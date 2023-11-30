@@ -50,7 +50,7 @@ public static class Dosai
                 .Distinct()
                 .Select(ns => new Namespace
                     {
-                        Module = $"{assembly.GetName().Name}{Constants.AssemblyExtension}",
+                        FileName = $"{assembly.GetName().Name}{Constants.AssemblyExtension}",
                         Name = ns
                     }
                 )
@@ -87,8 +87,8 @@ public static class Dosai
                 
                 // Keep moving "out" of nested classes etc until we get to a namespace or until we run out of parents
                 while (potentialNamespaceParent != null &&
-                        potentialNamespaceParent is not NamespaceDeclarationSyntax
-                        && potentialNamespaceParent is not FileScopedNamespaceDeclarationSyntax)
+                        potentialNamespaceParent is not NamespaceDeclarationSyntax &&
+                        potentialNamespaceParent is not FileScopedNamespaceDeclarationSyntax)
                 {
                     potentialNamespaceParent = potentialNamespaceParent.Parent;
                 }
@@ -117,7 +117,7 @@ public static class Dosai
                 {
                     sourceNamespaces.Add(new Namespace
                     {
-                        Module = fileName,
+                        FileName = fileName,
                         Name = nameSpace
                     });
                 }
@@ -165,7 +165,7 @@ public static class Dosai
                     {
                         assemblyMethods.Add(new Method
                         {
-                            Module = method.Module.Name,
+                            FileName = method.Module.Name,
                             Namespace = method.DeclaringType?.Namespace,
                             Class = type.Name,
                             Attributes = method.Attributes.ToString(),
@@ -209,16 +209,22 @@ public static class Dosai
                 var modifiers = methodDeclaration.Modifiers;
                 var method = model.GetDeclaredSymbol(methodDeclaration);
 
+                var codeSpan = methodDeclaration.SyntaxTree.GetLineSpan(methodDeclaration.Span);
+                var lineNumber = codeSpan.StartLinePosition.Line + 1;
+                var columnNumber = codeSpan.Span.Start.Character;
+
                 if (method != null && method.DeclaredAccessibility == Accessibility.Public)
                 {
                     sourceMethods.Add(new Method
                     {
-                        Module = fileName,
+                        FileName = fileName,
                         Namespace = method.ContainingNamespace.ToDisplayString(),
                         Class = method.ContainingType.Name,
                         Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
                         Name = method?.Name,
                         ReturnType = method?.ReturnType.Name,
+                        LineNumber = lineNumber,
+                        ColumnNumber = columnNumber,
                         Parameters = method?.Parameters.Select(p => new Parameter {
                             Name = p.Name,
                             Type = p.Type?.ToString()

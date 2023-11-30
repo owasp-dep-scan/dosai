@@ -1,18 +1,18 @@
 # Dotnet Source and Assembly Inspector (Dosai)
 
-List details about the namespaces and methods from a C# .NET source file or assembly
+List details about the namespaces and methods from a C# .NET source file or assembly  
 
 ## Usage
-`Dosai [command] [options]`
+`Dosai [command] [options]`  
+
+### Commands:
+`namespaces`          Retrieve the namespaces details  
+`methods`             Retrieve the methods details  
+`--version`           Show version information  
+`-?`, `-h`, `--help`  Show help and usage information  
 
 ### Options:
 `--path [path]` (REQUIRED)  The file or directory to inspect  
-`--version`                 Show version information  
-`-?`, `-h`, `--help`        Show help and usage information  
-
-### Commands:
-`namespaces`  Retrieve the namespaces details
-`methods`     Retrieve the methods details
 
 ---
 

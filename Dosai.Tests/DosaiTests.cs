@@ -6,26 +6,6 @@ namespace Dosai.Tests;
 
 public class DosaiTests
 {
-    private const string DosaiTestsDLL = "Dosai.Tests.dll";
-    private const string DosaiTestsPdb = "Dosai.Tests.pdb";
-    private const string DosaiTestsSource = "DosaiTests.cs";
-    private const string AssemblySource = "Assembly.cs";
-    private const string DosaiDLL = "Dosai.dll";
-    private const string FakeDLL = "Fake.dll";
-    private const string DepscanNamespace = "Depscan";
-    private const string DosaiTestsNamespace = "Dosai.Tests";
-    private const string FooBarNamespace = "FooBar";
-    private const string HelloWorldNamespace = "HelloWorld";
-    private const string Void = "Void";
-    private const string String = "String";
-    private const string StringArray = "String[]";
-    private const string List = "List";
-    private const string Task = "Task";
-    private const string assembliesDirectory = "assemblies";
-    private const string sourceDirectory = "source";
-    private const string emptyDirectory = "empty";
-    private const string combinedDirectory = "combined";
-
     [Fact]
     public void GetNamespaces_Assembly_PathIsFile_ReturnsDetails()
     {
@@ -232,8 +212,8 @@ public class DosaiTests
 
             try
             {
-                troubleshootingMessage = $"{expectedNamespace.Module}.{expectedNamespace.Name}";
-                var matchingNamespace = actualNamespaces?.Single(ns => ns.Module == expectedNamespace.Module && 
+                troubleshootingMessage = $"{expectedNamespace.FileName}.{expectedNamespace.Name}";
+                var matchingNamespace = actualNamespaces?.Single(ns => ns.FileName == expectedNamespace.FileName && 
                                                                        ns.Name == expectedNamespace.Name);
 
                 Assert.NotNull(matchingNamespace);
@@ -254,13 +234,15 @@ public class DosaiTests
 
             try
             {
-                troubleshootingMessage = $"{expectedMethod.Module}.{expectedMethod.Namespace}.{expectedMethod.Class}.{expectedMethod.Attributes}.{expectedMethod.Name}.{expectedMethod.ReturnType}";
-                matchingMethod = actualMethods?.Single(method => method.Module == expectedMethod.Module &&
+                troubleshootingMessage = $"{expectedMethod.FileName}.{expectedMethod.Namespace}.{expectedMethod.Class}.{expectedMethod.Attributes}.{expectedMethod.Name}.{expectedMethod.ReturnType}.{expectedMethod.LineNumber}.{expectedMethod.ColumnNumber}";
+                matchingMethod = actualMethods?.Single(method => method.FileName == expectedMethod.FileName &&
                                                   method.Namespace == expectedMethod.Namespace &&
                                                   method.Class == expectedMethod.Class &&
                                                   method.Attributes == expectedMethod.Attributes &&
                                                   method.Name == expectedMethod.Name &&
-                                                  method.ReturnType == expectedMethod.ReturnType);
+                                                  method.ReturnType == expectedMethod.ReturnType &&
+                                                  method.LineNumber == expectedMethod.LineNumber &&
+                                                  method.ColumnNumber == expectedMethod.ColumnNumber);
 
                 Assert.NotNull(matchingMethod);
             }
@@ -292,17 +274,17 @@ public class DosaiTests
     [
         new()
         {
-            Module = DosaiTestsDLL,
+            FileName = DosaiTestsDLL,
             Name = DosaiTestsNamespace
         },
         new()
         {
-            Module = DosaiTestsDLL,
+            FileName = DosaiTestsDLL,
             Name = FooBarNamespace
         },
         new()
         {
-            Module = DosaiTestsDLL,
+            FileName = DosaiTestsDLL,
             Name = HelloWorldNamespace
         }
     ];
@@ -312,12 +294,12 @@ public class DosaiTests
     [
         new()
         {
-            Module = AssemblySource,
+            FileName = AssemblySource,
             Name = FooBarNamespace
         },
         new()
         {
-            Module = AssemblySource,
+            FileName = AssemblySource,
             Name = HelloWorldNamespace
         }
     ];
@@ -327,7 +309,7 @@ public class DosaiTests
     [
         new()
         {
-            Module = DosaiDLL,
+            FileName = DosaiDLL,
             Name = DepscanNamespace
         }
     ];
@@ -337,7 +319,7 @@ public class DosaiTests
     [
         new()
         {
-            Module = DosaiTestsSource,
+            FileName = DosaiTestsSource,
             Name = DosaiTestsNamespace
         }
     ];
@@ -347,212 +329,254 @@ public class DosaiTests
     [
         new()
         {
-            Module = DosaiTestsDLL,
+            FileName = DosaiTestsDLL,
             Namespace = DosaiTestsNamespace,
             Class = "DosaiTests",
             Attributes = "Public, HideBySig",
             Name = "GetNamespaces_Assembly_PathIsFile_ReturnsDetails",
             ReturnType = Void,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters = []
         },
         new()
         {
-            Module = DosaiTestsDLL,
+            FileName = DosaiTestsDLL,
             Namespace = DosaiTestsNamespace,
             Class = "DosaiTests",
             Attributes = "Public, HideBySig",
             Name = "GetNamespaces_CSharpSource_PathIsFile_ReturnsDetails",
             ReturnType = Void,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters = []
         },
         new()
         {
-            Module = DosaiTestsDLL,
+            FileName = DosaiTestsDLL,
             Namespace = DosaiTestsNamespace,
             Class = "DosaiTests",
             Attributes = "Public, HideBySig",
             Name = "GetNamespaces_Assembly_PathIsDirectory_ReturnsDetails",
             ReturnType = Void,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters = []
         },
         new()
         {
-            Module = DosaiTestsDLL,
+            FileName = DosaiTestsDLL,
             Namespace = DosaiTestsNamespace,
             Class = "DosaiTests",
             Attributes = "Public, HideBySig",
             Name = "GetNamespaces_CSharpSource_PathIsDirectory_ReturnsDetails",
             ReturnType = Void,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters = []
         },
         new()
         {
-            Module = DosaiTestsDLL,
+            FileName = DosaiTestsDLL,
             Namespace = DosaiTestsNamespace,
             Class = "DosaiTests",
             Attributes = "Public, HideBySig",
             Name = "GetNamespaces_AssemblyAndSource_PathIsDirectory_ReturnsDetails",
             ReturnType = Void,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters = []
         },
         new()
         {
-            Module = DosaiTestsDLL,
+            FileName = DosaiTestsDLL,
             Namespace = DosaiTestsNamespace,
             Class = "DosaiTests",
             Attributes = "Public, HideBySig",
             Name = "GetNamespaces_PathIsNotDLLFile_ThrowsException",
             ReturnType = Void,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters = []
         },
         new()
         {
-            Module = DosaiTestsDLL,
+            FileName = DosaiTestsDLL,
             Namespace = DosaiTestsNamespace,
             Class = "DosaiTests",
             Attributes = "Public, HideBySig",
             Name = "GetNamespaces_PathDoesNotExist_ThrowsException",
             ReturnType = Void,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters = []
         },
         new()
         {
-            Module = DosaiTestsDLL,
+            FileName = DosaiTestsDLL,
             Namespace = DosaiTestsNamespace,
             Class = "DosaiTests",
             Attributes = "Public, HideBySig",
             Name = "GetNamespaces_PathIsEmptyDirectory_ReturnsNothing",
             ReturnType = Void,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters = []
         },
         new()
         {
-            Module = DosaiTestsDLL,
+            FileName = DosaiTestsDLL,
             Namespace = DosaiTestsNamespace,
             Class = "DosaiTests",
             Attributes = "Public, HideBySig",
             Name = "GetMethods_Assembly_PathIsFile_ReturnsDetails",
             ReturnType = Void,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters = []
         },
         new()
         {
-            Module = DosaiTestsDLL,
+            FileName = DosaiTestsDLL,
             Namespace = DosaiTestsNamespace,
             Class = "DosaiTests",
             Attributes = "Public, HideBySig",
             Name = "GetMethods_CSharpSource_PathIsFile_ReturnsDetails",
             ReturnType = Void,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters = []
         },
         new()
         {
-            Module = DosaiTestsDLL,
+            FileName = DosaiTestsDLL,
             Namespace = DosaiTestsNamespace,
             Class = "DosaiTests",
             Attributes = "Public, HideBySig",
             Name = "GetMethods_Assembly_PathIsDirectory_ReturnsDetails",
             ReturnType = Void,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters = []
         },
         new()
         {
-            Module = DosaiTestsDLL,
+            FileName = DosaiTestsDLL,
             Namespace = DosaiTestsNamespace,
             Class = "DosaiTests",
             Attributes = "Public, HideBySig",
             Name = "GetMethods_AssemblyAndSource_PathIsDirectory_ReturnsDetails",
             ReturnType = Void,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters = []
         },
         new()
         {
-            Module = DosaiTestsDLL,
+            FileName = DosaiTestsDLL,
             Namespace = DosaiTestsNamespace,
             Class = "DosaiTests",
             Attributes = "Public, HideBySig",
             Name = "GetMethods_CSharpSource_PathIsDirectory_ReturnsDetails",
             ReturnType = Void,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters = []
         },
         new()
         {
-            Module = DosaiTestsDLL,
+            FileName = DosaiTestsDLL,
             Namespace = DosaiTestsNamespace,
             Class = "DosaiTests",
             Attributes = "Public, HideBySig",
             Name = "GetMethods_PathIsEmptyDirectory_ReturnsNothing",
             ReturnType = Void,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters = []
         },
         new()
         {
-            Module = DosaiTestsDLL,
+            FileName = DosaiTestsDLL,
             Namespace = DosaiTestsNamespace,
             Class = "DosaiTests",
             Attributes = "Public, HideBySig",
             Name = "GetMethods_PathIsNotDLLFile_ThrowsException",
             ReturnType = Void,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters = []
         },
         new()
         {
-            Module = DosaiTestsDLL,
+            FileName = DosaiTestsDLL,
             Namespace = DosaiTestsNamespace,
             Class = "DosaiTests",
             Attributes = "Public, HideBySig",
             Name = "GetMethods_PathDoesNotExist_ThrowsException",
             ReturnType = Void,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters = []
         },
         new()
         {
-            Module = DosaiTestsDLL,
+            FileName = DosaiTestsDLL,
             Namespace = FooBarNamespace,
             Class = "Foo",
             Attributes = "Public, HideBySig",
             Name = "foo",
             ReturnType = Void,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters = []
         },
         new()
         {
-            Module = DosaiTestsDLL,
+            FileName = DosaiTestsDLL,
             Namespace = FooBarNamespace,
             Class = "Bar",
             Attributes = "Public, HideBySig",
             Name = "bar",
             ReturnType = Void,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters = []
         },
         new()
         {
-            Module = DosaiTestsDLL,
+            FileName = DosaiTestsDLL,
             Namespace = HelloWorldNamespace,
             Class = "Hello",
             Attributes = "Public, Static, HideBySig",
             Name = "elevate",
             ReturnType = Void,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters = []
         },
         new()
         {
-            Module = DosaiTestsDLL,
+            FileName = DosaiTestsDLL,
             Namespace = HelloWorldNamespace,
             Class = "Hello",
             Attributes = "Public, HideBySig",
             Name = "Appreciate",
             ReturnType = Task,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters = []
         },
         new()
         {
-            Module = DosaiTestsDLL,
+            FileName = DosaiTestsDLL,
             Namespace = HelloWorldNamespace,
             Class = "World",
             Attributes = "Public, HideBySig",
             Name = "shout",
             ReturnType = Void,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters = []
         }
     ];
@@ -562,162 +586,194 @@ public class DosaiTests
     [
         new()
         {
-            Module = DosaiTestsSource,
+            FileName = DosaiTestsSource,
             Namespace = DosaiTestsNamespace,
             Class = "DosaiTests",
             Attributes = "Public",
             Name = "GetNamespaces_Assembly_PathIsFile_ReturnsDetails",
             ReturnType = Void,
+            LineNumber = 9,
+            ColumnNumber = 4,
             Parameters = []
         },
         new()
         {
-            Module = DosaiTestsSource,
+            FileName = DosaiTestsSource,
             Namespace = DosaiTestsNamespace,
             Class = "DosaiTests",
             Attributes = "Public",
             Name = "GetNamespaces_CSharpSource_PathIsFile_ReturnsDetails",
             ReturnType = Void,
+            LineNumber = 19,
+            ColumnNumber = 4,
             Parameters = []
         },
         new()
         {
-            Module = DosaiTestsSource,
+            FileName = DosaiTestsSource,
             Namespace = DosaiTestsNamespace,
             Class = "DosaiTests",
             Attributes = "Public",
             Name = "GetNamespaces_Assembly_PathIsDirectory_ReturnsDetails",
             ReturnType = Void,
+            LineNumber = 29,
+            ColumnNumber = 4,
             Parameters = []
         },
         new()
         {
-            Module = DosaiTestsSource,
-            Namespace = DosaiTestsNamespace,
-            Class = "DosaiTests",
-            Attributes = "Public",
-            Name = "GetNamespaces_AssemblyAndSource_PathIsDirectory_ReturnsDetails",
-            ReturnType = Void,
-            Parameters = []
-        },
-        new()
-        {
-            Module = DosaiTestsSource,
+            FileName = DosaiTestsSource,
             Namespace = DosaiTestsNamespace,
             Class = "DosaiTests",
             Attributes = "Public",
             Name = "GetNamespaces_CSharpSource_PathIsDirectory_ReturnsDetails",
             ReturnType = Void,
+            LineNumber = 45,
+            ColumnNumber = 4,
             Parameters = []
         },
         new()
         {
-            Module = DosaiTestsSource,
+            FileName = DosaiTestsSource,
+            Namespace = DosaiTestsNamespace,
+            Class = "DosaiTests",
+            Attributes = "Public",
+            Name = "GetNamespaces_AssemblyAndSource_PathIsDirectory_ReturnsDetails",
+            ReturnType = Void,
+            LineNumber = 61,
+            ColumnNumber = 4,
+            Parameters = []
+        },
+        new()
+        {
+            FileName = DosaiTestsSource,
             Namespace = DosaiTestsNamespace,
             Class = "DosaiTests",
             Attributes = "Public",
             Name = "GetNamespaces_PathIsNotDLLFile_ThrowsException",
             ReturnType = Void,
+            LineNumber = 84,
+            ColumnNumber = 4,
             Parameters = []
         },
         new()
         {
-            Module = DosaiTestsSource,
+            FileName = DosaiTestsSource,
             Namespace = DosaiTestsNamespace,
             Class = "DosaiTests",
             Attributes = "Public",
             Name = "GetNamespaces_PathDoesNotExist_ThrowsException",
             ReturnType = Void,
+            LineNumber = 91,
+            ColumnNumber = 4,
             Parameters = []
         },
         new()
         {
-            Module = DosaiTestsSource,
+            FileName = DosaiTestsSource,
             Namespace = DosaiTestsNamespace,
             Class = "DosaiTests",
             Attributes = "Public",
             Name = "GetNamespaces_PathIsEmptyDirectory_ReturnsNothing",
             ReturnType = Void,
+            LineNumber = 98,
+            ColumnNumber = 4,
             Parameters = []
         },
         new()
         {
-            Module = DosaiTestsSource,
+            FileName = DosaiTestsSource,
             Namespace = DosaiTestsNamespace,
             Class = "DosaiTests",
             Attributes = "Public",
             Name = "GetMethods_Assembly_PathIsFile_ReturnsDetails",
             ReturnType = Void,
+            LineNumber = 108,
+            ColumnNumber = 4,
             Parameters = []
         },
         new()
         {
-            Module = DosaiTestsSource,
+            FileName = DosaiTestsSource,
             Namespace = DosaiTestsNamespace,
             Class = "DosaiTests",
             Attributes = "Public",
             Name = "GetMethods_CSharpSource_PathIsFile_ReturnsDetails",
             ReturnType = Void,
+            LineNumber = 118,
+            ColumnNumber = 4,
             Parameters = []
         },
         new()
         {
-            Module = DosaiTestsSource,
+            FileName = DosaiTestsSource,
             Namespace = DosaiTestsNamespace,
             Class = "DosaiTests",
             Attributes = "Public",
             Name = "GetMethods_Assembly_PathIsDirectory_ReturnsDetails",
             ReturnType = Void,
+            LineNumber = 128,
+            ColumnNumber = 4,
             Parameters = []
         },
         new()
         {
-            Module = DosaiTestsSource,
-            Namespace = DosaiTestsNamespace,
-            Class = "DosaiTests",
-            Attributes = "Public",
-            Name = "GetMethods_AssemblyAndSource_PathIsDirectory_ReturnsDetails",
-            ReturnType = Void,
-            Parameters = []
-        },
-        new()
-        {
-            Module = DosaiTestsSource,
+            FileName = DosaiTestsSource,
             Namespace = DosaiTestsNamespace,
             Class = "DosaiTests",
             Attributes = "Public",
             Name = "GetMethods_CSharpSource_PathIsDirectory_ReturnsDetails",
             ReturnType = Void,
+            LineNumber = 144,
+            ColumnNumber = 4,
             Parameters = []
         },
         new()
         {
-            Module = DosaiTestsSource,
+            FileName = DosaiTestsSource,
             Namespace = DosaiTestsNamespace,
             Class = "DosaiTests",
             Attributes = "Public",
-            Name = "GetMethods_PathIsEmptyDirectory_ReturnsNothing",
+            Name = "GetMethods_AssemblyAndSource_PathIsDirectory_ReturnsDetails",
             ReturnType = Void,
+            LineNumber = 160,
+            ColumnNumber = 4,
             Parameters = []
         },
         new()
         {
-            Module = DosaiTestsSource,
+            FileName = DosaiTestsSource,
             Namespace = DosaiTestsNamespace,
             Class = "DosaiTests",
             Attributes = "Public",
             Name = "GetMethods_PathIsNotDLLFile_ThrowsException",
             ReturnType = Void,
+            LineNumber = 183,
+            ColumnNumber = 4,
             Parameters = []
         },
         new()
         {
-            Module = DosaiTestsSource,
+            FileName = DosaiTestsSource,
             Namespace = DosaiTestsNamespace,
             Class = "DosaiTests",
             Attributes = "Public",
             Name = "GetMethods_PathDoesNotExist_ThrowsException",
             ReturnType = Void,
+            LineNumber = 190,
+            ColumnNumber = 4,
+            Parameters = []
+        },
+        new()
+        {
+            FileName = DosaiTestsSource,
+            Namespace = DosaiTestsNamespace,
+            Class = "DosaiTests",
+            Attributes = "Public",
+            Name = "GetMethods_PathIsEmptyDirectory_ReturnsNothing",
+            ReturnType = Void,
+            LineNumber = 197,
+            ColumnNumber = 4,
             Parameters = []
         }
     ];
@@ -727,12 +783,14 @@ public class DosaiTests
     [
         new()
         {
-            Module = DosaiDLL,
+            FileName = DosaiDLL,
             Namespace = DepscanNamespace,
             Class = "Dosai",
             Attributes = "Public, Static, HideBySig",
             Name = "GetNamespaces",
             ReturnType = String,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters =
             [
                 new()
@@ -744,12 +802,14 @@ public class DosaiTests
         },
         new()
         {
-            Module = DosaiDLL,
+            FileName = DosaiDLL,
             Namespace = DepscanNamespace,
             Class = "Dosai",
             Attributes = "Public, Static, HideBySig",
             Name = "GetMethods",
             ReturnType = String,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters =
             [
                 new()
@@ -761,309 +821,417 @@ public class DosaiTests
         },
         new()
         {
-            Module = DosaiDLL,
+            FileName = DosaiDLL,
             Namespace = DepscanNamespace,
             Class = "Method",
             Attributes = "Public, HideBySig, SpecialName",
-            Name = "get_Module",
+            Name = "get_FileName",
             ReturnType = String,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters = []
         },
         new()
         {
-            Module = DosaiDLL,
+            FileName = DosaiDLL,
             Namespace = DepscanNamespace,
             Class = "Method",
             Attributes = "Public, HideBySig, SpecialName",
-            Name = "set_Module",
+            Name = "set_FileName",
             ReturnType = Void,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters =
             [
                 new()
                 {
-                    Name = "value",
+                    Name = value,
                     Type = String
                 }
             ]
         },
         new()
         {
-            Module = DosaiDLL,
+            FileName = DosaiDLL,
             Namespace = DepscanNamespace,
             Class = "Method",
             Attributes = "Public, HideBySig, SpecialName",
             Name = "get_Namespace",
             ReturnType = String,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters = []
         },
         new()
         {
-            Module = DosaiDLL,
+            FileName = DosaiDLL,
             Namespace = DepscanNamespace,
             Class = "Method",
             Attributes = "Public, HideBySig, SpecialName",
             Name = "set_Namespace",
             ReturnType = Void,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters =
             [
                 new()
                 {
-                    Name = "value",
+                    Name = value,
                     Type = String
                 }
             ]
         },
         new()
         {
-            Module = DosaiDLL,
+            FileName = DosaiDLL,
             Namespace = DepscanNamespace,
             Class = "Method",
             Attributes = "Public, HideBySig, SpecialName",
             Name = "get_Class",
             ReturnType = String,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters = []
         },
         new()
         {
-            Module = DosaiDLL,
+            FileName = DosaiDLL,
             Namespace = DepscanNamespace,
             Class = "Method",
             Attributes = "Public, HideBySig, SpecialName",
             Name = "set_Class",
             ReturnType = Void,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters =
             [
                 new()
                 {
-                    Name = "value",
+                    Name = value,
                     Type = String
                 }
             ]
         },
         new()
         {
-            Module = DosaiDLL,
+            FileName = DosaiDLL,
             Namespace = DepscanNamespace,
             Class = "Method",
             Attributes = "Public, HideBySig, SpecialName",
             Name = "get_Attributes",
             ReturnType = String,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters = []
         },
         new()
         {
-            Module = DosaiDLL,
+            FileName = DosaiDLL,
             Namespace = DepscanNamespace,
             Class = "Method",
             Attributes = "Public, HideBySig, SpecialName",
             Name = "set_Attributes",
             ReturnType = Void,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters =
             [
                 new()
                 {
-                    Name = "value",
+                    Name = value,
                     Type = String
                 }
             ]
         },
         new()
         {
-            Module = DosaiDLL,
+            FileName = DosaiDLL,
             Namespace = DepscanNamespace,
             Class = "Method",
             Attributes = "Public, HideBySig, SpecialName",
             Name = "get_Name",
             ReturnType = String,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters = []
         },
         new()
         {
-            Module = DosaiDLL,
+            FileName = DosaiDLL,
             Namespace = DepscanNamespace,
             Class = "Method",
             Attributes = "Public, HideBySig, SpecialName",
             Name = "set_Name",
             ReturnType = Void,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters =
             [
                 new()
                 {
-                    Name = "value",
+                    Name = value,
                     Type = String
                 }
             ]
         },
         new()
         {
-            Module = DosaiDLL,
+            FileName = DosaiDLL,
             Namespace = DepscanNamespace,
             Class = "Method",
             Attributes = "Public, HideBySig, SpecialName",
             Name = "get_ReturnType",
             ReturnType = String,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters = []
         },
         new()
         {
-            Module = DosaiDLL,
+            FileName = DosaiDLL,
             Namespace = DepscanNamespace,
             Class = "Method",
             Attributes = "Public, HideBySig, SpecialName",
             Name = "set_ReturnType",
             ReturnType = Void,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters =
             [
                 new()
                 {
-                    Name = "value",
+                    Name = value,
                     Type = String
                 }
             ]
         },
         new()
         {
-            Module = DosaiDLL,
+            FileName = DosaiDLL,
+            Namespace = DepscanNamespace,
+            Class = "Method",
+            Attributes = "Public, HideBySig, SpecialName",
+            Name = "get_LineNumber",
+            ReturnType = Int32,
+            LineNumber = default,
+            ColumnNumber = default,
+            Parameters = []
+        },
+        new()
+        {
+            FileName = DosaiDLL,
+            Namespace = DepscanNamespace,
+            Class = "Method",
+            Attributes = "Public, HideBySig, SpecialName",
+            Name = "set_LineNumber",
+            ReturnType = Void,
+            LineNumber = default,
+            ColumnNumber = default,
+            Parameters =
+            [
+                new()
+                {
+                    Name = value,
+                    Type = Int32
+                }
+            ]
+        },
+        new()
+        {
+            FileName = DosaiDLL,
+            Namespace = DepscanNamespace,
+            Class = "Method",
+            Attributes = "Public, HideBySig, SpecialName",
+            Name = "get_ColumnNumber",
+            ReturnType = Int32,
+            LineNumber = default,
+            ColumnNumber = default,
+            Parameters = []
+        },
+        new()
+        {
+            FileName = DosaiDLL,
+            Namespace = DepscanNamespace,
+            Class = "Method",
+            Attributes = "Public, HideBySig, SpecialName",
+            Name = "set_ColumnNumber",
+            ReturnType = Void,
+            LineNumber = default,
+            ColumnNumber = default,
+            Parameters =
+            [
+                new()
+                {
+                    Name = value,
+                    Type = Int32
+                }
+            ]
+        },
+        new()
+        {
+            FileName = DosaiDLL,
             Namespace = DepscanNamespace,
             Class = "Method",
             Attributes = "Public, HideBySig, SpecialName",
             Name = "get_Parameters",
             ReturnType = List,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters = []
         },
         new()
         {
-            Module = DosaiDLL,
+            FileName = DosaiDLL,
             Namespace = DepscanNamespace,
             Class = "Method",
             Attributes = "Public, HideBySig, SpecialName",
             Name = "set_Parameters",
             ReturnType = Void,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters =
             [
                 new()
                 {
-                    Name = "value",
+                    Name = value,
                     Type = List
                 }
             ]
         },
         new()
         {
-            Module = DosaiDLL,
+            FileName = DosaiDLL,
             Namespace = DepscanNamespace,
             Class = "Namespace",
             Attributes = "Public, HideBySig, SpecialName",
-            Name = "get_Module",
+            Name = "get_FileName",
             ReturnType = String,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters = []
         },
         new()
         {
-            Module = DosaiDLL,
+            FileName = DosaiDLL,
             Namespace = DepscanNamespace,
             Class = "Namespace",
             Attributes = "Public, HideBySig, SpecialName",
-            Name = "set_Module",
+            Name = "set_FileName",
             ReturnType = Void,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters =
             [
                 new()
                 {
-                    Name = "value",
+                    Name = value,
                     Type = String
                 }
             ]
         },
         new()
         {
-            Module = DosaiDLL,
+            FileName = DosaiDLL,
             Namespace = DepscanNamespace,
             Class = "Namespace",
             Attributes = "Public, HideBySig, SpecialName",
             Name = "get_Name",
             ReturnType = String,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters = []
         },
         new()
         {
-            Module = DosaiDLL,
+            FileName = DosaiDLL,
             Namespace = DepscanNamespace,
             Class = "Namespace",
             Attributes = "Public, HideBySig, SpecialName",
             Name = "set_Name",
             ReturnType = Void,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters =
             [
                 new()
                 {
-                    Name = "value",
+                    Name = value,
                     Type = String
                 }
             ]
         },
         new()
         {
-            Module = DosaiDLL,
+            FileName = DosaiDLL,
             Namespace = DepscanNamespace,
             Class = "Parameter",
             Attributes = "Public, HideBySig, SpecialName",
             Name = "get_Name",
             ReturnType = String,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters = []
         },
         new()
         {
-            Module = DosaiDLL,
+            FileName = DosaiDLL,
             Namespace = DepscanNamespace,
             Class = "Parameter",
             Attributes = "Public, HideBySig, SpecialName",
             Name = "set_Name",
             ReturnType = Void,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters =
             [
                 new()
                 {
-                    Name = "value",
+                    Name = value,
                     Type = String
                 }
             ]
         },
         new()
         {
-            Module = DosaiDLL,
+            FileName = DosaiDLL,
             Namespace = DepscanNamespace,
             Class = "Parameter",
             Attributes = "Public, HideBySig, SpecialName",
             Name = "get_Type",
             ReturnType = String,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters = []
         },
         new()
         {
-            Module = DosaiDLL,
+            FileName = DosaiDLL,
             Namespace = DepscanNamespace,
             Class = "Parameter",
             Attributes = "Public, HideBySig, SpecialName",
             Name = "set_Type",
             ReturnType = Void,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters = 
             [
                 new()
                 {
-                    Name = "value",
+                    Name = value,
                     Type = String
                 }
             ]
         },
         new()
         {
-            Module = DosaiDLL,
+            FileName = DosaiDLL,
             Namespace = DepscanNamespace,
             Class = "CommandLine",
             Attributes = "Public, Static, HideBySig",
             Name = "Main",
             ReturnType = Task,
+            LineNumber = default,
+            ColumnNumber = default,
             Parameters = 
             [
                 new()
@@ -1080,53 +1248,85 @@ public class DosaiTests
     [
         new()
         {
-            Module = AssemblySource,
-            Namespace = FooBarNamespace,
-            Class = "Foo",
-            Attributes = "Public",
-            Name = "foo",
-            ReturnType = Void,
-            Parameters = []
-        },
-        new()
-        {
-            Module = AssemblySource,
-            Namespace = FooBarNamespace,
-            Class = "Bar",
-            Attributes = "Public",
-            Name = "bar",
-            ReturnType = Void,
-            Parameters = []
-        },
-        new()
-        {
-            Module = AssemblySource,
+            FileName = AssemblySource,
             Namespace = HelloWorldNamespace,
             Class = "Hello",
             Attributes = "Public, Static",
             Name = "elevate",
             ReturnType = Void,
+            LineNumber = 6,
+            ColumnNumber = 8,
             Parameters = []
         },
         new()
         {
-            Module = AssemblySource,
+            FileName = AssemblySource,
             Namespace = HelloWorldNamespace,
             Class = "Hello",
             Attributes = "Public, Async",
             Name = "Appreciate",
+            LineNumber = 11,
+            ColumnNumber = 8,
             ReturnType = Task,
             Parameters = []
         },
         new()
         {
-            Module = AssemblySource,
+            FileName = AssemblySource,
             Namespace = HelloWorldNamespace,
             Class = "World",
             Attributes = "Public",
             Name = "shout",
             ReturnType = Void,
+            LineNumber = 19,
+            ColumnNumber = 8,
+            Parameters = []
+        },
+        new()
+        {
+            FileName = AssemblySource,
+            Namespace = FooBarNamespace,
+            Class = "Foo",
+            Attributes = "Public",
+            Name = "foo",
+            ReturnType = Void,
+            LineNumber = 35,
+            ColumnNumber = 8,
+            Parameters = []
+        },
+        new()
+        {
+            FileName = AssemblySource,
+            Namespace = FooBarNamespace,
+            Class = "Bar",
+            Attributes = "Public",
+            Name = "bar",
+            ReturnType = Void,
+            LineNumber = 43,
+            ColumnNumber = 8,
             Parameters = []
         }
     ];
+
+    private const string DosaiTestsDLL = "Dosai.Tests.dll";
+    private const string DosaiTestsPdb = "Dosai.Tests.pdb";
+    private const string DosaiTestsSource = "DosaiTests.cs";
+    private const string AssemblySource = "Assembly.cs";
+    private const string DosaiDLL = "Dosai.dll";
+    private const string FakeDLL = "Fake.dll";
+    private const string DepscanNamespace = "Depscan";
+    private const string DosaiTestsNamespace = "Dosai.Tests";
+    private const string FooBarNamespace = "FooBar";
+    private const string HelloWorldNamespace = "HelloWorld";
+    private const string Void = "Void";
+    private const string String = "String";
+    private const string StringArray = "String[]";
+    private const string List = "List";
+    private const string Task = "Task";
+    private const string Int32 = "Int32";
+    private const string value = "value";
+    private const string assembliesDirectory = "assemblies";
+    private const string sourceDirectory = "source";
+    private const string emptyDirectory = "empty";
+    private const string combinedDirectory = "combined";
 }
