@@ -152,6 +152,7 @@ public static class Dosai
 
         foreach(var assemblyFilePath in assembliesToInspect)
         {
+            var fileName = Path.GetFileName(assemblyFilePath);
             var assembly = Assembly.LoadFrom(assemblyFilePath);
             var types = assembly.GetExportedTypes();
 
@@ -161,11 +162,11 @@ public static class Dosai
 
                 foreach(var method in methods)
                 {
-                    if (method.Module.Name == $"{assembly.GetName().Name}{Constants.AssemblyExtension}")
+                    if ($"{method.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName)
                     {
                         assemblyMethods.Add(new Method
                         {
-                            FileName = method.Module.Name,
+                            FileName = fileName,
                             Namespace = method.DeclaringType?.Namespace,
                             Class = type.Name,
                             Attributes = method.Attributes.ToString(),

@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        dotnet: [ '6.0.x', '7.0.x', '8.0.x' ]
+        dotnet: [ '8.0.x' ]
     steps:
     - uses: actions/checkout@v3
     - name: Setup .NET
@@ -24,6 +24,7 @@ jobs:
       run: dotnet build --no-restore ./Dosai
     - name: Test
       run: |
+        dotnet test
         dotnet run --project ./Dosai/ namespaces --path ./Dosai/bin/x64/Debug/net8.0/linux-x64/Dosai.dll
         dotnet run --project ./Dosai/ methods --path ./Dosai/Dosai.cs
     - name: Publish the package
