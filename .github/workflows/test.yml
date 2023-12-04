@@ -27,3 +27,34 @@ jobs:
         dotnet test
         dotnet run --project ./Dosai/ namespaces --path ./Dosai/bin/x64/Debug/net8.0/linux-x64/Dosai.dll
         dotnet run --project ./Dosai/ methods --path ./Dosai/Dosai.cs
+    - name: Publish the package
+      run: |
+        dotnet pack --configuration Release Dosai
+        dotnet nuget push Dosai/bin/Release/*.nupkg
+        dotnet publish ./Dosai/ -r linux-x64 --property:PublishDir=dosai-linux -p:PublishSingleFile=true --self-contained false /p:UseAppHost=true
+        dotnet publish ./Dosai/ -r win-x64 --property:PublishDir=dosai-win -p:PublishSingleFile=true --self-contained false /p:UseAppHost=true
+        dotnet publish ./Dosai/ -r osx-x64 --property:PublishDir=dosai-osx -p:PublishSingleFile=true --self-contained false /p:UseAppHost=true /p:AssemblyName=Dosai-osx-x64
+        dotnet publish ./Dosai/ -r osx-arm64 --property:PublishDir=dosai-osx-arm64 -p:PublishSingleFile=true --self-contained false /p:UseAppHost=true /p:AssemblyName=Dosai-osx-arm64
+        dotnet publish ./Dosai/ -r linux-arm64 --property:PublishDir=dosai-linux-arm64 -p:PublishSingleFile=true --self-contained false /p:UseAppHost=true /p:AssemblyName=Dosai-linux-arm64
+        dotnet publish ./Dosai/ -r linux-musl-x64 --property:PublishDir=dosai-linux-musl-x64 -p:PublishSingleFile=true --self-contained false /p:UseAppHost=true /p:AssemblyName=Dosai-linux-musl-x64
+      if: startsWith(github.ref, 'refs/tags/')
+    - name: Create Release
+      id: create_release
+      if: startsWith(github.ref, 'refs/tags/')
+      with:
+        files: |
+          Dosai/dosai-linux/Dosai
+          Dosai/dosai-linux/Dosai.pdb
+          Dosai/dosai-win/Dosai.exe
+          Dosai/dosai-win/Dosai.exe.pdb
+          Dosai/dosai-osx/Dosai-osx-x64
+          Dosai/dosai-osx/Dosai-osx-x64.pdb
+          Dosai/dosai-osx-arm64/Dosai-osx-arm64
+          Dosai/dosai-osx-arm64/Dosai-osx-arm64.pdb
+          Dosai/dosai-linux-arm64/Dosai-linux-arm64
+          Dosai/dosai-linux-arm64/Dosai-linux-arm64.pdb
+          Dosai/dosai-linux-musl-x64/Dosai-linux-musl-x64
+          Dosai/dosai-linux-musl-x64/Dosai-linux-musl-x64.pdb
+      uses: softprops/action-gh-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

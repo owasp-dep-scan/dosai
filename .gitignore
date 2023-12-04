@@ -396,3 +396,10 @@ FodyWeavers.xsd
 
 # JetBrains Rider
 *.sln.iml
+
+dosai-linux/
+dosai-win/
+dosai-osx/
+dosai-linux-arm64/
+dosai-osx-arm64/
+dosai-linux-musl-x64/
