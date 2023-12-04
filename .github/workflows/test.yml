@@ -24,5 +24,6 @@ jobs:
       run: dotnet build --no-restore ./Dosai
     - name: Test
       run: |
-        dotnet run --project ./Dosai/ namespaces --path ./Dosai/bin/x64/Debug/net8.0/Dosai.dll
+        dotnet test
+        dotnet run --project ./Dosai/ namespaces --path ./Dosai/bin/x64/Debug/net8.0/linux-x64/Dosai.dll
         dotnet run --project ./Dosai/ methods --path ./Dosai/Dosai.cs
