@@ -6,6 +6,8 @@
     <Nullable>enable</Nullable>
     <Platform>x64</Platform>
     <OutputType>Exe</OutputType>
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
     <Version>0.0.1</Version>
   </PropertyGroup>
 
