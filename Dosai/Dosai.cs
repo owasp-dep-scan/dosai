@@ -14,7 +14,8 @@ public static class Dosai
 {
     private static readonly JsonSerializerOptions options = new()
     {
-        WriteIndented = true
+        WriteIndented = true,
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
     };
 
     /// <summary>
@@ -149,7 +150,8 @@ public static class Dosai
     {
         var assembliesToInspect = GetFilesToInspect(path, Constants.AssemblyExtension);
         var assemblyMethods = new List<Method>();
-        var failedAssemblies = new List<String>();
+        var failedAssemblies = new List<string>();
+
         foreach(var assemblyFilePath in assembliesToInspect)
         {
             var fileName = Path.GetFileName(assemblyFilePath);
@@ -173,10 +175,10 @@ public static class Dosai
                                 Class = type.Name,
                                 Attributes = method.Attributes.ToString(),
                                 Name = method.Name,
-                                ReturnType = method.ReturnType.Name.Replace("`1", string.Empty),
+                                ReturnType = method.ReturnType.Name,
                                 Parameters = method.GetParameters().Select(p => new Parameter {
                                     Name = p.Name,
-                                    Type = p.ParameterType.Name.Replace("`1", string.Empty)
+                                    Type = p.ParameterType.Name
                                 }).ToList()
                             });
                         }

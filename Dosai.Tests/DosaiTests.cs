@@ -1074,7 +1074,7 @@ public class DosaiTests
             Class = "Method",
             Attributes = "Public, HideBySig, SpecialName",
             Name = "get_Parameters",
-            ReturnType = List,
+            ReturnType = ListPrimeOne,
             LineNumber = default,
             ColumnNumber = default,
             Parameters = []
@@ -1094,7 +1094,7 @@ public class DosaiTests
                 new()
                 {
                     Name = value,
-                    Type = List
+                    Type = ListPrimeOne
                 }
             ]
         },
@@ -1229,7 +1229,7 @@ public class DosaiTests
             Class = "CommandLine",
             Attributes = "Public, Static, HideBySig",
             Name = "Main",
-            ReturnType = Task,
+            ReturnType = "Task`1",
             LineNumber = default,
             ColumnNumber = default,
             Parameters = 
@@ -1321,7 +1321,7 @@ public class DosaiTests
     private const string Void = "Void";
     private const string String = "String";
     private const string StringArray = "String[]";
-    private const string List = "List";
+    private const string ListPrimeOne = "List`1";
     private const string Task = "Task";
     private const string Int32 = "Int32";
     private const string value = "value";
