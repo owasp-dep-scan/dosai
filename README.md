@@ -13,6 +13,7 @@ List details about the namespaces and methods from a C# .NET source file or asse
 
 ### Options:
 `--path [path]` (REQUIRED)  The file or directory to inspect  
+`--o`           The output file location and name, default value when option not provided is 'dosai.json'  
 
 ---
 

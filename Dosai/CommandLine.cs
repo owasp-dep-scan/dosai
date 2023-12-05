@@ -4,6 +4,8 @@ namespace Depscan;
 
 public class CommandLine
 {
+    private const string DefaultOutputFile = "dosai.json";
+
     public static async Task<int> Main(string[] args)
     {
         var rootCommand = new RootCommand("Dosai");
@@ -13,34 +15,41 @@ public class CommandLine
             description: "The file or directory to inspect")
             { IsRequired = true };
         
+        var outputFileOption = new Option<string?>(
+            name: "--o",
+            description: $"The output file location and name, default value when option not provided is '{DefaultOutputFile}'");
+        outputFileOption.SetDefaultValue(DefaultOutputFile);
+        
         rootCommand.AddGlobalOption(pathOption);
 
         var namespaceCommand = new Command("namespaces", "Retrieve the namespaces details")
         {
-            pathOption
+            pathOption,
+            outputFileOption
         };
 
         var methodCommand = new Command("methods", "Retrieve the methods details")
         {
-            pathOption
+            pathOption,
+            outputFileOption
         };
 
         rootCommand.AddCommand(namespaceCommand);
         rootCommand.AddCommand(methodCommand);
 
-        namespaceCommand.SetHandler((path) =>
+        namespaceCommand.SetHandler((path, outputFile) =>
         {
             var result = Dosai.GetNamespaces(path!);
-            Console.WriteLine(result);
+            File.WriteAllText(outputFile!, result);
         },
-        pathOption);
+        pathOption, outputFileOption);
 
-        methodCommand.SetHandler((path) =>
+        methodCommand.SetHandler((path, outputFile) =>
         {
             var result = Dosai.GetMethods(path!);
-            Console.WriteLine(result);
+            File.WriteAllText(outputFile!, result);
         },
-        pathOption);
+        pathOption, outputFileOption);
 
         return await rootCommand.InvokeAsync(args);
     }
