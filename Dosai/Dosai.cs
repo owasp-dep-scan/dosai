@@ -55,7 +55,7 @@ public static class Dosai
                     }
                 )
                 .ToArray();
-            
+
             assemblyNamespaces.AddRange(namespaces);
         }
 
@@ -84,7 +84,7 @@ public static class Dosai
             {
                 string nameSpace = string.Empty;
                 SyntaxNode? potentialNamespaceParent = syntax.Parent;
-                
+
                 // Keep moving "out" of nested classes etc until we get to a namespace or until we run out of parents
                 while (potentialNamespaceParent != null &&
                         potentialNamespaceParent is not NamespaceDeclarationSyntax &&
@@ -98,7 +98,7 @@ public static class Dosai
                 {
                     // We have a namespace. Use that as the type
                     nameSpace = namespaceParent.Name.ToString();
-                    
+
                     // Keep moving "out" of the namespace declarations until we run out of nested namespace declarations
                     while (true)
                     {
@@ -149,36 +149,47 @@ public static class Dosai
     {
         var assembliesToInspect = GetFilesToInspect(path, Constants.AssemblyExtension);
         var assemblyMethods = new List<Method>();
-
+        var failedAssemblies = new List<String>();
         foreach(var assemblyFilePath in assembliesToInspect)
         {
             var fileName = Path.GetFileName(assemblyFilePath);
-            var assembly = Assembly.LoadFrom(assemblyFilePath);
-            var types = assembly.GetExportedTypes();
-
-            foreach(var type in types)
+            try
             {
-                var methods = type.GetMethods();
+                var assembly = Assembly.LoadFrom(assemblyFilePath);
+                var types = assembly.GetExportedTypes();
 
-                foreach(var method in methods)
+                foreach(var type in types)
                 {
-                    if ($"{method.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName)
+                    var methods = type.GetMethods();
+
+                    foreach(var method in methods)
                     {
-                        assemblyMethods.Add(new Method
+                        if ($"{method.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName)
                         {
-                            FileName = fileName,
-                            Namespace = method.DeclaringType?.Namespace,
-                            Class = type.Name,
-                            Attributes = method.Attributes.ToString(),
-                            Name = method.Name,
-                            ReturnType = method.ReturnType.Name.Replace("`1", string.Empty),
-                            Parameters = method.GetParameters().Select(p => new Parameter {
-                                Name = p.Name,
-                                Type = p.ParameterType.Name.Replace("`1", string.Empty)
-                            }).ToList()
-                        });
+                            assemblyMethods.Add(new Method
+                            {
+                                FileName = fileName,
+                                Namespace = method.DeclaringType?.Namespace,
+                                Class = type.Name,
+                                Attributes = method.Attributes.ToString(),
+                                Name = method.Name,
+                                ReturnType = method.ReturnType.Name.Replace("`1", string.Empty),
+                                Parameters = method.GetParameters().Select(p => new Parameter {
+                                    Name = p.Name,
+                                    Type = p.ParameterType.Name.Replace("`1", string.Empty)
+                                }).ToList()
+                            });
+                        }
                     }
                 }
+            }
+            catch (Exception e) when (e is System.IO.FileLoadException || e is System.IO.FileNotFoundException || e is System.BadImageFormatException)
+            {
+                failedAssemblies.Add(assemblyFilePath);
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine($"Unable to process {assemblyFilePath} due to: {e.Message}");
             }
         }
 
@@ -247,11 +258,12 @@ public static class Dosai
     {
         var filesToInspect = new List<string>();
         var fileAttributes = File.GetAttributes(path);
-
         if (fileAttributes.HasFlag(FileAttributes.Directory))
         {
-            var filePaths = Directory.GetFiles(path, $"*{fileExtension}");
-            filesToInspect.AddRange(filePaths);
+            foreach (var inputFile in new DirectoryInfo(path).EnumerateFiles($"*{fileExtension}", SearchOption.AllDirectories))
+            {
+                filesToInspect.Add(inputFile.FullName);
+            }
         }
         else
         {
@@ -267,7 +279,6 @@ public static class Dosai
                 filesToInspect.Add(path);
             }
         }
-
         return filesToInspect;
     }
 }
