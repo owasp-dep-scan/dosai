@@ -10,5 +10,5 @@ public class Dependency
     public string? Namespace { get; set; }
     public int LineNumber { get; set; }
     public int ColumnNumber { get; set; }
-    public List<String>? NamespaceMembers { get; set; }
+    public List<string>? NamespaceMembers { get; set; }
 }

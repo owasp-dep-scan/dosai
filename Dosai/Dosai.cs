@@ -157,6 +157,7 @@ public static class Dosai
         foreach(var assemblyFilePath in assembliesToInspect)
         {
             var fileName = Path.GetFileName(assemblyFilePath);
+
             try
             {
                 var assembly = Assembly.LoadFrom(assemblyFilePath);
@@ -189,7 +190,7 @@ public static class Dosai
                     }
                 }
             }
-            catch (Exception e) when (e is System.IO.FileLoadException || e is System.IO.FileNotFoundException || e is System.BadImageFormatException)
+            catch (Exception e) when (e is FileLoadException || e is FileNotFoundException || e is BadImageFormatException)
             {
                 failedAssemblies.Add(assemblyFilePath);
             }
@@ -217,12 +218,16 @@ public static class Dosai
 #pragma warning disable IL3000
         var Mscorlib = MetadataReference.CreateFromFile(Path.Combine(AppContext.BaseDirectory, typeof(object).Assembly.Location));
 #pragma warning restore IL3000
-        var metadataReferences = new List<PortableExecutableReference>();
-        metadataReferences.Add(Mscorlib);
+        var metadataReferences = new List<PortableExecutableReference>
+        {
+            Mscorlib
+        };
+        
         foreach (var externalAssembly in assembliesToInspect)
         {
             metadataReferences.Add(MetadataReference.CreateFromFile(externalAssembly));
         }
+
         foreach (var sourceFilePath in sourcesToInspect)
         {
             var fileName = Path.GetFileName(sourceFilePath);
@@ -234,6 +239,7 @@ public static class Dosai
             var methodDeclarations = root.DescendantNodes().OfType<MethodDeclarationSyntax>();
             var usingDirectives = root.Usings;
             var methodCalls = root.DescendantNodes().OfType<InvocationExpressionSyntax>();
+
             // method declarations
             foreach(var methodDeclaration in methodDeclarations)
             {
@@ -260,11 +266,12 @@ public static class Dosai
                         ColumnNumber = columnNumber,
                         Parameters = method?.Parameters.Select(p => new Parameter {
                             Name = p.Name,
-                            Type = p.Type?.ToString()
+                            Type = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(p.Type?.ToString()!)
                         }).ToList()
                     });
                 }
             }
+
             // using declarations
             foreach(var usingDirective in usingDirectives)
             {
@@ -297,6 +304,7 @@ public static class Dosai
                         namespaceType = nsSymbol.ContainingNamespace?.ToDisplayString();
                     }
                 }
+
                 allUsingDirectives.Add(new Dependency
                 {
                     Path = Path.GetRelativePath(path, sourceFilePath),
@@ -310,6 +318,7 @@ public static class Dosai
                     NamespaceMembers = namespaceMembers
                 });
             }
+
             // method calls
             foreach(var methodCall in methodCalls)
             {
@@ -325,10 +334,11 @@ public static class Dosai
                 var calledMethod = memberName;
                 var isInMetadata = false;
                 var isInSource = false;
-                var Assembly = "";
-                var Module = "";
-                var Namespace = "";
-                var ClassName = "";
+                var Assembly = string.Empty;
+                var Module = string.Empty;
+                var Namespace = string.Empty;
+                var ClassName = string.Empty;
+
                 if (exprInfo.Symbol != null)
                 {
                     var methodSymbol = exprInfo.Symbol;
@@ -340,7 +350,9 @@ public static class Dosai
                     Namespace = methodSymbol.ContainingNamespace.ToDisplayString();
                     ClassName = methodSymbol.ContainingType.ToDisplayString();
                 }
+
                 var IsInternal = isInSource || !isInMetadata;
+                
                 if (!IsInternal)
                 {
                     allMethodCalls.Add(new MethodCalls
@@ -398,6 +410,7 @@ public static class Dosai
                 filesToInspect.Add(path);
             }
         }
+        
         return filesToInspect;
     }
 }

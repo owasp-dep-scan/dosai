@@ -23,12 +23,16 @@
 
   <ItemGroup>
   <None 
-     Include="*.cs" 
+     Include="./../Dosai.TestData/FooBar.cs" 
+     CopyToOutputDirectory="PreserveNewest" />
+  <None 
+     Include="./../Dosai.TestData/HelloWorld.cs" 
      CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\Dosai\Dosai.csproj" />
+    <ProjectReference Include="..\Dosai.TestData\Dosai.TestData.csproj" />
   </ItemGroup>
 
 </Project>
