@@ -15,7 +15,8 @@ public static class Dosai
     private static readonly JsonSerializerOptions options = new()
     {
         WriteIndented = true,
-        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
     };
 
     /// <summary>
@@ -136,9 +137,10 @@ public static class Dosai
     public static string GetMethods(string path)
     {
         var methods = GetAssemblyMethods(path);
-        methods.AddRange(GetCSharpSourceMethods(path));
+        var (sourceMethods, usings, methodCalls) = GetCSharpSourceMethods(path);
+        methods.AddRange(sourceMethods);
 
-        return JsonSerializer.Serialize(methods, options);
+        return JsonSerializer.Serialize(new MethodsSlice { Dependencies = usings, Methods = methods, MethodCalls = methodCalls }, options);
     }
 
     /// <summary>
@@ -155,6 +157,7 @@ public static class Dosai
         foreach(var assemblyFilePath in assembliesToInspect)
         {
             var fileName = Path.GetFileName(assemblyFilePath);
+
             try
             {
                 var assembly = Assembly.LoadFrom(assemblyFilePath);
@@ -170,22 +173,24 @@ public static class Dosai
                         {
                             assemblyMethods.Add(new Method
                             {
+                                Path = assemblyFilePath,
                                 FileName = fileName,
+                                Module = method.DeclaringType?.Module.ToString(),
                                 Namespace = method.DeclaringType?.Namespace,
-                                Class = type.Name,
+                                ClassName = type.Name,
                                 Attributes = method.Attributes.ToString(),
                                 Name = method.Name,
                                 ReturnType = method.ReturnType.Name,
                                 Parameters = method.GetParameters().Select(p => new Parameter {
                                     Name = p.Name,
-                                    Type = p.ParameterType.Name
+                                    Type = p.ParameterType.FullName
                                 }).ToList()
                             });
                         }
                     }
                 }
             }
-            catch (Exception e) when (e is System.IO.FileLoadException || e is System.IO.FileNotFoundException || e is System.BadImageFormatException)
+            catch (Exception e) when (e is FileLoadException || e is FileNotFoundException || e is BadImageFormatException)
             {
                 failedAssemblies.Add(assemblyFilePath);
             }
@@ -202,38 +207,58 @@ public static class Dosai
     /// Get all source methods for the given path to C# source or directory of C# source
     /// </summary>
     /// <param name="path">Filesystem path to C# source file or directory containing C# source files</param>
-    /// <returns>List of source methods</returns>
-    private static List<Method> GetCSharpSourceMethods(string path)
+    /// <returns>Tuple with List of source methods and using directives</returns>
+    private static (List<Method>, List<Dependency>, List<MethodCalls>) GetCSharpSourceMethods(string path)
     {
+        var assembliesToInspect = GetFilesToInspect(path, Constants.AssemblyExtension);
         var sourcesToInspect = GetFilesToInspect(path, Constants.CSharpSourceExtension);
         var sourceMethods = new List<Method>();
+        var allUsingDirectives = new List<Dependency>();
+        var allMethodCalls = new List<MethodCalls>();
+#pragma warning disable IL3000
+        var Mscorlib = MetadataReference.CreateFromFile(Path.Combine(AppContext.BaseDirectory, typeof(object).Assembly.Location));
+#pragma warning restore IL3000
+        var metadataReferences = new List<PortableExecutableReference>
+        {
+            Mscorlib
+        };
+        
+        foreach (var externalAssembly in assembliesToInspect)
+        {
+            metadataReferences.Add(MetadataReference.CreateFromFile(externalAssembly));
+        }
 
-        foreach(var sourceFilePath in sourcesToInspect)
+        foreach (var sourceFilePath in sourcesToInspect)
         {
             var fileName = Path.GetFileName(sourceFilePath);
             var fileContent = File.ReadAllText(sourceFilePath);
             var tree = CSharpSyntaxTree.ParseText(fileContent);
             var root = tree.GetCompilationUnitRoot();
-            var compilation = CSharpCompilation.Create("Source").AddSyntaxTrees(tree);
+            var compilation = CSharpCompilation.Create(fileName, syntaxTrees: new[] { tree }, references: metadataReferences);
             var model = compilation.GetSemanticModel(tree);
             var methodDeclarations = root.DescendantNodes().OfType<MethodDeclarationSyntax>();
+            var usingDirectives = root.Usings;
+            var methodCalls = root.DescendantNodes().OfType<InvocationExpressionSyntax>();
 
+            // method declarations
             foreach(var methodDeclaration in methodDeclarations)
             {
                 var modifiers = methodDeclaration.Modifiers;
                 var method = model.GetDeclaredSymbol(methodDeclaration);
-
                 var codeSpan = methodDeclaration.SyntaxTree.GetLineSpan(methodDeclaration.Span);
                 var lineNumber = codeSpan.StartLinePosition.Line + 1;
-                var columnNumber = codeSpan.Span.Start.Character;
+                var columnNumber = codeSpan.Span.Start.Character + 1;
 
-                if (method != null && method.DeclaredAccessibility == Accessibility.Public)
+                if (method != null && method.DeclaredAccessibility != Accessibility.Private)
                 {
                     sourceMethods.Add(new Method
                     {
+                        Path = Path.GetRelativePath(path, sourceFilePath),
                         FileName = fileName,
+                        Assembly = method.ContainingAssembly.ToDisplayString(),
+                        Module = method.ContainingModule.ToDisplayString(),
                         Namespace = method.ContainingNamespace.ToDisplayString(),
-                        Class = method.ContainingType.Name,
+                        ClassName = method.ContainingType.Name,
                         Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
                         Name = method?.Name,
                         ReturnType = method?.ReturnType.Name,
@@ -241,14 +266,114 @@ public static class Dosai
                         ColumnNumber = columnNumber,
                         Parameters = method?.Parameters.Select(p => new Parameter {
                             Name = p.Name,
-                            Type = p.Type?.ToString()
+                            Type = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(p.Type?.ToString()!)
                         }).ToList()
                     });
                 }
             }
+
+            // using declarations
+            foreach(var usingDirective in usingDirectives)
+            {
+                var name = usingDirective.Name?.ToFullString();
+                var namespaceType = usingDirective.NamespaceOrType?.ToFullString();
+                var location = usingDirective.GetLocation().GetLineSpan().StartLinePosition;
+                var lineNumber = location.Line + 1;
+                var columnNumber = location.Character + 1;
+                var namespaceMembers = new List<String>();
+                var Assembly = "";
+                var Module = "";
+                if (usingDirective.Name != null)
+                {
+                    var nameInfo = model.GetSymbolInfo(usingDirective.Name);
+                    INamespaceSymbol? nsSymbol = null;
+                    if (nameInfo.Symbol is not null and INamespaceSymbol)
+                    {
+                        nsSymbol = (INamespaceSymbol)nameInfo.Symbol;
+                    }
+                    else if (nameInfo.CandidateSymbols.Length > 0)
+                    {
+                        nsSymbol = (INamespaceSymbol)nameInfo.CandidateSymbols.First();
+                    }
+                    if (nsSymbol != null)
+                    {
+                        var nsMembers = nsSymbol.GetNamespaceMembers();
+                        namespaceMembers.AddRange(nsMembers.Select(m => m.Name));
+                        Assembly = nsSymbol.ContainingAssembly?.ToDisplayString();
+                        Module = nsSymbol.ContainingModule?.ToDisplayString();
+                        namespaceType = nsSymbol.ContainingNamespace?.ToDisplayString();
+                    }
+                }
+
+                allUsingDirectives.Add(new Dependency
+                {
+                    Path = Path.GetRelativePath(path, sourceFilePath),
+                    FileName = fileName,
+                    Assembly = Assembly,
+                    Module = Module,
+                    Namespace = namespaceType,
+                    Name = name,
+                    LineNumber = lineNumber,
+                    ColumnNumber = columnNumber,
+                    NamespaceMembers = namespaceMembers
+                });
+            }
+
+            // method calls
+            foreach(var methodCall in methodCalls)
+            {
+                var callArguments = methodCall.ArgumentList;
+                var callExpression = methodCall.Expression;
+                var location = methodCall.GetLocation().GetLineSpan().StartLinePosition;
+                var lineNumber = location.Line + 1;
+                var columnNumber = location.Character + 1;
+                var fullName = callExpression.ToFullString();
+                var memberName = callExpression.TryGetInferredMemberName();
+                var callArgsTypes = callArguments.Arguments.Select(a => a.TryGetInferredMemberName() ?? a.ToFullString()).ToList();
+                var exprInfo = model.GetSymbolInfo(callExpression);
+                var calledMethod = memberName;
+                var isInMetadata = false;
+                var isInSource = false;
+                var Assembly = string.Empty;
+                var Module = string.Empty;
+                var Namespace = string.Empty;
+                var ClassName = string.Empty;
+
+                if (exprInfo.Symbol != null)
+                {
+                    var methodSymbol = exprInfo.Symbol;
+                    calledMethod = methodSymbol.ToDisplayString();
+                    isInMetadata = methodSymbol.Locations.Any(loc => loc.IsInMetadata);
+                    isInSource = methodSymbol.Locations.Any(loc => loc.IsInSource);
+                    Assembly = methodSymbol.ContainingAssembly.ToDisplayString();
+                    Module = methodSymbol.ContainingModule.ToDisplayString();
+                    Namespace = methodSymbol.ContainingNamespace.ToDisplayString();
+                    ClassName = methodSymbol.ContainingType.ToDisplayString();
+                }
+
+                var IsInternal = isInSource || !isInMetadata;
+                
+                if (!IsInternal)
+                {
+                    allMethodCalls.Add(new MethodCalls
+                    {
+                        Path = Path.GetRelativePath(path, sourceFilePath),
+                        FileName = fileName,
+                        Assembly = Assembly,
+                        Module = Module,
+                        Namespace = Namespace,
+                        ClassName = ClassName,
+                        CalledMethod = calledMethod,
+                        LineNumber = lineNumber,
+                        ColumnNumber = columnNumber,
+                        Arguments = callArgsTypes
+                    });
+                }
+            }
+
         }
 
-        return sourceMethods;
+        return (sourceMethods, allUsingDirectives, allMethodCalls);
     }
 
     /// <summary>
@@ -264,7 +389,11 @@ public static class Dosai
         {
             foreach (var inputFile in new DirectoryInfo(path).EnumerateFiles($"*{fileExtension}", SearchOption.AllDirectories))
             {
-                filesToInspect.Add(inputFile.FullName);
+                // ignore generated cs files
+                if (!inputFile.FullName.EndsWith(".g.cs"))
+                {
+                    filesToInspect.Add(inputFile.FullName);
+                }
             }
         }
         else
@@ -281,6 +410,7 @@ public static class Dosai
                 filesToInspect.Add(path);
             }
         }
+        
         return filesToInspect;
     }
 }

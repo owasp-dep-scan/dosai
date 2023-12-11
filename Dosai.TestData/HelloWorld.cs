@@ -1,4 +1,6 @@
-// Example assembly that can be used in unit tests
+using System.Globalization;
+using System.Reflection;
+
 namespace HelloWorld
 {
     public class Hello
@@ -17,30 +19,6 @@ namespace HelloWorld
     public class World
     {
         public void shout()
-        {
-            
-        }
-
-        private void PrivateMethod()
-        {
-            
-        }
-    }
-}
-
-namespace FooBar
-{
-    public class Foo
-    {         
-        public void foo()
-        {
-            
-        }
-    }
-
-    public class Bar
-    {
-        public void bar()
         {
             
         }
