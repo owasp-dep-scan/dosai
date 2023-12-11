@@ -34,8 +34,15 @@ public class CommandLine
             outputFileOption
         };
 
+        var dependencyCommand = new Command("dependencies", "Retrieve the dependencies details")
+        {
+            pathOption,
+            outputFileOption
+        };
+
         rootCommand.AddCommand(namespaceCommand);
         rootCommand.AddCommand(methodCommand);
+        rootCommand.AddCommand(dependencyCommand);
 
         namespaceCommand.SetHandler((path, outputFile) =>
         {
@@ -47,6 +54,13 @@ public class CommandLine
         methodCommand.SetHandler((path, outputFile) =>
         {
             var result = Dosai.GetMethods(path!);
+            File.WriteAllText(outputFile!, result);
+        },
+        pathOption, outputFileOption);
+
+        dependencyCommand.SetHandler((path, outputFile) =>
+        {
+            var result = Dosai.GetDependencies(path!);
             File.WriteAllText(outputFile!, result);
         },
         pathOption, outputFileOption);

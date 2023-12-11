@@ -8,6 +8,7 @@ List details about the namespaces and methods from a C# .NET source file or asse
 ### Commands:
 `namespaces`          Retrieve the namespaces details  
 `methods`             Retrieve the methods details  
+`dependencies`        Retrieve the dependencies details  
 `--version`           Show version information  
 `-?`, `-h`, `--help`  Show help and usage information  
 

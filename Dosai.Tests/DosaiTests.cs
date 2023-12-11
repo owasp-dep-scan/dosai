@@ -6,6 +6,7 @@ namespace Dosai.Tests;
 
 public class DosaiTests
 {
+    #region Namespaces
     [Fact]
     public void GetNamespaces_Assembly_PathIsFile_ReturnsDetails()
     {
@@ -104,13 +105,21 @@ public class DosaiTests
         var namespaces = JsonSerializer.Deserialize<List<Namespace>>(result);
         Assert.Equal(0, namespaces?.Count);
     }
+    #endregion Namespaces
 
+    #region Methods
     [Fact]
     public void GetMethods_Assembly_PathIsFile_ReturnsDetails()
     {
         var assemblyPath = GetFilePath(DosaiTestsDLL);
         var result = Depscan.Dosai.GetMethods(assemblyPath);
         var actualMethods = JsonSerializer.Deserialize<List<Method>>(result);
+
+        if(actualMethods != null)
+        {
+            actualMethods = FilterOutTestMethods(actualMethods);
+        }
+        
         Assert.Equal(expectedMethodsDosaiTestsDLL.Length, actualMethods?.Count);
         AssertMethods(actualMethods, expectedMethodsDosaiTestsDLL);
     }
@@ -118,11 +127,12 @@ public class DosaiTests
     [Fact]
     public void GetMethods_CSharpSource_PathIsFile_ReturnsDetails()
     {
-        var assemblyPath = GetFilePath(DosaiTestsSource);
-        var result = Depscan.Dosai.GetMethods(assemblyPath);
+        var sourcePath = GetFilePath(DosaiSource);
+        var result = Depscan.Dosai.GetMethods(sourcePath);
         var actualMethods = JsonSerializer.Deserialize<List<Method>>(result);
-        Assert.Equal(expectedMethodsDosaiTestsSource.Length, actualMethods?.Count);
-        AssertMethods(actualMethods, expectedMethodsDosaiTestsSource);
+
+        Assert.Equal(expectedMethodsDosaiSource.Length, actualMethods?.Count);
+        AssertMethods(actualMethods, expectedMethodsDosaiSource);
     }
 
     [Fact]
@@ -135,6 +145,12 @@ public class DosaiTests
         var assemblyFolder = Path.Combine(Directory.GetCurrentDirectory(), assembliesDirectory);
         var result = Depscan.Dosai.GetMethods(assemblyFolder);
         var actualMethods = JsonSerializer.Deserialize<List<Method>>(result);
+
+        if(actualMethods != null)
+        {
+            actualMethods = FilterOutTestMethods(actualMethods);
+        }
+
         Assert.Equal(expectedMethodsDosaiTestsDLL.Length + expectedMethodsDosaiDLL.Length, actualMethods?.Count);
         AssertMethods(actualMethods, expectedMethodsDosaiTestsDLL);
         AssertMethods(actualMethods, expectedMethodsDosaiDLL);
@@ -145,14 +161,15 @@ public class DosaiTests
     public void GetMethods_CSharpSource_PathIsDirectory_ReturnsDetails()
     {
         Directory.CreateDirectory(sourceDirectory);
-        File.Copy(DosaiTestsSource, Path.Combine(sourceDirectory, DosaiTestsSource), true);
+        File.Copy(DosaiSource, Path.Combine(sourceDirectory, DosaiSource), true);
         File.Copy(AssemblySource, Path.Combine(sourceDirectory, AssemblySource), true);
 
         var sourceFolder = Path.Combine(Directory.GetCurrentDirectory(), sourceDirectory);
         var result = Depscan.Dosai.GetMethods(sourceFolder);
         var actualMethods = JsonSerializer.Deserialize<List<Method>>(result);
-        Assert.Equal(expectedMethodsDosaiTestsSource.Length + expectedMethodsAssemblySource.Length, actualMethods?.Count);
-        AssertMethods(actualMethods, expectedMethodsDosaiTestsSource);
+
+        Assert.Equal(expectedMethodsDosaiSource.Length + expectedMethodsAssemblySource.Length, actualMethods?.Count);
+        AssertMethods(actualMethods, expectedMethodsDosaiSource);
         AssertMethods(actualMethods, expectedMethodsAssemblySource);
         Directory.Delete(sourceDirectory, true);
     }
@@ -163,19 +180,25 @@ public class DosaiTests
         Directory.CreateDirectory(combinedDirectory);
         File.Copy(DosaiTestsDLL, Path.Combine(combinedDirectory, DosaiTestsDLL), true);
         File.Copy(DosaiDLL, Path.Combine(combinedDirectory, DosaiDLL), true);
-        File.Copy(DosaiTestsSource, Path.Combine(combinedDirectory, DosaiTestsSource), true);
+        File.Copy(DosaiSource, Path.Combine(combinedDirectory, DosaiSource), true);
         File.Copy(AssemblySource, Path.Combine(combinedDirectory, AssemblySource), true);
 
         var folder = Path.Combine(Directory.GetCurrentDirectory(), combinedDirectory);
         var result = Depscan.Dosai.GetMethods(folder);
         var actualMethods = JsonSerializer.Deserialize<List<Method>>(result);
+
+        if(actualMethods != null)
+        {
+            actualMethods = FilterOutTestMethods(actualMethods);
+        }
+
         Assert.Equal(expectedMethodsDosaiTestsDLL.Length + 
                      expectedMethodsDosaiDLL.Length + 
                      expectedMethodsAssemblySource.Length +
-                     expectedMethodsDosaiTestsSource.Length, actualMethods?.Count);
+                     expectedMethodsDosaiSource.Length, actualMethods?.Count);
         AssertMethods(actualMethods, expectedMethodsDosaiTestsDLL);
         AssertMethods(actualMethods, expectedMethodsDosaiDLL);
-        AssertMethods(actualMethods, expectedMethodsDosaiTestsSource);
+        AssertMethods(actualMethods, expectedMethodsDosaiSource);
         AssertMethods(actualMethods, expectedMethodsAssemblySource);
         Directory.Delete(combinedDirectory, true);
     }
@@ -203,6 +226,108 @@ public class DosaiTests
         var methods = JsonSerializer.Deserialize<List<Method>>(result);
         Assert.Equal(0, methods?.Count);
     }
+    #endregion Methods
+
+    #region Dependencies
+    [Fact]
+    public void GetDependencies_Assembly_PathIsFile_ReturnsDetails()
+    {
+        var assemblyPath = GetFilePath(DosaiDLL);
+        var result = Depscan.Dosai.GetDependencies(assemblyPath);
+        var actualDependenciess = JsonSerializer.Deserialize<List<Dependency>>(result);
+        Assert.Equal(expectedDependenciesDosaiDLL.Length, actualDependenciess?.Count);
+        AssertDependencies(actualDependenciess, expectedDependenciesDosaiDLL);
+    }
+
+    [Fact]
+    public void GetDependencies_CSharpSource_PathIsFile_ReturnsDetails()
+    {
+        var sourcePath = GetFilePath(DosaiSource);
+        var result = Depscan.Dosai.GetDependencies(sourcePath);
+        var actualDependencies = JsonSerializer.Deserialize<List<Dependency>>(result);
+        Assert.Equal(expectedDependenciesDosaiSource.Length, actualDependencies?.Count);
+        AssertDependencies(actualDependencies, expectedDependenciesDosaiSource);
+    }
+
+    [Fact]
+    public void GetDependencies_Assembly_PathIsDirectory_ReturnsDetails()
+    {
+        Directory.CreateDirectory(assembliesDirectory);
+        File.Copy(DosaiTestsDLL, Path.Combine(assembliesDirectory, DosaiTestsDLL), true);
+        File.Copy(DosaiDLL, Path.Combine(assembliesDirectory, DosaiDLL), true);
+
+        var assemblyFolder = Path.Combine(Directory.GetCurrentDirectory(), assembliesDirectory);
+        var result = Depscan.Dosai.GetDependencies(assemblyFolder);
+        var actualDependencies = JsonSerializer.Deserialize<List<Dependency>>(result);
+        Assert.Equal(expectedDependenciesDosaiTestsDLL.Length + expectedDependenciesDosaiDLL.Length, actualDependencies?.Count);
+        AssertDependencies(actualDependencies, expectedDependenciesDosaiTestsDLL);
+        AssertDependencies(actualDependencies, expectedDependenciesDosaiDLL);
+        Directory.Delete(assembliesDirectory, true);
+    }
+
+    [Fact]
+    public void GetDependencies_CSharpSource_PathIsDirectory_ReturnsDetails()
+    {
+        Directory.CreateDirectory(sourceDirectory);
+        File.Copy(DosaiSource, Path.Combine(sourceDirectory, DosaiSource), true);
+        File.Copy(AssemblySource, Path.Combine(sourceDirectory, AssemblySource), true);
+
+        var sourceFolder = Path.Combine(Directory.GetCurrentDirectory(), sourceDirectory);
+        var result = Depscan.Dosai.GetDependencies(sourceFolder);
+        var actualDependencies = JsonSerializer.Deserialize<List<Dependency>>(result);
+        Assert.Equal(expectedDependenciesDosaiSource.Length + expectedDependenciesAssemblySource.Length, actualDependencies?.Count);
+        AssertDependencies(actualDependencies, expectedDependenciesDosaiSource);
+        AssertDependencies(actualDependencies, expectedDependenciesAssemblySource);
+        Directory.Delete(sourceDirectory, true);
+    }
+
+    [Fact]
+    public void GetDependencies_AssemblyAndSource_PathIsDirectory_ReturnsDetails()
+    {
+        Directory.CreateDirectory(combinedDirectory);
+        File.Copy(DosaiTestsDLL, Path.Combine(combinedDirectory, DosaiTestsDLL), true);
+        File.Copy(DosaiDLL, Path.Combine(combinedDirectory, DosaiDLL), true);
+        File.Copy(DosaiSource, Path.Combine(combinedDirectory, DosaiSource), true);
+        File.Copy(AssemblySource, Path.Combine(combinedDirectory, AssemblySource), true);
+
+        var folder = Path.Combine(Directory.GetCurrentDirectory(), combinedDirectory);
+        var result = Depscan.Dosai.GetDependencies(folder);
+        var actualDependencies = JsonSerializer.Deserialize<List<Dependency>>(result);
+        Assert.Equal(expectedDependenciesDosaiTestsDLL.Length + 
+                     expectedDependenciesDosaiDLL.Length + 
+                     expectedDependenciesAssemblySource.Length +
+                     expectedDependenciesDosaiSource.Length, actualDependencies?.Count);
+        AssertDependencies(actualDependencies, expectedDependenciesDosaiTestsDLL);
+        AssertDependencies(actualDependencies, expectedDependenciesDosaiDLL);
+        AssertDependencies(actualDependencies, expectedDependenciesDosaiSource);
+        AssertDependencies(actualDependencies, expectedDependenciesAssemblySource);
+        Directory.Delete(combinedDirectory, true);
+    }
+
+    [Fact]
+    public void GetDependencies_PathIsNotDLLFile_ThrowsException()
+    {
+        var assemblyPath = GetFilePath(DosaiTestsPdb);
+        Assert.Throws<Exception>(() => Depscan.Dosai.GetDependencies(assemblyPath));
+    }
+
+    [Fact]
+    public void GetDependencies_PathDoesNotExist_ThrowsException()
+    {
+        var assemblyPath = GetFilePath(FakeDLL);
+        Assert.Throws<FileNotFoundException>(() => Depscan.Dosai.GetDependencies(assemblyPath));
+    }
+
+    [Fact]
+    public void GetDependencies_PathIsEmptyDirectory_ReturnsNothing()
+    {
+        Directory.CreateDirectory(emptyDirectory);
+        var assemblyFolder = Path.Combine(Directory.GetCurrentDirectory(), emptyDirectory);
+        var result = Depscan.Dosai.GetDependencies(assemblyFolder);
+        var dependencies = JsonSerializer.Deserialize<List<Dependency>>(result);
+        Assert.Equal(0, dependencies?.Count);
+    }
+    #endregion Dependencies
 
     private static void AssertNamespaces(List<Namespace>? actualNamespaces, Namespace[] expectedNamespaces)
     {
@@ -263,10 +388,40 @@ public class DosaiTests
         }
     }
 
+    private static void AssertDependencies(List<Dependency>? actualDependencies, Dependency[] expectedDependencies)
+    {
+        foreach(var expectedDependency in expectedDependencies)
+        {
+            Dependency? matchingDependency = null;
+            var troubleshootingMessage = string.Empty;
+
+            try
+            {
+                troubleshootingMessage = $"{expectedDependency.FileName}.{expectedDependency.Name}.{expectedDependency.LineNumber}.{expectedDependency.ColumnNumber}";
+                matchingDependency = actualDependencies?.Single(dependency => dependency.FileName == expectedDependency.FileName &&
+                                                  dependency.Name == expectedDependency.Name &&
+                                                  dependency.LineNumber == expectedDependency.LineNumber &&
+                                                  dependency.ColumnNumber == expectedDependency.ColumnNumber);
+
+                Assert.NotNull(matchingDependency);
+            }
+            catch(Exception)
+            {
+                Assert.Fail($"Matching dependency not found. Expecting: {troubleshootingMessage}");
+            }
+        }
+    }
+
     private static string GetFilePath(string filePath)
     {
         var currentDirectory = Directory.GetCurrentDirectory();
         return Path.Join(currentDirectory, filePath);
+    }
+
+    // We want to use the Dosai Tests DLL in unit testing because it has Assembly.cs for test cases, but exclude the unit tests themselves as they can change often, requiring extra unnecessary work to update tests to be passing
+    private static List<Method> FilterOutTestMethods(List<Method> methods)
+    {
+        return methods.Where(method => method.Namespace != DosaiTestsNamespace).ToList();
     }
 
     // Expected namespaces in Dosai.Tests.dll
@@ -324,201 +479,9 @@ public class DosaiTests
         }
     ];
 
-    // Expected methods in Dosai.Tests.dll
+    // Expected methods in Dosai.Tests.dll, with the unit test methods themselves excluded
     private static readonly Method[] expectedMethodsDosaiTestsDLL =
     [
-        new()
-        {
-            FileName = DosaiTestsDLL,
-            Namespace = DosaiTestsNamespace,
-            Class = "DosaiTests",
-            Attributes = "Public, HideBySig",
-            Name = "GetNamespaces_Assembly_PathIsFile_ReturnsDetails",
-            ReturnType = Void,
-            LineNumber = default,
-            ColumnNumber = default,
-            Parameters = []
-        },
-        new()
-        {
-            FileName = DosaiTestsDLL,
-            Namespace = DosaiTestsNamespace,
-            Class = "DosaiTests",
-            Attributes = "Public, HideBySig",
-            Name = "GetNamespaces_CSharpSource_PathIsFile_ReturnsDetails",
-            ReturnType = Void,
-            LineNumber = default,
-            ColumnNumber = default,
-            Parameters = []
-        },
-        new()
-        {
-            FileName = DosaiTestsDLL,
-            Namespace = DosaiTestsNamespace,
-            Class = "DosaiTests",
-            Attributes = "Public, HideBySig",
-            Name = "GetNamespaces_Assembly_PathIsDirectory_ReturnsDetails",
-            ReturnType = Void,
-            LineNumber = default,
-            ColumnNumber = default,
-            Parameters = []
-        },
-        new()
-        {
-            FileName = DosaiTestsDLL,
-            Namespace = DosaiTestsNamespace,
-            Class = "DosaiTests",
-            Attributes = "Public, HideBySig",
-            Name = "GetNamespaces_CSharpSource_PathIsDirectory_ReturnsDetails",
-            ReturnType = Void,
-            LineNumber = default,
-            ColumnNumber = default,
-            Parameters = []
-        },
-        new()
-        {
-            FileName = DosaiTestsDLL,
-            Namespace = DosaiTestsNamespace,
-            Class = "DosaiTests",
-            Attributes = "Public, HideBySig",
-            Name = "GetNamespaces_AssemblyAndSource_PathIsDirectory_ReturnsDetails",
-            ReturnType = Void,
-            LineNumber = default,
-            ColumnNumber = default,
-            Parameters = []
-        },
-        new()
-        {
-            FileName = DosaiTestsDLL,
-            Namespace = DosaiTestsNamespace,
-            Class = "DosaiTests",
-            Attributes = "Public, HideBySig",
-            Name = "GetNamespaces_PathIsNotDLLFile_ThrowsException",
-            ReturnType = Void,
-            LineNumber = default,
-            ColumnNumber = default,
-            Parameters = []
-        },
-        new()
-        {
-            FileName = DosaiTestsDLL,
-            Namespace = DosaiTestsNamespace,
-            Class = "DosaiTests",
-            Attributes = "Public, HideBySig",
-            Name = "GetNamespaces_PathDoesNotExist_ThrowsException",
-            ReturnType = Void,
-            LineNumber = default,
-            ColumnNumber = default,
-            Parameters = []
-        },
-        new()
-        {
-            FileName = DosaiTestsDLL,
-            Namespace = DosaiTestsNamespace,
-            Class = "DosaiTests",
-            Attributes = "Public, HideBySig",
-            Name = "GetNamespaces_PathIsEmptyDirectory_ReturnsNothing",
-            ReturnType = Void,
-            LineNumber = default,
-            ColumnNumber = default,
-            Parameters = []
-        },
-        new()
-        {
-            FileName = DosaiTestsDLL,
-            Namespace = DosaiTestsNamespace,
-            Class = "DosaiTests",
-            Attributes = "Public, HideBySig",
-            Name = "GetMethods_Assembly_PathIsFile_ReturnsDetails",
-            ReturnType = Void,
-            LineNumber = default,
-            ColumnNumber = default,
-            Parameters = []
-        },
-        new()
-        {
-            FileName = DosaiTestsDLL,
-            Namespace = DosaiTestsNamespace,
-            Class = "DosaiTests",
-            Attributes = "Public, HideBySig",
-            Name = "GetMethods_CSharpSource_PathIsFile_ReturnsDetails",
-            ReturnType = Void,
-            LineNumber = default,
-            ColumnNumber = default,
-            Parameters = []
-        },
-        new()
-        {
-            FileName = DosaiTestsDLL,
-            Namespace = DosaiTestsNamespace,
-            Class = "DosaiTests",
-            Attributes = "Public, HideBySig",
-            Name = "GetMethods_Assembly_PathIsDirectory_ReturnsDetails",
-            ReturnType = Void,
-            LineNumber = default,
-            ColumnNumber = default,
-            Parameters = []
-        },
-        new()
-        {
-            FileName = DosaiTestsDLL,
-            Namespace = DosaiTestsNamespace,
-            Class = "DosaiTests",
-            Attributes = "Public, HideBySig",
-            Name = "GetMethods_AssemblyAndSource_PathIsDirectory_ReturnsDetails",
-            ReturnType = Void,
-            LineNumber = default,
-            ColumnNumber = default,
-            Parameters = []
-        },
-        new()
-        {
-            FileName = DosaiTestsDLL,
-            Namespace = DosaiTestsNamespace,
-            Class = "DosaiTests",
-            Attributes = "Public, HideBySig",
-            Name = "GetMethods_CSharpSource_PathIsDirectory_ReturnsDetails",
-            ReturnType = Void,
-            LineNumber = default,
-            ColumnNumber = default,
-            Parameters = []
-        },
-        new()
-        {
-            FileName = DosaiTestsDLL,
-            Namespace = DosaiTestsNamespace,
-            Class = "DosaiTests",
-            Attributes = "Public, HideBySig",
-            Name = "GetMethods_PathIsEmptyDirectory_ReturnsNothing",
-            ReturnType = Void,
-            LineNumber = default,
-            ColumnNumber = default,
-            Parameters = []
-        },
-        new()
-        {
-            FileName = DosaiTestsDLL,
-            Namespace = DosaiTestsNamespace,
-            Class = "DosaiTests",
-            Attributes = "Public, HideBySig",
-            Name = "GetMethods_PathIsNotDLLFile_ThrowsException",
-            ReturnType = Void,
-            LineNumber = default,
-            ColumnNumber = default,
-            Parameters = []
-        },
-        new()
-        {
-            FileName = DosaiTestsDLL,
-            Namespace = DosaiTestsNamespace,
-            Class = "DosaiTests",
-            Attributes = "Public, HideBySig",
-            Name = "GetMethods_PathDoesNotExist_ThrowsException",
-            ReturnType = Void,
-            LineNumber = default,
-            ColumnNumber = default,
-            Parameters = []
-        },
         new()
         {
             FileName = DosaiTestsDLL,
@@ -581,200 +544,65 @@ public class DosaiTests
         }
     ];
 
-    // Expected methods in DosaiTests.cs
-    private static readonly Method[] expectedMethodsDosaiTestsSource =
+    // Expected methods in Dosai.cs
+    private static readonly Method[] expectedMethodsDosaiSource =
     [
         new()
         {
-            FileName = DosaiTestsSource,
-            Namespace = DosaiTestsNamespace,
-            Class = "DosaiTests",
-            Attributes = "Public",
-            Name = "GetNamespaces_Assembly_PathIsFile_ReturnsDetails",
-            ReturnType = Void,
-            LineNumber = 9,
+            FileName = DosaiSource,
+            Namespace = DepscanNamespace,
+            Class = "Dosai",
+            Attributes = "Public, Static",
+            Name = "GetNamespaces",
+            ReturnType = String,
+            LineNumber = 26,
             ColumnNumber = 4,
-            Parameters = []
+            Parameters =
+            [
+                new()
+                {
+                    Name = "path",
+                    Type = String
+                }
+            ]
         },
         new()
         {
-            FileName = DosaiTestsSource,
-            Namespace = DosaiTestsNamespace,
-            Class = "DosaiTests",
-            Attributes = "Public",
-            Name = "GetNamespaces_CSharpSource_PathIsFile_ReturnsDetails",
-            ReturnType = Void,
-            LineNumber = 19,
+            FileName = DosaiSource,
+            Namespace = DepscanNamespace,
+            Class = "Dosai",
+            Attributes = "Public, Static",
+            Name = "GetMethods",
+            ReturnType = String,
+            LineNumber = 136,
             ColumnNumber = 4,
-            Parameters = []
+            Parameters =
+            [
+                new()
+                {
+                    Name = "path",
+                    Type = String
+                }
+            ]
         },
         new()
         {
-            FileName = DosaiTestsSource,
-            Namespace = DosaiTestsNamespace,
-            Class = "DosaiTests",
-            Attributes = "Public",
-            Name = "GetNamespaces_Assembly_PathIsDirectory_ReturnsDetails",
-            ReturnType = Void,
-            LineNumber = 29,
+            FileName = DosaiSource,
+            Namespace = DepscanNamespace,
+            Class = "Dosai",
+            Attributes = "Public, Static",
+            Name = "GetDependencies",
+            ReturnType = String,
+            LineNumber = 260,
             ColumnNumber = 4,
-            Parameters = []
-        },
-        new()
-        {
-            FileName = DosaiTestsSource,
-            Namespace = DosaiTestsNamespace,
-            Class = "DosaiTests",
-            Attributes = "Public",
-            Name = "GetNamespaces_CSharpSource_PathIsDirectory_ReturnsDetails",
-            ReturnType = Void,
-            LineNumber = 45,
-            ColumnNumber = 4,
-            Parameters = []
-        },
-        new()
-        {
-            FileName = DosaiTestsSource,
-            Namespace = DosaiTestsNamespace,
-            Class = "DosaiTests",
-            Attributes = "Public",
-            Name = "GetNamespaces_AssemblyAndSource_PathIsDirectory_ReturnsDetails",
-            ReturnType = Void,
-            LineNumber = 61,
-            ColumnNumber = 4,
-            Parameters = []
-        },
-        new()
-        {
-            FileName = DosaiTestsSource,
-            Namespace = DosaiTestsNamespace,
-            Class = "DosaiTests",
-            Attributes = "Public",
-            Name = "GetNamespaces_PathIsNotDLLFile_ThrowsException",
-            ReturnType = Void,
-            LineNumber = 84,
-            ColumnNumber = 4,
-            Parameters = []
-        },
-        new()
-        {
-            FileName = DosaiTestsSource,
-            Namespace = DosaiTestsNamespace,
-            Class = "DosaiTests",
-            Attributes = "Public",
-            Name = "GetNamespaces_PathDoesNotExist_ThrowsException",
-            ReturnType = Void,
-            LineNumber = 91,
-            ColumnNumber = 4,
-            Parameters = []
-        },
-        new()
-        {
-            FileName = DosaiTestsSource,
-            Namespace = DosaiTestsNamespace,
-            Class = "DosaiTests",
-            Attributes = "Public",
-            Name = "GetNamespaces_PathIsEmptyDirectory_ReturnsNothing",
-            ReturnType = Void,
-            LineNumber = 98,
-            ColumnNumber = 4,
-            Parameters = []
-        },
-        new()
-        {
-            FileName = DosaiTestsSource,
-            Namespace = DosaiTestsNamespace,
-            Class = "DosaiTests",
-            Attributes = "Public",
-            Name = "GetMethods_Assembly_PathIsFile_ReturnsDetails",
-            ReturnType = Void,
-            LineNumber = 108,
-            ColumnNumber = 4,
-            Parameters = []
-        },
-        new()
-        {
-            FileName = DosaiTestsSource,
-            Namespace = DosaiTestsNamespace,
-            Class = "DosaiTests",
-            Attributes = "Public",
-            Name = "GetMethods_CSharpSource_PathIsFile_ReturnsDetails",
-            ReturnType = Void,
-            LineNumber = 118,
-            ColumnNumber = 4,
-            Parameters = []
-        },
-        new()
-        {
-            FileName = DosaiTestsSource,
-            Namespace = DosaiTestsNamespace,
-            Class = "DosaiTests",
-            Attributes = "Public",
-            Name = "GetMethods_Assembly_PathIsDirectory_ReturnsDetails",
-            ReturnType = Void,
-            LineNumber = 128,
-            ColumnNumber = 4,
-            Parameters = []
-        },
-        new()
-        {
-            FileName = DosaiTestsSource,
-            Namespace = DosaiTestsNamespace,
-            Class = "DosaiTests",
-            Attributes = "Public",
-            Name = "GetMethods_CSharpSource_PathIsDirectory_ReturnsDetails",
-            ReturnType = Void,
-            LineNumber = 144,
-            ColumnNumber = 4,
-            Parameters = []
-        },
-        new()
-        {
-            FileName = DosaiTestsSource,
-            Namespace = DosaiTestsNamespace,
-            Class = "DosaiTests",
-            Attributes = "Public",
-            Name = "GetMethods_AssemblyAndSource_PathIsDirectory_ReturnsDetails",
-            ReturnType = Void,
-            LineNumber = 160,
-            ColumnNumber = 4,
-            Parameters = []
-        },
-        new()
-        {
-            FileName = DosaiTestsSource,
-            Namespace = DosaiTestsNamespace,
-            Class = "DosaiTests",
-            Attributes = "Public",
-            Name = "GetMethods_PathIsNotDLLFile_ThrowsException",
-            ReturnType = Void,
-            LineNumber = 183,
-            ColumnNumber = 4,
-            Parameters = []
-        },
-        new()
-        {
-            FileName = DosaiTestsSource,
-            Namespace = DosaiTestsNamespace,
-            Class = "DosaiTests",
-            Attributes = "Public",
-            Name = "GetMethods_PathDoesNotExist_ThrowsException",
-            ReturnType = Void,
-            LineNumber = 190,
-            ColumnNumber = 4,
-            Parameters = []
-        },
-        new()
-        {
-            FileName = DosaiTestsSource,
-            Namespace = DosaiTestsNamespace,
-            Class = "DosaiTests",
-            Attributes = "Public",
-            Name = "GetMethods_PathIsEmptyDirectory_ReturnsNothing",
-            ReturnType = Void,
-            LineNumber = 197,
-            ColumnNumber = 4,
-            Parameters = []
+            Parameters =
+            [
+                new()
+                {
+                    Name = "path",
+                    Type = String
+                }
+            ]
         }
     ];
 
@@ -807,6 +635,25 @@ public class DosaiTests
             Class = "Dosai",
             Attributes = "Public, Static, HideBySig",
             Name = "GetMethods",
+            ReturnType = String,
+            LineNumber = default,
+            ColumnNumber = default,
+            Parameters =
+            [
+                new()
+                {
+                    Name = "path",
+                    Type = String
+                }
+            ]
+        },
+        new()
+        {
+            FileName = DosaiDLL,
+            Namespace = DepscanNamespace,
+            Class = "Dosai",
+            Attributes = "Public, Static, HideBySig",
+            Name = "GetDependencies",
             ReturnType = String,
             LineNumber = default,
             ColumnNumber = default,
@@ -1226,6 +1073,130 @@ public class DosaiTests
         {
             FileName = DosaiDLL,
             Namespace = DepscanNamespace,
+            Class = "Dependency",
+            Attributes = "Public, HideBySig, SpecialName",
+            Name = "get_FileName",
+            ReturnType = String,
+            LineNumber = default,
+            ColumnNumber = default,
+            Parameters = []
+        },
+        new()
+        {
+            FileName = DosaiDLL,
+            Namespace = DepscanNamespace,
+            Class = "Dependency",
+            Attributes = "Public, HideBySig, SpecialName",
+            Name = "set_FileName",
+            ReturnType = Void,
+            LineNumber = default,
+            ColumnNumber = default,
+            Parameters =
+            [
+                new()
+                {
+                    Name = value,
+                    Type = String
+                }
+            ]
+        },
+        new()
+        {
+            FileName = DosaiDLL,
+            Namespace = DepscanNamespace,
+            Class = "Dependency",
+            Attributes = "Public, HideBySig, SpecialName",
+            Name = "get_Name",
+            ReturnType = String,
+            LineNumber = default,
+            ColumnNumber = default,
+            Parameters = []
+        },
+        new()
+        {
+            FileName = DosaiDLL,
+            Namespace = DepscanNamespace,
+            Class = "Dependency",
+            Attributes = "Public, HideBySig, SpecialName",
+            Name = "set_Name",
+            ReturnType = Void,
+            LineNumber = default,
+            ColumnNumber = default,
+            Parameters =
+            [
+                new()
+                {
+                    Name = value,
+                    Type = String
+                }
+            ]
+        },
+        new()
+        {
+            FileName = DosaiDLL,
+            Namespace = DepscanNamespace,
+            Class = "Dependency",
+            Attributes = "Public, HideBySig, SpecialName",
+            Name = "get_LineNumber",
+            ReturnType = Int32,
+            LineNumber = default,
+            ColumnNumber = default,
+            Parameters = []
+        },
+        new()
+        {
+            FileName = DosaiDLL,
+            Namespace = DepscanNamespace,
+            Class = "Dependency",
+            Attributes = "Public, HideBySig, SpecialName",
+            Name = "set_LineNumber",
+            ReturnType = Void,
+            LineNumber = default,
+            ColumnNumber = default,
+            Parameters =
+            [
+                new()
+                {
+                    Name = value,
+                    Type = Int32
+                }
+            ]
+        },
+        new()
+        {
+            FileName = DosaiDLL,
+            Namespace = DepscanNamespace,
+            Class = "Dependency",
+            Attributes = "Public, HideBySig, SpecialName",
+            Name = "get_ColumnNumber",
+            ReturnType = Int32,
+            LineNumber = default,
+            ColumnNumber = default,
+            Parameters = []
+        },
+        new()
+        {
+            FileName = DosaiDLL,
+            Namespace = DepscanNamespace,
+            Class = "Dependency",
+            Attributes = "Public, HideBySig, SpecialName",
+            Name = "set_ColumnNumber",
+            ReturnType = Void,
+            LineNumber = default,
+            ColumnNumber = default,
+            Parameters =
+            [
+                new()
+                {
+                    Name = value,
+                    Type = Int32
+                }
+            ]
+        },
+        new()
+        {
+            FileName = DosaiDLL,
+            Namespace = DepscanNamespace,
             Class = "CommandLine",
             Attributes = "Public, Static, HideBySig",
             Name = "Main",
@@ -1254,7 +1225,7 @@ public class DosaiTests
             Attributes = "Public, Static",
             Name = "elevate",
             ReturnType = Void,
-            LineNumber = 6,
+            LineNumber = 13,
             ColumnNumber = 8,
             Parameters = []
         },
@@ -1265,7 +1236,7 @@ public class DosaiTests
             Class = "Hello",
             Attributes = "Public, Async",
             Name = "Appreciate",
-            LineNumber = 11,
+            LineNumber = 18,
             ColumnNumber = 8,
             ReturnType = Task,
             Parameters = []
@@ -1278,7 +1249,7 @@ public class DosaiTests
             Attributes = "Public",
             Name = "shout",
             ReturnType = Void,
-            LineNumber = 19,
+            LineNumber = 26,
             ColumnNumber = 8,
             Parameters = []
         },
@@ -1290,7 +1261,7 @@ public class DosaiTests
             Attributes = "Public",
             Name = "foo",
             ReturnType = Void,
-            LineNumber = 35,
+            LineNumber = 42,
             ColumnNumber = 8,
             Parameters = []
         },
@@ -1302,15 +1273,253 @@ public class DosaiTests
             Attributes = "Public",
             Name = "bar",
             ReturnType = Void,
-            LineNumber = 43,
+            LineNumber = 50,
             ColumnNumber = 8,
             Parameters = []
+        }
+    ];
+
+    // Expected dependencies in Assembly.cs
+    private static readonly Dependency[] expectedDependenciesAssemblySource =
+    [
+        new()
+        {
+            FileName = AssemblySource,
+            Name = "Microsoft.CodeAnalysis",
+            LineNumber = 1,
+            ColumnNumber = 0
+        },
+        new()
+        {
+            FileName = AssemblySource,
+            Name = "Microsoft.CodeAnalysis.CSharp",
+            LineNumber = 2,
+            ColumnNumber = 0
+        },
+        new()
+        {
+            FileName = AssemblySource,
+            Name = "Microsoft.CodeAnalysis.CSharp.Syntax",
+            LineNumber = 3,
+            ColumnNumber = 0
+        },
+        new()
+        {
+            FileName = AssemblySource,
+            Name = "System.Globalization",
+            LineNumber = 4,
+            ColumnNumber = 0
+        },
+        new()
+        {
+            FileName = AssemblySource,
+            Name = "System.Reflection",
+            LineNumber = 5,
+            ColumnNumber = 0
+        },
+        new()
+        {
+            FileName = AssemblySource,
+            Name = "System.Text.Json",
+            LineNumber = 6,
+            ColumnNumber = 0
+        }
+    ];
+
+    // Expected dependencies in Dosai.cs
+    private static readonly Dependency[] expectedDependenciesDosaiSource =
+    [
+        new()
+        {
+            FileName = DosaiSource,
+            Name = "Microsoft.CodeAnalysis",
+            LineNumber = 1,
+            ColumnNumber = 0
+        },
+        new()
+        {
+            FileName = DosaiSource,
+            Name = "Microsoft.CodeAnalysis.CSharp",
+            LineNumber = 2,
+            ColumnNumber = 0
+        },
+        new()
+        {
+            FileName = DosaiSource,
+            Name = "Microsoft.CodeAnalysis.CSharp.Syntax",
+            LineNumber = 3,
+            ColumnNumber = 0
+        },
+        new()
+        {
+            FileName = DosaiSource,
+            Name = "System.Globalization",
+            LineNumber = 4,
+            ColumnNumber = 0
+        },
+        new()
+        {
+            FileName = DosaiSource,
+            Name = "System.Reflection",
+            LineNumber = 5,
+            ColumnNumber = 0
+        },
+        new()
+        {
+            FileName = DosaiSource,
+            Name = "System.Text.Json",
+            LineNumber = 6,
+            ColumnNumber = 0
+        }
+    ];
+
+    // Expected dependencies in Dosai.dll
+    private static readonly Dependency[] expectedDependenciesDosaiDLL =
+    [
+        new()
+        {
+            FileName = DosaiDLL,
+            Name = "System.Runtime",
+            LineNumber = default,
+            ColumnNumber = default
+        },
+        new()
+        {
+            FileName = DosaiDLL,
+            Name = "System.CommandLine",
+            LineNumber = default,
+            ColumnNumber = default
+        },
+        new()
+        {
+            FileName = DosaiDLL,
+            Name = "System.Text.Json",
+            LineNumber = default,
+            ColumnNumber = default
+        },
+        new()
+        {
+            FileName = DosaiDLL,
+            Name = "System.Collections",
+            LineNumber = default,
+            ColumnNumber = default
+        },
+        new()
+        {
+            FileName = DosaiDLL,
+            Name = "Microsoft.CodeAnalysis",
+            LineNumber = default,
+            ColumnNumber = default
+        },
+        new()
+        {
+            FileName = DosaiDLL,
+            Name = "Microsoft.CodeAnalysis.CSharp",
+            LineNumber = default,
+            ColumnNumber = default
+        },
+        new()
+        {
+            FileName = DosaiDLL,
+            Name = "System.Linq",
+            LineNumber = default,
+            ColumnNumber = default
+        },
+        new()
+        {
+            FileName = DosaiDLL,
+            Name = "System.Console",
+            LineNumber = default,
+            ColumnNumber = default
+        },
+        new()
+        {
+            FileName = DosaiDLL,
+            Name = "System.Collections.Immutable",
+            LineNumber = default,
+            ColumnNumber = default
+        },
+        new()
+        {
+            FileName = DosaiDLL,
+            Name = "System.Text.Encodings.Web",
+            LineNumber = default,
+            ColumnNumber = default
+        }
+    ];
+
+    // Expected dependencies in Dosai.Tests.dll
+    private static readonly Dependency[] expectedDependenciesDosaiTestsDLL =
+    [
+        new()
+        {
+            FileName = DosaiTestsDLL,
+            Name = "System.Runtime",
+            LineNumber = default,
+            ColumnNumber = default
+        },
+        new()
+        {
+            FileName = DosaiTestsDLL,
+            Name = "Microsoft.VisualStudio.TestPlatform.ObjectModel",
+            LineNumber = default,
+            ColumnNumber = default
+        },
+        new()
+        {
+            FileName = DosaiTestsDLL,
+            Name = "Dosai",
+            LineNumber = default,
+            ColumnNumber = default
+        },
+        new()
+        {
+            FileName = DosaiTestsDLL,
+            Name = "xunit.core",
+            LineNumber = default,
+            ColumnNumber = default
+        },
+        new()
+        {
+            FileName = DosaiTestsDLL,
+            Name = "System.Collections",
+            LineNumber = default,
+            ColumnNumber = default
+        },
+        new()
+        {
+            FileName = DosaiTestsDLL,
+            Name = "System.Text.Json",
+            LineNumber = default,
+            ColumnNumber = default
+        },
+        new()
+        {
+            FileName = DosaiTestsDLL,
+            Name = "xunit.assert",
+            LineNumber = default,
+            ColumnNumber = default
+        },
+        new()
+        {
+            FileName = DosaiTestsDLL,
+            Name = "System.Linq",
+            LineNumber = default,
+            ColumnNumber = default
+        },
+        new()
+        {
+            FileName = DosaiTestsDLL,
+            Name = "System.Runtime.InteropServices",
+            LineNumber = default,
+            ColumnNumber = default
         }
     ];
 
     private const string DosaiTestsDLL = "Dosai.Tests.dll";
     private const string DosaiTestsPdb = "Dosai.Tests.pdb";
     private const string DosaiTestsSource = "DosaiTests.cs";
+    private const string DosaiSource = "Dosai.cs";
     private const string AssemblySource = "Assembly.cs";
     private const string DosaiDLL = "Dosai.dll";
     private const string FakeDLL = "Fake.dll";

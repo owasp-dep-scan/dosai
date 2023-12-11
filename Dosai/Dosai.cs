@@ -155,6 +155,7 @@ public static class Dosai
         foreach(var assemblyFilePath in assembliesToInspect)
         {
             var fileName = Path.GetFileName(assemblyFilePath);
+            
             try
             {
                 var assembly = Assembly.LoadFrom(assemblyFilePath);
@@ -185,7 +186,7 @@ public static class Dosai
                     }
                 }
             }
-            catch (Exception e) when (e is System.IO.FileLoadException || e is System.IO.FileNotFoundException || e is System.BadImageFormatException)
+            catch (Exception e) when (e is FileLoadException || e is FileNotFoundException || e is BadImageFormatException)
             {
                 failedAssemblies.Add(assemblyFilePath);
             }
@@ -241,7 +242,7 @@ public static class Dosai
                         ColumnNumber = columnNumber,
                         Parameters = method?.Parameters.Select(p => new Parameter {
                             Name = p.Name,
-                            Type = p.Type?.ToString()
+                            Type = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(p.Type?.ToString()!)
                         }).ToList()
                     });
                 }
@@ -249,6 +250,101 @@ public static class Dosai
         }
 
         return sourceMethods;
+    }
+
+    /// <summary>
+    /// Get all assembly/source dependencies for the given path to assembly/source or directory of assemblies/source
+    /// </summary>
+    /// <param name="path">Filesystem path to assembly/source file or directory containing assembly/source files</param>
+    /// <returns>JSON list of assembly/source dependencies</returns>
+    public static string GetDependencies(string path)
+    {
+        var dependencies = GetAssemblyDependencies(path);
+        dependencies.AddRange(GetCSharpSourceDependencies(path));
+
+        return JsonSerializer.Serialize(dependencies, options);
+    }
+
+    /// <summary>
+    /// Get all assembly dependencies for the given path to assembly or directory of assemblies
+    /// </summary>
+    /// <param name="path">Filesystem path to assembly file or directory containing assembly files</param>
+    /// <returns>List of assembly dependencies</returns>
+    private static List<Dependency> GetAssemblyDependencies(string path)
+    {
+        var assembliesToInspect = GetFilesToInspect(path, Constants.AssemblyExtension);
+        var assemblyDependencies = new List<Dependency>();
+        var failedAssemblies = new List<string>();
+
+        foreach(var assemblyFilePath in assembliesToInspect)
+        {
+            var fileName = Path.GetFileName(assemblyFilePath);
+
+            try
+            {
+                var assembly = Assembly.LoadFrom(assemblyFilePath);
+                var dependencies = assembly.GetReferencedAssemblies();
+
+
+                foreach(var dependency in dependencies)
+                {
+                    //if ($"{dependency.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName)
+                    //{
+                        assemblyDependencies.Add(new Dependency
+                        {
+                            FileName = fileName,
+                            Name = dependency.Name
+                        });
+                    //}
+                }
+            }
+            catch (Exception e) when (e is FileLoadException || e is FileNotFoundException || e is BadImageFormatException)
+            {
+                failedAssemblies.Add(assemblyFilePath);
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine($"Unable to process {assemblyFilePath} due to: {e.Message}");
+            }
+        }
+
+        return assemblyDependencies;
+    }
+
+    /// <summary>
+    /// Get all source dependencies for the given path to C# source or directory of C# source
+    /// </summary>
+    /// <param name="path">Filesystem path to C# source file or directory containing C# source files</param>
+    /// <returns>List of source dependencies</returns>
+    private static List<Dependency> GetCSharpSourceDependencies(string path)
+    {
+        var sourcesToInspect = GetFilesToInspect(path, Constants.CSharpSourceExtension);
+        var sourceDependencies = new List<Dependency>();
+
+        foreach(var sourceFilePath in sourcesToInspect)
+        {
+            var fileName = Path.GetFileName(sourceFilePath);
+            var fileContent = File.ReadAllText(sourceFilePath);
+            var tree = CSharpSyntaxTree.ParseText(fileContent);
+            var root = tree.GetCompilationUnitRoot();
+
+            foreach (var usingDirective in root.Usings)
+            {
+                var codeSpan = usingDirective.SyntaxTree.GetLineSpan(usingDirective.Span);
+                var lineNumber = codeSpan.StartLinePosition.Line + 1;
+                var columnNumber = codeSpan.Span.Start.Character;
+
+                sourceDependencies.Add(new Dependency
+                {
+                    FileName = fileName,
+                    Name = usingDirective.Name?.ToString(),
+                    LineNumber = lineNumber,
+                    ColumnNumber = columnNumber
+                });
+            }
+        }
+
+        return sourceDependencies;
     }
 
     /// <summary>

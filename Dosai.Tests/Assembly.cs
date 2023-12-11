@@ -1,3 +1,10 @@
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
+using System.Globalization;
+using System.Reflection;
+using System.Text.Json;
+
 // Example assembly that can be used in unit tests
 namespace HelloWorld
 {

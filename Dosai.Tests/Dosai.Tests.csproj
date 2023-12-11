@@ -25,6 +25,9 @@
   <None 
      Include="*.cs" 
      CopyToOutputDirectory="PreserveNewest" />
+  <None 
+     Include="./../Dosai/Dosai.cs" 
+     CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>
