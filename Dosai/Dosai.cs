@@ -82,26 +82,31 @@ public static class Dosai
             var fileName = Path.GetFileName(sourceFilePath);
             var fileContent = File.ReadAllText(sourceFilePath);
             var extn = Path.GetExtension(sourceFilePath);
-            SyntaxTree? syntaxTree = null;
+            Microsoft.CodeAnalysis.CSharp.Syntax.CompilationUnitSyntax? csRoot = null;
+            Microsoft.CodeAnalysis.VisualBasic.Syntax.CompilationUnitSyntax? vbRoot = null;
+            
             if (extn.Equals(Constants.CSharpSourceExtension))
             {
-                syntaxTree = CSharpSyntaxTree.ParseText(fileContent);
+                var syntaxTree = (CSharpSyntaxTree)CSharpSyntaxTree.ParseText(fileContent);
+                csRoot = syntaxTree.GetCompilationUnitRoot();
             }
             else if (extn.Equals(Constants.VBSourceExtension))
             {
-                syntaxTree = VisualBasicSyntaxTree.ParseText(fileContent);
+                var syntaxTree = (VisualBasicSyntaxTree)VisualBasicSyntaxTree.ParseText(fileContent);
+                vbRoot = syntaxTree.GetCompilationUnitRoot();
             }
             else
             {
                 continue;
             }
-            var root = syntaxTree.GetCompilationUnitRoot();
-            var syntaxes = root.DescendantNodes().OfType<BaseTypeDeclarationSyntax>();
 
-            foreach(var syntax in syntaxes)
+            // TODO: following logic is for c# only. Need to add similar for VB
+            var csSyntaxes = csRoot?.DescendantNodes().OfType<BaseTypeDeclarationSyntax>();
+
+            foreach(var syntax in csSyntaxes!)
             {
-                string nameSpace = string.Empty;
-                SyntaxNode? potentialNamespaceParent = syntax.Parent;
+                var nameSpace = string.Empty;
+                var potentialNamespaceParent = syntax.Parent;
 
                 // Keep moving "out" of nested classes etc until we get to a namespace or until we run out of parents
                 while (potentialNamespaceParent != null &&
@@ -253,16 +258,17 @@ public static class Dosai
             SemanticModel? model = null;
             Microsoft.CodeAnalysis.CSharp.Syntax.CompilationUnitSyntax? csRoot = null;
             Microsoft.CodeAnalysis.VisualBasic.Syntax.CompilationUnitSyntax? vbRoot = null;
+
             if (extn.Equals(Constants.CSharpSourceExtension))
             {
-                var tree = CSharpSyntaxTree.ParseText(fileContent);
+                var tree = (CSharpSyntaxTree)CSharpSyntaxTree.ParseText(fileContent);
                 csRoot = tree.GetCompilationUnitRoot();
                 var compilation = CSharpCompilation.Create(fileName, syntaxTrees: new[] { tree }, references: metadataReferences);
                 model = compilation.GetSemanticModel(tree);
             }
             else if (extn.Equals(Constants.VBSourceExtension))
             {
-                var tree = VisualBasicSyntaxTree.ParseText(fileContent);
+                var tree = (VisualBasicSyntaxTree)VisualBasicSyntaxTree.ParseText(fileContent);
                 vbRoot = tree.GetCompilationUnitRoot();
                 var compilation = VisualBasicCompilation.Create(fileName, syntaxTrees: new[] { tree }, references: metadataReferences);
                 model = compilation.GetSemanticModel(tree);
@@ -273,9 +279,9 @@ public static class Dosai
             }
 
             var methodDeclarations = csRoot?.DescendantNodes().OfType<MethodDeclarationSyntax>();
-            var vbMethodDeclarations = vbRoot?.DescendantNodes().OfType<Microsoft.CodeAnalysis.VisualBasic.Syntax.MethodBaseSyntax>();
+            var vbMethodDeclarations = vbRoot?.DescendantNodes().OfType<MethodBaseSyntax>();
             var usingDirectives = csRoot?.DescendantNodes().OfType<UsingDirectiveSyntax>();
-            var vbImportsDirectives = vbRoot?.DescendantNodes().OfType<Microsoft.CodeAnalysis.VisualBasic.Syntax.SimpleImportsClauseSyntax>();
+            var vbImportsDirectives = vbRoot?.DescendantNodes().OfType<SimpleImportsClauseSyntax>();
             var csMethodCalls = csRoot?.DescendantNodes().OfType<Microsoft.CodeAnalysis.CSharp.Syntax.InvocationExpressionSyntax>();
             var vbMethodCalls = vbRoot?.DescendantNodes().OfType<Microsoft.CodeAnalysis.VisualBasic.Syntax.InvocationExpressionSyntax>();
 
@@ -356,13 +362,15 @@ public static class Dosai
                     var location = usingDirective.GetLocation().GetLineSpan().StartLinePosition;
                     var lineNumber = location.Line + 1;
                     var columnNumber = location.Character + 1;
-                    var namespaceMembers = new List<String>();
-                    var Assembly = "";
-                    var Module = "";
+                    var namespaceMembers = new List<string>();
+                    var Assembly = string.Empty;
+                    var Module = string.Empty;
+
                     if (usingDirective.Name != null)
                     {
                         var nameInfo = model.GetSymbolInfo(usingDirective.Name);
                         INamespaceSymbol? nsSymbol = null;
+
                         if (nameInfo.Symbol is not null and INamespaceSymbol)
                         {
                             nsSymbol = (INamespaceSymbol)nameInfo.Symbol;
@@ -371,6 +379,7 @@ public static class Dosai
                         {
                             nsSymbol = (INamespaceSymbol)nameInfo.CandidateSymbols.First();
                         }
+
                         if (nsSymbol != null)
                         {
                             var nsMembers = nsSymbol.GetNamespaceMembers();
@@ -406,9 +415,10 @@ public static class Dosai
                     var location = importDirective.GetLocation().GetLineSpan().StartLinePosition;
                     var lineNumber = location.Line + 1;
                     var columnNumber = location.Character + 1;
-                    var namespaceMembers = new List<String>();
+                    var namespaceMembers = new List<string>();
                     var Assembly = "";
                     var Module = "";
+
                     if (importDirective.Name != null)
                     {
                         var nameInfo = model.GetSymbolInfo(importDirective.Name);
@@ -454,6 +464,7 @@ public static class Dosai
                     TrackCsMethodCall(methodCall, model, allMethodCalls, path, sourceFilePath, fileName);
                 }
             }
+
             if (vbMethodCalls != null)
             {
                 foreach(var methodCall in vbMethodCalls)
@@ -476,7 +487,7 @@ public static class Dosai
         var fullName = callExpression.ToFullString();
         var callArgsTypes = callArguments.Arguments.Select(a => a.ToFullString()).ToList();
         var exprInfo = model.GetSymbolInfo(callExpression);
-        var calledMethod = "";
+        var calledMethod = string.Empty;
         var isInMetadata = false;
         var isInSource = false;
         var Assembly = string.Empty;
@@ -526,7 +537,7 @@ public static class Dosai
         var fullName = callExpression.ToFullString();
         var callArgsTypes = callArguments.Arguments.Select(a => a.ToFullString()).ToList();
         var exprInfo = model.GetSymbolInfo(callExpression);
-        var calledMethod = "";
+        var calledMethod = string.Empty;
         var isInMetadata = false;
         var isInSource = false;
         var Assembly = string.Empty;
@@ -575,6 +586,7 @@ public static class Dosai
     {
         var filesToInspect = new List<string>();
         var fileAttributes = File.GetAttributes(path);
+
         if (fileAttributes.HasFlag(FileAttributes.Directory))
         {
             foreach (var inputFile in new DirectoryInfo(path).EnumerateFiles($"*{fileExtension}", SearchOption.AllDirectories))
@@ -590,7 +602,7 @@ public static class Dosai
         {
             var extension = Path.GetExtension(path);
 
-            if (!extension.Equals(Constants.AssemblyExtension) && !extension.Equals(fileExtension))
+            if (!extension.Equals(Constants.AssemblyExtension) && !extension.Equals(Constants.CSharpSourceExtension) && !extension.Equals(Constants.VBSourceExtension))
             {
                 throw new Exception($"The provided file path must reference a {fileExtension} file.");
             }

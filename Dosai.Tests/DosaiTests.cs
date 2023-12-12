@@ -190,7 +190,7 @@ public class DosaiTests
 
             try
             {
-                troubleshootingMessage = $"{expectedNamespace.FileName}.{expectedNamespace.Name}";
+                troubleshootingMessage = $"{expectedNamespace.FileName}${expectedNamespace.Name}";
                 var matchingNamespace = actualNamespaces?.Single(ns => ns.FileName == expectedNamespace.FileName &&
                                                                        ns.Name == expectedNamespace.Name);
 
@@ -212,15 +212,17 @@ public class DosaiTests
 
             try
             {
-                troubleshootingMessage = $"{expectedMethod.FileName}.{expectedMethod.Namespace}.{expectedMethod.ClassName}.{expectedMethod.Attributes}.{expectedMethod.Name}.{expectedMethod.ReturnType}.{expectedMethod.LineNumber}.{expectedMethod.ColumnNumber}";
+                troubleshootingMessage = $"{expectedMethod.Path}${expectedMethod.FileName}${expectedMethod.Assembly}${expectedMethod.Module}${expectedMethod.Namespace}${expectedMethod.ClassName}${expectedMethod.Attributes}${expectedMethod.Name}${expectedMethod.ReturnType}${expectedMethod.LineNumber}${expectedMethod.ColumnNumber}";
                 matchingMethod = actualMethods?.Single(method => method.FileName == expectedMethod.FileName &&
-                                                  method.Namespace == expectedMethod.Namespace &&
-                                                  method.ClassName == expectedMethod.ClassName &&
-                                                  method.Attributes == expectedMethod.Attributes &&
-                                                  method.Name == expectedMethod.Name &&
-                                                  method.ReturnType == expectedMethod.ReturnType &&
-                                                  method.LineNumber == expectedMethod.LineNumber &&
-                                                  method.ColumnNumber == expectedMethod.ColumnNumber);
+                                                                 method.Assembly == expectedMethod.Assembly &&
+                                                                 method.Module == expectedMethod.Module &&
+                                                                 method.Namespace == expectedMethod.Namespace &&
+                                                                 method.ClassName == expectedMethod.ClassName &&
+                                                                 method.Attributes == expectedMethod.Attributes &&
+                                                                 method.Name == expectedMethod.Name &&
+                                                                 method.ReturnType == expectedMethod.ReturnType &&
+                                                                 method.LineNumber == expectedMethod.LineNumber &&
+                                                                 method.ColumnNumber == expectedMethod.ColumnNumber);
 
                 Assert.NotNull(matchingMethod);
             }
@@ -252,13 +254,13 @@ public class DosaiTests
     [
         new()
         {
-            FileName = DosaiTestDataDLL,
-            Name = FooBarNamespace
+            FileName = "Dosai.TestData.dll",
+            Name = "FooBar"
         },
         new()
         {
-            FileName = DosaiTestDataDLL,
-            Name = HelloWorldNamespace
+            FileName = "Dosai.TestData.dll",
+            Name = "HelloWorld"
         }
     ];
 
@@ -267,8 +269,8 @@ public class DosaiTests
     [
         new()
         {
-            FileName = HelloWorldSource,
-            Name = HelloWorldNamespace
+            FileName = "HelloWorld.cs",
+            Name = "HelloWorld"
         }
     ];
 
@@ -277,8 +279,8 @@ public class DosaiTests
     [
         new()
         {
-            FileName = FooBarSource,
-            Name = FooBarNamespace
+            FileName = "FooBar.cs",
+            Name = "FooBar"
         }
     ];
 
@@ -287,12 +289,14 @@ public class DosaiTests
     [
         new()
         {
-            FileName = DosaiTestDataDLL,
-            Namespace = FooBarNamespace,
+            FileName = "Dosai.TestData.dll",
+            Assembly = null,
+            Module = "Dosai.TestData.dll",
+            Namespace = "FooBar",
             ClassName = "Foo",
             Attributes = "Public, Static, HideBySig",
             Name = "Main",
-            ReturnType = Void,
+            ReturnType = "Void",
             LineNumber = default,
             ColumnNumber = default,
             Parameters = [
@@ -305,48 +309,56 @@ public class DosaiTests
         },
         new()
         {
-            FileName = DosaiTestDataDLL,
-            Namespace = FooBarNamespace,
+            FileName = "Dosai.TestData.dll",
+            Assembly = null,
+            Module = "Dosai.TestData.dll",
+            Namespace = "FooBar",
             ClassName = "Bar",
             Attributes = "Public, HideBySig",
             Name = "bar",
-            ReturnType = Void,
+            ReturnType = "Void",
             LineNumber = default,
             ColumnNumber = default,
             Parameters = []
         },
         new()
         {
-            FileName = DosaiTestDataDLL,
-            Namespace = HelloWorldNamespace,
+            FileName = "Dosai.TestData.dll",
+            Assembly = null,
+            Module = "Dosai.TestData.dll",
+            Namespace = "HelloWorld",
             ClassName = "Hello",
             Attributes = "Public, Static, HideBySig",
             Name = "elevate",
-            ReturnType = Void,
+            ReturnType = "Void",
             LineNumber = default,
             ColumnNumber = default,
             Parameters = []
         },
         new()
         {
-            FileName = DosaiTestDataDLL,
-            Namespace = HelloWorldNamespace,
+            FileName = "Dosai.TestData.dll",
+            Assembly = null,
+            Module = "Dosai.TestData.dll",
+            Namespace = "HelloWorld",
             ClassName = "Hello",
             Attributes = "Public, HideBySig",
             Name = "Appreciate",
-            ReturnType = Task,
+            ReturnType = "Task",
             LineNumber = default,
             ColumnNumber = default,
             Parameters = []
         },
         new()
         {
-            FileName = DosaiTestDataDLL,
-            Namespace = HelloWorldNamespace,
+            FileName = "Dosai.TestData.dll",
+            Assembly = null,
+            Module = "Dosai.TestData.dll",
+            Namespace = "HelloWorld",
             ClassName = "World",
             Attributes = "Public, HideBySig",
             Name = "shout",
-            ReturnType = Void,
+            ReturnType = "Void",
             LineNumber = default,
             ColumnNumber = default,
             Parameters = []
@@ -358,36 +370,42 @@ public class DosaiTests
     [
         new()
         {
-            FileName = HelloWorldSource,
-            Namespace = HelloWorldNamespace,
+            FileName = "HelloWorld.cs",
+            Assembly = "HelloWorld.cs, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null",
+            Module = "HelloWorld.cs.exe",
+            Namespace = "HelloWorld",
             ClassName = "Hello",
             Attributes = "Public, Static",
             Name = "elevate",
-            ReturnType = Void,
+            ReturnType = "Void",
             LineNumber = 8,
             ColumnNumber = 9,
             Parameters = []
         },
         new()
         {
-            FileName = HelloWorldSource,
-            Namespace = HelloWorldNamespace,
+            FileName = "HelloWorld.cs",
+            Assembly = "HelloWorld.cs, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null",
+            Module = "HelloWorld.cs.exe",
+            Namespace = "HelloWorld",
             ClassName = "Hello",
             Attributes = "Public, Async",
             Name = "Appreciate",
             LineNumber = 13,
             ColumnNumber = 9,
-            ReturnType = Task,
+            ReturnType = "Task",
             Parameters = []
         },
         new()
         {
-            FileName = HelloWorldSource,
-            Namespace = HelloWorldNamespace,
+            FileName = "HelloWorld.cs",
+            Assembly = "HelloWorld.cs, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null",
+            Module = "HelloWorld.cs.exe",
+            Namespace = "HelloWorld",
             ClassName = "World",
             Attributes = "Public",
             Name = "shout",
-            ReturnType = Void,
+            ReturnType = "Void",
             LineNumber = 21,
             ColumnNumber = 9,
             Parameters = []
@@ -399,12 +417,14 @@ public class DosaiTests
     [
         new()
         {
-            FileName = FooBarSource,
-            Namespace = FooBarNamespace,
+            FileName = "FooBar.cs",
+            Assembly = "FooBar.cs, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null",
+            Module = "FooBar.cs.exe",
+            Namespace = "FooBar",
             ClassName = "Foo",
             Attributes = "Public, Static",
             Name = "Main",
-            ReturnType = Void,
+            ReturnType = "Void",
             LineNumber = 7,
             ColumnNumber = 9,
             Parameters = [
@@ -417,12 +437,14 @@ public class DosaiTests
         },
         new()
         {
-            FileName = FooBarSource,
-            Namespace = FooBarNamespace,
+            FileName = "FooBar.cs",
+            Assembly = "FooBar.cs, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null",
+            Module = "FooBar.cs.exe",
+            Namespace = "FooBar",
             ClassName = "Bar",
             Attributes = "Public",
             Name = "bar",
-            ReturnType = Void,
+            ReturnType = "Void",
             LineNumber = 15,
             ColumnNumber = 9,
             Parameters = []
@@ -434,11 +456,6 @@ public class DosaiTests
     private const string HelloWorldSource = "HelloWorld.cs";
     private const string FooBarSource = "FooBar.cs";
     private const string FakeDLL = "Fake.dll";
-    private const string FooBarNamespace = "FooBar";
-    private const string HelloWorldNamespace = "HelloWorld";
-    private const string Void = "Void";
-    private const string Task = "Task";
-    private const string assembliesDirectory = "assemblies";
     private const string sourceDirectory = "source";
     private const string emptyDirectory = "empty";
     private const string combinedDirectory = "combined";
