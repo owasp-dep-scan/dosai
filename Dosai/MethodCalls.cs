@@ -11,5 +11,5 @@ public class MethodCalls
     public string? CalledMethod { get; set; }
     public int LineNumber { get; set; }
     public int ColumnNumber { get; set; }
-    public List<String>? Arguments { get; set; }
+    public List<string>? Arguments { get; set; }
 }
