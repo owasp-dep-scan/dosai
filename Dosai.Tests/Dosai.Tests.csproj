@@ -28,11 +28,18 @@
   <None 
      Include="./../Dosai.TestData/HelloWorld.cs" 
      CopyToOutputDirectory="PreserveNewest" />
+  <None 
+     Include="./../Dosai.TestData/FooBar.vb" 
+     CopyToOutputDirectory="PreserveNewest" />
+  <None 
+     Include="./../Dosai.TestData/HelloWorld.vb" 
+     CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\Dosai\Dosai.csproj" />
-    <ProjectReference Include="..\Dosai.TestData\Dosai.TestData.csproj" />
+    <ProjectReference Include="..\Dosai.TestData\Dosai.TestData.CSharp.csproj" />
+    <ProjectReference Include="..\Dosai.TestData\Dosai.TestData.VB.vbproj" />
   </ItemGroup>
 
 </Project>

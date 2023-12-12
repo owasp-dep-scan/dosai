@@ -278,17 +278,19 @@ public static class Dosai
                 continue;
             }
 
-            var methodDeclarations = csRoot?.DescendantNodes().OfType<MethodDeclarationSyntax>();
-            var vbMethodDeclarations = vbRoot?.DescendantNodes().OfType<MethodBaseSyntax>();
-            var usingDirectives = csRoot?.DescendantNodes().OfType<UsingDirectiveSyntax>();
+            var csMethodDeclarations = csRoot?.DescendantNodes().OfType<MethodDeclarationSyntax>();
+            var vbMethodDeclarations = vbRoot?.DescendantNodes().OfType<MethodStatementSyntax>();
+
+            var csUsingDirectives = csRoot?.DescendantNodes().OfType<UsingDirectiveSyntax>();
             var vbImportsDirectives = vbRoot?.DescendantNodes().OfType<SimpleImportsClauseSyntax>();
+
             var csMethodCalls = csRoot?.DescendantNodes().OfType<Microsoft.CodeAnalysis.CSharp.Syntax.InvocationExpressionSyntax>();
             var vbMethodCalls = vbRoot?.DescendantNodes().OfType<Microsoft.CodeAnalysis.VisualBasic.Syntax.InvocationExpressionSyntax>();
 
-            // method declarations
-            if (methodDeclarations != null)
+            // C# method declarations
+            if (csMethodDeclarations != null)
             {
-                foreach(var methodDeclaration in methodDeclarations)
+                foreach(var methodDeclaration in csMethodDeclarations)
                 {
                     var modifiers = methodDeclaration.Modifiers;
                     var method = model.GetDeclaredSymbol(methodDeclaration);
@@ -320,7 +322,7 @@ public static class Dosai
                 }
             }
 
-            // method declarations
+            // VB method declarations
             if (vbMethodDeclarations != null)
             {
                 foreach(var methodDeclaration in vbMethodDeclarations)
@@ -343,19 +345,22 @@ public static class Dosai
                             ClassName = method.ContainingType.Name,
                             Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
                             Name = method?.Name,
-                            ReturnType = "",
+                            ReturnType = method?.ReturnType.Name,
                             LineNumber = lineNumber,
                             ColumnNumber = columnNumber,
-                            Parameters = null
+                            Parameters = method?.Parameters.Select(p => new Parameter {
+                                Name = p.Name,
+                                Type = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(p.Type?.ToString()!)
+                            }).ToList()
                         });
                     }
                 }
             }
 
             // using declarations
-            if (usingDirectives != null)
+            if (csUsingDirectives != null)
             {
-                foreach(var usingDirective in usingDirectives)
+                foreach(var usingDirective in csUsingDirectives)
                 {
                     var name = usingDirective.Name?.ToFullString();
                     var namespaceType = usingDirective.NamespaceOrType?.ToFullString();
