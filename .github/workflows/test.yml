@@ -34,7 +34,6 @@ jobs:
     - name: Test
       run: |
         dotnet test
-        dotnet run --project ./Dosai/ namespaces --path ./Dosai/bin/x64/Debug/net8.0/linux-x64/Dosai.dll
         dotnet run --project ./Dosai/ methods --path ./Dosai/Dosai.cs
     - name: Publish the package
       run: |

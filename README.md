@@ -6,8 +6,7 @@ List details about the namespaces and methods from a C# .NET source file or asse
 `Dosai [command] [options]`  
 
 ### Commands:
-`namespaces`          Retrieve the namespaces details  
-`methods`             Retrieve the methods details  
+`methods`             Retrieve details about the methods  
 `--version`           Show version information  
 `-?`, `-h`, `--help`  Show help and usage information  
 
@@ -22,7 +21,7 @@ List details about the namespaces and methods from a C# .NET source file or asse
 ### Running code directly from the code repository
 1. `dotnet build ./Dosai`
 2. Run a command such as:
-   * `dotnet run --project ./Dosai/ namespaces --path ./Dosai/bin/x64/Debug/net8.0/Dosai.dll`
+   * `dotnet run --project ./Dosai/ methods --path ./Dosai/bin/x64/Debug/net8.0/Dosai.dll`
    * `dotnet run --project ./Dosai/ methods --path ./Dosai/Dosai.cs`
 
 ### Generating a self-contained executable for a system
@@ -30,7 +29,7 @@ List details about the namespaces and methods from a C# .NET source file or asse
 * Linux: `dotnet publish -r linux-x64 --self-contained`
 
 ### Invoking the self-contained executable
-* Windows: `Dosai.exe namespaces --path ./Dosai/bin/x64/Debug/net8.0/Dosai.dll`
+* Windows: `Dosai.exe methods --path ./Dosai/bin/x64/Debug/net8.0/Dosai.dll`
 * Linux: `Dosai methods --path ./Dosai/Dosai.cs`
 
 ### Run unit tests
