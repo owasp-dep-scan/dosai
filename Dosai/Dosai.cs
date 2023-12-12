@@ -84,7 +84,7 @@ public static class Dosai
             var extn = Path.GetExtension(sourceFilePath);
             Microsoft.CodeAnalysis.CSharp.Syntax.CompilationUnitSyntax? csRoot = null;
             Microsoft.CodeAnalysis.VisualBasic.Syntax.CompilationUnitSyntax? vbRoot = null;
-            
+
             if (extn.Equals(Constants.CSharpSourceExtension))
             {
                 var syntaxTree = (CSharpSyntaxTree)CSharpSyntaxTree.ParseText(fileContent);
@@ -410,7 +410,7 @@ public static class Dosai
             {
                 foreach(var importDirective in vbImportsDirectives)
                 {
-                    var name = importDirective.Name?.ToFullString();
+                    var name = importDirective.Name?.ToFullString().Trim();
                     var namespaceType = importDirective.Alias?.ToFullString();
                     var location = importDirective.GetLocation().GetLineSpan().StartLinePosition;
                     var lineNumber = location.Line + 1;
@@ -535,7 +535,7 @@ public static class Dosai
         var lineNumber = location.Line + 1;
         var columnNumber = location.Character + 1;
         var fullName = callExpression.ToFullString();
-        var callArgsTypes = callArguments.Arguments.Select(a => a.ToFullString()).ToList();
+        var callArgsTypes = callArguments?.Arguments.Select(a => a.ToFullString()).ToList();
         var exprInfo = model.GetSymbolInfo(callExpression);
         var calledMethod = string.Empty;
         var isInMetadata = false;
