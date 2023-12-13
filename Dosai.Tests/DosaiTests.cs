@@ -6,91 +6,7 @@ namespace Dosai.Tests;
 
 public class DosaiTests
 {
-    #region Namespaces
-    [Fact]
-    public void GetNamespaces_Assembly_PathIsFile_ReturnsDetails()
-    {
-        var assemblyPath = GetFilePath(DosaiTestDataCSharpDLL);
-        var result = Depscan.Dosai.GetNamespaces(assemblyPath);
-        var actualNamespaces = JsonSerializer.Deserialize<List<Namespace>>(result);
-        Assert.Equal(expectedNamespacesDosaiTestDataCSharpDLL.Length, actualNamespaces?.Count);
-        AssertNamespaces(actualNamespaces, expectedNamespacesDosaiTestDataCSharpDLL);
-    }
-
-    [Fact]
-    public void GetNamespaces_CSharpSource_PathIsFile_ReturnsDetails()
-    {
-        var sourcePath = GetFilePath(HelloWorldCSharpSource);
-        var result = Depscan.Dosai.GetNamespaces(sourcePath);
-        var actualNamespaces = JsonSerializer.Deserialize<List<Namespace>>(result);
-        Assert.Equal(expectedNamespacesHelloWorldCSharpSource.Length, actualNamespaces?.Count);
-        AssertNamespaces(actualNamespaces, expectedNamespacesHelloWorldCSharpSource);
-    }
-
-    [Fact]
-    public void GetNamespaces_CSharpSource_PathIsDirectory_ReturnsDetails()
-    {
-        if(Directory.Exists(sourceDirectory)) Directory.Delete(sourceDirectory, true);
-
-        Directory.CreateDirectory(sourceDirectory);
-        File.Copy(HelloWorldCSharpSource, Path.Combine(sourceDirectory, HelloWorldCSharpSource), true);
-        File.Copy(FooBarCSharpSource, Path.Combine(sourceDirectory, FooBarCSharpSource), true);
-
-        var sourceFolder = Path.Combine(Directory.GetCurrentDirectory(), sourceDirectory);
-        var result = Depscan.Dosai.GetNamespaces(sourceFolder);
-        var actualNamespaces = JsonSerializer.Deserialize<List<Namespace>>(result);
-        Assert.Equal(expectedNamespacesHelloWorldCSharpSource.Length + expectedNamespacesFooBarCSharpSource.Length, actualNamespaces?.Count);
-        AssertNamespaces(actualNamespaces, expectedNamespacesHelloWorldCSharpSource);
-        AssertNamespaces(actualNamespaces, expectedNamespacesFooBarCSharpSource);
-    }
-
-    [Fact]
-    public void GetNamespaces_AssemblyAndSource_PathIsDirectory_ReturnsDetails()
-    {
-        if(Directory.Exists(combinedDirectory)) Directory.Delete(combinedDirectory, true);
-
-        Directory.CreateDirectory(combinedDirectory);
-        File.Copy(DosaiTestDataCSharpDLL, Path.Combine(combinedDirectory, DosaiTestDataCSharpDLL), true);
-        File.Copy(HelloWorldCSharpSource, Path.Combine(combinedDirectory, HelloWorldCSharpSource), true);
-        File.Copy(FooBarCSharpSource, Path.Combine(combinedDirectory, FooBarCSharpSource), true);
-
-        var folder = Path.Combine(Directory.GetCurrentDirectory(), combinedDirectory);
-        var result = Depscan.Dosai.GetNamespaces(folder);
-        var actualNamespaces = JsonSerializer.Deserialize<List<Namespace>>(result);
-        Assert.Equal(expectedNamespacesDosaiTestDataCSharpDLL.Length +
-                     expectedNamespacesHelloWorldCSharpSource.Length +
-                     expectedNamespacesFooBarCSharpSource.Length, actualNamespaces?.Count);
-        AssertNamespaces(actualNamespaces, expectedNamespacesDosaiTestDataCSharpDLL);
-        AssertNamespaces(actualNamespaces, expectedNamespacesHelloWorldCSharpSource);
-        AssertNamespaces(actualNamespaces, expectedNamespacesFooBarCSharpSource);
-    }
-
-    [Fact]
-    public void GetNamespaces_PathIsNotDLLFile_ThrowsException()
-    {
-        var assemblyPath = GetFilePath(DosaiTestsPdb);
-        Assert.Throws<Exception>(() => Depscan.Dosai.GetNamespaces(assemblyPath));
-    }
-
-    [Fact]
-    public void GetNamespaces_PathDoesNotExist_ThrowsException()
-    {
-        var assemblyPath = GetFilePath(FakeDLL);
-        Assert.Throws<FileNotFoundException>(() => Depscan.Dosai.GetNamespaces(assemblyPath));
-    }
-
-    [Fact]
-    public void GetNamespaces_PathIsEmptyDirectory_ReturnsNothing()
-    {
-        Directory.CreateDirectory(emptyDirectory);
-        var assemblyFolder = Path.Combine(Directory.GetCurrentDirectory(), emptyDirectory);
-        var result = Depscan.Dosai.GetNamespaces(assemblyFolder);
-        var namespaces = JsonSerializer.Deserialize<List<Namespace>>(result);
-        Assert.Equal(0, namespaces?.Count);
-    }
-    #endregion Namespaces
-
-    #region Methods
+    #region GetMethods
     [Fact]
     public void GetMethods_CSharpAssembly_PathIsFile_ReturnsDetails()
     {
@@ -246,7 +162,7 @@ public class DosaiTests
         var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
         Assert.Equal(0, methodsSlice?.Methods?.Count);
     }
-    #endregion Methods
+    #endregion GetMethods
 
     private static void AssertNamespaces(List<Namespace>? actualNamespaces, Namespace[] expectedNamespaces)
     {

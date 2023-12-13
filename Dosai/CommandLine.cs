@@ -22,29 +22,16 @@ public class CommandLine
         
         rootCommand.AddGlobalOption(pathOption);
 
-        var namespaceCommand = new Command("namespaces", "Retrieve the namespaces details")
+
+        var methodsCommand = new Command("methods", "Retrieve details about the methods")
         {
             pathOption,
             outputFileOption
         };
 
-        var methodCommand = new Command("methods", "Retrieve the methods details")
-        {
-            pathOption,
-            outputFileOption
-        };
+        rootCommand.AddCommand(methodsCommand);
 
-        rootCommand.AddCommand(namespaceCommand);
-        rootCommand.AddCommand(methodCommand);
-
-        namespaceCommand.SetHandler((path, outputFile) =>
-        {
-            var result = Dosai.GetNamespaces(path!);
-            File.WriteAllText(outputFile!, result);
-        },
-        pathOption, outputFileOption);
-
-        methodCommand.SetHandler((path, outputFile) =>
+        methodsCommand.SetHandler((path, outputFile) =>
         {
             var result = Dosai.GetMethods(path!);
             File.WriteAllText(outputFile!, result);
