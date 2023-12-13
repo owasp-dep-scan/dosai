@@ -10,21 +10,21 @@ public class DosaiTests
     [Fact]
     public void GetNamespaces_Assembly_PathIsFile_ReturnsDetails()
     {
-        var assemblyPath = GetFilePath(DosaiTestDataDLL);
+        var assemblyPath = GetFilePath(DosaiTestDataCSharpDLL);
         var result = Depscan.Dosai.GetNamespaces(assemblyPath);
         var actualNamespaces = JsonSerializer.Deserialize<List<Namespace>>(result);
-        Assert.Equal(expectedNamespacesDosaiTestDataDLL.Length, actualNamespaces?.Count);
-        AssertNamespaces(actualNamespaces, expectedNamespacesDosaiTestDataDLL);
+        Assert.Equal(expectedNamespacesDosaiTestDataCSharpDLL.Length, actualNamespaces?.Count);
+        AssertNamespaces(actualNamespaces, expectedNamespacesDosaiTestDataCSharpDLL);
     }
 
     [Fact]
     public void GetNamespaces_CSharpSource_PathIsFile_ReturnsDetails()
     {
-        var sourcePath = GetFilePath(HelloWorldSource);
+        var sourcePath = GetFilePath(HelloWorldCSharpSource);
         var result = Depscan.Dosai.GetNamespaces(sourcePath);
         var actualNamespaces = JsonSerializer.Deserialize<List<Namespace>>(result);
-        Assert.Equal(expectedNamespacesHelloWorldSource.Length, actualNamespaces?.Count);
-        AssertNamespaces(actualNamespaces, expectedNamespacesHelloWorldSource);
+        Assert.Equal(expectedNamespacesHelloWorldCSharpSource.Length, actualNamespaces?.Count);
+        AssertNamespaces(actualNamespaces, expectedNamespacesHelloWorldCSharpSource);
     }
 
     [Fact]
@@ -33,15 +33,15 @@ public class DosaiTests
         if(Directory.Exists(sourceDirectory)) Directory.Delete(sourceDirectory, true);
 
         Directory.CreateDirectory(sourceDirectory);
-        File.Copy(HelloWorldSource, Path.Combine(sourceDirectory, HelloWorldSource), true);
-        File.Copy(FooBarSource, Path.Combine(sourceDirectory, FooBarSource), true);
+        File.Copy(HelloWorldCSharpSource, Path.Combine(sourceDirectory, HelloWorldCSharpSource), true);
+        File.Copy(FooBarCSharpSource, Path.Combine(sourceDirectory, FooBarCSharpSource), true);
 
         var sourceFolder = Path.Combine(Directory.GetCurrentDirectory(), sourceDirectory);
         var result = Depscan.Dosai.GetNamespaces(sourceFolder);
         var actualNamespaces = JsonSerializer.Deserialize<List<Namespace>>(result);
-        Assert.Equal(expectedNamespacesHelloWorldSource.Length + expectedNamespacesFooBarSource.Length, actualNamespaces?.Count);
-        AssertNamespaces(actualNamespaces, expectedNamespacesHelloWorldSource);
-        AssertNamespaces(actualNamespaces, expectedNamespacesFooBarSource);
+        Assert.Equal(expectedNamespacesHelloWorldCSharpSource.Length + expectedNamespacesFooBarCSharpSource.Length, actualNamespaces?.Count);
+        AssertNamespaces(actualNamespaces, expectedNamespacesHelloWorldCSharpSource);
+        AssertNamespaces(actualNamespaces, expectedNamespacesFooBarCSharpSource);
     }
 
     [Fact]
@@ -50,19 +50,19 @@ public class DosaiTests
         if(Directory.Exists(combinedDirectory)) Directory.Delete(combinedDirectory, true);
 
         Directory.CreateDirectory(combinedDirectory);
-        File.Copy(DosaiTestDataDLL, Path.Combine(combinedDirectory, DosaiTestDataDLL), true);
-        File.Copy(HelloWorldSource, Path.Combine(combinedDirectory, HelloWorldSource), true);
-        File.Copy(FooBarSource, Path.Combine(combinedDirectory, FooBarSource), true);
+        File.Copy(DosaiTestDataCSharpDLL, Path.Combine(combinedDirectory, DosaiTestDataCSharpDLL), true);
+        File.Copy(HelloWorldCSharpSource, Path.Combine(combinedDirectory, HelloWorldCSharpSource), true);
+        File.Copy(FooBarCSharpSource, Path.Combine(combinedDirectory, FooBarCSharpSource), true);
 
         var folder = Path.Combine(Directory.GetCurrentDirectory(), combinedDirectory);
         var result = Depscan.Dosai.GetNamespaces(folder);
         var actualNamespaces = JsonSerializer.Deserialize<List<Namespace>>(result);
-        Assert.Equal(expectedNamespacesDosaiTestDataDLL.Length +
-                     expectedNamespacesHelloWorldSource.Length +
-                     expectedNamespacesFooBarSource.Length, actualNamespaces?.Count);
-        AssertNamespaces(actualNamespaces, expectedNamespacesDosaiTestDataDLL);
-        AssertNamespaces(actualNamespaces, expectedNamespacesHelloWorldSource);
-        AssertNamespaces(actualNamespaces, expectedNamespacesFooBarSource);
+        Assert.Equal(expectedNamespacesDosaiTestDataCSharpDLL.Length +
+                     expectedNamespacesHelloWorldCSharpSource.Length +
+                     expectedNamespacesFooBarCSharpSource.Length, actualNamespaces?.Count);
+        AssertNamespaces(actualNamespaces, expectedNamespacesDosaiTestDataCSharpDLL);
+        AssertNamespaces(actualNamespaces, expectedNamespacesHelloWorldCSharpSource);
+        AssertNamespaces(actualNamespaces, expectedNamespacesFooBarCSharpSource);
     }
 
     [Fact]
@@ -92,27 +92,51 @@ public class DosaiTests
 
     #region Methods
     [Fact]
-    public void GetMethods_Assembly_PathIsFile_ReturnsDetails()
+    public void GetMethods_CSharpAssembly_PathIsFile_ReturnsDetails()
     {
-        var assemblyPath = GetFilePath(DosaiTestDataDLL);
+        var assemblyPath = GetFilePath(DosaiTestDataCSharpDLL);
         var result = Depscan.Dosai.GetMethods(assemblyPath);
         var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
         var actualMethods = methodsSlice?.Methods;
         
-        Assert.Equal(expectedMethodsDosaiTestDataDLL.Length, actualMethods?.Count);
-        AssertMethods(actualMethods, expectedMethodsDosaiTestDataDLL);
+        Assert.Equal(expectedMethodsDosaiTestDataCSharpDLL.Length, actualMethods?.Count);
+        AssertMethods(actualMethods, expectedMethodsDosaiTestDataCSharpDLL);
+    }
+
+    [Fact]
+    public void GetMethods_VBAssembly_PathIsFile_ReturnsDetails()
+    {
+        var assemblyPath = GetFilePath(DosaiTestDataVBDLL);
+        var result = Depscan.Dosai.GetMethods(assemblyPath);
+        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
+        var actualMethods = methodsSlice?.Methods;
+        
+        Assert.Equal(expectedMethodsDosaiTestDataVBDLL.Length, actualMethods?.Count);
+        AssertMethods(actualMethods, expectedMethodsDosaiTestDataVBDLL);
     }
 
     [Fact]
     public void GetMethods_CSharpSource_PathIsFile_ReturnsDetails()
     {
-        var sourcePath = GetFilePath(HelloWorldSource);
+        var sourcePath = GetFilePath(HelloWorldCSharpSource);
         var result = Depscan.Dosai.GetMethods(sourcePath);
         var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
         var actualMethods = methodsSlice?.Methods;
 
-        Assert.Equal(expectedMethodsHelloWorldSource.Length, actualMethods?.Count);
-        AssertMethods(actualMethods, expectedMethodsHelloWorldSource);
+        Assert.Equal(expectedMethodsHelloWorldCSharpSource.Length, actualMethods?.Count);
+        AssertMethods(actualMethods, expectedMethodsHelloWorldCSharpSource);
+    }
+
+    [Fact]
+    public void GetMethods_VBSource_PathIsFile_ReturnsDetails()
+    {
+        var sourcePath = GetFilePath(HelloWorldVBSource);
+        var result = Depscan.Dosai.GetMethods(sourcePath);
+        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
+        var actualMethods = methodsSlice?.Methods;
+
+        Assert.Equal(expectedMethodsHelloWorldVBSource.Length, actualMethods?.Count);
+        AssertMethods(actualMethods, expectedMethodsHelloWorldVBSource);
     }
 
     [Fact]
@@ -121,40 +145,82 @@ public class DosaiTests
         if(Directory.Exists(sourceDirectory)) Directory.Delete(sourceDirectory, true);
 
         Directory.CreateDirectory(sourceDirectory);
-        File.Copy(HelloWorldSource, Path.Combine(sourceDirectory, HelloWorldSource), true);
-        File.Copy(FooBarSource, Path.Combine(sourceDirectory, FooBarSource), true);
+        File.Copy(HelloWorldCSharpSource, Path.Combine(sourceDirectory, HelloWorldCSharpSource), true);
+        File.Copy(FooBarCSharpSource, Path.Combine(sourceDirectory, FooBarCSharpSource), true);
 
         var sourceFolder = Path.Combine(Directory.GetCurrentDirectory(), sourceDirectory);
         var result = Depscan.Dosai.GetMethods(sourceFolder);
         var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
         var actualMethods = methodsSlice?.Methods;
 
-        Assert.Equal(expectedMethodsHelloWorldSource.Length + expectedMethodsFooBarSource.Length, actualMethods?.Count);
-        AssertMethods(actualMethods, expectedMethodsHelloWorldSource);
-        AssertMethods(actualMethods, expectedMethodsFooBarSource);
+        Assert.Equal(expectedMethodsHelloWorldCSharpSource.Length + expectedMethodsFooBarCSharpSource.Length, actualMethods?.Count);
+        AssertMethods(actualMethods, expectedMethodsHelloWorldCSharpSource);
+        AssertMethods(actualMethods, expectedMethodsFooBarCSharpSource);
     }
 
     [Fact]
-    public void GetMethods_AssemblyAndSource_PathIsDirectory_ReturnsDetails()
+    public void GetMethods_VBSource_PathIsDirectory_ReturnsDetails()
+    {
+        if(Directory.Exists(sourceDirectory)) Directory.Delete(sourceDirectory, true);
+
+        Directory.CreateDirectory(sourceDirectory);
+        File.Copy(HelloWorldVBSource, Path.Combine(sourceDirectory, HelloWorldVBSource), true);
+        File.Copy(FooBarVBSource, Path.Combine(sourceDirectory, FooBarVBSource), true);
+
+        var sourceFolder = Path.Combine(Directory.GetCurrentDirectory(), sourceDirectory);
+        var result = Depscan.Dosai.GetMethods(sourceFolder);
+        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
+        var actualMethods = methodsSlice?.Methods;
+
+        Assert.Equal(expectedMethodsHelloWorldVBSource.Length + expectedMethodsFooBarVBSource.Length, actualMethods?.Count);
+        AssertMethods(actualMethods, expectedMethodsHelloWorldVBSource);
+        AssertMethods(actualMethods, expectedMethodsFooBarVBSource);
+    }
+
+    [Fact]
+    public void GetMethods_CSharpAssemblyAndSource_PathIsDirectory_ReturnsDetails()
     {
         if(Directory.Exists(combinedDirectory)) Directory.Delete(combinedDirectory, true);
 
         Directory.CreateDirectory(combinedDirectory);
-        File.Copy(DosaiTestDataDLL, Path.Combine(combinedDirectory, DosaiTestDataDLL), true);
-        File.Copy(HelloWorldSource, Path.Combine(combinedDirectory, HelloWorldSource), true);
-        File.Copy(FooBarSource, Path.Combine(combinedDirectory, FooBarSource), true);
+        File.Copy(DosaiTestDataCSharpDLL, Path.Combine(combinedDirectory, DosaiTestDataCSharpDLL), true);
+        File.Copy(HelloWorldCSharpSource, Path.Combine(combinedDirectory, HelloWorldCSharpSource), true);
+        File.Copy(FooBarCSharpSource, Path.Combine(combinedDirectory, FooBarCSharpSource), true);
 
         var folder = Path.Combine(Directory.GetCurrentDirectory(), combinedDirectory);
         var result = Depscan.Dosai.GetMethods(folder);
         var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
         var actualMethods = methodsSlice?.Methods;
 
-        Assert.Equal(expectedMethodsDosaiTestDataDLL.Length +
-                     expectedMethodsHelloWorldSource.Length +
-                     expectedMethodsFooBarSource.Length, actualMethods?.Count);
-        AssertMethods(actualMethods, expectedMethodsDosaiTestDataDLL);
-        AssertMethods(actualMethods, expectedMethodsHelloWorldSource);
-        AssertMethods(actualMethods, expectedMethodsFooBarSource);
+        Assert.Equal(expectedMethodsDosaiTestDataCSharpDLL.Length +
+                     expectedMethodsHelloWorldCSharpSource.Length +
+                     expectedMethodsFooBarCSharpSource.Length, actualMethods?.Count);
+        AssertMethods(actualMethods, expectedMethodsDosaiTestDataCSharpDLL);
+        AssertMethods(actualMethods, expectedMethodsHelloWorldCSharpSource);
+        AssertMethods(actualMethods, expectedMethodsFooBarCSharpSource);
+    }
+
+    [Fact]
+    public void GetMethods_VBAssemblyAndSource_PathIsDirectory_ReturnsDetails()
+    {
+        if(Directory.Exists(combinedDirectory)) Directory.Delete(combinedDirectory, true);
+
+        Directory.CreateDirectory(combinedDirectory);
+        File.Copy(DosaiTestDataVBDLL, Path.Combine(combinedDirectory, DosaiTestDataVBDLL), true);
+        File.Copy(HelloWorldVBSource, Path.Combine(combinedDirectory, HelloWorldVBSource), true);
+        File.Copy(FooBarVBSource, Path.Combine(combinedDirectory, FooBarVBSource), true);
+
+        var folder = Path.Combine(Directory.GetCurrentDirectory(), combinedDirectory);
+        var result = Depscan.Dosai.GetMethods(folder);
+        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
+        var actualMethods = methodsSlice?.Methods;
+
+        Assert.Equal(expectedMethodsDosaiTestDataVBDLL.Length +
+                     expectedMethodsHelloWorldVBSource.Length +
+                     expectedMethodsFooBarVBSource.Length, actualMethods?.Count);
+        AssertMethods(actualMethods, expectedMethodsDosaiTestDataVBDLL);
+        AssertMethods(actualMethods, expectedMethodsHelloWorldVBSource);
+        AssertMethods(actualMethods, expectedMethodsFooBarVBSource);
     }
 
     [Fact]
@@ -249,23 +315,23 @@ public class DosaiTests
         return Path.Join(currentDirectory, filePath);
     }
 
-    // Expected namespaces in Dosai.TestData.dll
-    private static readonly Namespace[] expectedNamespacesDosaiTestDataDLL =
+    // Expected namespaces in Dosai.TestData.CSharp.dll
+    private static readonly Namespace[] expectedNamespacesDosaiTestDataCSharpDLL =
     [
         new()
         {
-            FileName = "Dosai.TestData.dll",
+            FileName = "Dosai.TestData.CSharp.dll",
             Name = "FooBar"
         },
         new()
         {
-            FileName = "Dosai.TestData.dll",
+            FileName = "Dosai.TestData.CSharp.dll",
             Name = "HelloWorld"
         }
     ];
 
     // Expected namespaces in HelloWorld.cs
-    private static readonly Namespace[] expectedNamespacesHelloWorldSource =
+    private static readonly Namespace[] expectedNamespacesHelloWorldCSharpSource =
     [
         new()
         {
@@ -275,7 +341,7 @@ public class DosaiTests
     ];
 
     // Expected namespaces in FooBar.cs
-    private static readonly Namespace[] expectedNamespacesFooBarSource =
+    private static readonly Namespace[] expectedNamespacesFooBarCSharpSource =
     [
         new()
         {
@@ -284,14 +350,14 @@ public class DosaiTests
         }
     ];
 
-    // Expected methods in Dosai.TestData.dll
-    private static readonly Method[] expectedMethodsDosaiTestDataDLL =
+    // Expected methods in Dosai.TestData.CSharp.dll
+    private static readonly Method[] expectedMethodsDosaiTestDataCSharpDLL =
     [
         new()
         {
-            FileName = "Dosai.TestData.dll",
+            FileName = "Dosai.TestData.CSharp.dll",
             Assembly = null,
-            Module = "Dosai.TestData.dll",
+            Module = "Dosai.TestData.CSharp.dll",
             Namespace = "FooBar",
             ClassName = "Foo",
             Attributes = "Public, Static, HideBySig",
@@ -309,9 +375,9 @@ public class DosaiTests
         },
         new()
         {
-            FileName = "Dosai.TestData.dll",
+            FileName = "Dosai.TestData.CSharp.dll",
             Assembly = null,
-            Module = "Dosai.TestData.dll",
+            Module = "Dosai.TestData.CSharp.dll",
             Namespace = "FooBar",
             ClassName = "Bar",
             Attributes = "Public, HideBySig",
@@ -323,9 +389,9 @@ public class DosaiTests
         },
         new()
         {
-            FileName = "Dosai.TestData.dll",
+            FileName = "Dosai.TestData.CSharp.dll",
             Assembly = null,
-            Module = "Dosai.TestData.dll",
+            Module = "Dosai.TestData.CSharp.dll",
             Namespace = "HelloWorld",
             ClassName = "Hello",
             Attributes = "Public, Static, HideBySig",
@@ -337,9 +403,9 @@ public class DosaiTests
         },
         new()
         {
-            FileName = "Dosai.TestData.dll",
+            FileName = "Dosai.TestData.CSharp.dll",
             Assembly = null,
-            Module = "Dosai.TestData.dll",
+            Module = "Dosai.TestData.CSharp.dll",
             Namespace = "HelloWorld",
             ClassName = "Hello",
             Attributes = "Public, HideBySig",
@@ -351,9 +417,9 @@ public class DosaiTests
         },
         new()
         {
-            FileName = "Dosai.TestData.dll",
+            FileName = "Dosai.TestData.CSharp.dll",
             Assembly = null,
-            Module = "Dosai.TestData.dll",
+            Module = "Dosai.TestData.CSharp.dll",
             Namespace = "HelloWorld",
             ClassName = "World",
             Attributes = "Public, HideBySig",
@@ -365,8 +431,89 @@ public class DosaiTests
         }
     ];
 
+    // Expected methods in Dosai.TestData.VB.dll
+    private static readonly Method[] expectedMethodsDosaiTestDataVBDLL =
+    [
+        new()
+        {
+            FileName = "Dosai.TestData.VB.dll",
+            Assembly = null,
+            Module = "Dosai.TestData.VB.dll",
+            Namespace = "Dosai.TestData.VB.FooBar",
+            ClassName = "Foo",
+            Attributes = "Public, Static",
+            Name = "Main",
+            ReturnType = "Void",
+            LineNumber = default,
+            ColumnNumber = default,
+            Parameters = [
+                new()
+                {
+                    Name = "args",
+                    Type = "System.String[]"
+                }
+            ]
+        },
+        new()
+        {
+            FileName = "Dosai.TestData.VB.dll",
+            Assembly = null,
+            Module = "Dosai.TestData.VB.dll",
+            Namespace = "Dosai.TestData.VB.FooBar",
+            ClassName = "Bar",
+            Attributes = "Public",
+            Name = "bar",
+            ReturnType = "Void",
+            LineNumber = default,
+            ColumnNumber = default,
+            Parameters = []
+        },
+        new()
+        {
+            FileName = "Dosai.TestData.VB.dll",
+            Assembly = null,
+            Module = "Dosai.TestData.VB.dll",
+            Namespace = "Dosai.TestData.VB.HelloWorld",
+            ClassName = "Hello",
+            Attributes = "Public, Static",
+            Name = "elevate",
+            ReturnType = "Void",
+            LineNumber = default,
+            ColumnNumber = default,
+            Parameters = []
+        },
+        new()
+        {
+            FileName = "Dosai.TestData.VB.dll",
+            Assembly = null,
+            Module = "Dosai.TestData.VB.dll",
+            Namespace = "Dosai.TestData.VB.HelloWorld",
+            ClassName = "Hello",
+            Attributes = "Public",
+            Name = "Appreciate",
+            ReturnType = "Task",
+            LineNumber = default,
+            ColumnNumber = default,
+            Parameters = []
+        },
+        new()
+        {
+            FileName = "Dosai.TestData.VB.dll",
+            Assembly = null,
+            Module = "Dosai.TestData.VB.dll",
+            Namespace = "Dosai.TestData.VB.HelloWorld",
+            ClassName = "World",
+            Attributes = "Public",
+            Name = "shout",
+            ReturnType = "Void",
+            LineNumber = default,
+            ColumnNumber = default,
+            Parameters = []
+        }
+    ];
+
     // Expected methods in HelloWorld.cs
-    private static readonly Method[] expectedMethodsHelloWorldSource =
+    private static readonly Method[] expectedMethodsHelloWorldCSharpSource =
     [
         new()
         {
@@ -378,7 +525,7 @@ public class DosaiTests
             Attributes = "Public, Static",
             Name = "elevate",
             ReturnType = "Void",
-            LineNumber = 8,
+            LineNumber = 9,
             ColumnNumber = 9,
             Parameters = []
         },
@@ -391,7 +538,7 @@ public class DosaiTests
             ClassName = "Hello",
             Attributes = "Public, Async",
             Name = "Appreciate",
-            LineNumber = 13,
+            LineNumber = 14,
             ColumnNumber = 9,
             ReturnType = "Task",
             Parameters = []
@@ -406,14 +553,61 @@ public class DosaiTests
             Attributes = "Public",
             Name = "shout",
             ReturnType = "Void",
-            LineNumber = 21,
+            LineNumber = 22,
+            ColumnNumber = 9,
+            Parameters = []
+        }
+    ];
+
+    // Expected methods in HelloWorld.vb
+    private static readonly Method[] expectedMethodsHelloWorldVBSource =
+    [
+        new()
+        {
+            FileName = "HelloWorld.vb",
+            Assembly = "HelloWorld.vb, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null",
+            Module = "HelloWorld.vb.exe",
+            Namespace = "HelloWorld",
+            ClassName = "Hello",
+            Attributes = "Public, Shared",
+            Name = "elevate",
+            ReturnType = "Void",
+            LineNumber = 7,
+            ColumnNumber = 9,
+            Parameters = []
+        },
+        new()
+        {
+            FileName = "HelloWorld.vb",
+            Assembly = "HelloWorld.vb, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null",
+            Module = "HelloWorld.vb.exe",
+            Namespace = "HelloWorld",
+            ClassName = "Hello",
+            Attributes = "Public, Async",
+            Name = "Appreciate",
+            LineNumber = 10,
+            ColumnNumber = 9,
+            ReturnType = "Task",
+            Parameters = []
+        },
+        new()
+        {
+            FileName = "HelloWorld.vb",
+            Assembly = "HelloWorld.vb, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null",
+            Module = "HelloWorld.vb.exe",
+            Namespace = "HelloWorld",
+            ClassName = "World",
+            Attributes = "Public",
+            Name = "shout",
+            ReturnType = "Void",
+            LineNumber = 16,
             ColumnNumber = 9,
             Parameters = []
         }
     ];
 
     // Expected methods in FooBar.cs
-    private static readonly Method[] expectedMethodsFooBarSource =
+    private static readonly Method[] expectedMethodsFooBarCSharpSource =
     [
         new()
         {
@@ -451,10 +645,52 @@ public class DosaiTests
         }
     ];
 
-    private const string DosaiTestDataDLL = "Dosai.TestData.dll";
+    // Expected methods in FooBar.vb
+    private static readonly Method[] expectedMethodsFooBarVBSource =
+    [
+        new()
+        {
+            FileName = "FooBar.vb",
+            Assembly = "FooBar.vb, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null",
+            Module = "FooBar.vb.exe",
+            Namespace = "FooBar",
+            ClassName = "Foo",
+            Attributes = "Public, Shared",
+            Name = "Main",
+            ReturnType = "Void",
+            LineNumber = 5,
+            ColumnNumber = 9,
+            Parameters = [
+                new()
+                {
+                    Name = "args",
+                    Type = "String()"
+                }
+            ]
+        },
+        new()
+        {
+            FileName = "FooBar.vb",
+            Assembly = "FooBar.vb, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null",
+            Module = "FooBar.vb.exe",
+            Namespace = "FooBar",
+            ClassName = "Bar",
+            Attributes = "Public",
+            Name = "bar",
+            ReturnType = "Void",
+            LineNumber = 10,
+            ColumnNumber = 9,
+            Parameters = []
+        }
+    ];
+
+    private const string DosaiTestDataCSharpDLL = "Dosai.TestData.CSharp.dll";
+    private const string DosaiTestDataVBDLL = "Dosai.TestData.VB.dll";
     private const string DosaiTestsPdb = "Dosai.Tests.pdb";
-    private const string HelloWorldSource = "HelloWorld.cs";
-    private const string FooBarSource = "FooBar.cs";
+    private const string HelloWorldCSharpSource = "HelloWorld.cs";
+    private const string FooBarCSharpSource = "FooBar.cs";
+    private const string HelloWorldVBSource = "HelloWorld.vb";
+    private const string FooBarVBSource = "FooBar.vb";
     private const string FakeDLL = "Fake.dll";
     private const string sourceDirectory = "source";
     private const string emptyDirectory = "empty";
