@@ -1,4 +1,4 @@
-using Depscan;
+using Dosai;
 using System.Text.Json;
 using Xunit;
 
@@ -11,7 +11,7 @@ public class DosaiTests
     public void GetMethods_CSharpAssembly_PathIsFile_ReturnsDetails()
     {
         var assemblyPath = GetFilePath(DosaiTestDataCSharpDLL);
-        var result = Depscan.Dosai.GetMethods(assemblyPath);
+        var result = Dosai.GetMethods(assemblyPath);
         var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
         var actualMethods = methodsSlice?.Methods;
         
@@ -23,7 +23,7 @@ public class DosaiTests
     public void GetMethods_VBAssembly_PathIsFile_ReturnsDetails()
     {
         var assemblyPath = GetFilePath(DosaiTestDataVBDLL);
-        var result = Depscan.Dosai.GetMethods(assemblyPath);
+        var result = Dosai.GetMethods(assemblyPath);
         var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
         var actualMethods = methodsSlice?.Methods;
         
@@ -35,7 +35,7 @@ public class DosaiTests
     public void GetMethods_CSharpSource_PathIsFile_ReturnsDetails()
     {
         var sourcePath = GetFilePath(HelloWorldCSharpSource);
-        var result = Depscan.Dosai.GetMethods(sourcePath);
+        var result = Dosai.GetMethods(sourcePath);
         var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
         var actualMethods = methodsSlice?.Methods;
 
@@ -47,7 +47,7 @@ public class DosaiTests
     public void GetMethods_VBSource_PathIsFile_ReturnsDetails()
     {
         var sourcePath = GetFilePath(HelloWorldVBSource);
-        var result = Depscan.Dosai.GetMethods(sourcePath);
+        var result = Dosai.GetMethods(sourcePath);
         var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
         var actualMethods = methodsSlice?.Methods;
 
@@ -65,7 +65,7 @@ public class DosaiTests
         File.Copy(FooBarCSharpSource, Path.Combine(sourceDirectory, FooBarCSharpSource), true);
 
         var sourceFolder = Path.Combine(Directory.GetCurrentDirectory(), sourceDirectory);
-        var result = Depscan.Dosai.GetMethods(sourceFolder);
+        var result = Dosai.GetMethods(sourceFolder);
         var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
         var actualMethods = methodsSlice?.Methods;
 
@@ -84,7 +84,7 @@ public class DosaiTests
         File.Copy(FooBarVBSource, Path.Combine(sourceDirectory, FooBarVBSource), true);
 
         var sourceFolder = Path.Combine(Directory.GetCurrentDirectory(), sourceDirectory);
-        var result = Depscan.Dosai.GetMethods(sourceFolder);
+        var result = Dosai.GetMethods(sourceFolder);
         var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
         var actualMethods = methodsSlice?.Methods;
 
@@ -104,7 +104,7 @@ public class DosaiTests
         File.Copy(FooBarCSharpSource, Path.Combine(combinedDirectory, FooBarCSharpSource), true);
 
         var folder = Path.Combine(Directory.GetCurrentDirectory(), combinedDirectory);
-        var result = Depscan.Dosai.GetMethods(folder);
+        var result = Dosai.GetMethods(folder);
         var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
         var actualMethods = methodsSlice?.Methods;
 
@@ -127,7 +127,7 @@ public class DosaiTests
         File.Copy(FooBarVBSource, Path.Combine(combinedDirectory, FooBarVBSource), true);
 
         var folder = Path.Combine(Directory.GetCurrentDirectory(), combinedDirectory);
-        var result = Depscan.Dosai.GetMethods(folder);
+        var result = Dosai.GetMethods(folder);
         var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
         var actualMethods = methodsSlice?.Methods;
 
@@ -143,14 +143,14 @@ public class DosaiTests
     public void GetMethods_PathIsNotDLLFile_ThrowsException()
     {
         var assemblyPath = GetFilePath(DosaiTestsPdb);
-        Assert.Throws<Exception>(() => Depscan.Dosai.GetMethods(assemblyPath));
+        Assert.Throws<Exception>(() => Dosai.GetMethods(assemblyPath));
     }
 
     [Fact]
     public void GetMethods_PathDoesNotExist_ThrowsException()
     {
         var assemblyPath = GetFilePath(FakeDLL);
-        Assert.Throws<FileNotFoundException>(() => Depscan.Dosai.GetMethods(assemblyPath));
+        Assert.Throws<FileNotFoundException>(() => Dosai.GetMethods(assemblyPath));
     }
 
     [Fact]
@@ -158,7 +158,7 @@ public class DosaiTests
     {
         Directory.CreateDirectory(emptyDirectory);
         var assemblyFolder = Path.Combine(Directory.GetCurrentDirectory(), emptyDirectory);
-        var result = Depscan.Dosai.GetMethods(assemblyFolder);
+        var result = Dosai.GetMethods(assemblyFolder);
         var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
         Assert.Equal(0, methodsSlice?.Methods?.Count);
     }

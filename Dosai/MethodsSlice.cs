@@ -1,4 +1,4 @@
-namespace Depscan;
+namespace Dosai;
 
 public class MethodsSlice
 {

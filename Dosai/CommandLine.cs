@@ -1,6 +1,6 @@
 using System.CommandLine;
 
-namespace Depscan;
+namespace Dosai;
 
 public class CommandLine
 {

@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
@@ -15,7 +15,19 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.8.0" />
     <PackageReference Include="Microsoft.CodeAnalysis.VisualBasic" Version="4.8.0" />
+	<PackageReference Include="Microsoft.CodeAnalysis.Analyzers" Version="3.11.0-beta1.23525.2">
+		<PrivateAssets>all</PrivateAssets>
+		<IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+	</PackageReference>	
     <PackageReference Include="System.CommandLine" Version="2.0.0-beta4.22272.1" />
-    <None Include="..\README.md" Pack="true" PackagePath="\"/>
+    <None Include="..\README.md" Pack="true" PackagePath="\" />
   </ItemGroup>
+  <Import Project="..\Roslyn\Compiler\Analyzer.Utilities.projitems" Label="Shared" />
+  <Import Project="..\Roslyn\FlowAnalysis\FlowAnalysis.Utilities.projitems" Label="Shared" />
+  <Import Project="..\Roslyn\Workspaces\Workspaces.Utilities.projitems" Label="Shared" />
+  <ItemGroup>
+	<PackageReference Update="Microsoft.CodeAnalysis" Version="4.8.0" />  
+    <PackageReference Update="Microsoft.CodeAnalysis.Common" Version="4.8.0" />
+    <PackageReference Update="Microsoft.CodeAnalysis.Workspaces.Common" Version="4.8.0" />
+  </ItemGroup>  
 </Project>
