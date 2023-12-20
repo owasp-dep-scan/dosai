@@ -18,12 +18,12 @@ namespace Analyzer.Utilities.FlowAnalysis.Analysis.TaintedDataAnalysis
     {
         internal static readonly AbstractValueDomain<TaintedDataAbstractValue> ValueDomainInstance = TaintedDataAbstractValueDomain.Default;
 
-        protected TaintedDataAnalysis(TaintedDataAnalysisDomain analysisDomain, TaintedDataOperationVisitor operationVisitor)
+        public TaintedDataAnalysis(TaintedDataAnalysisDomain analysisDomain, TaintedDataOperationVisitor operationVisitor)
             : base(analysisDomain, operationVisitor)
         {
         }
 
-        internal static TaintedDataAnalysisResult? TryGetOrComputeResult(
+        public static TaintedDataAnalysisResult? TryGetOrComputeResult(
             ControlFlowGraph cfg,
             Compilation compilation,
             ISymbol containingMethod,
@@ -39,7 +39,7 @@ namespace Analyzer.Utilities.FlowAnalysis.Analysis.TaintedDataAnalysis
                 taintedSanitizerInfos, taintedSinkInfos, interproceduralAnalysisConfig);
         }
 
-        private static TaintedDataAnalysisResult? TryGetOrComputeResult(
+        public static TaintedDataAnalysisResult? TryGetOrComputeResult(
             ControlFlowGraph cfg,
             Compilation compilation,
             ISymbol containingMethod,
@@ -114,7 +114,7 @@ namespace Analyzer.Utilities.FlowAnalysis.Analysis.TaintedDataAnalysis
             return TryGetOrComputeResultForAnalysisContext(analysisContext);
         }
 
-        private static TaintedDataAnalysisResult? TryGetOrComputeResultForAnalysisContext(TaintedDataAnalysisContext analysisContext)
+        public static TaintedDataAnalysisResult? TryGetOrComputeResultForAnalysisContext(TaintedDataAnalysisContext analysisContext)
         {
             TaintedDataAnalysisDomain analysisDomain = new(new CoreTaintedDataAnalysisDataDomain(analysisContext.PointsToAnalysisResult));
             TaintedDataOperationVisitor visitor = new(analysisDomain, analysisContext);
