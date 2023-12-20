@@ -16,7 +16,7 @@ public static class Dosai
 {
     private static readonly JsonSerializerOptions options = new()
     {
-        WriteIndented = true,
+        WriteIndented = false,
         Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
         DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
     };
@@ -33,6 +33,10 @@ public static class Dosai
         methods.AddRange(sourceMethods);
 
         return JsonSerializer.Serialize(new MethodsSlice { Dependencies = usings, Methods = methods, MethodCalls = methodCalls }, options);
+    }
+
+    private static void GetReachableMethods(string path)
+    {
     }
 
     /// <summary>
@@ -158,6 +162,7 @@ public static class Dosai
             var csMethodCalls = csRoot?.DescendantNodes().OfType<Microsoft.CodeAnalysis.CSharp.Syntax.InvocationExpressionSyntax>();
             var vbMethodCalls = vbRoot?.DescendantNodes().OfType<Microsoft.CodeAnalysis.VisualBasic.Syntax.InvocationExpressionSyntax>();
 
+<<<<<<< Updated upstream
             // C# method declarations
             if (csMethodDeclarations != null)
             {
@@ -168,44 +173,59 @@ public static class Dosai
                     var codeSpan = methodDeclaration.SyntaxTree.GetLineSpan(methodDeclaration.Span);
                     var lineNumber = codeSpan.StartLinePosition.Line + 1;
                     var columnNumber = codeSpan.Span.Start.Character + 1;
+=======
+            // method declarations
+            foreach(var methodDeclaration in methodDeclarations!)
+            {
+                var modifiers = methodDeclaration.Modifiers;
+                var method = model.GetDeclaredSymbol(methodDeclaration);
+                var codeSpan = methodDeclaration.SyntaxTree.GetLineSpan(methodDeclaration.Span);
+                var lineNumber = codeSpan.StartLinePosition.Line + 1;
+                var columnNumber = codeSpan.Span.Start.Character + 1;
+>>>>>>> Stashed changes
 
-                    if (method != null && method.DeclaredAccessibility != Accessibility.Private)
+                if (method != null && method.DeclaredAccessibility != Accessibility.Private)
+                {
+                    sourceMethods.Add(new Method
                     {
-                        sourceMethods.Add(new Method
-                        {
-                            Path = Path.GetRelativePath(path, sourceFilePath),
-                            FileName = fileName,
-                            Assembly = method.ContainingAssembly.ToDisplayString(),
-                            Module = method.ContainingModule.ToDisplayString(),
-                            Namespace = method.ContainingNamespace.ToDisplayString(),
-                            ClassName = method.ContainingType.Name,
-                            Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
-                            Name = method?.Name,
-                            ReturnType = method?.ReturnType.Name,
-                            LineNumber = lineNumber,
-                            ColumnNumber = columnNumber,
-                            Parameters = method?.Parameters.Select(p => new Parameter {
-                                Name = p.Name,
-                                Type = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(p.Type?.ToString()!)
-                            }).ToList()
-                        });
-                    }
+                        Path = Path.GetRelativePath(path, sourceFilePath),
+                        FileName = fileName,
+                        Assembly = method.ContainingAssembly.ToDisplayString(),
+                        Module = method.ContainingModule.ToDisplayString(),
+                        Namespace = method.ContainingNamespace.ToDisplayString(),
+                        ClassName = method.ContainingType.Name,
+                        Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
+                        Name = method?.Name,
+                        ReturnType = method?.ReturnType.Name,
+                        LineNumber = lineNumber,
+                        ColumnNumber = columnNumber,
+                        Parameters = method?.Parameters.Select(p => new Parameter {
+                            Name = p.Name,
+                            Type = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(p.Type?.ToString()!)
+                        }).ToList()
+                    });
                 }
             }
 
+<<<<<<< Updated upstream
             // VB method declarations
             if (vbMethodDeclarations != null)
+=======
+            // method declarations
+            foreach(var methodDeclaration in vbMethodDeclarations!)
+>>>>>>> Stashed changes
             {
-                foreach(var methodDeclaration in vbMethodDeclarations)
-                {
-                    var modifiers = methodDeclaration.Modifiers;
-                    var method = model.GetDeclaredSymbol(methodDeclaration);
-                    var codeSpan = methodDeclaration.SyntaxTree.GetLineSpan(methodDeclaration.Span);
-                    var lineNumber = codeSpan.StartLinePosition.Line + 1;
-                    var columnNumber = codeSpan.Span.Start.Character + 1;
+                var modifiers = methodDeclaration.Modifiers;
+                var method = model.GetDeclaredSymbol(methodDeclaration);
+                var codeSpan = methodDeclaration.SyntaxTree.GetLineSpan(methodDeclaration.Span);
+                var lineNumber = codeSpan.StartLinePosition.Line + 1;
+                var columnNumber = codeSpan.Span.Start.Character + 1;
 
-                    if (method != null && method.DeclaredAccessibility != Accessibility.Private)
+                if (method != null && method.DeclaredAccessibility != Accessibility.Private)
+                {
+                    sourceMethods.Add(new Method
                     {
+<<<<<<< Updated upstream
                         sourceMethods.Add(new Method
                         {
                             Path = Path.GetRelativePath(path, sourceFilePath),
@@ -225,128 +245,137 @@ public static class Dosai
                             }).ToList()
                         });
                     }
+=======
+                        Path = Path.GetRelativePath(path, sourceFilePath),
+                        FileName = fileName,
+                        Assembly = method.ContainingAssembly.ToDisplayString(),
+                        Module = method.ContainingModule.ToDisplayString(),
+                        Namespace = method.ContainingNamespace.ToDisplayString(),
+                        ClassName = method.ContainingType.Name,
+                        Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
+                        Name = method?.Name,
+                        ReturnType = "",
+                        LineNumber = lineNumber,
+                        ColumnNumber = columnNumber,
+                        Parameters = null
+                    });
+>>>>>>> Stashed changes
                 }
             }
 
             // using declarations
+<<<<<<< Updated upstream
             if (csUsingDirectives != null)
             {
                 foreach(var usingDirective in csUsingDirectives)
+=======
+            foreach(var usingDirective in usingDirectives!)
+            {
+                var name = usingDirective.Name?.ToFullString();
+                var namespaceType = usingDirective.NamespaceOrType?.ToFullString();
+                var location = usingDirective.GetLocation().GetLineSpan().StartLinePosition;
+                var lineNumber = location.Line + 1;
+                var columnNumber = location.Character + 1;
+                var namespaceMembers = new List<string>();
+                var Assembly = string.Empty;
+                var Module = string.Empty;
+
+                if (usingDirective.Name != null)
+>>>>>>> Stashed changes
                 {
-                    var name = usingDirective.Name?.ToFullString();
-                    var namespaceType = usingDirective.NamespaceOrType?.ToFullString();
-                    var location = usingDirective.GetLocation().GetLineSpan().StartLinePosition;
-                    var lineNumber = location.Line + 1;
-                    var columnNumber = location.Character + 1;
-                    var namespaceMembers = new List<string>();
-                    var Assembly = string.Empty;
-                    var Module = string.Empty;
+                    var nameInfo = model.GetSymbolInfo(usingDirective.Name);
+                    INamespaceSymbol? nsSymbol = null;
 
-                    if (usingDirective.Name != null)
+                    if (nameInfo.Symbol is not null and INamespaceSymbol)
                     {
-                        var nameInfo = model.GetSymbolInfo(usingDirective.Name);
-                        INamespaceSymbol? nsSymbol = null;
-
-                        if (nameInfo.Symbol is not null and INamespaceSymbol)
-                        {
-                            nsSymbol = (INamespaceSymbol)nameInfo.Symbol;
-                        }
-                        else if (nameInfo.CandidateSymbols.Length > 0)
-                        {
-                            nsSymbol = (INamespaceSymbol)nameInfo.CandidateSymbols.First();
-                        }
-
-                        if (nsSymbol != null)
-                        {
-                            var nsMembers = nsSymbol.GetNamespaceMembers();
-                            namespaceMembers.AddRange(nsMembers.Select(m => m.Name));
-                            Assembly = nsSymbol.ContainingAssembly?.ToDisplayString();
-                            Module = nsSymbol.ContainingModule?.ToDisplayString();
-                            namespaceType = nsSymbol.ContainingNamespace?.ToDisplayString();
-                        }
+                        nsSymbol = (INamespaceSymbol)nameInfo.Symbol;
+                    }
+                    else if (nameInfo.CandidateSymbols.Length > 0)
+                    {
+                        nsSymbol = (INamespaceSymbol)nameInfo.CandidateSymbols.First();
                     }
 
-                    allUsingDirectives.Add(new Dependency
+                    if (nsSymbol != null)
                     {
-                        Path = Path.GetRelativePath(path, sourceFilePath),
-                        FileName = fileName,
-                        Assembly = Assembly,
-                        Module = Module,
-                        Namespace = namespaceType,
-                        Name = name,
-                        LineNumber = lineNumber,
-                        ColumnNumber = columnNumber,
-                        NamespaceMembers = namespaceMembers
-                    });
+                        var nsMembers = nsSymbol.GetNamespaceMembers();
+                        namespaceMembers.AddRange(nsMembers.Select(m => m.Name));
+                        Assembly = nsSymbol.ContainingAssembly?.ToDisplayString();
+                        Module = nsSymbol.ContainingModule?.ToDisplayString();
+                        namespaceType = nsSymbol.ContainingNamespace?.ToDisplayString();
+                    }
                 }
+
+                allUsingDirectives.Add(new Dependency
+                {
+                    Path = Path.GetRelativePath(path, sourceFilePath),
+                    FileName = fileName,
+                    Assembly = Assembly,
+                    Module = Module,
+                    Namespace = namespaceType,
+                    Name = name,
+                    LineNumber = lineNumber,
+                    ColumnNumber = columnNumber,
+                    NamespaceMembers = namespaceMembers
+                });
             }
 
             // import declarations
-            if (vbImportsDirectives != null)
+            foreach(var importDirective in vbImportsDirectives!)
             {
-                foreach(var importDirective in vbImportsDirectives)
+                var name = importDirective.Name?.ToFullString().Trim();
+                var namespaceType = importDirective.Alias?.ToFullString();
+                var location = importDirective.GetLocation().GetLineSpan().StartLinePosition;
+                var lineNumber = location.Line + 1;
+                var columnNumber = location.Character + 1;
+                var namespaceMembers = new List<string>();
+                var Assembly = "";
+                var Module = "";
+
+                if (importDirective.Name != null)
                 {
-                    var name = importDirective.Name?.ToFullString().Trim();
-                    var namespaceType = importDirective.Alias?.ToFullString();
-                    var location = importDirective.GetLocation().GetLineSpan().StartLinePosition;
-                    var lineNumber = location.Line + 1;
-                    var columnNumber = location.Character + 1;
-                    var namespaceMembers = new List<string>();
-                    var Assembly = "";
-                    var Module = "";
-
-                    if (importDirective.Name != null)
+                    var nameInfo = model.GetSymbolInfo(importDirective.Name);
+                    INamespaceSymbol? nsSymbol = null;
+                    if (nameInfo.Symbol is not null and INamespaceSymbol)
                     {
-                        var nameInfo = model.GetSymbolInfo(importDirective.Name);
-                        INamespaceSymbol? nsSymbol = null;
-                        if (nameInfo.Symbol is not null and INamespaceSymbol)
-                        {
-                            nsSymbol = (INamespaceSymbol)nameInfo.Symbol;
-                        }
-                        else if (nameInfo.CandidateSymbols.Length > 0)
-                        {
-                            nsSymbol = (INamespaceSymbol)nameInfo.CandidateSymbols.First();
-                        }
-                        if (nsSymbol != null)
-                        {
-                            var nsMembers = nsSymbol.GetNamespaceMembers();
-                            namespaceMembers.AddRange(nsMembers.Select(m => m.Name));
-                            Assembly = nsSymbol.ContainingAssembly?.ToDisplayString();
-                            Module = nsSymbol.ContainingModule?.ToDisplayString();
-                            namespaceType = nsSymbol.ContainingNamespace?.ToDisplayString();
-                        }
+                        nsSymbol = (INamespaceSymbol)nameInfo.Symbol;
                     }
-
-                    allUsingDirectives.Add(new Dependency
+                    else if (nameInfo.CandidateSymbols.Length > 0)
                     {
-                        Path = Path.GetRelativePath(path, sourceFilePath),
-                        FileName = fileName,
-                        Assembly = Assembly,
-                        Module = Module,
-                        Namespace = namespaceType,
-                        Name = name,
-                        LineNumber = lineNumber,
-                        ColumnNumber = columnNumber,
-                        NamespaceMembers = namespaceMembers
-                    });
+                        nsSymbol = (INamespaceSymbol)nameInfo.CandidateSymbols.First();
+                    }
+                    if (nsSymbol != null)
+                    {
+                        var nsMembers = nsSymbol.GetNamespaceMembers();
+                        namespaceMembers.AddRange(nsMembers.Select(m => m.Name));
+                        Assembly = nsSymbol.ContainingAssembly?.ToDisplayString();
+                        Module = nsSymbol.ContainingModule?.ToDisplayString();
+                        namespaceType = nsSymbol.ContainingNamespace?.ToDisplayString();
+                    }
                 }
+
+                allUsingDirectives.Add(new Dependency
+                {
+                    Path = Path.GetRelativePath(path, sourceFilePath),
+                    FileName = fileName,
+                    Assembly = Assembly,
+                    Module = Module,
+                    Namespace = namespaceType,
+                    Name = name,
+                    LineNumber = lineNumber,
+                    ColumnNumber = columnNumber,
+                    NamespaceMembers = namespaceMembers
+                });
             }
 
             // method calls
-            if (csMethodCalls != null)
+            foreach(var methodCall in csMethodCalls!)
             {
-                foreach(var methodCall in csMethodCalls)
-                {
-                    TrackCsMethodCall(methodCall, model, allMethodCalls, path, sourceFilePath, fileName);
-                }
+                TrackCsMethodCall(methodCall, model, allMethodCalls, path, sourceFilePath, fileName);
             }
 
-            if (vbMethodCalls != null)
+            foreach(var methodCall in vbMethodCalls!)
             {
-                foreach(var methodCall in vbMethodCalls)
-                {
-                    TrackVBMethodCall(methodCall, model, allMethodCalls, path, sourceFilePath, fileName);
-                }
+                TrackVBMethodCall(methodCall, model, allMethodCalls, path, sourceFilePath, fileName);
             }
         }
 
