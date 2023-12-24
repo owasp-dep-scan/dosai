@@ -1,6 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using Analyzer.Utilities;
+﻿using Analyzer.Utilities;
 using Analyzer.Utilities.Extensions;
 using Analyzer.Utilities.FlowAnalysis.Analysis.TaintedDataAnalysis;
 using Microsoft.CodeAnalysis;
@@ -10,9 +8,7 @@ using Microsoft.CodeAnalysis.FlowAnalysis.DataFlow;
 using Microsoft.CodeAnalysis.Operations;
 using Microsoft.CodeAnalysis.FlowAnalysis.DataFlow.ValueContentAnalysis;
 using System.Collections.Immutable;
-using static System.Runtime.InteropServices.JavaScript.JSType;
 using System.Threading.Tasks.Dataflow;
-using System.Threading;
 using Analyzer.Utilities.PooledObjects;
 using Microsoft.CodeAnalysis.FlowAnalysis.DataFlow.PointsToAnalysis;
 
@@ -84,11 +80,11 @@ namespace Dosai.Analyzers
 
     public class ReachableDiagnosticAnalyzer : DiagnosticAnalyzer
     {
-        protected DiagnosticDescriptor TaintedDataEnteringSinkDescriptor { get; }
+        protected DiagnosticDescriptor? TaintedDataEnteringSinkDescriptor { get; }
 
         protected SinkKind SinkKind { get; }
 
-        public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics => ImmutableArray.Create(TaintedDataEnteringSinkDescriptor);
+        public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics => [TaintedDataEnteringSinkDescriptor!];
 
         public override void Initialize(AnalysisContext context)
         {
@@ -97,9 +93,9 @@ namespace Dosai.Analyzers
             (CompilationStartAnalysisContext compilationContext) =>
             {
                 // FIXME: These two needs to be populated.
-                TaintedDataSymbolMap<SourceInfo> sourceInfoSymbolMap = null;
-                TaintedDataSymbolMap<SinkInfo> sinkInfoSymbolMap = null;
-                TaintedDataSymbolMap<SanitizerInfo> sanitizerInfoSymbolMap = null;
+                TaintedDataSymbolMap<SourceInfo>? sourceInfoSymbolMap = null;
+                TaintedDataSymbolMap<SinkInfo>? sinkInfoSymbolMap = null;
+                TaintedDataSymbolMap<SanitizerInfo>? sanitizerInfoSymbolMap = null;
 
                 Compilation compilation = compilationContext.Compilation;
                 compilationContext.RegisterOperationBlockStartAction(
@@ -136,7 +132,7 @@ namespace Dosai.Analyzers
                                                                     interproceduralAnalysisConfiguration,
                                                                     interproceduralAnalysisPredicate: null);
                                     });
-                        Lazy<(PointsToAnalysisResult?, ValueContentAnalysisResult?)> valueContentFactory = new Lazy<(PointsToAnalysisResult?, ValueContentAnalysisResult?)>(
+                        Lazy<(PointsToAnalysisResult?, ValueContentAnalysisResult?)> valueContentFactory = new(
                             () =>
                             {
                                 if (controlFlowGraphFactory.Value == null)
@@ -235,10 +231,10 @@ namespace Dosai.Analyzers
                                                         operationBlockAnalysisContext.Compilation,
                                                         operationBlockAnalysisContext.OwningSymbol,
                                                         operationBlockAnalysisContext.Options,
-                                                        TaintedDataEnteringSinkDescriptor,
-                                                        sourceInfoSymbolMap,
-                                                        sanitizerInfoSymbolMap,
-                                                        sinkInfoSymbolMap
+                                                        TaintedDataEnteringSinkDescriptor!,
+                                                        sourceInfoSymbolMap!,
+                                                        sanitizerInfoSymbolMap!,
+                                                        sinkInfoSymbolMap!
                                                         );
                                                     if (taintedDataAnalysisResult == null)
                                                     {
@@ -247,7 +243,7 @@ namespace Dosai.Analyzers
 
                                                     foreach (TaintedDataSourceSink sourceSink in taintedDataAnalysisResult.TaintedDataSourceSinks)
                                                     {
-                                                        if (!sourceSink.SinkKinds.Contains(this.SinkKind))
+                                                        if (!sourceSink.SinkKinds.Contains(SinkKind))
                                                         {
                                                             continue;
                                                         }
@@ -255,14 +251,14 @@ namespace Dosai.Analyzers
                                                         foreach (SymbolAccess sourceOrigin in sourceSink.SourceOrigins)
                                                         {
                                                             Diagnostic diagnostic = Diagnostic.Create(
-                                                                this.TaintedDataEnteringSinkDescriptor,
+                                                                TaintedDataEnteringSinkDescriptor!,
                                                                 sourceSink.Sink.Location,
                                                                 additionalLocations: new Location[] { sourceOrigin.Location },
-                                                                messageArgs: new object[] {
+                                                                messageArgs: [
                                                                 sourceSink.Sink.Symbol.Name,
                                                                 sourceSink.Sink.AccessingMethod.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat),
                                                                 sourceOrigin.Symbol.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat),
-                                                                sourceOrigin.AccessingMethod.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat)});
+                                                                sourceOrigin.AccessingMethod.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat)]);
                                                             operationBlockAnalysisContext.ReportDiagnostic(diagnostic);
                                                         }
                                                     }
