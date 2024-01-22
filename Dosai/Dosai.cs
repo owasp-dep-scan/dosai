@@ -16,7 +16,6 @@ public static class Dosai
 {
     private static readonly JsonSerializerOptions options = new()
     {
-        WriteIndented = true,
         Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
         DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
     };
