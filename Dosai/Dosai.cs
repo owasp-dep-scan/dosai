@@ -29,9 +29,53 @@ public static class Dosai
     {
         var methods = GetAssemblyMethods(path);
         var (sourceMethods, usings, methodCalls) = GetSourceMethods(path);
+        var assemblyInformation = GetAssemblyInformation(path);
         methods.AddRange(sourceMethods);
 
-        return JsonSerializer.Serialize(new MethodsSlice { Dependencies = usings, Methods = methods, MethodCalls = methodCalls }, options);
+        return JsonSerializer.Serialize(new MethodsSlice { Dependencies = usings, Methods = methods, MethodCalls = methodCalls, AssemblyInformation = assemblyInformation }, options);
+    }
+
+    /// <summary>
+    /// Get all assembly information for the given path to assembly or directory of assemblies
+    /// </summary>
+    /// <param name="path">Filesystem path to assembly file or directory containing assembly files</param>
+    /// <returns>List of assembly information</returns>
+    private static List<AssemblyInformation> GetAssemblyInformation(string path)
+    {
+        var assembliesToInspect = GetFilesToInspect(path, Constants.AssemblyExtension);
+        var assemblyInformation = new List<AssemblyInformation>();
+        var failedAssemblies = new List<string>();
+
+        foreach(var assemblyFilePath in assembliesToInspect)
+        {
+            try
+            {
+                var fileName = Path.GetFileNameWithoutExtension(assemblyFilePath);
+
+                if (assemblyInformation.Exists(item => item.Name == fileName))
+                {
+                    continue;
+                }
+
+                var assemblyInfo = new AssemblyInformation
+                {
+                    Name = fileName,
+                    Version = AssemblyName.GetAssemblyName(assemblyFilePath)?.Version?.ToString()
+                };
+
+                assemblyInformation.Add(assemblyInfo);
+            }
+            catch (Exception e) when (e is FileLoadException || e is FileNotFoundException || e is BadImageFormatException)
+            {
+                failedAssemblies.Add(assemblyFilePath);
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine($"Unable to process {assemblyFilePath} due to: {e.Message}");
+            }
+        }
+
+        return assemblyInformation;
     }
 
     /// <summary>

@@ -7,4 +7,6 @@ public class MethodsSlice
 	public List<Method>? Methods { get; set; }
 
 	public List<MethodCalls>? MethodCalls { get; set; }
+
+	public List<AssemblyInformation>? AssemblyInformation { get; set; }
 }
