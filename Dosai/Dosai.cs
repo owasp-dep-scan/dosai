@@ -59,11 +59,15 @@ public static class Dosai
                 }
 
                 var fileVersionInfo = FileVersionInfo.GetVersionInfo(assemblyFilePath);
+#pragma warning disable CS0472 // The result of the expression is always the same since a value of this type is never equal to 'null'
+                var buildPart = fileVersionInfo.FileBuildPart == null ? string.Empty : $".{fileVersionInfo.FileBuildPart}";
+                var privatePart = fileVersionInfo.FilePrivatePart == null ? string.Empty : $".{fileVersionInfo.FilePrivatePart}";
+#pragma warning restore CS0472 // The result of the expression is always the same since a value of this type is never equal to 'null'
 
                 var assemblyInfo = new AssemblyInformation
                 {
                     Name = fileName,
-                    Version = $"{fileVersionInfo.FileMajorPart}.{fileVersionInfo.FileMinorPart}.{fileVersionInfo.FileBuildPart}.{fileVersionInfo.FilePrivatePart}"
+                    Version = $"{fileVersionInfo.FileMajorPart}.{fileVersionInfo.FileMinorPart}{buildPart}{privatePart}"
                 };
 
                 assemblyInformation.Add(assemblyInfo);
