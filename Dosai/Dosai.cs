@@ -3,6 +3,7 @@ using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.VisualBasic;
 using Microsoft.CodeAnalysis.VisualBasic.Syntax;
+using System.Diagnostics;
 using System.Globalization;
 using System.Reflection;
 using System.Text.Json;
@@ -57,10 +58,16 @@ public static class Dosai
                     continue;
                 }
 
+                var fileVersionInfo = FileVersionInfo.GetVersionInfo(assemblyFilePath);
+#pragma warning disable CS0472 // The result of the expression is always the same since a value of this type is never equal to 'null'
+                var buildPart = fileVersionInfo.FileBuildPart == null ? string.Empty : $".{fileVersionInfo.FileBuildPart}";
+                var privatePart = fileVersionInfo.FilePrivatePart == null ? string.Empty : $".{fileVersionInfo.FilePrivatePart}";
+#pragma warning restore CS0472 // The result of the expression is always the same since a value of this type is never equal to 'null'
+
                 var assemblyInfo = new AssemblyInformation
                 {
                     Name = fileName,
-                    Version = AssemblyName.GetAssemblyName(assemblyFilePath)?.Version?.ToString()
+                    Version = $"{fileVersionInfo.FileMajorPart}.{fileVersionInfo.FileMinorPart}{buildPart}{privatePart}"
                 };
 
                 assemblyInformation.Add(assemblyInfo);
