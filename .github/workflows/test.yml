@@ -42,6 +42,7 @@ jobs:
         dotnet publish ./Dosai/ -r win-arm64 --property:PublishDir=dosai-win-arm64 -p:PublishSingleFile=true --self-contained false /p:UseAppHost=true /p:AssemblyName=Dosai-windows-arm64
         dotnet publish ./Dosai/ -r osx-x64 --property:PublishDir=dosai-osx -p:PublishSingleFile=true --self-contained false /p:UseAppHost=true /p:AssemblyName=Dosai-osx-x64
         dotnet publish ./Dosai/ -r osx-arm64 --property:PublishDir=dosai-osx-arm64 -p:PublishSingleFile=true --self-contained false /p:UseAppHost=true /p:AssemblyName=Dosai-osx-arm64
+        dotnet publish ./Dosai/ -r linux-arm32 --property:PublishDir=dosai-linux-arm32 -p:PublishSingleFile=true --self-contained false /p:UseAppHost=true /p:AssemblyName=Dosai-linux-arm32
         dotnet publish ./Dosai/ -r linux-arm64 --property:PublishDir=dosai-linux-arm64 -p:PublishSingleFile=true --self-contained false /p:UseAppHost=true /p:AssemblyName=Dosai-linux-arm64
         dotnet publish ./Dosai/ -r linux-musl-x64 --property:PublishDir=dosai-linux-musl-x64 -p:PublishSingleFile=true --self-contained false /p:UseAppHost=true /p:AssemblyName=Dosai-linux-musl-x64
         dotnet pack --configuration Release Dosai
@@ -62,6 +63,8 @@ jobs:
           Dosai/dosai-osx/Dosai-osx-x64.pdb
           Dosai/dosai-osx-arm64/Dosai-osx-arm64
           Dosai/dosai-osx-arm64/Dosai-osx-arm64.pdb
+          Dosai/dosai-linux-arm32/Dosai-linux-arm32
+          Dosai/dosai-linux-arm32/Dosai-linux-arm32.pdb
           Dosai/dosai-linux-arm64/Dosai-linux-arm64
           Dosai/dosai-linux-arm64/Dosai-linux-arm64.pdb
           Dosai/dosai-linux-musl-x64/Dosai-linux-musl-x64
