@@ -406,3 +406,4 @@ dosai-osx/
 dosai-linux-arm64/
 dosai-osx-arm64/
 dosai-linux-musl-x64/
+.vscode/

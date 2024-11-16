@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net9.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
@@ -22,17 +22,17 @@
   </ItemGroup>
 
   <ItemGroup>
-  <None 
-     Include="./../Dosai.TestData/FooBar.cs" 
+  <None
+     Include="./../Dosai.TestData/FooBar.cs"
      CopyToOutputDirectory="PreserveNewest" />
-  <None 
-     Include="./../Dosai.TestData/HelloWorld.cs" 
+  <None
+     Include="./../Dosai.TestData/HelloWorld.cs"
      CopyToOutputDirectory="PreserveNewest" />
-  <None 
-     Include="./../Dosai.TestData/FooBar.vb" 
+  <None
+     Include="./../Dosai.TestData/FooBar.vb"
      CopyToOutputDirectory="PreserveNewest" />
-  <None 
-     Include="./../Dosai.TestData/HelloWorld.vb" 
+  <None
+     Include="./../Dosai.TestData/HelloWorld.vb"
      CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
