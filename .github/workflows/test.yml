@@ -38,7 +38,7 @@ jobs:
     - name: Publish binaries
       run: |
         dotnet publish ./Dosai/ -r linux-x64 --property:PublishDir=dosai-linux -p:PublishSingleFile=true --self-contained false /p:UseAppHost=true /p:AssemblyName=Dosai
-        dotnet publish ./Dosai/ -r linux-x64 --property:PublishDir=dosai-linux -p:PublishSingleFile=true --self-contained false /p:UseAppHost=true /p:AssemblyName=Dosai-linux-amd64
+        dotnet publish ./Dosai/ -r linux-x64 --property:PublishDir=dosai-linux-amd64 -p:PublishSingleFile=true --self-contained false /p:UseAppHost=true /p:AssemblyName=Dosai-linux-amd64
         dotnet publish ./Dosai/ -r win-x64 --property:PublishDir=dosai-win -p:PublishSingleFile=true --self-contained false /p:UseAppHost=true /p:AssemblyName=Dosai
         dotnet publish ./Dosai/ -r win-arm64 --property:PublishDir=dosai-win-arm64 -p:PublishSingleFile=true --self-contained false /p:UseAppHost=true /p:AssemblyName=Dosai-windows-arm64
         dotnet publish ./Dosai/ -r osx-x64 --property:PublishDir=dosai-osx -p:PublishSingleFile=true --self-contained false /p:UseAppHost=true /p:AssemblyName=Dosai-osx-x64
@@ -68,6 +68,8 @@ jobs:
         files: |
           Dosai/dosai-linux/Dosai
           Dosai/dosai-linux/Dosai.pdb
+          Dosai/dosai-linux-amd64/Dosai-linux-amd64
+          Dosai/dosai-linux-amd64/Dosai-linux-amd64.pdb
           Dosai/dosai-win/Dosai.exe
           Dosai/dosai-win-arm64/Dosai-windows-arm64.exe
           Dosai/dosai-osx/Dosai-osx-x64
