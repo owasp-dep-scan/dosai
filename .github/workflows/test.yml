@@ -47,6 +47,7 @@ jobs:
         dotnet publish ./Dosai/ -r linux-arm64 --property:PublishDir=dosai-linux-arm64 -p:PublishSingleFile=true --self-contained false /p:UseAppHost=true /p:AssemblyName=Dosai-linux-arm64
         dotnet publish ./Dosai/ -r linux-musl-x64 --property:PublishDir=dosai-linux-musl-x64 -p:PublishSingleFile=true --self-contained false /p:UseAppHost=true /p:AssemblyName=Dosai-linux-musl-x64
         dotnet publish ./Dosai/ -r linux-x64 --property:PublishDir=dosai-linux-full -p:PublishSingleFile=true --self-contained true /p:UseAppHost=true /p:AssemblyName=Dosai-full
+        dotnet publish ./Dosai/ -r linux-x64 --property:PublishDir=dosai-linux-amd64-full -p:PublishSingleFile=true --self-contained true /p:UseAppHost=true /p:AssemblyName=Dosai-linux-amd64-full
         dotnet publish ./Dosai/ -r win-x64 --property:PublishDir=dosai-win-full -p:PublishSingleFile=true --self-contained true /p:UseAppHost=true /p:AssemblyName=Dosai-full
         dotnet publish ./Dosai/ -r win-arm64 --property:PublishDir=dosai-win-arm64-full -p:PublishSingleFile=true --self-contained true /p:UseAppHost=true /p:AssemblyName=Dosai-windows-arm64-full
         dotnet publish ./Dosai/ -r osx-x64 --property:PublishDir=dosai-osx-full -p:PublishSingleFile=true --self-contained true /p:UseAppHost=true /p:AssemblyName=Dosai-osx-x64-full
@@ -83,6 +84,7 @@ jobs:
           Dosai/dosai-linux-musl-x64/Dosai-linux-musl-x64
           Dosai/dosai-linux-musl-x64/Dosai-linux-musl-x64.pdb
           Dosai/dosai-linux-full/Dosai-full
+          Dosai/dosai-linux-amd64-full/Dosai-linux-amd64-full
           Dosai/dosai-win-full/Dosai-full.exe
           Dosai/dosai-win-arm64-full/Dosai-windows-arm64-full.exe
           Dosai/dosai-osx-full/Dosai-osx-x64-full
