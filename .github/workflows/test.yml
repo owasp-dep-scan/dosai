@@ -24,7 +24,9 @@ jobs:
           dotnet-version: ${{ matrix.dotnet }}
           dotnet-quality: 'preview'
       - name: Restore dependencies
-        run: dotnet restore
+        run: |
+          sed 's/net9.0/net10.0/g' Dosai/Dosai.csproj
+          dotnet restore
       - name: Build
         run: dotnet build --no-restore ./Dosai
       - name: Test
