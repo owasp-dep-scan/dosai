@@ -9,6 +9,28 @@ on:
     branches: [ "main" ]
 
 jobs:
+  preview-test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        dotnet: [ '10.0.x' ]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ matrix.dotnet }}
+          dotnet-quality: 'preview'
+      - name: Restore dependencies
+        run: dotnet restore
+      - name: Build
+        run: dotnet build --no-restore ./Dosai
+      - name: Test
+        run: |
+          dotnet test
+          dotnet run --project ./Dosai/ methods --path ./Dosai/Dosai.cs
   build:
     runs-on: ubuntu-latest
     permissions:
