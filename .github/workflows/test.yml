@@ -7,6 +7,7 @@ on:
       - 'v*'
   pull_request:
     branches: [ "main" ]
+  workflow_dispatch: 
 
 jobs:
   preview-test:
@@ -79,6 +80,13 @@ jobs:
         dotnet publish ./Dosai/ -r linux-arm --property:PublishDir=dosai-linux-arm-full -p:PublishSingleFile=true --self-contained true /p:UseAppHost=true /p:AssemblyName=Dosai-linux-arm-full
         dotnet publish ./Dosai/ -r linux-arm64 --property:PublishDir=dosai-linux-arm64-full -p:PublishSingleFile=true --self-contained true /p:UseAppHost=true /p:AssemblyName=Dosai-linux-arm64-full
         dotnet publish ./Dosai/ -r linux-musl-x64 --property:PublishDir=dosai-linux-musl-x64-full -p:PublishSingleFile=true --self-contained true /p:UseAppHost=true /p:AssemblyName=Dosai-linux-musl-x64-full
+    - name: Publish RISC-V 64 binaries
+      run: |
+        curl -LO https://github.com/dkurt/dotnet_riscv/releases/download/v9.0.100/dotnet-sdk-9.0.100-linux-riscv64.tar.gz
+        tar -xf dotnet-sdk-9.0.100-linux-riscv64.tar.gz
+        rm dotnet-sdk-9.0.100-linux-riscv64.tar.gz
+        chmod +x ./dotnet
+        ./dotnet publish ./Dosai/ -r linux-riscv64 --property:PublishDir=dosai-linux-riscv64-full -p:PublishSingleFile=true --self-contained true /p:UseAppHost=true /p:AssemblyName=Dosai-linux-riscv64-full
     - name: Publish the package
       run: |
         dotnet pack --configuration Release Dosai
@@ -115,6 +123,7 @@ jobs:
           Dosai/dosai-osx-arm64-full/Dosai-osx-arm64-full
           Dosai/dosai-linux-arm-full/Dosai-linux-arm-full
           Dosai/dosai-linux-arm64-full/Dosai-linux-arm64-full
+          Dosai/dosai-linux-riscv64-full/Dosai-linux-riscv64-full
           Dosai/dosai-linux-musl-x64-full/Dosai-linux-musl-x64-full
       uses: softprops/action-gh-release@v1
       env:
