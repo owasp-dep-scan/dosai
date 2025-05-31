@@ -70,6 +70,7 @@ jobs:
         dotnet publish ./Dosai/ -r linux-arm --property:PublishDir=dosai-linux-arm -p:PublishSingleFile=true --self-contained false /p:UseAppHost=true /p:AssemblyName=Dosai-linux-arm
         dotnet publish ./Dosai/ -r linux-arm64 --property:PublishDir=dosai-linux-arm64 -p:PublishSingleFile=true --self-contained false /p:UseAppHost=true /p:AssemblyName=Dosai-linux-arm64
         dotnet publish ./Dosai/ -r linux-musl-x64 --property:PublishDir=dosai-linux-musl-x64 -p:PublishSingleFile=true --self-contained false /p:UseAppHost=true /p:AssemblyName=Dosai-linux-musl-x64
+        dotnet publish ./Dosai/ -r linux-musl-arm64 --property:PublishDir=dosai-linux-musl-arm64 -p:PublishSingleFile=true --self-contained false /p:UseAppHost=true /p:AssemblyName=Dosai-linux-musl-arm64
         dotnet publish ./Dosai/ -r linux-x64 --property:PublishDir=dosai-linux-full -p:PublishSingleFile=true --self-contained true /p:UseAppHost=true /p:AssemblyName=Dosai-full
         dotnet publish ./Dosai/ -r linux-x64 --property:PublishDir=dosai-linux-amd64-full -p:PublishSingleFile=true --self-contained true /p:UseAppHost=true /p:AssemblyName=Dosai-linux-amd64-full
         dotnet publish ./Dosai/ -r win-x64 --property:PublishDir=dosai-win-full -p:PublishSingleFile=true --self-contained true /p:UseAppHost=true /p:AssemblyName=Dosai-full
@@ -79,6 +80,7 @@ jobs:
         dotnet publish ./Dosai/ -r linux-arm --property:PublishDir=dosai-linux-arm-full -p:PublishSingleFile=true --self-contained true /p:UseAppHost=true /p:AssemblyName=Dosai-linux-arm-full
         dotnet publish ./Dosai/ -r linux-arm64 --property:PublishDir=dosai-linux-arm64-full -p:PublishSingleFile=true --self-contained true /p:UseAppHost=true /p:AssemblyName=Dosai-linux-arm64-full
         dotnet publish ./Dosai/ -r linux-musl-x64 --property:PublishDir=dosai-linux-musl-x64-full -p:PublishSingleFile=true --self-contained true /p:UseAppHost=true /p:AssemblyName=Dosai-linux-musl-x64-full
+        dotnet publish ./Dosai/ -r linux-musl-arm64 --property:PublishDir=dosai-linux-musl-arm64-full -p:PublishSingleFile=true --self-contained true /p:UseAppHost=true /p:AssemblyName=Dosai-linux-musl-arm64-full
     - name: Publish the package
       run: |
         dotnet pack --configuration Release Dosai
@@ -107,6 +109,8 @@ jobs:
           Dosai/dosai-linux-arm64/Dosai-linux-arm64.pdb
           Dosai/dosai-linux-musl-x64/Dosai-linux-musl-x64
           Dosai/dosai-linux-musl-x64/Dosai-linux-musl-x64.pdb
+          Dosai/dosai-linux-musl-arm64/Dosai-linux-musl-arm64
+          Dosai/dosai-linux-musl-arm64/Dosai-linux-musl-arm64.pdb
           Dosai/dosai-linux-full/Dosai-full
           Dosai/dosai-linux-amd64-full/Dosai-linux-amd64-full
           Dosai/dosai-win-full/Dosai-full.exe
@@ -116,6 +120,7 @@ jobs:
           Dosai/dosai-linux-arm-full/Dosai-linux-arm-full
           Dosai/dosai-linux-arm64-full/Dosai-linux-arm64-full
           Dosai/dosai-linux-musl-x64-full/Dosai-linux-musl-x64-full
+          Dosai/dosai-linux-musl-arm64-full/Dosai-linux-musl-arm64-full
       uses: softprops/action-gh-release@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
