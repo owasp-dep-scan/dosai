@@ -18,4 +18,7 @@ public class ConstructorInfo
     public bool IsStatic { get; set; }
     public string? BaseType { get; set; }
     public List<string>? ImplementedInterfaces { get; set; }
+    public int MetadataToken { get; set; }
+    public bool IsGenericMethod { get; set; }
+    public List<string>? GenericParameters { get; set; }
 }

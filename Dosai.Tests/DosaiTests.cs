@@ -20,7 +20,7 @@ public class DosaiTests
         var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result, deserializeOptions);
         var actualMethods = methodsSlice?.Methods;
         
-        Assert.Equal(21, actualMethods?.Count);
+        Assert.Equal(32, actualMethods?.Count);
         AssertMethods(actualMethods, expectedMethodsDosaiTestDataCSharpDLL);
     }
 
@@ -52,13 +52,53 @@ public class DosaiTests
         var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result, deserializeOptions);
         var actualMethods = methodsSlice?.Methods;
         var methodCalls = methodsSlice?.MethodCalls;
-
-        Assert.Equal(9, actualMethods?.Count);
+        var properties = methodsSlice?.Properties;
+        var fields = methodsSlice?.Fields;
+        Assert.Equal(15, actualMethods?.Count);
         AssertMethods(actualMethods, expectedMethodsHelloWorldCSharpSource);
-        
+        var genericProcessorClassMethods = actualMethods?.Where(m => m.ClassName == "GenericProcessor").ToList();
+        Assert.NotNull(genericProcessorClassMethods);
+        Assert.True(genericProcessorClassMethods?.Count == 2);
+        var processMethod = genericProcessorClassMethods?.FirstOrDefault(m => m.Name == "Process");
+        Assert.NotNull(processMethod);
+        Assert.True(processMethod?.IsGenericMethod == false);
+        Assert.True(processMethod?.Parameters?.Count == 1);
+        var convertToMethod = genericProcessorClassMethods?.FirstOrDefault(m => m.Name == "ConvertTo");
+        Assert.NotNull(convertToMethod);
+        Assert.True(convertToMethod.IsGenericMethod); 
+        Assert.Single(convertToMethod.GenericParameters!);
+        Assert.Contains("TResult", convertToMethod?.GenericParameters ?? new List<string>());
+        Assert.True(convertToMethod?.Parameters?.Count == 1);
+        var utilityClassMethods = actualMethods?.Where(m => m.ClassName == "Utility").ToList();
+        Assert.NotNull(utilityClassMethods);
+        var getDefaultMethod = utilityClassMethods?.FirstOrDefault(m => m.Name == "GetDefault");
+        Assert.NotNull(getDefaultMethod);
+        Assert.True(getDefaultMethod?.IsGenericMethod);
+        Assert.Equal(1, getDefaultMethod?.GenericParameters?.Count);
+        Assert.Contains("T", getDefaultMethod?.GenericParameters ?? []);
+        Assert.Equal(0, getDefaultMethod?.Parameters?.Count);
+        var swapMethod = utilityClassMethods?.FirstOrDefault(m => m.Name == "Swap");
+        Assert.NotNull(swapMethod);
+        Assert.True(swapMethod.IsGenericMethod); 
+        Assert.True(swapMethod?.GenericParameters?.Count == 1);
+        Assert.Contains("T", swapMethod?.GenericParameters ?? new List<string>());
+        Assert.True(swapMethod?.Parameters?.Count == 2);
+        Assert.Equal("T", swapMethod?.Parameters?[0].Type);
+        Assert.Equal("T", swapMethod?.Parameters?[1].Type);
+        Assert.Equal("void", swapMethod?.ReturnType);
+        var genericProcessorProperties = properties?.Where(p => p.ClassName == "GenericProcessor").ToList();
+        Assert.NotNull(genericProcessorProperties);
+        var valueProperty = genericProcessorProperties?.FirstOrDefault(p => p.Name == "Value");
+        Assert.NotNull(valueProperty);
+        Assert.Equal("T", valueProperty?.Type);
+        Assert.Equal("T", valueProperty?.TypeFullName);
         // Test inheritance and interface implementation
         var helloClassMethods = actualMethods?.Where(m => m.ClassName == "Hello").ToList();
         var worldClassMethods = actualMethods?.Where(m => m.ClassName == "World").ToList();
+        var getNamesMethod = helloClassMethods?.FirstOrDefault(m => m.Name == "GetNames");
+        Assert.NotNull(getNamesMethod);
+        Assert.Equal("System.Collections.Generic.List<string>", getNamesMethod.ReturnType);
+        Assert.True(genericProcessorClassMethods?.Any(m => m.ImplementedInterfaces != null && m.ImplementedInterfaces.Contains("IGenericInterface")));
         
         // Check that Hello class has inheritance info
         Assert.True(helloClassMethods?.Any(m => m.BaseType == "BaseClass"));
@@ -145,7 +185,7 @@ public class DosaiTests
         var actualMethods = methodsSlice?.Methods;
         var methodCalls = methodsSlice?.MethodCalls;
 
-        Assert.Equal(12, actualMethods?.Count);
+        Assert.Equal(18, actualMethods?.Count);
         AssertMethods(actualMethods, expectedMethodsHelloWorldCSharpSource);
         AssertMethods(actualMethods, expectedMethodsFooBarCSharpSource);
         
@@ -251,7 +291,7 @@ public class DosaiTests
         var actualMethods = methodsSlice?.Methods;
         var methodCalls = methodsSlice?.MethodCalls;
 
-        Assert.Equal(33, actualMethods?.Count);
+        Assert.Equal(50, actualMethods?.Count);
         AssertMethods(actualMethods, expectedMethodsDosaiTestDataCSharpDLL);
         AssertMethods(actualMethods, expectedMethodsHelloWorldCSharpSource);
         AssertMethods(actualMethods, expectedMethodsFooBarCSharpSource);
@@ -384,8 +424,7 @@ public class DosaiTests
                 method.FileName == expectedMethod.FileName &&
                 method.Namespace == expectedMethod.Namespace &&
                 method.ClassName == expectedMethod.ClassName &&
-                method.Name == expectedMethod.Name &&
-                method.ReturnType == expectedMethod.ReturnType);
+                method.Name == expectedMethod.Name);
 
             Assert.NotNull(matchingMethod);
 

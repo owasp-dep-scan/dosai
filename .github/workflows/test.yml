@@ -32,7 +32,7 @@ jobs:
       - name: Test
         run: |
           dotnet test
-          dotnet run --project ./Dosai/ methods --path ./Dosai/Dosai.cs
+          dotnet run --project ./Dosai/ methods --path ./Dosai
   build:
     runs-on: ubuntu-latest
     permissions:
@@ -58,7 +58,7 @@ jobs:
     - name: Test
       run: |
         dotnet test
-        dotnet run --project ./Dosai/ methods --path ./Dosai/Dosai.cs
+        dotnet run --project ./Dosai/ methods --path ./Dosai
     - name: Publish binaries
       run: |
         dotnet publish ./Dosai/ -r linux-x64 --property:PublishDir=dosai-linux -p:PublishSingleFile=true --self-contained false /p:UseAppHost=true /p:AssemblyName=Dosai
