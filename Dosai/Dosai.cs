@@ -9,8 +9,8 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Reflection;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using FieldDeclarationSyntax = Microsoft.CodeAnalysis.CSharp.Syntax.FieldDeclarationSyntax;
-using InvocationExpressionSyntax = Microsoft.CodeAnalysis.CSharp.Syntax.InvocationExpressionSyntax;
 
 namespace Depscan;
 
@@ -22,7 +22,8 @@ public static class Dosai
     private static readonly JsonSerializerOptions options = new()
     {
         Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
-        DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
+        DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
+        Converters = { new JsonStringEnumConverter() }
     };
 
     /// <summary>
@@ -1447,9 +1448,10 @@ public static class Dosai
                                 LineNumber = call.LineNumber,
                                 ColumnNumber = call.ColumnNumber
                             },
-                            // Optional: Store call details on the edge
                             CalledMethodName = call.CalledMethod, 
-                            Arguments = call.Arguments ?? new List<string>()
+                            Arguments = call.Arguments ?? new List<string>(),
+                            ArgumentExpressions = call.ArgumentExpressions ?? new List<string>(),
+                            CallType = call.CallType
                         });
                     }
                 }
@@ -1485,6 +1487,7 @@ public static class Dosai
         var lineNumber = location.Line + 1;
         var columnNumber = location.Character + 1;
         var callArgsTypes = new List<string>();
+        var callArgExpressions = new List<string>();
         foreach (var arg in callArguments.Arguments)
         {
             var argType = model.GetTypeInfo(arg.Expression).Type;
@@ -1497,6 +1500,7 @@ public static class Dosai
                 // Fallback to expression type if we can't get the type info
                 callArgsTypes.Add(arg.Expression.GetType().Name);
             }
+            callArgExpressions.Add(arg.Expression.ToFullString());
         }
         var exprInfo = model.GetSymbolInfo(callExpression);
         var calledMethod = string.Empty;
@@ -1509,17 +1513,62 @@ public static class Dosai
         var callerMethod = string.Empty;
         var callerNamespace = string.Empty;
         var callerClass = string.Empty;
-
+        var callType = CallType.MethodCall;
+        
         if (exprInfo.Symbol != null)
         {
-            var methodSymbol = exprInfo.Symbol;
-            calledMethod = methodSymbol.ToDisplayString();
-            isInMetadata = methodSymbol.Locations.Any(loc => loc.IsInMetadata);
-            isInSource = methodSymbol.Locations.Any(loc => loc.IsInSource);
-            Assembly = methodSymbol.ContainingAssembly.ToDisplayString();
-            Module = methodSymbol.ContainingModule.ToDisplayString();
-            Namespace = methodSymbol.ContainingNamespace.ToDisplayString();
-            ClassName = methodSymbol.ContainingType.ToDisplayString();
+            switch (exprInfo.Symbol)
+            {
+                case IMethodSymbol methodSymbol when methodSymbol.MethodKind == MethodKind.PropertyGet:
+                    callType = CallType.PropertyGet;
+                    calledMethod = methodSymbol.AssociatedSymbol?.Name ?? methodSymbol.Name;
+                    ClassName = methodSymbol.AssociatedSymbol?.ContainingType?.Name ?? methodSymbol.ContainingType?.Name ?? "";
+                    Namespace = methodSymbol.AssociatedSymbol?.ContainingNamespace?.ToDisplayString() ??
+                                methodSymbol.ContainingNamespace?.ToDisplayString() ?? "";
+                    break;
+                case IMethodSymbol methodSymbol when methodSymbol.MethodKind == MethodKind.PropertySet:
+                    callType = CallType.PropertySet;
+                    calledMethod = methodSymbol.AssociatedSymbol?.Name ?? methodSymbol.Name;
+                    ClassName = methodSymbol.AssociatedSymbol?.ContainingType?.Name ?? methodSymbol.ContainingType?.Name ?? "";
+                    Namespace = methodSymbol.AssociatedSymbol?.ContainingNamespace?.ToDisplayString() ??
+                                methodSymbol.ContainingNamespace?.ToDisplayString() ?? "";
+                    break;
+                case IMethodSymbol methodSymbol when methodSymbol.MethodKind == MethodKind.EventAdd:
+                    callType = CallType.EventSubscribe;
+                    calledMethod = methodSymbol.AssociatedSymbol?.Name ?? methodSymbol.Name;
+                    ClassName = methodSymbol.AssociatedSymbol?.ContainingType?.Name ?? methodSymbol.ContainingType?.Name ?? "";
+                    Namespace = methodSymbol.AssociatedSymbol?.ContainingNamespace?.ToDisplayString() ??
+                                methodSymbol.ContainingNamespace?.ToDisplayString() ?? "";
+                    break;
+                case IMethodSymbol methodSymbol when methodSymbol.MethodKind == MethodKind.EventRemove:
+                    callType = CallType.EventUnsubscribe;
+                    calledMethod = methodSymbol.AssociatedSymbol?.Name ?? methodSymbol.Name;
+                    ClassName = methodSymbol.AssociatedSymbol?.ContainingType?.Name ?? methodSymbol.ContainingType?.Name ?? "";
+                    Namespace = methodSymbol.AssociatedSymbol?.ContainingNamespace?.ToDisplayString() ??
+                                methodSymbol.ContainingNamespace?.ToDisplayString() ?? "";
+                    break;
+                case IMethodSymbol methodSymbol when methodSymbol.MethodKind == MethodKind.Constructor:
+                    callType = CallType.ConstructorCall;
+                    calledMethod = methodSymbol.ContainingType?.Name ?? methodSymbol.Name; // Constructor name is usually .ctor
+                    ClassName = methodSymbol.ContainingType?.Name ?? "";
+                    Namespace = methodSymbol.ContainingNamespace?.ToDisplayString() ?? "";
+                    break;
+                case IMethodSymbol methodSymbol:
+                    calledMethod = methodSymbol.ToDisplayString();
+                    isInMetadata = methodSymbol.Locations.Any(l => l.IsInMetadata);
+                    isInSource = methodSymbol.Locations.Any(l => l.IsInSource);
+                    Assembly = methodSymbol.ContainingAssembly?.ToDisplayString() ?? "";
+                    Module = methodSymbol.ContainingModule?.ToDisplayString() ?? "";
+                    Namespace = methodSymbol.ContainingNamespace?.ToDisplayString() ?? "";
+                    ClassName = methodSymbol.ContainingType?.Name ?? "";
+                    break;
+                case IPropertySymbol propertySymbol:
+                    callType = CallType.PropertyGet;
+                    calledMethod = propertySymbol.Name;
+                    ClassName = propertySymbol.ContainingType?.Name ?? "";
+                    Namespace = propertySymbol.ContainingNamespace?.ToDisplayString() ?? "";
+                    break;
+            }
         }
 
         // Get caller context
@@ -1548,6 +1597,8 @@ public static class Dosai
             LineNumber = lineNumber,
             ColumnNumber = columnNumber,
             Arguments = callArgsTypes,
+            ArgumentExpressions = callArgExpressions,
+            CallType = callType,
             CallerMethod = callerMethod,
             CallerNamespace = callerNamespace,
             CallerClass = callerClass,
