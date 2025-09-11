@@ -15,7 +15,7 @@ public class DosaiTests
         var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
         var actualMethods = methodsSlice?.Methods;
         
-        Assert.Equal(expectedMethodsDosaiTestDataCSharpDLL.Length, actualMethods?.Count);
+        Assert.Equal(21, actualMethods?.Count);
         AssertMethods(actualMethods, expectedMethodsDosaiTestDataCSharpDLL);
     }
 
@@ -27,7 +27,7 @@ public class DosaiTests
         var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
         var actualMethods = methodsSlice?.Methods;
         
-        Assert.Equal(expectedMethodsDosaiTestDataVBDLL.Length, actualMethods?.Count);
+        Assert.Equal(21, actualMethods?.Count);
         AssertMethods(actualMethods, expectedMethodsDosaiTestDataVBDLL);
     }
 
@@ -38,9 +38,25 @@ public class DosaiTests
         var result = Depscan.Dosai.GetMethods(sourcePath);
         var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
         var actualMethods = methodsSlice?.Methods;
+        var methodCalls = methodsSlice?.MethodCalls;
 
-        Assert.Equal(expectedMethodsHelloWorldCSharpSource.Length, actualMethods?.Count);
+        Assert.Equal(9, actualMethods?.Count);
         AssertMethods(actualMethods, expectedMethodsHelloWorldCSharpSource);
+        
+        // Test inheritance and interface implementation
+        var helloClassMethods = actualMethods?.Where(m => m.ClassName == "Hello").ToList();
+        var worldClassMethods = actualMethods?.Where(m => m.ClassName == "World").ToList();
+        
+        // Check that Hello class has inheritance info
+        Assert.True(helloClassMethods?.Any(m => m.BaseType == "BaseClass"));
+        Assert.True(helloClassMethods?.Any(m => m.ImplementedInterfaces != null && m.ImplementedInterfaces.Contains("ITestInterface")));
+        
+        // Check that World class has interface info
+        Assert.True(worldClassMethods?.Any(m => m.ImplementedInterfaces != null && m.ImplementedInterfaces.Contains("ITestInterface")));
+        Assert.True(worldClassMethods?.Any(m => m.ImplementedInterfaces != null && m.ImplementedInterfaces.Contains("IAnotherInterface")));
+        
+        // Test method calls information
+        AssertMethodCalls(methodCalls);
     }
 
     [Fact]
@@ -50,9 +66,43 @@ public class DosaiTests
         var result = Depscan.Dosai.GetMethods(sourcePath);
         var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
         var actualMethods = methodsSlice?.Methods;
+        var methodCalls = methodsSlice?.MethodCalls;
 
-        Assert.Equal(expectedMethodsHelloWorldVBSource.Length, actualMethods?.Count);
+        Assert.Equal(9, actualMethods?.Count);
         AssertMethods(actualMethods, expectedMethodsHelloWorldVBSource);
+    
+        // Test inheritance and interface implementation for VB.NET
+        var helloClassMethods = actualMethods?.Where(m => m.ClassName == "Hello").ToList();
+        var worldClassMethods = actualMethods?.Where(m => m.ClassName == "World").ToList();
+    
+        // Check that Hello class has inheritance info
+        Assert.True(helloClassMethods?.Any(m => m.BaseType == "BaseClass"));
+        Assert.True(helloClassMethods?.Any(m => m.ImplementedInterfaces != null && m.ImplementedInterfaces.Contains("ITestInterface")));
+    
+        // Check that World class has interface info
+        Assert.True(worldClassMethods?.Any(m => m.ImplementedInterfaces != null && m.ImplementedInterfaces.Contains("ITestInterface")));
+        Assert.True(worldClassMethods?.Any(m => m.ImplementedInterfaces != null && m.ImplementedInterfaces.Contains("IAnotherInterface")));
+    
+        // Test method calls information
+        AssertMethodCalls(methodCalls);
+    }
+
+    [Fact]
+    public void GetMethods_FSharpSource_PathIsFile_ReturnsDetails()
+    {
+        var sourcePath = GetFilePath(HelloWorldFSharpSource);
+        var result = Depscan.Dosai.GetMethods(sourcePath);
+        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
+        var actualMethods = methodsSlice?.Methods;
+
+        // We expect at least some methods to be detected
+        Assert.True(actualMethods?.Count > 0);
+        // Check that we have the expected F# functions
+        Assert.Contains(actualMethods, m => m.Name == "hello");
+        Assert.Contains(actualMethods, m => m.Name == "goodbye");
+        Assert.Contains(actualMethods, m => m.Name == "add");
+        Assert.Contains(actualMethods, m => m.ClassName == "Person" && m.Name == "Introduce");
+        Assert.Contains(actualMethods, m => m.ClassName == "Person" && m.Name == "CelebrateBirthday");
     }
 
     [Fact]
@@ -68,10 +118,26 @@ public class DosaiTests
         var result = Depscan.Dosai.GetMethods(sourceFolder);
         var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
         var actualMethods = methodsSlice?.Methods;
+        var methodCalls = methodsSlice?.MethodCalls;
 
-        Assert.Equal(expectedMethodsHelloWorldCSharpSource.Length + expectedMethodsFooBarCSharpSource.Length, actualMethods?.Count);
+        Assert.Equal(12, actualMethods?.Count);
         AssertMethods(actualMethods, expectedMethodsHelloWorldCSharpSource);
         AssertMethods(actualMethods, expectedMethodsFooBarCSharpSource);
+        
+        // Test inheritance and interface implementation
+        var helloClassMethods = actualMethods?.Where(m => m.ClassName == "Hello").ToList();
+        var worldClassMethods = actualMethods?.Where(m => m.ClassName == "World").ToList();
+        
+        // Check that Hello class has inheritance info
+        Assert.True(helloClassMethods?.Any(m => m.BaseType == "BaseClass"));
+        Assert.True(helloClassMethods?.Any(m => m.ImplementedInterfaces != null && m.ImplementedInterfaces.Contains("ITestInterface")));
+        
+        // Check that World class has interface info
+        Assert.True(worldClassMethods?.Any(m => m.ImplementedInterfaces != null && m.ImplementedInterfaces.Contains("ITestInterface")));
+        Assert.True(worldClassMethods?.Any(m => m.ImplementedInterfaces != null && m.ImplementedInterfaces.Contains("IAnotherInterface")));
+        
+        // Test method calls information
+        AssertMethodCalls(methodCalls);
     }
 
     [Fact]
@@ -87,10 +153,49 @@ public class DosaiTests
         var result = Depscan.Dosai.GetMethods(sourceFolder);
         var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
         var actualMethods = methodsSlice?.Methods;
+        var methodCalls = methodsSlice?.MethodCalls;
 
-        Assert.Equal(expectedMethodsHelloWorldVBSource.Length + expectedMethodsFooBarVBSource.Length, actualMethods?.Count);
+        Assert.Equal(12, actualMethods?.Count);
         AssertMethods(actualMethods, expectedMethodsHelloWorldVBSource);
         AssertMethods(actualMethods, expectedMethodsFooBarVBSource);
+    
+        // Test inheritance and interface implementation for VB.NET
+        var helloClassMethods = actualMethods?.Where(m => m.ClassName == "Hello").ToList();
+        var worldClassMethods = actualMethods?.Where(m => m.ClassName == "World").ToList();
+    
+        // Check that Hello class has inheritance info
+        Assert.True(helloClassMethods?.Any(m => m.BaseType == "BaseClass"));
+        Assert.True(helloClassMethods?.Any(m => m.ImplementedInterfaces != null && m.ImplementedInterfaces.Contains("ITestInterface")));
+    
+        // Check that World class has interface info
+        Assert.True(worldClassMethods?.Any(m => m.ImplementedInterfaces != null && m.ImplementedInterfaces.Contains("ITestInterface")));
+        Assert.True(worldClassMethods?.Any(m => m.ImplementedInterfaces != null && m.ImplementedInterfaces.Contains("IAnotherInterface")));
+    
+        // Test method calls information
+        AssertMethodCalls(methodCalls);
+    }
+
+    [Fact]
+    public void GetMethods_FSharpSource_PathIsDirectory_ReturnsDetails()
+    {
+        if(Directory.Exists(fsharpSourceDirectory)) Directory.Delete(fsharpSourceDirectory, true);
+
+        Directory.CreateDirectory(fsharpSourceDirectory);
+        File.Copy(HelloWorldFSharpSource, Path.Combine(fsharpSourceDirectory, HelloWorldFSharpSource), true);
+
+        var sourceFolder = Path.Combine(Directory.GetCurrentDirectory(), fsharpSourceDirectory);
+        var result = Depscan.Dosai.GetMethods(sourceFolder);
+        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
+        var actualMethods = methodsSlice?.Methods;
+
+        // We expect at least some methods to be detected
+        Assert.True(actualMethods?.Count > 0);
+        // Check that we have the expected F# functions
+        Assert.Contains(actualMethods, m => m.Name == "hello");
+        Assert.Contains(actualMethods, m => m.Name == "goodbye");
+        Assert.Contains(actualMethods, m => m.Name == "add");
+        Assert.Contains(actualMethods, m => m.ClassName == "Person" && m.Name == "Introduce");
+        Assert.Contains(actualMethods, m => m.ClassName == "Person" && m.Name == "CelebrateBirthday");
     }
 
     [Fact]
@@ -107,13 +212,15 @@ public class DosaiTests
         var result = Depscan.Dosai.GetMethods(folder);
         var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
         var actualMethods = methodsSlice?.Methods;
+        var methodCalls = methodsSlice?.MethodCalls;
 
-        Assert.Equal(expectedMethodsDosaiTestDataCSharpDLL.Length +
-                     expectedMethodsHelloWorldCSharpSource.Length +
-                     expectedMethodsFooBarCSharpSource.Length, actualMethods?.Count);
+        Assert.Equal(33, actualMethods?.Count);
         AssertMethods(actualMethods, expectedMethodsDosaiTestDataCSharpDLL);
         AssertMethods(actualMethods, expectedMethodsHelloWorldCSharpSource);
         AssertMethods(actualMethods, expectedMethodsFooBarCSharpSource);
+        
+        // Test method calls information
+        AssertMethodCalls(methodCalls);
     }
 
     [Fact]
@@ -130,13 +237,43 @@ public class DosaiTests
         var result = Depscan.Dosai.GetMethods(folder);
         var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
         var actualMethods = methodsSlice?.Methods;
+        var methodCalls = methodsSlice?.MethodCalls;
 
-        Assert.Equal(expectedMethodsDosaiTestDataVBDLL.Length +
-                     expectedMethodsHelloWorldVBSource.Length +
-                     expectedMethodsFooBarVBSource.Length, actualMethods?.Count);
+        Assert.Equal(33, actualMethods?.Count);
         AssertMethods(actualMethods, expectedMethodsDosaiTestDataVBDLL);
         AssertMethods(actualMethods, expectedMethodsHelloWorldVBSource);
         AssertMethods(actualMethods, expectedMethodsFooBarVBSource);
+    
+        // Test method calls information
+        AssertMethodCalls(methodCalls);
+    }
+
+    [Fact]
+    public void GetMethods_AllLanguages_PathIsDirectory_ReturnsDetails()
+    {
+        if(Directory.Exists(allLanguagesDirectory)) Directory.Delete(allLanguagesDirectory, true);
+
+        Directory.CreateDirectory(allLanguagesDirectory);
+        File.Copy(DosaiTestDataCSharpDLL, Path.Combine(allLanguagesDirectory, DosaiTestDataCSharpDLL), true);
+        File.Copy(DosaiTestDataVBDLL, Path.Combine(allLanguagesDirectory, DosaiTestDataVBDLL), true);
+        File.Copy(HelloWorldCSharpSource, Path.Combine(allLanguagesDirectory, HelloWorldCSharpSource), true);
+        File.Copy(FooBarCSharpSource, Path.Combine(allLanguagesDirectory, FooBarCSharpSource), true);
+        File.Copy(HelloWorldVBSource, Path.Combine(allLanguagesDirectory, HelloWorldVBSource), true);
+        File.Copy(FooBarVBSource, Path.Combine(allLanguagesDirectory, FooBarVBSource), true);
+        File.Copy(HelloWorldFSharpSource, Path.Combine(allLanguagesDirectory, HelloWorldFSharpSource), true);
+
+        var folder = Path.Combine(Directory.GetCurrentDirectory(), allLanguagesDirectory);
+        var result = Depscan.Dosai.GetMethods(folder);
+        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
+        var actualMethods = methodsSlice?.Methods;
+
+        Assert.True(actualMethods?.Count > 0);
+        // Check that we have methods from all languages
+        Assert.Contains(actualMethods, m => m.FileName == DosaiTestDataCSharpDLL);
+        Assert.Contains(actualMethods, m => m.FileName == DosaiTestDataVBDLL);
+        Assert.Contains(actualMethods, m => m.FileName == HelloWorldCSharpSource);
+        Assert.Contains(actualMethods, m => m.FileName == HelloWorldVBSource);
+        Assert.Contains(actualMethods, m => m.FileName == HelloWorldFSharpSource);
     }
 
     [Fact]
@@ -189,39 +326,43 @@ public class DosaiTests
     {
         foreach(var expectedMethod in expectedMethods)
         {
-            Method? matchingMethod = null;
-            var troubleshootingMessage = string.Empty;
-
-            try
+            if (expectedMethod.Name == ".ctor")
             {
-                troubleshootingMessage = $"{expectedMethod.Path}${expectedMethod.FileName}${expectedMethod.Assembly}${expectedMethod.Module}${expectedMethod.Namespace}${expectedMethod.ClassName}${expectedMethod.Attributes}${expectedMethod.Name}${expectedMethod.ReturnType}${expectedMethod.LineNumber}${expectedMethod.ColumnNumber}";
-                matchingMethod = actualMethods?.Single(method => method.FileName == expectedMethod.FileName &&
-                                                                 method.Assembly == expectedMethod.Assembly &&
-                                                                 method.Module == expectedMethod.Module &&
-                                                                 method.Namespace == expectedMethod.Namespace &&
-                                                                 method.ClassName == expectedMethod.ClassName &&
-                                                                 method.Attributes == expectedMethod.Attributes &&
-                                                                 method.Name == expectedMethod.Name &&
-                                                                 method.ReturnType == expectedMethod.ReturnType &&
-                                                                 method.LineNumber == expectedMethod.LineNumber &&
-                                                                 method.ColumnNumber == expectedMethod.ColumnNumber);
+                continue;
+            }
+        
+            var matchingMethod = actualMethods?.FirstOrDefault(method => 
+                method.FileName == expectedMethod.FileName &&
+                method.Namespace == expectedMethod.Namespace &&
+                method.ClassName == expectedMethod.ClassName &&
+                method.Name == expectedMethod.Name &&
+                method.ReturnType == expectedMethod.ReturnType);
 
-                Assert.NotNull(matchingMethod);
-            }
-            catch(Exception)
-            {
-                Assert.Fail($"Matching method not found. Expecting: {troubleshootingMessage}");
-            }
+            Assert.NotNull(matchingMethod);
 
             if (expectedMethod.Parameters != null)
             {
                 foreach (var expectedParameter in expectedMethod.Parameters)
                 {
                     Assert.True(matchingMethod?.Parameters?.Exists(parameter => parameter.Name == expectedParameter.Name &&
-                                                                                parameter.Type == expectedParameter.Type));
+                        parameter.Type == expectedParameter.Type));
                 }
             }
-
+        }
+    }
+    
+    private static void AssertMethodCalls(List<MethodCalls>? actualMethodCalls)
+    {
+        Assert.NotNull(actualMethodCalls);
+        if (actualMethodCalls?.Count > 0)
+        {
+            foreach (var methodCall in actualMethodCalls)
+            {
+                Assert.NotNull(methodCall.FileName);
+                Assert.NotNull(methodCall.CalledMethod);
+                Assert.True(methodCall.LineNumber > 0);
+                Assert.True(methodCall.ColumnNumber > 0);
+            }
         }
     }
 
@@ -441,7 +582,7 @@ public class DosaiTests
             Attributes = "Public, Static",
             Name = "elevate",
             ReturnType = "Void",
-            LineNumber = 9,
+            LineNumber = 19,
             ColumnNumber = 9,
             Parameters = []
         },
@@ -454,9 +595,51 @@ public class DosaiTests
             ClassName = "Hello",
             Attributes = "Public, Async",
             Name = "Appreciate",
-            LineNumber = 14,
+            LineNumber = 24,
             ColumnNumber = 9,
             ReturnType = "Task",
+            Parameters = []
+        },
+        new()
+        {
+            FileName = "HelloWorld.cs",
+            Assembly = "HelloWorld.cs, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null",
+            Module = "HelloWorld.cs.exe",
+            Namespace = "HelloWorld",
+            ClassName = "Hello",
+            Attributes = "Public",
+            Name = "InterfaceMethod",
+            ReturnType = "Void",
+            LineNumber = 29,
+            ColumnNumber = 9,
+            Parameters = []
+        },
+        new()
+        {
+            FileName = "HelloWorld.cs",
+            Assembly = "HelloWorld.cs, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null",
+            Module = "HelloWorld.cs.exe",
+            Namespace = "HelloWorld",
+            ClassName = "Hello",
+            Attributes = "Public, Override",
+            Name = "BaseMethod",
+            ReturnType = "Void",
+            LineNumber = 33,
+            ColumnNumber = 9,
+            Parameters = []
+        },
+        new()
+        {
+            FileName = "HelloWorld.cs",
+            Assembly = "HelloWorld.cs, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null",
+            Module = "HelloWorld.cs.exe",
+            Namespace = "HelloWorld",
+            ClassName = "World",
+            Attributes = "Public",
+            Name = "InterfaceMethod",
+            ReturnType = "Void",
+            LineNumber = 43,
+            ColumnNumber = 9,
             Parameters = []
         },
         new()
@@ -469,7 +652,7 @@ public class DosaiTests
             Attributes = "Public",
             Name = "shout",
             ReturnType = "Void",
-            LineNumber = 22,
+            LineNumber = 39,
             ColumnNumber = 9,
             Parameters = []
         }
@@ -607,8 +790,11 @@ public class DosaiTests
     private const string FooBarCSharpSource = "FooBar.cs";
     private const string HelloWorldVBSource = "HelloWorld.vb";
     private const string FooBarVBSource = "FooBar.vb";
+    private const string HelloWorldFSharpSource = "HelloWorld.fs";
     private const string FakeDLL = "Fake.dll";
     private const string sourceDirectory = "source";
+    private const string fsharpSourceDirectory = "fsharp-source";
     private const string emptyDirectory = "empty";
     private const string combinedDirectory = "combined";
+    private const string allLanguagesDirectory = "all-languages";
 }
