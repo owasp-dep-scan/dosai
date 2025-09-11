@@ -872,7 +872,7 @@ public static class Dosai
                             FileName = fileName,
                             Assembly = model.Compilation.Assembly.ToDisplayString(),
                             Module = model.Compilation.Assembly.Modules.FirstOrDefault()?.ToDisplayString(),
-                            Namespace = model.Compilation.Assembly.Name,
+                            Namespace = containingTypeSymbol?.ContainingNamespace?.ToDisplayString() ?? model.Compilation.Assembly.Name,
                             ClassName = GetContainingTypeName(fieldDeclaration),
                             Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
                             Name = variable.Identifier.Text,
@@ -927,7 +927,7 @@ public static class Dosai
                             FileName = fileName,
                             Assembly = model.Compilation.Assembly.ToDisplayString(),
                             Module = model.Compilation.Assembly.Modules.FirstOrDefault()?.ToDisplayString(),
-                            Namespace = model.Compilation.Assembly.Name,
+                            Namespace = containingTypeSymbol?.ContainingNamespace?.ToDisplayString() ?? model.Compilation.Assembly.Name,
                             ClassName = GetContainingTypeNameVB(fieldDeclaration), // Use VB-specific method
                             Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
                             Name = variable.Names.FirstOrDefault()?.Identifier.Text ?? "",
