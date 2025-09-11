@@ -3,10 +3,14 @@ using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.VisualBasic;
 using Microsoft.CodeAnalysis.VisualBasic.Syntax;
+using System.Text.RegularExpressions;
+
 using System.Diagnostics;
 using System.Globalization;
 using System.Reflection;
 using System.Text.Json;
+using System.Text.Json.Serialization;
+using FieldDeclarationSyntax = Microsoft.CodeAnalysis.CSharp.Syntax.FieldDeclarationSyntax;
 
 namespace Depscan;
 
@@ -18,7 +22,8 @@ public static class Dosai
     private static readonly JsonSerializerOptions options = new()
     {
         Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
-        DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
+        DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
+        Converters = { new JsonStringEnumConverter() }
     };
 
     /// <summary>
@@ -29,11 +34,22 @@ public static class Dosai
     public static string GetMethods(string path)
     {
         var methods = GetAssemblyMethods(path);
-        var (sourceMethods, usings, methodCalls) = GetSourceMethods(path);
+        var (sourceMethods, usings, methodCalls, properties, fields, events, constructors, callGraph) = GetSourceMethods(path);
         var assemblyInformation = GetAssemblyInformation(path);
         methods.AddRange(sourceMethods);
 
-        return JsonSerializer.Serialize(new MethodsSlice { Dependencies = usings, Methods = methods, MethodCalls = methodCalls, AssemblyInformation = assemblyInformation }, options);
+        return JsonSerializer.Serialize(new MethodsSlice 
+        { 
+            Dependencies = usings, 
+            Methods = methods, 
+            MethodCalls = methodCalls, 
+            AssemblyInformation = assemblyInformation,
+            Properties = properties,
+            Fields = fields,
+            Events = events,
+            Constructors = constructors,
+            CallGraph = callGraph
+        }, options);
     }
 
     /// <summary>
@@ -107,26 +123,198 @@ public static class Dosai
 
                 foreach(var type in types)
                 {
+                    // Methods
                     var methods = type.GetMethods();
-
                     foreach(var method in methods)
                     {
                         if ($"{method.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName)
                         {
+                            // Get type information for inheritance
+                            var typ = method.DeclaringType;
+                            var baseType = typ?.BaseType?.Name;
+                            var implementedInterfaces = typ?.GetInterfaces().Select(i => i.Name).ToList();
+
                             assemblyMethods.Add(new Method
                             {
                                 Path = assemblyFilePath,
                                 FileName = fileName,
                                 Module = method.DeclaringType?.Module.ToString(),
                                 Namespace = method.DeclaringType?.Namespace,
-                                ClassName = type.Name,
+                                ClassName = typ?.Name ?? string.Empty,
                                 Attributes = method.Attributes.ToString(),
                                 Name = method.Name,
                                 ReturnType = method.ReturnType.Name,
                                 Parameters = method.GetParameters().Select(p => new Parameter {
                                     Name = p.Name,
                                     Type = p.ParameterType.FullName
-                                }).ToList()
+                                }).ToList(),
+                                CustomAttributes = method.GetCustomAttributesData().Select(attr => 
+                                    new CustomAttributeInfo {
+                                        Name = attr.AttributeType.Name,
+                                        FullName = attr.AttributeType.FullName,
+                                        ConstructorArguments = attr.ConstructorArguments.Select(arg => arg.Value?.ToString() ?? string.Empty).ToList(),
+                                        NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo {
+                                            Name = na.MemberName,
+                                            Value = na.TypedValue.Value?.ToString() ?? string.Empty
+                                        }).ToList()
+                                    }).ToList(),
+                                BaseType = baseType,
+                                ImplementedInterfaces = implementedInterfaces
+                            });
+                        }
+                    }
+
+                    // Constructors
+                    var constructors = type.GetConstructors();
+                    foreach(var ctor in constructors)
+                    {
+                        if ($"{ctor.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName)
+                        {
+                            // Get type information for inheritance
+                            var typ = ctor.DeclaringType;
+                            var baseType = typ?.BaseType?.Name;
+                            var implementedInterfaces = typ?.GetInterfaces().Select(i => i.Name).ToList();
+
+                            assemblyMethods.Add(new Method
+                            {
+                                Path = assemblyFilePath,
+                                FileName = fileName,
+                                Module = ctor.DeclaringType?.Module.ToString(),
+                                Namespace = ctor.DeclaringType?.Namespace,
+                                ClassName = typ?.Name ?? string.Empty,
+                                Attributes = ctor.Attributes.ToString(),
+                                Name = ".ctor",
+                                ReturnType = "Void",
+                                Parameters = ctor.GetParameters().Select(p => new Parameter {
+                                    Name = p.Name,
+                                    Type = p.ParameterType.FullName
+                                }).ToList(),
+                                CustomAttributes = ctor.GetCustomAttributesData().Select(attr => 
+                                    new CustomAttributeInfo {
+                                        Name = attr.AttributeType.Name,
+                                        FullName = attr.AttributeType.FullName,
+                                        ConstructorArguments = attr.ConstructorArguments.Select(arg => arg.Value?.ToString() ?? string.Empty).ToList(),
+                                        NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo {
+                                            Name = na.MemberName,
+                                            Value = na.TypedValue.Value?.ToString() ?? string.Empty
+                                        }).ToList()
+                                    }).ToList(),
+                                BaseType = baseType,
+                                ImplementedInterfaces = implementedInterfaces
+                            });
+                        }
+                    }
+
+                    // Properties
+                    var properties = type.GetProperties();
+                    foreach(var prop in properties)
+                    {
+                        if ($"{prop.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName)
+                        {
+                            // Get type information for inheritance
+                            var typ = prop.DeclaringType;
+                            var baseType = typ?.BaseType?.Name;
+                            var implementedInterfaces = typ?.GetInterfaces().Select(i => i.Name).ToList();
+
+                            assemblyMethods.Add(new Method
+                            {
+                                Path = assemblyFilePath,
+                                FileName = fileName,
+                                Module = prop.DeclaringType?.Module.ToString(),
+                                Namespace = prop.DeclaringType?.Namespace,
+                                ClassName = typ?.Name ?? string.Empty,
+                                Attributes = "Property",
+                                Name = prop.Name,
+                                ReturnType = prop.PropertyType.Name,
+                                Parameters = [],
+                                CustomAttributes = prop.GetCustomAttributesData().Select(attr => 
+                                    new CustomAttributeInfo {
+                                        Name = attr.AttributeType.Name,
+                                        FullName = attr.AttributeType.FullName,
+                                        ConstructorArguments = attr.ConstructorArguments.Select(arg => arg.Value?.ToString() ?? string.Empty).ToList(),
+                                        NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo {
+                                            Name = na.MemberName,
+                                            Value = na.TypedValue.Value?.ToString() ?? string.Empty
+                                        }).ToList()
+                                    }).ToList(),
+                                BaseType = baseType,
+                                ImplementedInterfaces = implementedInterfaces
+                            });
+                        }
+                    }
+
+                    // Fields
+                    var fields = type.GetFields();
+                    foreach(var field in fields)
+                    {
+                        if ($"{field.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName)
+                        {
+                            // Get type information for inheritance
+                            var typ = field.DeclaringType;
+                            var baseType = typ?.BaseType?.Name;
+                            var implementedInterfaces = typ?.GetInterfaces().Select(i => i.Name).ToList();
+
+                            assemblyMethods.Add(new Method
+                            {
+                                Path = assemblyFilePath,
+                                FileName = fileName,
+                                Module = field.DeclaringType?.Module.ToString(),
+                                Namespace = field.DeclaringType?.Namespace,
+                                ClassName = typ?.Name ?? string.Empty,
+                                Attributes = field.Attributes.ToString(),
+                                Name = field.Name,
+                                ReturnType = field.FieldType.Name,
+                                Parameters = [],
+                                CustomAttributes = field.GetCustomAttributesData().Select(attr => 
+                                    new CustomAttributeInfo {
+                                        Name = attr.AttributeType.Name,
+                                        FullName = attr.AttributeType.FullName,
+                                        ConstructorArguments = attr.ConstructorArguments.Select(arg => arg.Value?.ToString() ?? string.Empty).ToList(),
+                                        NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo {
+                                            Name = na.MemberName,
+                                            Value = na.TypedValue.Value?.ToString() ?? string.Empty
+                                        }).ToList()
+                                    }).ToList(),
+                                BaseType = baseType,
+                                ImplementedInterfaces = implementedInterfaces
+                            });
+                        }
+                    }
+
+                    // Events
+                    var events = type.GetEvents();
+                    foreach(var evt in events)
+                    {
+                        if ($"{evt.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName)
+                        {
+                            // Get type information for inheritance
+                            var typ = evt.DeclaringType;
+                            var baseType = typ?.BaseType?.Name;
+                            var implementedInterfaces = typ?.GetInterfaces().Select(i => i.Name).ToList();
+
+                            assemblyMethods.Add(new Method
+                            {
+                                Path = assemblyFilePath,
+                                FileName = fileName,
+                                Module = evt.DeclaringType?.Module.ToString(),
+                                Namespace = evt.DeclaringType?.Namespace,
+                                ClassName = typ?.Name ?? string.Empty,
+                                Attributes = evt.Attributes.ToString(),
+                                Name = evt.Name,
+                                ReturnType = evt.EventHandlerType?.Name ?? string.Empty,
+                                Parameters = [],
+                                CustomAttributes = evt.GetCustomAttributesData().Select(attr => 
+                                    new CustomAttributeInfo {
+                                        Name = attr.AttributeType.Name,
+                                        FullName = attr.AttributeType.FullName,
+                                        ConstructorArguments = attr.ConstructorArguments.Select(arg => arg.Value?.ToString() ?? string.Empty).ToList(),
+                                        NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo {
+                                            Name = na.MemberName,
+                                            Value = na.TypedValue.Value?.ToString() ?? string.Empty
+                                        }).ToList()
+                                    }).ToList(),
+                                BaseType = baseType,
+                                ImplementedInterfaces = implementedInterfaces
                             });
                         }
                     }
@@ -145,19 +333,248 @@ public static class Dosai
         return assemblyMethods;
     }
 
+    private static string GetContainingTypeNameVB(Microsoft.CodeAnalysis.VisualBasic.Syntax.FieldDeclarationSyntax member)
+    {
+        var parent = member.Parent;
+        while (parent != null)
+        {
+            if (parent is Microsoft.CodeAnalysis.VisualBasic.Syntax.ClassBlockSyntax classBlock)
+                return classBlock.ClassStatement.Identifier.Text;
+            if (parent is Microsoft.CodeAnalysis.VisualBasic.Syntax.StructureBlockSyntax structBlock)
+                return structBlock.StructureStatement.Identifier.Text;
+            parent = parent.Parent;
+        }
+        return "";
+    }
+    
+    /// <summary>
+    /// Get all F# methods for the given path to F# source or directory of F# source
+    /// </summary>
+    /// <param name="path">Filesystem path to F# source file or directory containing F# source files</param>
+    /// <returns>Tuple with List of F# methods, dependencies, and method calls</returns>
+    private static (List<Method>, List<Dependency>, List<MethodCalls>) GetFSharpMethods(string path)
+    {
+        var sourcesToInspect = GetFilesToInspect(path, Constants.FSharpSourceExtension);
+        var fsharpMethods = new List<Method>();
+        var fsharpDependencies = new List<Dependency>();
+        var fsharpMethodCalls = new List<MethodCalls>();
+
+        foreach (var sourceFilePath in sourcesToInspect)
+        {
+            try
+            {
+                var fileName = Path.GetFileName(sourceFilePath);
+                var fileContent = File.ReadAllText(sourceFilePath);
+                var lines = fileContent.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                
+                string currentModule = "Global";
+                string currentType = "";
+                
+                for (int i = 0; i < lines.Length; i++)
+                {
+                    var line = lines[i].Trim();
+                    var lineNumber = i + 1;
+                    
+                    // Extract module declarations
+                    var moduleMatch = Regex.Match(line, @"^\s*module\s+([\w\.]+)");
+                    if (moduleMatch.Success)
+                    {
+                        currentModule = moduleMatch.Groups[1].Value;
+                    }
+                    
+                    // Extract type declarations
+                    var typeMatch = Regex.Match(line, @"^\s*type\s+(\w+)");
+                    if (typeMatch.Success)
+                    {
+                        currentType = typeMatch.Groups[1].Value;
+                    }
+                    
+                    // Extract function declarations: "let functionName" or "let rec functionName"
+                    var functionMatch = Regex.Match(line, @"^\s*let\s+(rec\s+)?(\w+)");
+                    if (functionMatch.Success)
+                    {
+                        var functionName = functionMatch.Groups[2].Value;
+                        
+                        // Skip common F# keywords that might match the pattern
+                        if (functionName == "rec" || functionName == "in" || functionName == "and") 
+                            continue;
+                        
+                        // Determine the containing context
+                        string containingContext = currentModule;
+                        if (!string.IsNullOrEmpty(currentType))
+                            containingContext = currentType;
+                        
+                        fsharpMethods.Add(new Method
+                        {
+                            Path = Path.GetRelativePath(path, sourceFilePath),
+                            FileName = fileName,
+                            Name = functionName,
+                            ClassName = containingContext,
+                            Namespace = "Unknown",
+                            Assembly = "Unknown",
+                            Module = "Unknown",
+                            Attributes = "Public",
+                            ReturnType = "Unknown",
+                            LineNumber = lineNumber,
+                            ColumnNumber = line.IndexOf(functionName) + 1,
+                            Parameters = new List<Parameter>(),
+                            CustomAttributes = new List<CustomAttributeInfo>()
+                        });
+                    }
+                    
+                    // Extract member declarations: "member this.MemberName" or "member _.MemberName"
+                    var memberMatch = Regex.Match(line, @"^\s*member\s+(\w+|\.)\.(\w+)");
+                    if (memberMatch.Success)
+                    {
+                        var instanceName = memberMatch.Groups[1].Value;
+                        var memberName = memberMatch.Groups[2].Value;
+                        
+                        string containingType = currentType;
+                        if (string.IsNullOrEmpty(containingType))
+                            containingType = "Unknown";
+                        
+                        fsharpMethods.Add(new Method
+                        {
+                            Path = Path.GetRelativePath(path, sourceFilePath),
+                            FileName = fileName,
+                            Name = memberName,
+                            ClassName = containingType,
+                            Namespace = "Unknown",
+                            Assembly = "Unknown",
+                            Module = "Unknown",
+                            Attributes = "Public",
+                            ReturnType = "Unknown",
+                            LineNumber = lineNumber,
+                            ColumnNumber = line.IndexOf(memberName) + 1,
+                            Parameters = new List<Parameter>(),
+                            CustomAttributes = new List<CustomAttributeInfo>()
+                        });
+                    }
+                    
+                    // Extract constructor declarations: "new(args) ="
+                    var constructorMatch = Regex.Match(line, @"^\s*new\s*\(");
+                    if (constructorMatch.Success)
+                    {
+                        string containingType = currentType;
+                        if (string.IsNullOrEmpty(containingType))
+                            containingType = "Unknown";
+                        
+                        fsharpMethods.Add(new Method
+                        {
+                            Path = Path.GetRelativePath(path, sourceFilePath),
+                            FileName = fileName,
+                            Name = ".ctor",
+                            ClassName = containingType,
+                            Namespace = "Unknown",
+                            Assembly = "Unknown",
+                            Module = "Unknown",
+                            Attributes = "Public",
+                            ReturnType = "Void",
+                            LineNumber = lineNumber,
+                            ColumnNumber = line.IndexOf("new") + 1,
+                            Parameters = new List<Parameter>(),
+                            CustomAttributes = new List<CustomAttributeInfo>()
+                        });
+                    }
+                }
+                
+                // Extract dependencies (open statements)
+                var openPattern = @"^\s*open\s+([\w\.]+)";
+                var openMatches = Regex.Matches(fileContent, openPattern, RegexOptions.Multiline);
+                
+                foreach (Match match in openMatches)
+                {
+                    var namespaceName = match.Groups[1].Value;
+                    var lineIndex = fileContent.Substring(0, match.Index).Split('\n').Length;
+                    
+                    fsharpDependencies.Add(new Dependency
+                    {
+                        Path = Path.GetRelativePath(path, sourceFilePath),
+                        FileName = fileName,
+                        Name = namespaceName,
+                        Namespace = namespaceName,
+                        Assembly = "Unknown",
+                        Module = "Unknown",
+                        LineNumber = lineIndex,
+                        ColumnNumber = match.Index - fileContent.LastIndexOf('\n', match.Index) + 1,
+                        NamespaceMembers = new List<string>()
+                    });
+                }
+                
+                // Extract method calls (function calls with parentheses)
+                var callPattern = @"(\w+)\s*\(";
+                var callMatches = Regex.Matches(fileContent, callPattern);
+                
+                foreach (Match match in callMatches)
+                {
+                    var methodName = match.Groups[1].Value;
+                    
+                    // Skip common keywords
+                    if (IsFSharpKeyword(methodName))
+                        continue;
+                    
+                    var lineIndex = fileContent.Substring(0, match.Index).Split('\n').Length;
+                    
+                    fsharpMethodCalls.Add(new MethodCalls
+                    {
+                        Path = Path.GetRelativePath(path, sourceFilePath),
+                        FileName = fileName,
+                        CalledMethod = methodName,
+                        ClassName = "Unknown",
+                        Namespace = "Unknown",
+                        Assembly = "Unknown",
+                        Module = "Unknown",
+                        LineNumber = lineIndex,
+                        ColumnNumber = match.Index - fileContent.LastIndexOf('\n', match.Index) + 1,
+                        Arguments = new List<string>()
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error processing F# file {sourceFilePath}: {ex.Message}");
+            }
+        }
+
+        return (fsharpMethods, fsharpDependencies, fsharpMethodCalls);
+    }
+
+    private static bool IsFSharpKeyword(string word)
+    {
+        var keywords = new HashSet<string>
+        {
+            "if", "then", "else", "elif", "for", "while", "do", "match", "with", "try", 
+            "catch", "finally", "let", "rec", "and", "fun", "function", "in", "open",
+            "module", "type", "exception", "namespace", "assembly", "begin", "end",
+            "abstract", "default", "delegate", "enum", "extern", "fixed", "interface",
+            "internal", "lazy", "mutable", "new", "null", "override", "private", 
+            "protected", "public", "return", "static", "to", "true", "upcast", "use",
+            "virtual", "void", "when", "yield"
+        };
+        
+        return keywords.Contains(word);
+    }
+
     /// <summary>
     /// Get all source methods for the given path to C# source or directory of C# source
     /// </summary>
     /// <param name="path">Filesystem path to C# source file or directory containing C# source files</param>
     /// <returns>Tuple with List of source methods and using directives</returns>
-    private static (List<Method>, List<Dependency>, List<MethodCalls>) GetSourceMethods(string path)
+    private static (List<Method>, List<Dependency>, List<MethodCalls>, List<PropertyInfo>, List<FieldInfo>, List<EventInfo>, List<ConstructorInfo>, CallGraph) GetSourceMethods(string path)
     {
         var assembliesToInspect = GetFilesToInspect(path, Constants.AssemblyExtension);
         var sourcesToInspect = GetFilesToInspect(path, Constants.CSharpSourceExtension);
         sourcesToInspect.AddRange(GetFilesToInspect(path, Constants.VBSourceExtension));
+        sourcesToInspect.AddRange(GetFilesToInspect(path, Constants.FSharpSourceExtension));
         var sourceMethods = new List<Method>();
         var allUsingDirectives = new List<Dependency>();
         var allMethodCalls = new List<MethodCalls>();
+        var properties = new List<PropertyInfo>();
+        var fields = new List<FieldInfo>();
+        var events = new List<EventInfo>();
+        var constructors = new List<ConstructorInfo>();
+        var callEdges = new List<MethodCallEdge>();
+        var methodNodes = new List<MethodNode>();
 #pragma warning disable IL3000
         var Mscorlib = MetadataReference.CreateFromFile(Path.Combine(AppContext.BaseDirectory, typeof(object).Assembly.Location));
 #pragma warning restore IL3000
@@ -208,7 +625,20 @@ public static class Dosai
             var csMethodCalls = csRoot?.DescendantNodes().OfType<Microsoft.CodeAnalysis.CSharp.Syntax.InvocationExpressionSyntax>();
             var vbMethodCalls = vbRoot?.DescendantNodes().OfType<Microsoft.CodeAnalysis.VisualBasic.Syntax.InvocationExpressionSyntax>();
 
-            // C# method declarations
+            var csPropertyDeclarations = csRoot?.DescendantNodes().OfType<PropertyDeclarationSyntax>();
+            var vbPropertyDeclarations = vbRoot?.DescendantNodes().OfType<PropertyStatementSyntax>();
+
+            var csFieldDeclarations = csRoot?.DescendantNodes().OfType<FieldDeclarationSyntax>();
+            var vbFieldDeclarations = vbRoot?.DescendantNodes().OfType<Microsoft.CodeAnalysis.VisualBasic.Syntax.FieldDeclarationSyntax>();
+
+            var csEventDeclarations = csRoot?.DescendantNodes().OfType<EventDeclarationSyntax>();
+            var csEventFieldDeclarations = csRoot?.DescendantNodes().OfType<EventFieldDeclarationSyntax>();
+            var vbEventDeclarations = vbRoot?.DescendantNodes().OfType<Microsoft.CodeAnalysis.VisualBasic.Syntax.EventStatementSyntax>();
+            
+            var csConstructorDeclarations = csRoot?.DescendantNodes().OfType<ConstructorDeclarationSyntax>();
+            var vbConstructorDeclarations = vbRoot?.DescendantNodes().OfType<ConstructorBlockSyntax>();
+
+            // C# method declarations - modify this section
             if (csMethodDeclarations != null)
             {
                 foreach(var methodDeclaration in csMethodDeclarations)
@@ -219,8 +649,13 @@ public static class Dosai
                     var lineNumber = codeSpan.StartLinePosition.Line + 1;
                     var columnNumber = codeSpan.Span.Start.Character + 1;
 
-                    if (method != null && method.DeclaredAccessibility != Accessibility.Private)
+                    if (method != null)
                     {
+                        // Get the containing type for inheritance information
+                        var containingType = method.ContainingType;
+                        var baseType = containingType?.BaseType?.Name;
+                        var implementedInterfaces = containingType?.AllInterfaces.Select(i => i.Name).ToList();
+
                         sourceMethods.Add(new Method
                         {
                             Path = Path.GetRelativePath(path, sourceFilePath),
@@ -237,7 +672,19 @@ public static class Dosai
                             Parameters = method?.Parameters.Select(p => new Parameter {
                                 Name = p.Name,
                                 Type = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(p.Type?.ToString()!)
-                            }).ToList()
+                            }).ToList(),
+                            CustomAttributes = method?.GetAttributes().Select(attr => 
+                                new CustomAttributeInfo {
+                                    Name = attr.AttributeClass?.Name,
+                                    FullName = attr.AttributeClass?.ToDisplayString(),
+                                    ConstructorArguments = attr.ConstructorArguments.Select(arg => arg.Value?.ToString() ?? string.Empty).ToList(),
+                                    NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo {
+                                        Name = na.Key,
+                                        Value = na.Value.Value?.ToString() ?? string.Empty
+                                    }).ToList()
+                                }).ToList(),
+                            BaseType = baseType,
+                            ImplementedInterfaces = implementedInterfaces
                         });
                     }
                 }
@@ -254,8 +701,13 @@ public static class Dosai
                     var lineNumber = codeSpan.StartLinePosition.Line + 1;
                     var columnNumber = codeSpan.Span.Start.Character + 1;
 
-                    if (method != null && method.DeclaredAccessibility != Accessibility.Private)
+                    if (method != null)
                     {
+                        // Get inheritance information
+                        var containingType = method.ContainingType;
+                        var baseType = containingType?.BaseType?.Name;
+                        var implementedInterfaces = containingType?.AllInterfaces.Select(i => i.Name).ToList();
+
                         sourceMethods.Add(new Method
                         {
                             Path = Path.GetRelativePath(path, sourceFilePath),
@@ -272,8 +724,482 @@ public static class Dosai
                             Parameters = method?.Parameters.Select(p => new Parameter {
                                 Name = p.Name,
                                 Type = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(p.Type?.ToString()!)
-                            }).ToList()
+                            }).ToList(),
+                            CustomAttributes = method?.GetAttributes().Select(attr => 
+                                new CustomAttributeInfo {
+                                    Name = attr.AttributeClass?.Name,
+                                    FullName = attr.AttributeClass?.ToDisplayString(),
+                                    ConstructorArguments = attr.ConstructorArguments.Select(arg => arg.Value?.ToString() ?? string.Empty).ToList(),
+                                    NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo {
+                                        Name = na.Key,
+                                        Value = na.Value.Value?.ToString() ?? string.Empty
+                                    }).ToList()
+                                }).ToList(),
+                            BaseType = baseType,
+                            ImplementedInterfaces = implementedInterfaces
                         });
+                    }
+                }
+            }
+
+            // C# property declarations
+            if (csPropertyDeclarations != null)
+            {
+                foreach(var propertyDeclaration in csPropertyDeclarations)
+                {
+                    var modifiers = propertyDeclaration.Modifiers;
+                    var property = model.GetDeclaredSymbol(propertyDeclaration);
+                    var codeSpan = propertyDeclaration.SyntaxTree.GetLineSpan(propertyDeclaration.Span);
+                    var lineNumber = codeSpan.StartLinePosition.Line + 1;
+                    var columnNumber = codeSpan.Span.Start.Character + 1;
+
+                    if (property != null)
+                    {
+                        // Get inheritance information
+                        var containingType = property.ContainingType;
+                        var baseType = containingType?.BaseType?.Name;
+                        var implementedInterfaces = containingType?.AllInterfaces.Select(i => i.Name).ToList();
+                        
+                        properties.Add(new PropertyInfo
+                        {
+                            Path = Path.GetRelativePath(path, sourceFilePath),
+                            FileName = fileName,
+                            Assembly = property.ContainingAssembly.ToDisplayString(),
+                            Module = property.ContainingModule.ToDisplayString(),
+                            Namespace = property.ContainingNamespace.ToDisplayString(),
+                            ClassName = property.ContainingType.Name,
+                            Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
+                            Name = property.Name,
+                            Type = property.Type.Name,
+                            LineNumber = lineNumber,
+                            ColumnNumber = columnNumber,
+                            CustomAttributes = property.GetAttributes().Select(attr => 
+                                new CustomAttributeInfo {
+                                    Name = attr.AttributeClass?.Name,
+                                    FullName = attr.AttributeClass?.ToDisplayString(),
+                                    ConstructorArguments = attr.ConstructorArguments.Select(arg => arg.Value?.ToString() ?? string.Empty).ToList(),
+                                    NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo {
+                                        Name = na.Key,
+                                        Value = na.Value.Value?.ToString() ?? string.Empty
+                                    }).ToList()
+                                }).ToList(),
+                            HasGetter = property.GetMethod != null,
+                            HasSetter = property.SetMethod != null,
+                            Implements = property.ExplicitInterfaceImplementations.Select(i => i.ToDisplayString()).ToList(),
+                            BaseType = baseType,
+                            ImplementedInterfaces = implementedInterfaces
+                        });
+                    }
+                }
+            }
+
+            // VB property declarations
+            if (vbPropertyDeclarations != null)
+            {
+                foreach(var propertyDeclaration in vbPropertyDeclarations)
+                {
+                    var modifiers = propertyDeclaration.Modifiers;
+                    var property = model.GetDeclaredSymbol(propertyDeclaration);
+                    var codeSpan = propertyDeclaration.SyntaxTree.GetLineSpan(propertyDeclaration.Span);
+                    var lineNumber = codeSpan.StartLinePosition.Line + 1;
+                    var columnNumber = codeSpan.Span.Start.Character + 1;
+
+                    if (property != null)
+                    {
+                        // Get inheritance information
+                        var containingType = property.ContainingType;
+                        var baseType = containingType?.BaseType?.Name;
+                        var implementedInterfaces = containingType?.AllInterfaces.Select(i => i.Name).ToList();
+                        
+                        properties.Add(new PropertyInfo
+                        {
+                            Path = Path.GetRelativePath(path, sourceFilePath),
+                            FileName = fileName,
+                            Assembly = property.ContainingAssembly.ToDisplayString(),
+                            Module = property.ContainingModule.ToDisplayString(),
+                            Namespace = property.ContainingNamespace.ToDisplayString(),
+                            ClassName = property.ContainingType.Name,
+                            Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
+                            Name = property.Name,
+                            Type = property.Type.Name,
+                            LineNumber = lineNumber,
+                            ColumnNumber = columnNumber,
+                            CustomAttributes = property.GetAttributes().Select(attr => 
+                                new CustomAttributeInfo {
+                                    Name = attr.AttributeClass?.Name,
+                                    FullName = attr.AttributeClass?.ToDisplayString(),
+                                    ConstructorArguments = attr.ConstructorArguments.Select(arg => arg.Value?.ToString() ?? string.Empty).ToList(),
+                                    NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo {
+                                        Name = na.Key,
+                                        Value = na.Value.Value?.ToString() ?? string.Empty
+                                    }).ToList()
+                                }).ToList(),
+                            HasGetter = property.GetMethod != null,
+                            HasSetter = property.SetMethod != null,
+                            Implements = property.ExplicitInterfaceImplementations.Select(i => i.ToDisplayString()).ToList(),
+                            BaseType = baseType,
+                            ImplementedInterfaces = implementedInterfaces
+                        });
+                    }
+                }
+            }
+
+            // C# field declarations
+            if (csFieldDeclarations != null)
+            {
+                foreach(var fieldDeclaration in csFieldDeclarations)
+                {
+                    var modifiers = fieldDeclaration.Modifiers;
+                    var variables = fieldDeclaration.Declaration.Variables;
+                    var type = fieldDeclaration.Declaration.Type;
+                    var typeSymbol = model.GetSymbolInfo(type).Symbol as ITypeSymbol;
+                    // Get inheritance information for the containing type
+                    INamedTypeSymbol? containingTypeSymbol = null;
+                    if (fieldDeclaration.Parent != null)
+                    {
+                        containingTypeSymbol = model.GetDeclaredSymbol(fieldDeclaration.Parent) as INamedTypeSymbol;
+                    }
+                    var baseType = containingTypeSymbol?.BaseType?.Name;
+                    var implementedInterfaces = containingTypeSymbol?.AllInterfaces.Select(i => i.Name).ToList();
+                    foreach(var variable in variables)
+                    {
+                        var codeSpan = variable.SyntaxTree.GetLineSpan(variable.Span);
+                        var lineNumber = codeSpan.StartLinePosition.Line + 1;
+                        var columnNumber = codeSpan.Span.Start.Character + 1;
+
+                        fields.Add(new FieldInfo
+                        {
+                            Path = Path.GetRelativePath(path, sourceFilePath),
+                            FileName = fileName,
+                            Assembly = model.Compilation.Assembly.ToDisplayString(),
+                            Module = model.Compilation.Assembly.Modules.FirstOrDefault()?.ToDisplayString(),
+                            Namespace = containingTypeSymbol?.ContainingNamespace?.ToDisplayString() ?? model.Compilation.Assembly.Name,
+                            ClassName = GetContainingTypeName(fieldDeclaration),
+                            Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
+                            Name = variable.Identifier.Text,
+                            Type = typeSymbol?.Name ?? type.ToString(),
+                            LineNumber = lineNumber,
+                            ColumnNumber = columnNumber,
+                            CustomAttributes = fieldDeclaration.AttributeLists.SelectMany(al => 
+                                al.Attributes.Select(attr => {
+                                    var attrSymbol = model.GetSymbolInfo(attr).Symbol;
+                                    return new CustomAttributeInfo {
+                                        Name = attrSymbol?.ContainingType.Name,
+                                        FullName = attrSymbol?.ContainingType.ToDisplayString(),
+                                        ConstructorArguments = attr.ArgumentList?.Arguments.Select(arg => arg.Expression.ToString() ?? string.Empty).ToList() ?? new List<string>(),
+                                        NamedArguments = new List<NamedArgumentInfo>()
+                                    };
+                                })).ToList(),
+                            BaseType = baseType,
+                            ImplementedInterfaces = implementedInterfaces
+                        });
+                    }
+                }
+            }
+
+            // VB field declarations
+            if (vbFieldDeclarations != null)
+            {
+                foreach(var fieldDeclaration in vbFieldDeclarations)
+                {
+                    var modifiers = fieldDeclaration.Modifiers;
+                    var variables = fieldDeclaration.Declarators;
+                    var firstVariable = variables.FirstOrDefault();
+                    var asClause = firstVariable?.AsClause as Microsoft.CodeAnalysis.VisualBasic.Syntax.SimpleAsClauseSyntax;
+                    var type = asClause?.Type;
+                    var typeSymbol = type != null ? model.GetSymbolInfo(type).Symbol as ITypeSymbol : null;
+                    // Get inheritance information for the containing type
+                    INamedTypeSymbol? containingTypeSymbol = null;
+                    if (fieldDeclaration.Parent != null)
+                    {
+                        containingTypeSymbol = model.GetDeclaredSymbol(fieldDeclaration.Parent) as INamedTypeSymbol;
+                    }
+                    var baseType = containingTypeSymbol?.BaseType?.Name;
+                    var implementedInterfaces = containingTypeSymbol?.AllInterfaces.Select(i => i.Name).ToList();
+                    foreach(var variable in variables)
+                    {
+                        var codeSpan = variable.SyntaxTree.GetLineSpan(variable.Span);
+                        var lineNumber = codeSpan.StartLinePosition.Line + 1;
+                        var columnNumber = codeSpan.Span.Start.Character + 1;
+
+                        fields.Add(new FieldInfo
+                        {
+                            Path = Path.GetRelativePath(path, sourceFilePath),
+                            FileName = fileName,
+                            Assembly = model.Compilation.Assembly.ToDisplayString(),
+                            Module = model.Compilation.Assembly.Modules.FirstOrDefault()?.ToDisplayString(),
+                            Namespace = containingTypeSymbol?.ContainingNamespace?.ToDisplayString() ?? model.Compilation.Assembly.Name,
+                            ClassName = GetContainingTypeNameVB(fieldDeclaration), // Use VB-specific method
+                            Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
+                            Name = variable.Names.FirstOrDefault()?.Identifier.Text ?? "",
+                            Type = typeSymbol?.Name ?? type?.ToString() ?? "Unknown",
+                            LineNumber = lineNumber,
+                            ColumnNumber = columnNumber,
+                            CustomAttributes = fieldDeclaration.AttributeLists.SelectMany(al => 
+                                al.Attributes.Select((Microsoft.CodeAnalysis.VisualBasic.Syntax.AttributeSyntax attr) => {
+                                    var attrSymbol = model.GetSymbolInfo(attr).Symbol;
+                                    return new CustomAttributeInfo {
+                                        Name = attrSymbol?.ContainingType.Name,
+                                        FullName = attrSymbol?.ContainingType.ToDisplayString(),
+                                        ConstructorArguments = attr.ArgumentList?.Arguments.Select((Microsoft.CodeAnalysis.VisualBasic.Syntax.ArgumentSyntax arg) => arg.GetExpression().ToString() ?? string.Empty).ToList() ?? new List<string>(),
+                                        NamedArguments = new List<NamedArgumentInfo>()
+                                    };
+                                })).ToList(),
+                            BaseType = baseType,
+                            ImplementedInterfaces = implementedInterfaces
+                        });
+                    }
+                }
+            }
+
+            // C# event declarations
+            if (csEventDeclarations != null)
+            {
+                foreach(var eventDeclaration in csEventDeclarations)
+                {
+                    var modifiers = eventDeclaration.Modifiers;
+                    var evt = model.GetDeclaredSymbol(eventDeclaration);
+                    var codeSpan = eventDeclaration.SyntaxTree.GetLineSpan(eventDeclaration.Span);
+                    var lineNumber = codeSpan.StartLinePosition.Line + 1;
+                    var columnNumber = codeSpan.Span.Start.Character + 1;
+
+                    if (evt != null)
+                    {
+                        // Get inheritance information
+                        var containingType = evt.ContainingType;
+                        var baseType = containingType?.BaseType?.Name;
+                        var implementedInterfaces = containingType?.AllInterfaces.Select(i => i.Name).ToList();
+                        events.Add(new EventInfo
+                        {
+                            Path = Path.GetRelativePath(path, sourceFilePath),
+                            FileName = fileName,
+                            Assembly = evt.ContainingAssembly.ToDisplayString(),
+                            Module = evt.ContainingModule.ToDisplayString(),
+                            Namespace = evt.ContainingNamespace.ToDisplayString(),
+                            ClassName = evt.ContainingType.Name,
+                            Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
+                            Name = evt.Name,
+                            Type = evt.Type.Name,
+                            LineNumber = lineNumber,
+                            ColumnNumber = columnNumber,
+                            CustomAttributes = evt.GetAttributes().Select(attr => 
+                                new CustomAttributeInfo {
+                                    Name = attr.AttributeClass?.Name,
+                                    FullName = attr.AttributeClass?.ToDisplayString(),
+                                    ConstructorArguments = attr.ConstructorArguments.Select(arg => arg.Value?.ToString() ?? string.Empty).ToList(),
+                                    NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo {
+                                        Name = na.Key,
+                                        Value = na.Value.Value?.ToString()
+                                    }).ToList()
+                                }).ToList(),
+                            BaseType = baseType,
+                            ImplementedInterfaces = implementedInterfaces
+                        });
+                    }
+                }
+            }
+
+            // C# event field declarations
+            if (csEventFieldDeclarations != null)
+            {
+                foreach(var eventFieldDeclaration in csEventFieldDeclarations)
+                {
+                    var modifiers = eventFieldDeclaration.Modifiers;
+                    var variables = eventFieldDeclaration.Declaration.Variables;
+                    var type = eventFieldDeclaration.Declaration.Type;
+                    var typeSymbol = model.GetSymbolInfo(type).Symbol as ITypeSymbol;
+                    
+                    foreach(var variable in variables)
+                    {
+                        var evtSymbol = model.GetDeclaredSymbol(variable) as IEventSymbol;
+                        var codeSpan = variable.SyntaxTree.GetLineSpan(variable.Span);
+                        var lineNumber = codeSpan.StartLinePosition.Line + 1;
+                        var columnNumber = codeSpan.Span.Start.Character + 1;
+                        // Get inheritance information
+                        var containingType = evtSymbol?.ContainingType;
+                        var baseType = containingType?.BaseType?.Name;
+                        var implementedInterfaces = containingType?.AllInterfaces.Select(i => i.Name).ToList();
+                        events.Add(new EventInfo
+                        {
+                            Path = Path.GetRelativePath(path, sourceFilePath),
+                            FileName = fileName,
+                            Assembly = evtSymbol?.ContainingAssembly.ToDisplayString() ?? model.Compilation.Assembly.ToDisplayString(),
+                            Module = evtSymbol?.ContainingModule.ToDisplayString() ?? model.Compilation.Assembly.Modules.FirstOrDefault()?.ToDisplayString(),
+                            Namespace = evtSymbol?.ContainingNamespace.ToDisplayString() ?? model.Compilation.Assembly.Name,
+                            ClassName = evtSymbol?.ContainingType.Name ?? GetContainingTypeName(eventFieldDeclaration),
+                            Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
+                            Name = variable.Identifier.Text,
+                            Type = typeSymbol?.Name ?? type.ToString(),
+                            LineNumber = lineNumber,
+                            ColumnNumber = columnNumber,
+                            CustomAttributes = eventFieldDeclaration.AttributeLists.SelectMany(al => 
+                                al.Attributes.Select(attr => {
+                                    var attrSymbol = model.GetSymbolInfo(attr).Symbol;
+                                    return new CustomAttributeInfo {
+                                        Name = attrSymbol?.ContainingType.Name,
+                                        FullName = attrSymbol?.ContainingType.ToDisplayString(),
+                                        ConstructorArguments = attr.ArgumentList?.Arguments.Select(arg => arg.Expression.ToString() ?? string.Empty).ToList() ?? new List<string>(),
+                                        NamedArguments = new List<NamedArgumentInfo>()
+                                    };
+                                })).ToList(),
+                            BaseType = baseType,
+                            ImplementedInterfaces = implementedInterfaces
+                        });
+                    }
+                }
+            }
+
+            // VB event declarations
+            if (vbEventDeclarations != null)
+            {
+                foreach(var eventDeclaration in vbEventDeclarations)
+                {
+                    var modifiers = eventDeclaration.Modifiers;
+                    var evt = model.GetDeclaredSymbol(eventDeclaration);
+                    var codeSpan = eventDeclaration.SyntaxTree.GetLineSpan(eventDeclaration.Span);
+                    var lineNumber = codeSpan.StartLinePosition.Line + 1;
+                    var columnNumber = codeSpan.Span.Start.Character + 1;
+
+                    if (evt != null)
+                    {
+                        // Get inheritance information
+                        var containingType = evt.ContainingType;
+                        var baseType = containingType?.BaseType?.Name;
+                        var implementedInterfaces = containingType?.AllInterfaces.Select(i => i.Name).ToList();
+                        events.Add(new EventInfo
+                        {
+                            Path = Path.GetRelativePath(path, sourceFilePath),
+                            FileName = fileName,
+                            Assembly = evt.ContainingAssembly.ToDisplayString(),
+                            Module = evt.ContainingModule.ToDisplayString(),
+                            Namespace = evt.ContainingNamespace.ToDisplayString(),
+                            ClassName = evt.ContainingType.Name,
+                            Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
+                            Name = evt.Name,
+                            Type = evt.Type.Name,
+                            LineNumber = lineNumber,
+                            ColumnNumber = columnNumber,
+                            CustomAttributes = evt.GetAttributes().Select(attr => 
+                                new CustomAttributeInfo {
+                                    Name = attr.AttributeClass?.Name,
+                                    FullName = attr.AttributeClass?.ToDisplayString(),
+                                    ConstructorArguments = attr.ConstructorArguments.Select(arg => arg.Value?.ToString() ?? string.Empty).ToList(),
+                                    NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo {
+                                        Name = na.Key,
+                                        Value = na.Value.Value?.ToString() ?? string.Empty
+                                    }).ToList()
+                                }).ToList(),
+                            BaseType = baseType,
+                            ImplementedInterfaces = implementedInterfaces
+                        });
+                    }
+                }
+            }
+
+            // C# constructor declarations
+            if (csConstructorDeclarations != null)
+            {
+                foreach(var constructorDeclaration in csConstructorDeclarations)
+                {
+                    var modifiers = constructorDeclaration.Modifiers;
+                    var ctor = model.GetDeclaredSymbol(constructorDeclaration);
+                    var codeSpan = constructorDeclaration.SyntaxTree.GetLineSpan(constructorDeclaration.Span);
+                    var lineNumber = codeSpan.StartLinePosition.Line + 1;
+                    var columnNumber = codeSpan.Span.Start.Character + 1;
+
+                    if (ctor != null)
+                    {
+                        // Get inheritance information
+                        var containingType = ctor.ContainingType;
+                        var baseType = containingType?.BaseType?.Name;
+                        var implementedInterfaces = containingType?.AllInterfaces.Select(i => i.Name).ToList();
+                        constructors.Add(new ConstructorInfo
+                        {
+                            Path = Path.GetRelativePath(path, sourceFilePath),
+                            FileName = fileName,
+                            Assembly = ctor.ContainingAssembly.ToDisplayString(),
+                            Module = ctor.ContainingModule.ToDisplayString(),
+                            Namespace = ctor.ContainingNamespace.ToDisplayString(),
+                            ClassName = ctor.ContainingType.Name,
+                            Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
+                            Name = ctor.ContainingType.Name,
+                            ReturnType = "Void",
+                            LineNumber = lineNumber,
+                            ColumnNumber = columnNumber,
+                            Parameters = ctor.Parameters.Select(p => new Parameter {
+                                Name = p.Name,
+                                Type = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(p.Type?.ToString()!)
+                            }).ToList(),
+                            CustomAttributes = ctor.GetAttributes().Select(attr => 
+                                new CustomAttributeInfo {
+                                    Name = attr.AttributeClass?.Name,
+                                    FullName = attr.AttributeClass?.ToDisplayString(),
+                                    ConstructorArguments = attr.ConstructorArguments.Select(arg => arg.Value?.ToString() ?? string.Empty).ToList(),
+                                    NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo {
+                                        Name = na.Key,
+                                        Value = na.Value.Value?.ToString() ?? string.Empty
+                                    }).ToList()
+                                }).ToList(),
+                            IsStatic = ctor.IsStatic,
+                            BaseType = baseType,
+                            ImplementedInterfaces = implementedInterfaces
+                        });
+                    }
+                }
+            }
+
+            // VB constructor declarations
+            if (vbConstructorDeclarations != null)
+            {
+                foreach(var constructorDeclaration in vbConstructorDeclarations)
+                {
+                    var ctorStmt = constructorDeclaration.SubNewStatement;
+                    if (ctorStmt != null)
+                    {
+                        var modifiers = ctorStmt.Modifiers;
+                        var ctor = model.GetDeclaredSymbol(ctorStmt);
+                        var codeSpan = ctorStmt.SyntaxTree.GetLineSpan(ctorStmt.Span);
+                        var lineNumber = codeSpan.StartLinePosition.Line + 1;
+                        var columnNumber = codeSpan.Span.Start.Character + 1;
+
+                        if (ctor != null)
+                        {
+                            // Get inheritance information
+                            var containingType = ctor.ContainingType;
+                            var baseType = containingType?.BaseType?.Name;
+                            var implementedInterfaces = containingType?.AllInterfaces.Select(i => i.Name).ToList();
+                            constructors.Add(new ConstructorInfo
+                            {
+                                Path = Path.GetRelativePath(path, sourceFilePath),
+                                FileName = fileName,
+                                Assembly = ctor.ContainingAssembly.ToDisplayString(),
+                                Module = ctor.ContainingModule.ToDisplayString(),
+                                Namespace = ctor.ContainingNamespace.ToDisplayString(),
+                                ClassName = ctor.ContainingType.Name,
+                                Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
+                                Name = ctor.ContainingType.Name,
+                                ReturnType = "Void",
+                                LineNumber = lineNumber,
+                                ColumnNumber = columnNumber,
+                                Parameters = ctor.Parameters.Select(p => new Parameter {
+                                    Name = p.Name,
+                                    Type = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(p.Type?.ToString()!)
+                                }).ToList(),
+                                CustomAttributes = ctor.GetAttributes().Select(attr => 
+                                    new CustomAttributeInfo {
+                                        Name = attr.AttributeClass?.Name,
+                                        FullName = attr.AttributeClass?.ToDisplayString(),
+                                        ConstructorArguments = attr.ConstructorArguments.Select(arg => arg.Value?.ToString() ?? string.Empty).ToList(),
+                                        NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo {
+                                            Name = na.Key,
+                                            Value = na.Value.Value?.ToString() ?? string.Empty
+                                        }).ToList()
+                                    }).ToList(),
+                                IsStatic = ctor.IsStatic,
+                                BaseType = baseType,
+                                ImplementedInterfaces = implementedInterfaces
+                            });
+                        }
                     }
                 }
             }
@@ -400,7 +1326,157 @@ public static class Dosai
             }
         }
 
-        return (sourceMethods, allUsingDirectives, allMethodCalls);
+        // Process F# files
+        var (fsharpMethods, fsharpDependencies, fsharpMethodCalls) = GetFSharpMethods(path);
+        sourceMethods.AddRange(fsharpMethods);
+        allUsingDirectives.AddRange(fsharpDependencies);
+        allMethodCalls.AddRange(fsharpMethodCalls);
+        
+        string CreateNodeId(string ns, string className, string memberName) => $"{ns}.{className}.{memberName}";
+        foreach (var method in sourceMethods)
+        {
+            var nodeId = CreateNodeId(method.Namespace ?? string.Empty, method.ClassName ?? string.Empty, method.Name ?? string.Empty);
+            if (methodNodes.All(n => n.Id != nodeId))
+            {
+                methodNodes.Add(new MethodNode
+                {
+                    Id = nodeId,
+                    Name = method.Name ?? string.Empty,
+                    ClassName = method.ClassName ?? string.Empty,
+                    Namespace = method.Namespace ?? string.Empty,
+                    FileName = method.FileName ?? string.Empty
+                });
+            }
+        }
+        // Add nodes for Properties
+        foreach (var prop in properties)
+        {
+            var nodeId = CreateNodeId(prop.Namespace ?? string.Empty, prop.ClassName ?? string.Empty, prop.Name ?? string.Empty);
+            if (methodNodes.All(n => n.Id != nodeId))
+            {
+                methodNodes.Add(new MethodNode
+                {
+                    Id = nodeId,
+                    Name = prop.Name ?? string.Empty,
+                    ClassName = prop.ClassName ?? string.Empty,
+                    Namespace = prop.Namespace ?? string.Empty,
+                    FileName = prop?.FileName ?? string.Empty
+                });
+            }
+        }
+        // Add nodes for Fields
+        foreach (var field in fields)
+        {
+            var nodeId = CreateNodeId(field.Namespace ?? string.Empty, field.ClassName ?? string.Empty, field.Name ?? string.Empty);
+            if (methodNodes.All(n => n.Id != nodeId))
+            {
+                methodNodes.Add(new MethodNode
+                {
+                    Id = nodeId,
+                    Name = field.Name ?? string.Empty,
+                    ClassName = field.ClassName ?? string.Empty,
+                    Namespace = field.Namespace ?? string.Empty,
+                    FileName = field.FileName ?? string.Empty
+                });
+            }
+        }
+        // Add nodes for Events
+        foreach (var evt in events)
+        {
+            var nodeId = CreateNodeId(evt.Namespace ?? string.Empty, evt.ClassName ?? string.Empty, evt.Name ?? string.Empty);
+            if (methodNodes.All(n => n.Id != nodeId))
+            {
+                methodNodes.Add(new MethodNode
+                {
+                    Id = nodeId,
+                    Name = evt.Name ?? string.Empty,
+                    ClassName = evt.ClassName ?? string.Empty,
+                    Namespace = evt.Namespace ?? string.Empty,
+                    FileName = evt.FileName ?? string.Empty
+                });
+            }
+        }
+        // Add nodes for Constructors
+        foreach (var ctor in constructors)
+        {
+            var nodeId = CreateNodeId(ctor.Namespace ?? string.Empty, ctor.ClassName ?? string.Empty, ctor.Name ?? string.Empty);
+            if (methodNodes.All(n => n.Id != nodeId))
+            {
+                methodNodes.Add(new MethodNode
+                {
+                    Id = nodeId,
+                    Name = ctor.Name ?? string.Empty,
+                    ClassName = ctor.ClassName ?? string.Empty,
+                    Namespace = ctor.Namespace ?? string.Empty,
+                    FileName = ctor.FileName ?? string.Empty
+                });
+            }
+        }
+        // 2. Create Edges based on tracked method calls
+        foreach (var call in allMethodCalls)
+        {
+            // Determine the source node (the method/property/etc that made the call)
+            if (!string.IsNullOrEmpty(call.CallerNamespace) &&
+                !string.IsNullOrEmpty(call.CallerClass) &&
+                !string.IsNullOrEmpty(call.CallerMethod))
+            {
+                var sourceNodeId = CreateNodeId(call.CallerNamespace, call.CallerClass, call.CallerMethod);
+                if (!string.IsNullOrEmpty(call.Namespace) &&
+                    !string.IsNullOrEmpty(call.ClassName) &&
+                    !string.IsNullOrEmpty(call.CalledMethod))
+                {
+                    string targetMemberName;
+                    var lastDotIndex = call.CalledMethod.LastIndexOf('.');
+                    if (lastDotIndex >= 0 && lastDotIndex < call.CalledMethod.Length - 1)
+                    {
+                        targetMemberName = call.CalledMethod.Substring(lastDotIndex + 1);
+                    }
+                    else
+                    {
+                        targetMemberName = call.CalledMethod;
+                    }
+                    var targetNodeId = CreateNodeId(call.Namespace, call.ClassName, targetMemberName);
+                    if (methodNodes.Any(n => n.Id == sourceNodeId))
+                    {
+                        callEdges.Add(new MethodCallEdge
+                        {
+                            SourceId = sourceNodeId,
+                            TargetId = targetNodeId,
+                            CallLocation = new CallLocation
+                            {
+                                FileName = call.FileName,
+                                LineNumber = call.LineNumber,
+                                ColumnNumber = call.ColumnNumber
+                            },
+                            CalledMethodName = call.CalledMethod, 
+                            Arguments = call.Arguments ?? new List<string>(),
+                            ArgumentExpressions = call.ArgumentExpressions ?? new List<string>(),
+                            CallType = call.CallType
+                        });
+                    }
+                }
+            }
+        }
+        var callGraph = new CallGraph
+        {
+            Edges = callEdges,
+            Nodes = methodNodes
+        };
+        return (sourceMethods, allUsingDirectives, allMethodCalls, properties, fields, events, constructors, callGraph);
+    }
+
+    private static string GetContainingTypeName(MemberDeclarationSyntax member)
+    {
+        var parent = member.Parent;
+        while (parent != null)
+        {
+            if (parent is ClassDeclarationSyntax classDecl)
+                return classDecl.Identifier.Text;
+            if (parent is StructDeclarationSyntax structDecl)
+                return structDecl.Identifier.Text;
+            parent = parent.Parent;
+        }
+        return "";
     }
 
     private static void TrackCsMethodCall(Microsoft.CodeAnalysis.CSharp.Syntax.InvocationExpressionSyntax methodCall, SemanticModel model, List<MethodCalls> allMethodCalls, string path, string sourceFilePath, string fileName)
@@ -410,8 +1486,22 @@ public static class Dosai
         var location = methodCall.GetLocation().GetLineSpan().StartLinePosition;
         var lineNumber = location.Line + 1;
         var columnNumber = location.Character + 1;
-        var fullName = callExpression.ToFullString();
-        var callArgsTypes = callArguments.Arguments.Select(a => a.ToFullString()).ToList();
+        var callArgsTypes = new List<string>();
+        var callArgExpressions = new List<string>();
+        foreach (var arg in callArguments.Arguments)
+        {
+            var argType = model.GetTypeInfo(arg.Expression).Type;
+            if (argType != null)
+            {
+                callArgsTypes.Add(argType.ToDisplayString());
+            }
+            else
+            {
+                // Fallback to expression type if we can't get the type info
+                callArgsTypes.Add(arg.Expression.GetType().Name);
+            }
+            callArgExpressions.Add(arg.Expression.ToFullString());
+        }
         var exprInfo = model.GetSymbolInfo(callExpression);
         var calledMethod = string.Empty;
         var isInMetadata = false;
@@ -420,37 +1510,100 @@ public static class Dosai
         var Module = string.Empty;
         var Namespace = string.Empty;
         var ClassName = string.Empty;
-
+        var callerMethod = string.Empty;
+        var callerNamespace = string.Empty;
+        var callerClass = string.Empty;
+        var callType = CallType.MethodCall;
+        
         if (exprInfo.Symbol != null)
         {
-            var methodSymbol = exprInfo.Symbol;
-            calledMethod = methodSymbol.ToDisplayString();
-            isInMetadata = methodSymbol.Locations.Any(loc => loc.IsInMetadata);
-            isInSource = methodSymbol.Locations.Any(loc => loc.IsInSource);
-            Assembly = methodSymbol.ContainingAssembly.ToDisplayString();
-            Module = methodSymbol.ContainingModule.ToDisplayString();
-            Namespace = methodSymbol.ContainingNamespace.ToDisplayString();
-            ClassName = methodSymbol.ContainingType.ToDisplayString();
+            switch (exprInfo.Symbol)
+            {
+                case IMethodSymbol methodSymbol when methodSymbol.MethodKind == MethodKind.PropertyGet:
+                    callType = CallType.PropertyGet;
+                    calledMethod = methodSymbol.AssociatedSymbol?.Name ?? methodSymbol.Name;
+                    ClassName = methodSymbol.AssociatedSymbol?.ContainingType?.Name ?? methodSymbol.ContainingType?.Name ?? "";
+                    Namespace = methodSymbol.AssociatedSymbol?.ContainingNamespace?.ToDisplayString() ??
+                                methodSymbol.ContainingNamespace?.ToDisplayString() ?? "";
+                    break;
+                case IMethodSymbol methodSymbol when methodSymbol.MethodKind == MethodKind.PropertySet:
+                    callType = CallType.PropertySet;
+                    calledMethod = methodSymbol.AssociatedSymbol?.Name ?? methodSymbol.Name;
+                    ClassName = methodSymbol.AssociatedSymbol?.ContainingType?.Name ?? methodSymbol.ContainingType?.Name ?? "";
+                    Namespace = methodSymbol.AssociatedSymbol?.ContainingNamespace?.ToDisplayString() ??
+                                methodSymbol.ContainingNamespace?.ToDisplayString() ?? "";
+                    break;
+                case IMethodSymbol methodSymbol when methodSymbol.MethodKind == MethodKind.EventAdd:
+                    callType = CallType.EventSubscribe;
+                    calledMethod = methodSymbol.AssociatedSymbol?.Name ?? methodSymbol.Name;
+                    ClassName = methodSymbol.AssociatedSymbol?.ContainingType?.Name ?? methodSymbol.ContainingType?.Name ?? "";
+                    Namespace = methodSymbol.AssociatedSymbol?.ContainingNamespace?.ToDisplayString() ??
+                                methodSymbol.ContainingNamespace?.ToDisplayString() ?? "";
+                    break;
+                case IMethodSymbol methodSymbol when methodSymbol.MethodKind == MethodKind.EventRemove:
+                    callType = CallType.EventUnsubscribe;
+                    calledMethod = methodSymbol.AssociatedSymbol?.Name ?? methodSymbol.Name;
+                    ClassName = methodSymbol.AssociatedSymbol?.ContainingType?.Name ?? methodSymbol.ContainingType?.Name ?? "";
+                    Namespace = methodSymbol.AssociatedSymbol?.ContainingNamespace?.ToDisplayString() ??
+                                methodSymbol.ContainingNamespace?.ToDisplayString() ?? "";
+                    break;
+                case IMethodSymbol methodSymbol when methodSymbol.MethodKind == MethodKind.Constructor:
+                    callType = CallType.ConstructorCall;
+                    calledMethod = methodSymbol.ContainingType?.Name ?? methodSymbol.Name; // Constructor name is usually .ctor
+                    ClassName = methodSymbol.ContainingType?.Name ?? "";
+                    Namespace = methodSymbol.ContainingNamespace?.ToDisplayString() ?? "";
+                    break;
+                case IMethodSymbol methodSymbol:
+                    calledMethod = methodSymbol.ToDisplayString();
+                    isInMetadata = methodSymbol.Locations.Any(l => l.IsInMetadata);
+                    isInSource = methodSymbol.Locations.Any(l => l.IsInSource);
+                    Assembly = methodSymbol.ContainingAssembly?.ToDisplayString() ?? "";
+                    Module = methodSymbol.ContainingModule?.ToDisplayString() ?? "";
+                    Namespace = methodSymbol.ContainingNamespace?.ToDisplayString() ?? "";
+                    ClassName = methodSymbol.ContainingType?.Name ?? "";
+                    break;
+                case IPropertySymbol propertySymbol:
+                    callType = CallType.PropertyGet;
+                    calledMethod = propertySymbol.Name;
+                    ClassName = propertySymbol.ContainingType?.Name ?? "";
+                    Namespace = propertySymbol.ContainingNamespace?.ToDisplayString() ?? "";
+                    break;
+            }
+        }
+
+        // Get caller context
+        var callerSymbol = model.GetEnclosingSymbol(methodCall.SpanStart) as IMethodSymbol;
+        if (callerSymbol != null)
+        {
+            callerMethod = callerSymbol.Name;
+            callerNamespace = callerSymbol.ContainingNamespace.ToDisplayString();
+            callerClass = callerSymbol.ContainingType.Name;
         }
 
         var IsInternal = isInSource || !isInMetadata;
-
-        if (!IsInternal)
+        if (Assembly == String.Empty && Module == String.Empty && Namespace == String.Empty && ClassName == String.Empty && calledMethod == String.Empty)
         {
-            allMethodCalls.Add(new MethodCalls
-            {
-                Path = Path.GetRelativePath(path, sourceFilePath),
-                FileName = fileName,
-                Assembly = Assembly,
-                Module = Module,
-                Namespace = Namespace,
-                ClassName = ClassName,
-                CalledMethod = calledMethod,
-                LineNumber = lineNumber,
-                ColumnNumber = columnNumber,
-                Arguments = callArgsTypes
-            });
+            return;
         }
+        allMethodCalls.Add(new MethodCalls
+        {
+            Path = Path.GetRelativePath(path, sourceFilePath),
+            FileName = fileName,
+            Assembly = Assembly,
+            Module = Module,
+            Namespace = Namespace,
+            ClassName = ClassName,
+            CalledMethod = calledMethod,
+            LineNumber = lineNumber,
+            ColumnNumber = columnNumber,
+            Arguments = callArgsTypes,
+            ArgumentExpressions = callArgExpressions,
+            CallType = callType,
+            CallerMethod = callerMethod,
+            CallerNamespace = callerNamespace,
+            CallerClass = callerClass,
+            IsInternal = IsInternal
+        });
     }
 
     private static void TrackVBMethodCall(Microsoft.CodeAnalysis.VisualBasic.Syntax.InvocationExpressionSyntax methodCall, SemanticModel model, List<MethodCalls> allMethodCalls, string path, string sourceFilePath, string fileName)
@@ -470,6 +1623,9 @@ public static class Dosai
         var Module = string.Empty;
         var Namespace = string.Empty;
         var ClassName = string.Empty;
+        var callerMethod = string.Empty;
+        var callerNamespace = string.Empty;
+        var callerClass = string.Empty;
 
         if (exprInfo.Symbol != null)
         {
@@ -483,24 +1639,34 @@ public static class Dosai
             ClassName = methodSymbol.ContainingType.ToDisplayString();
         }
 
+        // Get caller context
+        var callerSymbol = model.GetEnclosingSymbol(methodCall.SpanStart) as IMethodSymbol;
+        if (callerSymbol != null)
+        {
+            callerMethod = callerSymbol.Name;
+            callerNamespace = callerSymbol.ContainingNamespace.ToDisplayString();
+            callerClass = callerSymbol.ContainingType.Name;
+        }
+
         var IsInternal = isInSource || !isInMetadata;
 
-        if (!IsInternal)
+        allMethodCalls.Add(new MethodCalls
         {
-            allMethodCalls.Add(new MethodCalls
-            {
-                Path = Path.GetRelativePath(path, sourceFilePath),
-                FileName = fileName,
-                Assembly = Assembly,
-                Module = Module,
-                Namespace = Namespace,
-                ClassName = ClassName,
-                CalledMethod = calledMethod,
-                LineNumber = lineNumber,
-                ColumnNumber = columnNumber,
-                Arguments = callArgsTypes
-            });
-        }
+            Path = Path.GetRelativePath(path, sourceFilePath),
+            FileName = fileName,
+            Assembly = Assembly,
+            Module = Module,
+            Namespace = Namespace,
+            ClassName = ClassName,
+            CalledMethod = calledMethod,
+            LineNumber = lineNumber,
+            ColumnNumber = columnNumber,
+            Arguments = callArgsTypes,
+            CallerMethod = callerMethod,
+            CallerNamespace = callerNamespace,
+            CallerClass = callerClass,
+            IsInternal = IsInternal
+        });
     }
 
     /// <summary>
@@ -528,7 +1694,7 @@ public static class Dosai
         {
             var extension = Path.GetExtension(path);
 
-            if (!extension.Equals(Constants.AssemblyExtension) && !extension.Equals(Constants.CSharpSourceExtension) && !extension.Equals(Constants.VBSourceExtension))
+            if (!extension.Equals(Constants.AssemblyExtension) && !extension.Equals(Constants.CSharpSourceExtension) && !extension.Equals(Constants.VBSourceExtension) && !extension.Equals(Constants.FSharpSourceExtension))
             {
                 throw new Exception($"The provided file path must reference a {fileExtension} file.");
             }
