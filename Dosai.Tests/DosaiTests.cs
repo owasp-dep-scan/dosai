@@ -1,5 +1,6 @@
 using Depscan;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Xunit;
 
 namespace Dosai.Tests;
@@ -12,7 +13,11 @@ public class DosaiTests
     {
         var assemblyPath = GetFilePath(DosaiTestDataCSharpDLL);
         var result = Depscan.Dosai.GetMethods(assemblyPath);
-        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
+        var deserializeOptions = new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() } 
+        };
+        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result, deserializeOptions);
         var actualMethods = methodsSlice?.Methods;
         
         Assert.Equal(21, actualMethods?.Count);
@@ -24,7 +29,11 @@ public class DosaiTests
     {
         var assemblyPath = GetFilePath(DosaiTestDataVBDLL);
         var result = Depscan.Dosai.GetMethods(assemblyPath);
-        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
+        var deserializeOptions = new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() } 
+        };
+        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result, deserializeOptions);
         var actualMethods = methodsSlice?.Methods;
         
         Assert.Equal(21, actualMethods?.Count);
@@ -36,7 +45,11 @@ public class DosaiTests
     {
         var sourcePath = GetFilePath(HelloWorldCSharpSource);
         var result = Depscan.Dosai.GetMethods(sourcePath);
-        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
+        var deserializeOptions = new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() } 
+        };
+        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result, deserializeOptions);
         var actualMethods = methodsSlice?.Methods;
         var methodCalls = methodsSlice?.MethodCalls;
 
@@ -64,7 +77,11 @@ public class DosaiTests
     {
         var sourcePath = GetFilePath(HelloWorldVBSource);
         var result = Depscan.Dosai.GetMethods(sourcePath);
-        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
+        var deserializeOptions = new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() } 
+        };
+        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result, deserializeOptions);
         var actualMethods = methodsSlice?.Methods;
         var methodCalls = methodsSlice?.MethodCalls;
 
@@ -92,7 +109,11 @@ public class DosaiTests
     {
         var sourcePath = GetFilePath(HelloWorldFSharpSource);
         var result = Depscan.Dosai.GetMethods(sourcePath);
-        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
+        var deserializeOptions = new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() } 
+        };
+        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result,  deserializeOptions);
         var actualMethods = methodsSlice?.Methods;
 
         // We expect at least some methods to be detected
@@ -116,7 +137,11 @@ public class DosaiTests
 
         var sourceFolder = Path.Combine(Directory.GetCurrentDirectory(), sourceDirectory);
         var result = Depscan.Dosai.GetMethods(sourceFolder);
-        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
+        var deserializeOptions = new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() } 
+        };
+        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result, deserializeOptions);
         var actualMethods = methodsSlice?.Methods;
         var methodCalls = methodsSlice?.MethodCalls;
 
@@ -151,7 +176,11 @@ public class DosaiTests
 
         var sourceFolder = Path.Combine(Directory.GetCurrentDirectory(), sourceDirectory);
         var result = Depscan.Dosai.GetMethods(sourceFolder);
-        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
+        var deserializeOptions = new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() } 
+        };
+        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result,  deserializeOptions);
         var actualMethods = methodsSlice?.Methods;
         var methodCalls = methodsSlice?.MethodCalls;
 
@@ -185,7 +214,11 @@ public class DosaiTests
 
         var sourceFolder = Path.Combine(Directory.GetCurrentDirectory(), fsharpSourceDirectory);
         var result = Depscan.Dosai.GetMethods(sourceFolder);
-        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
+        var deserializeOptions = new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() } 
+        };
+        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result,  deserializeOptions);
         var actualMethods = methodsSlice?.Methods;
 
         // We expect at least some methods to be detected
@@ -210,7 +243,11 @@ public class DosaiTests
 
         var folder = Path.Combine(Directory.GetCurrentDirectory(), combinedDirectory);
         var result = Depscan.Dosai.GetMethods(folder);
-        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
+        var deserializeOptions = new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() } 
+        };
+        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result,  deserializeOptions);
         var actualMethods = methodsSlice?.Methods;
         var methodCalls = methodsSlice?.MethodCalls;
 
@@ -235,7 +272,11 @@ public class DosaiTests
 
         var folder = Path.Combine(Directory.GetCurrentDirectory(), combinedDirectory);
         var result = Depscan.Dosai.GetMethods(folder);
-        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
+        var deserializeOptions = new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() } 
+        };
+        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result,  deserializeOptions);
         var actualMethods = methodsSlice?.Methods;
         var methodCalls = methodsSlice?.MethodCalls;
 
@@ -264,7 +305,11 @@ public class DosaiTests
 
         var folder = Path.Combine(Directory.GetCurrentDirectory(), allLanguagesDirectory);
         var result = Depscan.Dosai.GetMethods(folder);
-        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
+        var deserializeOptions = new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() } 
+        };
+        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result,  deserializeOptions);
         var actualMethods = methodsSlice?.Methods;
 
         Assert.True(actualMethods?.Count > 0);
@@ -296,7 +341,11 @@ public class DosaiTests
         Directory.CreateDirectory(emptyDirectory);
         var assemblyFolder = Path.Combine(Directory.GetCurrentDirectory(), emptyDirectory);
         var result = Depscan.Dosai.GetMethods(assemblyFolder);
-        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result);
+        var deserializeOptions = new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() } 
+        };
+        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result,  deserializeOptions);
         Assert.Equal(0, methodsSlice?.Methods?.Count);
     }
     #endregion GetMethods
