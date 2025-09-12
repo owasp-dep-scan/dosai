@@ -38,7 +38,7 @@ public static class Dosai
         var methodName = methodSymbol.Name;
         var returnType = methodSymbol.MethodKind == MethodKind.Constructor ? "" : (methodSymbol.ReturnType.ToDisplayString());
 
-        var parameters = methodSymbol.Parameters.Select(p => p.Type.ToDisplayString()).ToList();
+        var parameters = methodSymbol.Parameters.Select(p => p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)).ToList();
         var paramString = string.Join(",", parameters);
 
         var generics = "";
@@ -625,6 +625,94 @@ public static class Dosai
         return keywords.Contains(word);
     }
 
+    private static Method CreateMethodFromSymbol(
+        IMethodSymbol methodSymbol,
+        SemanticModel model,
+        string sourceFilePath,
+        string fileName,
+        string basePath,
+        int lineNumber = 0,
+        int columnNumber = 0)
+    {
+        if (lineNumber == 0 || columnNumber == 0)
+        {
+            var location = methodSymbol.Locations.FirstOrDefault();
+            var lineSpan = location?.GetLineSpan();
+            lineNumber = lineSpan?.StartLinePosition.Line + 1 ?? lineNumber;
+            columnNumber = lineSpan?.Span.Start.Character + 1 ?? columnNumber;
+        }
+
+        var containingType = methodSymbol.ContainingType;
+        var containingNamespace = methodSymbol.ContainingNamespace;
+        var assembly = methodSymbol.ContainingAssembly;
+        var module = methodSymbol.ContainingModule;
+
+        var modifiers = new List<string>();
+        if (methodSymbol.DeclaredAccessibility.HasFlag(Accessibility.Public)) modifiers.Add("Public");
+        if (methodSymbol.DeclaredAccessibility.HasFlag(Accessibility.Private)) modifiers.Add("Private");
+        if (methodSymbol.DeclaredAccessibility.HasFlag(Accessibility.Protected)) modifiers.Add("Protected");
+        if (methodSymbol.DeclaredAccessibility.HasFlag(Accessibility.Internal)) modifiers.Add("Internal");
+        if (methodSymbol.IsStatic) modifiers.Add("Static");
+        if (methodSymbol.IsVirtual) modifiers.Add("Virtual");
+        if (methodSymbol.IsOverride) modifiers.Add("Override");
+
+        var isGenericMethod = methodSymbol.IsGenericMethod;
+        var genericParameters = methodSymbol.TypeParameters.Select(tp => tp.Name).ToList();
+
+        var metadataToken = 0;
+        if (assembly != null && SymbolEqualityComparer.Default.Equals(assembly, model.Compilation.Assembly))
+        {
+            metadataToken = methodSymbol.MetadataToken;
+        }
+
+        string sourceSignature = GenerateMethodSignature(methodSymbol);
+        string assemblySignature = methodSymbol.ToDisplayString();
+
+        var baseType = containingType?.BaseType?.Name ?? "Object";
+        var implementedInterfaces = containingType?.AllInterfaces.Select(i => i.Name).ToList() ?? new List<string>();
+
+        return new Method
+        {
+            Path = Path.GetRelativePath(basePath, sourceFilePath),
+            FileName = fileName,
+            Assembly = assembly?.ToDisplayString() ?? "",
+            Module = module?.ToDisplayString() ?? "",
+            Namespace = containingNamespace?.ToDisplayString() ?? "",
+            ClassName = containingType?.Name ?? "",
+            Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
+            Name = methodSymbol.Name,
+            ReturnType = methodSymbol.ReturnType.ToDisplayString(),
+            LineNumber = lineNumber,
+            ColumnNumber = columnNumber,
+            Parameters = methodSymbol.Parameters.Select(p => new Parameter
+            {
+                Name = p.Name,
+                Type = p.Type.ToDisplayString(),
+                TypeFullName = p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
+                IsGenericParameter = p.Type is ITypeParameterSymbol
+            }).ToList(),
+            CustomAttributes = methodSymbol.GetAttributes().Select(attr =>
+                new CustomAttributeInfo
+                {
+                    Name = attr.AttributeClass?.Name,
+                    FullName = attr.AttributeClass?.ToDisplayString(),
+                    ConstructorArguments = attr.ConstructorArguments.Select(arg => arg.Value?.ToString() ?? string.Empty).ToList(),
+                    NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo
+                    {
+                        Name = na.Key,
+                        Value = na.Value.Value?.ToString() ?? string.Empty
+                    }).ToList()
+                }).ToList(),
+            BaseType = baseType,
+            ImplementedInterfaces = implementedInterfaces,
+            MetadataToken = metadataToken,
+            SourceSignature = sourceSignature,
+            AssemblySignature = assemblySignature,
+            IsGenericMethod = isGenericMethod,
+            GenericParameters = genericParameters,
+        };
+    }
+    
     /// <summary>
     /// Get all source methods for the given path to C# source or directory of C# source
     /// </summary>
@@ -709,7 +797,7 @@ public static class Dosai
             var csConstructorDeclarations = csRoot?.DescendantNodes().OfType<ConstructorDeclarationSyntax>();
             var vbConstructorDeclarations = vbRoot?.DescendantNodes().OfType<ConstructorBlockSyntax>();
 
-            // C# method declarations - modify this section
+            // C# method declarations
             if (csMethodDeclarations != null)
             {
                 foreach(var methodDeclaration in csMethodDeclarations)
@@ -754,7 +842,7 @@ public static class Dosai
                             {
                                 Name = p.Name,
                                 Type = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(p.Type.ToString()!),
-                                TypeFullName = p.Type.ToDisplayString(),
+                                TypeFullName = p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
                                 IsGenericParameter = p.Type is ITypeParameterSymbol
                             }).ToList(),
                             CustomAttributes = methodSymbol.GetAttributes().Select(attr => 
@@ -815,7 +903,8 @@ public static class Dosai
                             ColumnNumber = columnNumber,
                             Parameters = method.Parameters.Select(p => new Parameter {
                                 Name = p.Name,
-                                Type = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(p.Type.ToString()!)
+                                Type = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(p.Type.ToString()!),
+                                TypeFullName = p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
                             }).ToList(),
                             CustomAttributes = method.GetAttributes().Select(attr => 
                                 new CustomAttributeInfo {
@@ -842,37 +931,37 @@ public static class Dosai
                 foreach(var propertyDeclaration in csPropertyDeclarations)
                 {
                     var modifiers = propertyDeclaration.Modifiers;
-                    var property = model.GetDeclaredSymbol(propertyDeclaration);
+                    var propertySymbol = model.GetDeclaredSymbol(propertyDeclaration);
                     var codeSpan = propertyDeclaration.SyntaxTree.GetLineSpan(propertyDeclaration.Span);
                     var lineNumber = codeSpan.StartLinePosition.Line + 1;
                     var columnNumber = codeSpan.Span.Start.Character + 1;
 
-                    if (property != null)
+                    if (propertySymbol != null)
                     {
                         // Get inheritance information
-                        var containingType = property.ContainingType;
+                        var containingType = propertySymbol.ContainingType;
                         var baseType = containingType?.BaseType?.Name;
                         var implementedInterfaces = containingType?.AllInterfaces.Select(i => i.Name).ToList();
                         var metadataToken = 0;
-                        if (SymbolEqualityComparer.Default.Equals(property.ContainingAssembly, model.Compilation.Assembly))
+                        if (SymbolEqualityComparer.Default.Equals(propertySymbol.ContainingAssembly, model.Compilation.Assembly))
                         {
-                            metadataToken = property.MetadataToken;
+                            metadataToken = propertySymbol.MetadataToken;
                         }
                         properties.Add(new PropertyInfo
                         {
                             Path = Path.GetRelativePath(path, sourceFilePath),
                             FileName = fileName,
-                            Assembly = property.ContainingAssembly.ToDisplayString(),
-                            Module = property.ContainingModule.ToDisplayString(),
-                            Namespace = property.ContainingNamespace.ToDisplayString(),
-                            ClassName = property.ContainingType.Name,
+                            Assembly = propertySymbol.ContainingAssembly.ToDisplayString(),
+                            Module = propertySymbol.ContainingModule.ToDisplayString(),
+                            Namespace = propertySymbol.ContainingNamespace.ToDisplayString(),
+                            ClassName = propertySymbol.ContainingType.Name,
                             Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
-                            Name = property.Name,
-                            Type = property.Type.Name,
-                            TypeFullName = property.Type.ToDisplayString(),
+                            Name = propertySymbol.Name,
+                            Type = propertySymbol.Type.Name,
+                            TypeFullName = propertySymbol.Type.ToDisplayString(),
                             LineNumber = lineNumber,
                             ColumnNumber = columnNumber,
-                            CustomAttributes = property.GetAttributes().Select(attr => 
+                            CustomAttributes = propertySymbol.GetAttributes().Select(attr => 
                                 new CustomAttributeInfo {
                                     Name = attr.AttributeClass?.Name,
                                     FullName = attr.AttributeClass?.ToDisplayString(),
@@ -882,13 +971,23 @@ public static class Dosai
                                         Value = na.Value.Value?.ToString() ?? string.Empty
                                     }).ToList()
                                 }).ToList(),
-                            HasGetter = property.GetMethod != null,
-                            HasSetter = property.SetMethod != null,
-                            Implements = property.ExplicitInterfaceImplementations.Select(i => i.ToDisplayString()).ToList(),
+                            HasGetter = propertySymbol.GetMethod != null,
+                            HasSetter = propertySymbol.SetMethod != null,
+                            Implements = propertySymbol.ExplicitInterfaceImplementations.Select(i => i.ToDisplayString()).ToList(),
                             BaseType = baseType,
                             ImplementedInterfaces = implementedInterfaces,
                             MetadataToken = metadataToken
                         });
+                        if (propertySymbol.GetMethod != null)
+                        {
+                            var getterMethod = CreateMethodFromSymbol(propertySymbol.GetMethod, model, sourceFilePath, fileName, path, lineNumber, columnNumber);
+                            sourceMethods.Add(getterMethod);    
+                        }
+                        if (propertySymbol.SetMethod != null)
+                        {
+                            var setterMethod = CreateMethodFromSymbol(propertySymbol.SetMethod, model, sourceFilePath, fileName, path, lineNumber, columnNumber);
+                            sourceMethods.Add(setterMethod);
+                        }
                     }
                 }
             }
@@ -899,37 +998,37 @@ public static class Dosai
                 foreach(var propertyDeclaration in vbPropertyDeclarations)
                 {
                     var modifiers = propertyDeclaration.Modifiers;
-                    var property = model.GetDeclaredSymbol(propertyDeclaration);
+                    var propertySymbol = model.GetDeclaredSymbol(propertyDeclaration);
                     var codeSpan = propertyDeclaration.SyntaxTree.GetLineSpan(propertyDeclaration.Span);
                     var lineNumber = codeSpan.StartLinePosition.Line + 1;
                     var columnNumber = codeSpan.Span.Start.Character + 1;
 
-                    if (property != null)
+                    if (propertySymbol != null)
                     {
                         // Get inheritance information
-                        var containingType = property.ContainingType;
+                        var containingType = propertySymbol.ContainingType;
                         var baseType = containingType?.BaseType?.Name;
                         var implementedInterfaces = containingType?.AllInterfaces.Select(i => i.Name).ToList();
                         var metadataToken = 0;
-                        if (SymbolEqualityComparer.Default.Equals(property.ContainingAssembly, model.Compilation.Assembly))
+                        if (SymbolEqualityComparer.Default.Equals(propertySymbol.ContainingAssembly, model.Compilation.Assembly))
                         {
-                            metadataToken = property.MetadataToken;
+                            metadataToken = propertySymbol.MetadataToken;
                         }
                         properties.Add(new PropertyInfo
                         {
                             Path = Path.GetRelativePath(path, sourceFilePath),
                             FileName = fileName,
-                            Assembly = property.ContainingAssembly.ToDisplayString(),
-                            Module = property.ContainingModule.ToDisplayString(),
-                            Namespace = property.ContainingNamespace.ToDisplayString(),
-                            ClassName = property.ContainingType.Name,
+                            Assembly = propertySymbol.ContainingAssembly.ToDisplayString(),
+                            Module = propertySymbol.ContainingModule.ToDisplayString(),
+                            Namespace = propertySymbol.ContainingNamespace.ToDisplayString(),
+                            ClassName = propertySymbol.ContainingType.Name,
                             Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
-                            Name = property.Name,
-                            Type = property.Type.Name,
-                            TypeFullName = property.Type.ToDisplayString(),
+                            Name = propertySymbol.Name,
+                            Type = propertySymbol.Type.Name,
+                            TypeFullName = propertySymbol.Type.ToDisplayString(),
                             LineNumber = lineNumber,
                             ColumnNumber = columnNumber,
-                            CustomAttributes = property.GetAttributes().Select(attr => 
+                            CustomAttributes = propertySymbol.GetAttributes().Select(attr => 
                                 new CustomAttributeInfo {
                                     Name = attr.AttributeClass?.Name,
                                     FullName = attr.AttributeClass?.ToDisplayString(),
@@ -939,13 +1038,24 @@ public static class Dosai
                                         Value = na.Value.Value?.ToString() ?? string.Empty
                                     }).ToList()
                                 }).ToList(),
-                            HasGetter = property.GetMethod != null,
-                            HasSetter = property.SetMethod != null,
-                            Implements = property.ExplicitInterfaceImplementations.Select(i => i.ToDisplayString()).ToList(),
+                            HasGetter = propertySymbol.GetMethod != null,
+                            HasSetter = propertySymbol.SetMethod != null,
+                            Implements = propertySymbol.ExplicitInterfaceImplementations.Select(i => i.ToDisplayString()).ToList(),
                             BaseType = baseType,
                             ImplementedInterfaces = implementedInterfaces,
                             MetadataToken = metadataToken
                         });
+                        if (propertySymbol.GetMethod != null)
+                        {
+                            var getterMethod = CreateMethodFromSymbol(propertySymbol.GetMethod, model, sourceFilePath, fileName, path, lineNumber, columnNumber);
+                            sourceMethods.Add(getterMethod);
+                        }
+
+                        if (propertySymbol.SetMethod != null)
+                        {
+                            var setterMethod = CreateMethodFromSymbol(propertySymbol.SetMethod, model, sourceFilePath, fileName, path, lineNumber, columnNumber);
+                            sourceMethods.Add(setterMethod);
+                        }
                     }
                 }
             }
@@ -1278,7 +1388,7 @@ public static class Dosai
                             {
                                 Name = p.Name,
                                 Type = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(p.Type.ToString()!),
-                                TypeFullName = p.Type.ToDisplayString(),
+                                TypeFullName = p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
                                 IsGenericParameter = p.Type is ITypeParameterSymbol
                             }).ToList(),
                             CustomAttributes = constructorSymbol.GetAttributes().Select(attr => 
