@@ -62,7 +62,7 @@ public static class Dosai
 
     #endregion
 
-    private static readonly JsonSerializerOptions options = new()
+    private static readonly JsonSerializerOptions Options = new()
     {
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
@@ -93,7 +93,7 @@ public static class Dosai
             CallGraph = callGraph,
             AssemblyInformation = assemblyInformation,
             SourceAssemblyMapping = sourceAssemblyMapping
-        }, options);
+        }, Options);
     }
 
     /// <summary>
@@ -403,7 +403,7 @@ public static class Dosai
         return assemblyMethods;
     }
 
-    private static string GetContainingTypeNameVB(Microsoft.CodeAnalysis.VisualBasic.Syntax.FieldDeclarationSyntax member)
+    private static string GetContainingTypeNameVb(Microsoft.CodeAnalysis.VisualBasic.Syntax.FieldDeclarationSyntax member)
     {
         var parent = member.Parent;
         while (parent != null)
@@ -435,7 +435,7 @@ public static class Dosai
             {
                 var fileName = Path.GetFileName(sourceFilePath);
                 var fileContent = File.ReadAllText(sourceFilePath);
-                var lines = fileContent.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                var lines = fileContent.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
                 
                 string currentModule = "Global";
                 string currentType = "";
@@ -648,11 +648,11 @@ public static class Dosai
         var methodNodes = new List<MethodNode>();
         var sourceAssemblyMappings = new List<SourceAssemblyMapping>();
 #pragma warning disable IL3000
-        var Mscorlib = MetadataReference.CreateFromFile(Path.Combine(AppContext.BaseDirectory, typeof(object).Assembly.Location));
+        var mscorlib = MetadataReference.CreateFromFile(Path.Combine(AppContext.BaseDirectory, typeof(object).Assembly.Location));
 #pragma warning restore IL3000
         var metadataReferences = new List<PortableExecutableReference>
         {
-            Mscorlib
+            mscorlib
         };
         foreach (var externalAssembly in assembliesToInspect)
         {
@@ -672,14 +672,14 @@ public static class Dosai
             {
                 var tree = (CSharpSyntaxTree)CSharpSyntaxTree.ParseText(fileContent);
                 csRoot = tree.GetCompilationUnitRoot();
-                var compilation = CSharpCompilation.Create(fileName, syntaxTrees: new[] { tree }, references: metadataReferences);
+                var compilation = CSharpCompilation.Create(fileName, syntaxTrees: [tree], references: metadataReferences);
                 model = compilation.GetSemanticModel(tree);
             }
             else if (extn.Equals(Constants.VBSourceExtension))
             {
                 var tree = (VisualBasicSyntaxTree)VisualBasicSyntaxTree.ParseText(fileContent);
                 vbRoot = tree.GetCompilationUnitRoot();
-                var compilation = VisualBasicCompilation.Create(fileName, syntaxTrees: new[] { tree }, references: metadataReferences);
+                var compilation = VisualBasicCompilation.Create(fileName, syntaxTrees: [tree], references: metadataReferences);
                 model = compilation.GetSemanticModel(tree);
             }
             else
@@ -1041,7 +1041,7 @@ public static class Dosai
                                 Assembly = model?.Compilation.Assembly.ToDisplayString(),
                                 Module = model?.Compilation.Assembly.Modules.FirstOrDefault()?.ToDisplayString(),
                                 Namespace = containingTypeSymbol?.ContainingNamespace?.ToDisplayString() ?? model?.Compilation.Assembly.Name,
-                                ClassName = GetContainingTypeNameVB(fieldDeclaration), // Use VB-specific method
+                                ClassName = GetContainingTypeNameVb(fieldDeclaration), // Use VB-specific method
                                 Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
                                 Name = variable.Names.FirstOrDefault()?.Identifier.Text ?? "",
                                 Type = typeSymbol?.Name ?? type?.ToString() ?? "Unknown",
@@ -1373,8 +1373,8 @@ public static class Dosai
                     var lineNumber = location.Line + 1;
                     var columnNumber = location.Character + 1;
                     var namespaceMembers = new List<string>();
-                    var Assembly = string.Empty;
-                    var Module = string.Empty;
+                    var assembly = string.Empty;
+                    var module = string.Empty;
 
                     if (usingDirective.Name != null)
                     {
@@ -1394,8 +1394,8 @@ public static class Dosai
                         {
                             var nsMembers = nsSymbol.GetNamespaceMembers();
                             namespaceMembers.AddRange(nsMembers.Select(m => m.Name));
-                            Assembly = nsSymbol.ContainingAssembly?.ToDisplayString();
-                            Module = nsSymbol.ContainingModule?.ToDisplayString();
+                            assembly = nsSymbol.ContainingAssembly?.ToDisplayString();
+                            module = nsSymbol.ContainingModule?.ToDisplayString();
                             namespaceType = nsSymbol.ContainingNamespace?.ToDisplayString();
                         }
                     }
@@ -1404,8 +1404,8 @@ public static class Dosai
                     {
                         Path = Path.GetRelativePath(path, sourceFilePath),
                         FileName = fileName,
-                        Assembly = Assembly,
-                        Module = Module,
+                        Assembly = assembly,
+                        Module = module,
                         Namespace = namespaceType,
                         Name = name,
                         LineNumber = lineNumber,
@@ -1426,8 +1426,8 @@ public static class Dosai
                     var lineNumber = location.Line + 1;
                     var columnNumber = location.Character + 1;
                     var namespaceMembers = new List<string>();
-                    var Assembly = "";
-                    var Module = "";
+                    var assembly = "";
+                    var module = "";
 
                     if (importDirective.Name != null)
                     {
@@ -1445,8 +1445,8 @@ public static class Dosai
                         {
                             var nsMembers = nsSymbol.GetNamespaceMembers();
                             namespaceMembers.AddRange(nsMembers.Select(m => m.Name));
-                            Assembly = nsSymbol.ContainingAssembly?.ToDisplayString();
-                            Module = nsSymbol.ContainingModule?.ToDisplayString();
+                            assembly = nsSymbol.ContainingAssembly?.ToDisplayString();
+                            module = nsSymbol.ContainingModule?.ToDisplayString();
                             namespaceType = nsSymbol.ContainingNamespace?.ToDisplayString();
                         }
                     }
@@ -1455,8 +1455,8 @@ public static class Dosai
                     {
                         Path = Path.GetRelativePath(path, sourceFilePath),
                         FileName = fileName,
-                        Assembly = Assembly,
-                        Module = Module,
+                        Assembly = assembly,
+                        Module = module,
                         Namespace = namespaceType,
                         Name = name,
                         LineNumber = lineNumber,
@@ -1481,7 +1481,7 @@ public static class Dosai
                 foreach(var methodCall in vbMethodCalls)
                 {
                     if (model != null)
-                        TrackVBMethodCall(methodCall, model, allMethodCalls, path, sourceFilePath, fileName);
+                        TrackVbMethodCall(methodCall, model, allMethodCalls, path, sourceFilePath, fileName);
                 }
             }
         }
@@ -1624,6 +1624,7 @@ public static class Dosai
         };
         // Source-to-Assembly Mapping Logic
         var assemblyMemberLookup = new Dictionary<string, object>();
+        var assemblyNameLookup = new Dictionary<string, object>();
         foreach (var asmMethod in assemblyMethods)
         {
             var asmSignature = asmMethod.AssemblySignature;
@@ -1631,6 +1632,7 @@ public static class Dosai
             {
                 assemblyMemberLookup.TryAdd(asmSignature, asmMethod);
             }
+            assemblyNameLookup.TryAdd($"{asmMethod.Namespace}.{asmMethod.ClassName}.{asmMethod.Name}", asmMethod);
         }
 
         foreach (var method in sourceMethods)
@@ -1647,6 +1649,14 @@ public static class Dosai
                 {
                     var sourceId = sourceMethod.SourceSignature;
                     var isMapped = assemblyMemberLookup.TryGetValue(sourceMethod.SourceSignature, out var asmMemberObj);
+                    if (!isMapped)
+                    {
+                        isMapped = assemblyNameLookup.TryGetValue($"{sourceMethod.Namespace}.{sourceMethod.ClassName}.{sourceMethod.Name}", out var asmMember);
+                        if (isMapped)
+                        {
+                            asmMemberObj = asmMember;
+                        }
+                    }
                     if (!isMapped)
                     {
                         break;
@@ -1705,25 +1715,18 @@ public static class Dosai
         foreach (var arg in callArguments.Arguments)
         {
             var argType = model.GetTypeInfo(arg.Expression).Type;
-            if (argType != null)
-            {
-                callArgsTypes.Add(argType.ToDisplayString());
-            }
-            else
-            {
-                // Fallback to expression type if we can't get the type info
-                callArgsTypes.Add(arg.Expression.GetType().Name);
-            }
+            // Fallback to expression type if we can't get the type info
+            callArgsTypes.Add(argType != null ? argType.ToDisplayString() : arg.Expression.GetType().Name);
             callArgExpressions.Add(arg.Expression.ToFullString());
         }
         var exprInfo = model.GetSymbolInfo(callExpression);
         var calledMethod = string.Empty;
         var isInMetadata = false;
         var isInSource = false;
-        var Assembly = string.Empty;
-        var Module = string.Empty;
-        var Namespace = string.Empty;
-        var ClassName = string.Empty;
+        var assembly = string.Empty;
+        var module = string.Empty;
+        var namespaceString = string.Empty;
+        var className = string.Empty;
         var callerMethod = string.Empty;
         var callerNamespace = string.Empty;
         var callerClass = string.Empty;
@@ -1733,69 +1736,68 @@ public static class Dosai
         {
             switch (exprInfo.Symbol)
             {
-                case IMethodSymbol methodSymbol when methodSymbol.MethodKind == MethodKind.PropertyGet:
+                case IMethodSymbol { MethodKind: MethodKind.PropertyGet } methodSymbol:
                     callType = CallType.PropertyGet;
                     calledMethod = methodSymbol.AssociatedSymbol?.Name ?? methodSymbol.Name;
-                    ClassName = methodSymbol.AssociatedSymbol?.ContainingType?.Name ?? methodSymbol.ContainingType?.Name ?? "";
-                    Namespace = methodSymbol.AssociatedSymbol?.ContainingNamespace?.ToDisplayString() ??
+                    className = methodSymbol.AssociatedSymbol?.ContainingType?.Name ?? methodSymbol.ContainingType?.Name ?? "";
+                    namespaceString = methodSymbol.AssociatedSymbol?.ContainingNamespace?.ToDisplayString() ??
                                 methodSymbol.ContainingNamespace?.ToDisplayString() ?? "";
                     break;
-                case IMethodSymbol methodSymbol when methodSymbol.MethodKind == MethodKind.PropertySet:
+                case IMethodSymbol { MethodKind: MethodKind.PropertySet } methodSymbol:
                     callType = CallType.PropertySet;
                     calledMethod = methodSymbol.AssociatedSymbol?.Name ?? methodSymbol.Name;
-                    ClassName = methodSymbol.AssociatedSymbol?.ContainingType?.Name ?? methodSymbol.ContainingType?.Name ?? "";
-                    Namespace = methodSymbol.AssociatedSymbol?.ContainingNamespace?.ToDisplayString() ??
+                    className = methodSymbol.AssociatedSymbol?.ContainingType?.Name ?? methodSymbol.ContainingType?.Name ?? "";
+                    namespaceString = methodSymbol.AssociatedSymbol?.ContainingNamespace?.ToDisplayString() ??
                                 methodSymbol.ContainingNamespace?.ToDisplayString() ?? "";
                     break;
-                case IMethodSymbol methodSymbol when methodSymbol.MethodKind == MethodKind.EventAdd:
+                case IMethodSymbol { MethodKind: MethodKind.EventAdd } methodSymbol:
                     callType = CallType.EventSubscribe;
                     calledMethod = methodSymbol.AssociatedSymbol?.Name ?? methodSymbol.Name;
-                    ClassName = methodSymbol.AssociatedSymbol?.ContainingType?.Name ?? methodSymbol.ContainingType?.Name ?? "";
-                    Namespace = methodSymbol.AssociatedSymbol?.ContainingNamespace?.ToDisplayString() ??
+                    className = methodSymbol.AssociatedSymbol?.ContainingType?.Name ?? methodSymbol.ContainingType?.Name ?? "";
+                    namespaceString = methodSymbol.AssociatedSymbol?.ContainingNamespace?.ToDisplayString() ??
                                 methodSymbol.ContainingNamespace?.ToDisplayString() ?? "";
                     break;
-                case IMethodSymbol methodSymbol when methodSymbol.MethodKind == MethodKind.EventRemove:
+                case IMethodSymbol { MethodKind: MethodKind.EventRemove } methodSymbol:
                     callType = CallType.EventUnsubscribe;
                     calledMethod = methodSymbol.AssociatedSymbol?.Name ?? methodSymbol.Name;
-                    ClassName = methodSymbol.AssociatedSymbol?.ContainingType?.Name ?? methodSymbol.ContainingType?.Name ?? "";
-                    Namespace = methodSymbol.AssociatedSymbol?.ContainingNamespace?.ToDisplayString() ??
+                    className = methodSymbol.AssociatedSymbol?.ContainingType?.Name ?? methodSymbol.ContainingType?.Name ?? "";
+                    namespaceString = methodSymbol.AssociatedSymbol?.ContainingNamespace?.ToDisplayString() ??
                                 methodSymbol.ContainingNamespace?.ToDisplayString() ?? "";
                     break;
-                case IMethodSymbol methodSymbol when methodSymbol.MethodKind == MethodKind.Constructor:
+                case IMethodSymbol { MethodKind: MethodKind.Constructor } methodSymbol:
                     callType = CallType.ConstructorCall;
                     calledMethod = methodSymbol.ContainingType?.Name ?? methodSymbol.Name; // Constructor name is usually .ctor
-                    ClassName = methodSymbol.ContainingType?.Name ?? "";
-                    Namespace = methodSymbol.ContainingNamespace?.ToDisplayString() ?? "";
+                    className = methodSymbol.ContainingType?.Name ?? "";
+                    namespaceString = methodSymbol.ContainingNamespace?.ToDisplayString() ?? "";
                     break;
                 case IMethodSymbol methodSymbol:
                     calledMethod = methodSymbol.ToDisplayString();
                     isInMetadata = methodSymbol.Locations.Any(l => l.IsInMetadata);
                     isInSource = methodSymbol.Locations.Any(l => l.IsInSource);
-                    Assembly = methodSymbol.ContainingAssembly?.ToDisplayString() ?? "";
-                    Module = methodSymbol.ContainingModule?.ToDisplayString() ?? "";
-                    Namespace = methodSymbol.ContainingNamespace?.ToDisplayString() ?? "";
-                    ClassName = methodSymbol.ContainingType?.Name ?? "";
+                    assembly = methodSymbol.ContainingAssembly?.ToDisplayString() ?? "";
+                    module = methodSymbol.ContainingModule?.ToDisplayString() ?? "";
+                    namespaceString = methodSymbol.ContainingNamespace?.ToDisplayString() ?? "";
+                    className = methodSymbol.ContainingType?.Name ?? "";
                     break;
                 case IPropertySymbol propertySymbol:
                     callType = CallType.PropertyGet;
                     calledMethod = propertySymbol.Name;
-                    ClassName = propertySymbol.ContainingType?.Name ?? "";
-                    Namespace = propertySymbol.ContainingNamespace?.ToDisplayString() ?? "";
+                    className = propertySymbol.ContainingType?.Name ?? "";
+                    namespaceString = propertySymbol.ContainingNamespace?.ToDisplayString() ?? "";
                     break;
             }
         }
 
         // Get caller context
-        var callerSymbol = model.GetEnclosingSymbol(methodCall.SpanStart) as IMethodSymbol;
-        if (callerSymbol != null)
+        if (model.GetEnclosingSymbol(methodCall.SpanStart) is IMethodSymbol callerSymbol)
         {
             callerMethod = callerSymbol.Name;
             callerNamespace = callerSymbol.ContainingNamespace.ToDisplayString();
             callerClass = callerSymbol.ContainingType.Name;
         }
 
-        var IsInternal = isInSource || !isInMetadata;
-        if (Assembly == String.Empty && Module == String.Empty && Namespace == String.Empty && ClassName == String.Empty && calledMethod == String.Empty)
+        var isInternal = isInSource || !isInMetadata;
+        if (assembly == String.Empty && module == String.Empty && namespaceString == String.Empty && className == String.Empty && calledMethod == String.Empty)
         {
             return;
         }
@@ -1803,10 +1805,10 @@ public static class Dosai
         {
             Path = Path.GetRelativePath(path, sourceFilePath),
             FileName = fileName,
-            Assembly = Assembly,
-            Module = Module,
-            Namespace = Namespace,
-            ClassName = ClassName,
+            Assembly = assembly,
+            Module = module,
+            Namespace = namespaceString,
+            ClassName = className,
             CalledMethod = calledMethod,
             LineNumber = lineNumber,
             ColumnNumber = columnNumber,
@@ -1816,11 +1818,11 @@ public static class Dosai
             CallerMethod = callerMethod,
             CallerNamespace = callerNamespace,
             CallerClass = callerClass,
-            IsInternal = IsInternal
+            IsInternal = isInternal
         });
     }
 
-    private static void TrackVBMethodCall(Microsoft.CodeAnalysis.VisualBasic.Syntax.InvocationExpressionSyntax methodCall, SemanticModel model, List<MethodCalls> allMethodCalls, string path, string sourceFilePath, string fileName)
+    private static void TrackVbMethodCall(Microsoft.CodeAnalysis.VisualBasic.Syntax.InvocationExpressionSyntax methodCall, SemanticModel model, List<MethodCalls> allMethodCalls, string path, string sourceFilePath, string fileName)
     {
         var callArguments = methodCall.ArgumentList;
         var callExpression = methodCall.Expression;
@@ -1833,10 +1835,10 @@ public static class Dosai
         var calledMethod = string.Empty;
         var isInMetadata = false;
         var isInSource = false;
-        var Assembly = string.Empty;
-        var Module = string.Empty;
-        var Namespace = string.Empty;
-        var ClassName = string.Empty;
+        var assembly = string.Empty;
+        var module = string.Empty;
+        var namespaceString = string.Empty;
+        var className = string.Empty;
         var callerMethod = string.Empty;
         var callerNamespace = string.Empty;
         var callerClass = string.Empty;
@@ -1847,31 +1849,30 @@ public static class Dosai
             calledMethod = methodSymbol.ToDisplayString();
             isInMetadata = methodSymbol.Locations.Any(loc => loc.IsInMetadata);
             isInSource = methodSymbol.Locations.Any(loc => loc.IsInSource);
-            Assembly = methodSymbol.ContainingAssembly.ToDisplayString();
-            Module = methodSymbol.ContainingModule.ToDisplayString();
-            Namespace = methodSymbol.ContainingNamespace.ToDisplayString();
-            ClassName = methodSymbol.ContainingType.ToDisplayString();
+            assembly = methodSymbol.ContainingAssembly.ToDisplayString();
+            module = methodSymbol.ContainingModule.ToDisplayString();
+            namespaceString = methodSymbol.ContainingNamespace.ToDisplayString();
+            className = methodSymbol.ContainingType.ToDisplayString();
         }
 
         // Get caller context
-        var callerSymbol = model.GetEnclosingSymbol(methodCall.SpanStart) as IMethodSymbol;
-        if (callerSymbol != null)
+        if (model.GetEnclosingSymbol(methodCall.SpanStart) is IMethodSymbol callerSymbol)
         {
             callerMethod = callerSymbol.Name;
             callerNamespace = callerSymbol.ContainingNamespace.ToDisplayString();
             callerClass = callerSymbol.ContainingType.Name;
         }
 
-        var IsInternal = isInSource || !isInMetadata;
+        var isInternal = isInSource || !isInMetadata;
 
         allMethodCalls.Add(new MethodCalls
         {
             Path = Path.GetRelativePath(path, sourceFilePath),
             FileName = fileName,
-            Assembly = Assembly,
-            Module = Module,
-            Namespace = Namespace,
-            ClassName = ClassName,
+            Assembly = assembly,
+            Module = module,
+            Namespace = namespaceString,
+            ClassName = className,
             CalledMethod = calledMethod,
             LineNumber = lineNumber,
             ColumnNumber = columnNumber,
@@ -1879,7 +1880,7 @@ public static class Dosai
             CallerMethod = callerMethod,
             CallerNamespace = callerNamespace,
             CallerClass = callerClass,
-            IsInternal = IsInternal
+            IsInternal = isInternal
         });
     }
 
