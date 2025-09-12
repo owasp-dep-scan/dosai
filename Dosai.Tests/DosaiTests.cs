@@ -54,11 +54,11 @@ public class DosaiTests
         var methodCalls = methodsSlice?.MethodCalls;
         var properties = methodsSlice?.Properties;
         var fields = methodsSlice?.Fields;
-        Assert.Equal(15, actualMethods?.Count);
+        Assert.Equal(21, actualMethods?.Count);
         AssertMethods(actualMethods, expectedMethodsHelloWorldCSharpSource);
         var genericProcessorClassMethods = actualMethods?.Where(m => m.ClassName == "GenericProcessor").ToList();
         Assert.NotNull(genericProcessorClassMethods);
-        Assert.True(genericProcessorClassMethods?.Count == 2);
+        Assert.True(genericProcessorClassMethods?.Count == 4);
         var processMethod = genericProcessorClassMethods?.FirstOrDefault(m => m.Name == "Process");
         Assert.NotNull(processMethod);
         Assert.True(processMethod?.IsGenericMethod == false);
@@ -125,7 +125,7 @@ public class DosaiTests
         var actualMethods = methodsSlice?.Methods;
         var methodCalls = methodsSlice?.MethodCalls;
 
-        Assert.Equal(9, actualMethods?.Count);
+        Assert.Equal(13, actualMethods?.Count);
         AssertMethods(actualMethods, expectedMethodsHelloWorldVBSource);
     
         // Test inheritance and interface implementation for VB.NET
@@ -185,7 +185,7 @@ public class DosaiTests
         var actualMethods = methodsSlice?.Methods;
         var methodCalls = methodsSlice?.MethodCalls;
 
-        Assert.Equal(18, actualMethods?.Count);
+        Assert.Equal(24, actualMethods?.Count);
         AssertMethods(actualMethods, expectedMethodsHelloWorldCSharpSource);
         AssertMethods(actualMethods, expectedMethodsFooBarCSharpSource);
         
@@ -224,7 +224,7 @@ public class DosaiTests
         var actualMethods = methodsSlice?.Methods;
         var methodCalls = methodsSlice?.MethodCalls;
 
-        Assert.Equal(12, actualMethods?.Count);
+        Assert.Equal(16, actualMethods?.Count);
         AssertMethods(actualMethods, expectedMethodsHelloWorldVBSource);
         AssertMethods(actualMethods, expectedMethodsFooBarVBSource);
     
@@ -291,7 +291,7 @@ public class DosaiTests
         var actualMethods = methodsSlice?.Methods;
         var methodCalls = methodsSlice?.MethodCalls;
 
-        Assert.Equal(50, actualMethods?.Count);
+        Assert.Equal(56, actualMethods?.Count);
         AssertMethods(actualMethods, expectedMethodsDosaiTestDataCSharpDLL);
         AssertMethods(actualMethods, expectedMethodsHelloWorldCSharpSource);
         AssertMethods(actualMethods, expectedMethodsFooBarCSharpSource);
@@ -320,7 +320,7 @@ public class DosaiTests
         var actualMethods = methodsSlice?.Methods;
         var methodCalls = methodsSlice?.MethodCalls;
 
-        Assert.Equal(33, actualMethods?.Count);
+        Assert.Equal(37, actualMethods?.Count);
         AssertMethods(actualMethods, expectedMethodsDosaiTestDataVBDLL);
         AssertMethods(actualMethods, expectedMethodsHelloWorldVBSource);
         AssertMethods(actualMethods, expectedMethodsFooBarVBSource);
