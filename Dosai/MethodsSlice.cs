@@ -19,4 +19,5 @@ public class MethodsSlice
     public List<ConstructorInfo>? Constructors { get; set; }
     
     public CallGraph? CallGraph { get; set; }
+    public List<SourceAssemblyMapping>? SourceAssemblyMapping { get; set; }
 }

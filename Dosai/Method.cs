@@ -17,4 +17,10 @@ public class Method
     public List<CustomAttributeInfo>? CustomAttributes { get; set; }
     public string? BaseType { get; set; }
     public List<string>? ImplementedInterfaces { get; set; }
+    public int MetadataToken { get; set; }
+    public string? SourceSignature { get; set; }
+    public string? AssemblySignature { get; set; }
+    public bool IsGenericMethod { get; set; }
+    public List<string>? GenericParameters { get; set; }
+    public bool IsGenericMethodDefinition { get; set; }
 }

@@ -16,4 +16,6 @@ public class FieldInfo
     public List<CustomAttributeInfo>? CustomAttributes { get; set; }
     public string? BaseType { get; set; }
     public List<string>? ImplementedInterfaces { get; set; }
+    public int MetadataToken { get; set; }
+    public string? TypeFullName { get; set; }
 }
