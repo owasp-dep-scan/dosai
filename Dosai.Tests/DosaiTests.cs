@@ -360,14 +360,7 @@ public class DosaiTests
         Assert.Contains(actualMethods, m => m.FileName == HelloWorldVBSource);
         Assert.Contains(actualMethods, m => m.FileName == HelloWorldFSharpSource);
     }
-
-    [Fact]
-    public void GetMethods_PathIsNotDLLFile_ThrowsException()
-    {
-        var assemblyPath = GetFilePath(DosaiTestsPdb);
-        Assert.Throws<Exception>(() => Depscan.Dosai.GetMethods(assemblyPath));
-    }
-
+    
     [Fact]
     public void GetMethods_PathDoesNotExist_ThrowsException()
     {

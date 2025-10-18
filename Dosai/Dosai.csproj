@@ -9,12 +9,22 @@
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
-    <Version>2.0.1</Version>
+    <Version>2.0.2</Version>
+    <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+    <Title>OWASP Dosai</Title>
+    <Authors>Team AppThreat &lt;cloud@appthreat.com&gt;</Authors>
+    <Description>Dotnet Source and Assembly Inspector (Dosai) is a tool to list details about the namespaces and methods from sources and assemblies.</Description>
+    <PackageProjectUrl>https://github.com/owasp-dep-scan/dosai</PackageProjectUrl>
+    <PackageLicense>Apache-2.0</PackageLicense>
+    <RepositoryUrl>https://github.com/owasp-dep-scan/dosai</RepositoryUrl>
+    <RepositoryType>GitHub</RepositoryType>
+    <PackageTags>roslyn,disassembler,slices,call-graph</PackageTags>
+    <Company>AppThreat</Company>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.14.0" />
-    <PackageReference Include="Microsoft.CodeAnalysis.VisualBasic" Version="4.14.0" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.0.0-2.final" />
+    <PackageReference Include="Microsoft.CodeAnalysis.VisualBasic" Version="5.0.0-2.final" />
     <PackageReference Include="System.CommandLine" Version="2.0.0-beta4.22272.1" />
     <None Include="..\README.md" Pack="true" PackagePath="\"/>
   </ItemGroup>

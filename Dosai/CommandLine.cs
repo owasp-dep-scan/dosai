@@ -11,8 +11,8 @@ public class CommandLine
         var rootCommand = new RootCommand("Dosai");
 
         var pathOption = new Option<string?>(
-            name: "--path",
-            description: "The file or directory to inspect")
+                name: "--path",
+                description: "The file or directory to inspect")
             { IsRequired = true };
         
         var outputFileOption = new Option<string?>(
@@ -32,11 +32,19 @@ public class CommandLine
         rootCommand.AddCommand(methodsCommand);
 
         methodsCommand.SetHandler((path, outputFile) =>
-        {
-            var result = Dosai.GetMethods(path!);
-            File.WriteAllText(outputFile!, result);
-        },
-        pathOption, outputFileOption);
+            {
+                string result;
+                if (Path.GetExtension(path)!.Equals(".nupkg", StringComparison.OrdinalIgnoreCase))
+                {
+                    result = Dosai.GetMethodsFromNupkg(path!);
+                }
+                else
+                {
+                    result = Dosai.GetMethods(path!);
+                }
+                File.WriteAllText(outputFile!, result);
+            },
+            pathOption, outputFileOption);
 
         return await rootCommand.InvokeAsync(args);
     }
