@@ -10,6 +10,7 @@ using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.VisualBasic;
 using Microsoft.CodeAnalysis.VisualBasic.Syntax;
+using System.IO.Compression;
 using CompilationUnitSyntax = Microsoft.CodeAnalysis.CSharp.Syntax.CompilationUnitSyntax;
 using FieldDeclarationSyntax = Microsoft.CodeAnalysis.CSharp.Syntax.FieldDeclarationSyntax;
 using InvocationExpressionSyntax = Microsoft.CodeAnalysis.CSharp.Syntax.InvocationExpressionSyntax;
@@ -97,13 +98,83 @@ public static class Dosai
     }
 
     /// <summary>
+    /// Gets methods, dependencies, and call graph information from a .nupkg file.
+    /// </summary>
+    /// <param name="nupkgPath">Path to the .nupkg file</param>
+    /// <returns>JSON string containing the results</returns>
+    public static string GetMethodsFromNupkg(string nupkgPath)
+    {
+        string? tempExtractionDir = null;
+        try
+        {
+            tempExtractionDir = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+            Directory.CreateDirectory(tempExtractionDir);
+            Console.WriteLine($"Extracting NuGet package: {nupkgPath} to {tempExtractionDir}");
+            using (var archive = ZipFile.OpenRead(nupkgPath))
+            {
+                foreach (var entry in archive.Entries)
+                {
+                    if (entry.FullName.EndsWith("/", StringComparison.OrdinalIgnoreCase) ||
+                        entry.FullName.EndsWith(".nuspec", StringComparison.OrdinalIgnoreCase) ||
+                        entry.FullName.StartsWith("package/", StringComparison.OrdinalIgnoreCase) ||
+                        entry.FullName.StartsWith("_rels/", StringComparison.OrdinalIgnoreCase) ||
+                        entry.FullName.StartsWith("[Content_Types].xml", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+                    var entryExtension = Path.GetExtension(entry.FullName).ToLowerInvariant();
+                    if (!IsDotNetExtension(entryExtension)) continue;
+                    var destinationPath = Path.Combine(tempExtractionDir, entry.FullName);
+                    var destinationDir = Path.GetDirectoryName(destinationPath);
+                    if (!Directory.Exists(destinationDir))
+                    {
+                        if (destinationDir != null) Directory.CreateDirectory(destinationDir);
+                    }
+                    entry.ExtractToFile(destinationPath, overwrite: true);
+                }
+            }
+            return GetMethods(tempExtractionDir);
+
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error processing NuGet package {nupkgPath}: {ex.Message}");
+            throw; 
+        }
+        finally
+        {
+            if (tempExtractionDir != null && Directory.Exists(tempExtractionDir))
+            {
+                try
+                {
+                    Directory.Delete(tempExtractionDir, recursive: true);
+                }
+                catch (Exception cleanupEx)
+                {
+                    Console.WriteLine($"Warning: Could not delete temporary directory {tempExtractionDir}: {cleanupEx.Message}");
+                }
+            }
+        }
+    }
+
+    private static bool IsDotNetExtension(string extension)
+    {
+        var relevantExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            Constants.AssemblyExtension, Constants.ExeExtension,
+            Constants.CSharpSourceExtension, Constants.VBSourceExtension, Constants.FSharpSourceExtension
+        };
+        return relevantExtensions.Contains(extension);
+    }
+    
+    /// <summary>
     /// Get all assembly information for the given path to assembly or directory of assemblies
     /// </summary>
     /// <param name="path">Filesystem path to assembly file or directory containing assembly files</param>
     /// <returns>List of assembly information</returns>
     private static List<AssemblyInformation> GetAssemblyInformation(string path)
     {
-        var assembliesToInspect = GetFilesToInspect(path, Constants.AssemblyExtension);
+        var assembliesToInspect = GetFilesToInspect(path, Constants.AssemblyExtension, Constants.ExeExtension);
         var assemblyInformation = new List<AssemblyInformation>();
         var failedAssemblies = new List<string>();
 
@@ -152,7 +223,7 @@ public static class Dosai
     /// <returns>List of assembly methods</returns>
     private static List<Method> GetAssemblyMethods(string path)
     {
-        var assembliesToInspect = GetFilesToInspect(path, Constants.AssemblyExtension);
+        var assembliesToInspect = GetFilesToInspect(path, Constants.AssemblyExtension, Constants.ExeExtension);
         var assemblyMethods = new List<Method>();
         var failedAssemblies = new List<string>();
         foreach(var assemblyFilePath in assembliesToInspect)
@@ -721,7 +792,7 @@ public static class Dosai
     /// <returns>Tuple with List of source methods and using directives</returns>
     private static (List<Method>, List<Dependency>, List<MethodCalls>, List<PropertyInfo>, List<FieldInfo>, List<EventInfo>, List<ConstructorInfo>, CallGraph, List<SourceAssemblyMapping>) GetSourceMethods(string path, List<Method> assemblyMethods)
     {
-        var assembliesToInspect = GetFilesToInspect(path, Constants.AssemblyExtension);
+        var assembliesToInspect = GetFilesToInspect(path, Constants.AssemblyExtension, Constants.ExeExtension);
         var sourcesToInspect = GetFilesToInspect(path, Constants.CSharpSourceExtension);
         sourcesToInspect.AddRange(GetFilesToInspect(path, Constants.VBSourceExtension));
         sourcesToInspect.AddRange(GetFilesToInspect(path, Constants.FSharpSourceExtension));
@@ -1995,42 +2066,32 @@ public static class Dosai
     }
 
     /// <summary>
-    /// Get list of files to inspect for the given path and file extension
+    /// Get list of files to inspect for the given path and file extensions
     /// </summary>
     /// <param name="path">Filesystem path to assembly/source file or directory containing assembly/source files</param>
-    /// <param name="fileExtension">File extension</param>
+    /// <param name="fileExtensions">File extensions to search for</param>
     /// <returns>List of files</returns>
-    private static List<string> GetFilesToInspect(string path, string fileExtension)
+    private static List<string> GetFilesToInspect(string path, params string[]? fileExtensions)
     {
         var filesToInspect = new List<string>();
         var fileAttributes = File.GetAttributes(path);
-
+        if (fileExtensions == null || fileExtensions.Length == 0)
+        {
+            return filesToInspect; // Return empty list if no extensions provided
+        }
         if (fileAttributes.HasFlag(FileAttributes.Directory))
         {
-            foreach (var inputFile in new DirectoryInfo(path).EnumerateFiles($"*{fileExtension}", SearchOption.AllDirectories))
-            {
-                // ignore generated cs/vb files
-                if (!inputFile.FullName.EndsWith($".g{fileExtension}"))
-                {
-                    filesToInspect.Add(inputFile.FullName);
-                }
-            }
+            filesToInspect.AddRange(from extension in fileExtensions from inputFile in new DirectoryInfo(path).EnumerateFiles($"*{extension}", SearchOption.AllDirectories) where !inputFile.FullName.EndsWith($".g{extension}") select inputFile.FullName);
         }
         else
         {
             var extension = Path.GetExtension(path);
-
-            if (!extension.Equals(Constants.AssemblyExtension) && !extension.Equals(Constants.CSharpSourceExtension) && !extension.Equals(Constants.VBSourceExtension) && !extension.Equals(Constants.FSharpSourceExtension))
+            // Check if the file extension matches any of the provided extensions
+            if (fileExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase))
             {
-                throw new Exception($"The provided file path must reference a {fileExtension} file.");
-            }
-
-            if (extension.Equals(fileExtension))
-            {
-                filesToInspect.Add(path);
+                filesToInspect.Add(path);    
             }
         }
-
         return filesToInspect;
     }
 }
