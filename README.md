@@ -104,6 +104,10 @@ The output is a JSON object conforming to the `MethodsSlice` class structure, co
 5.  Calls the standard `GetMethods` on the temporary directory.
 6.  Cleans up the temporary directory after analysis.
 
+## Complementary Analysis with OWASP blint
+
+See [this document](./BLINT-INTEGRATION.md) for integration ideas.
+
 ## Integration with YARA cli
 
 See [Yara Usage docs](./YARA-USAGE.md)
