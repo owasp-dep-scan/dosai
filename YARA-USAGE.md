@@ -6,7 +6,7 @@ Dosai is a .NET source and assembly inspection tool that extracts detailed metad
 
 ## How Dosai Works
 
-Dosai leverages Microsoft.CodeAnalysis (Roslyn) API and .NET Reflection to extract metadata from both source code and compiled assemblies. It provides a unified view of code structure across different .NET compilation outputs.
+Dosai uses Microsoft.CodeAnalysis (Roslyn) API and .NET Reflection to extract metadata from both source code and compiled assemblies. It provides a unified view of code structure across different .NET compilation outputs.
 
 ```
 ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
