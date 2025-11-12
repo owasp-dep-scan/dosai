@@ -67,7 +67,7 @@ public class DosaiTests
         Assert.NotNull(convertToMethod);
         Assert.True(convertToMethod.IsGenericMethod); 
         Assert.Single(convertToMethod.GenericParameters!);
-        Assert.Contains("TResult", convertToMethod?.GenericParameters ?? new List<string>());
+        Assert.Contains("TResult", convertToMethod?.GenericParameters ?? []);
         Assert.True(convertToMethod?.Parameters?.Count == 1);
         var utilityClassMethods = actualMethods?.Where(m => m.ClassName == "Utility").ToList();
         Assert.NotNull(utilityClassMethods);
@@ -81,7 +81,7 @@ public class DosaiTests
         Assert.NotNull(swapMethod);
         Assert.True(swapMethod.IsGenericMethod); 
         Assert.True(swapMethod?.GenericParameters?.Count == 1);
-        Assert.Contains("T", swapMethod?.GenericParameters ?? new List<string>());
+        Assert.Contains("T", swapMethod?.GenericParameters ?? []);
         Assert.True(swapMethod?.Parameters?.Count == 2);
         Assert.Equal("T", swapMethod?.Parameters?[0].Type);
         Assert.Equal("T", swapMethod?.Parameters?[1].Type);

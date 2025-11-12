@@ -716,7 +716,7 @@ public static class Dosai
         string assemblySignature = methodSymbol.ToDisplayString();
 
         var baseType = containingType?.BaseType?.Name ?? "Object";
-        var implementedInterfaces = containingType?.AllInterfaces.Select(i => i.Name).ToList() ?? new List<string>();
+        var implementedInterfaces = containingType?.AllInterfaces.Select(i => i.Name).ToList() ?? [];
 
         return new Method
         {
@@ -1142,8 +1142,9 @@ public static class Dosai
                                     return new CustomAttributeInfo {
                                         Name = attrSymbol?.ContainingType.Name,
                                         FullName = attrSymbol?.ContainingType.ToDisplayString(),
-                                        ConstructorArguments = attr.ArgumentList?.Arguments.Select(arg => arg.Expression.ToString()).ToList() ?? new List<string>(),
-                                        NamedArguments = new List<NamedArgumentInfo>()
+                                        ConstructorArguments = attr.ArgumentList?.Arguments.Select(arg => arg.Expression.ToString()).ToList() ??
+                                                               [],
+                                        NamedArguments = []
                                     };
                                 })).ToList(),
                             BaseType = baseType,
@@ -1202,8 +1203,9 @@ public static class Dosai
                                         return new CustomAttributeInfo {
                                             Name = attrSymbol?.ContainingType.Name,
                                             FullName = attrSymbol?.ContainingType.ToDisplayString(),
-                                            ConstructorArguments = attr.ArgumentList?.Arguments.Select(arg => arg.GetExpression().ToString()).ToList() ?? new List<string>(),
-                                            NamedArguments = new List<NamedArgumentInfo>()
+                                            ConstructorArguments = attr.ArgumentList?.Arguments.Select(arg => arg.GetExpression().ToString()).ToList() ??
+                                                                   [],
+                                            NamedArguments = []
                                         };
                                     })).ToList(),
                                 BaseType = baseType,
@@ -1314,8 +1316,9 @@ public static class Dosai
                                     return new CustomAttributeInfo {
                                         Name = attrSymbol?.ContainingType.Name,
                                         FullName = attrSymbol?.ContainingType.ToDisplayString(),
-                                        ConstructorArguments = attr.ArgumentList?.Arguments.Select(arg => arg.Expression.ToString()).ToList() ?? new List<string>(),
-                                        NamedArguments = new List<NamedArgumentInfo>()
+                                        ConstructorArguments = attr.ArgumentList?.Arguments.Select(arg => arg.Expression.ToString()).ToList() ??
+                                                               [],
+                                        NamedArguments = []
                                     };
                                 })).ToList(),
                             BaseType = baseType,
@@ -1402,7 +1405,7 @@ public static class Dosai
                             metadataToken = constructorSymbol.MetadataToken;
                         }
                         var isGenericMethod = constructorSymbol.IsGenericMethod;
-                        List<string> genericParameters = new List<string>();
+                        List<string> genericParameters = [];
                         if (constructorSymbol.ContainingType?.IsGenericType ?? false)
                         {
                             genericParameters = constructorSymbol.ContainingType.TypeParameters.Select(tp => tp.Name).ToList();
