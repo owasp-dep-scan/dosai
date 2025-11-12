@@ -410,13 +410,18 @@ public static class Dosai
                     assemblyMethods.AddRange(from evt in type.GetEvents() where $"{evt.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName select CreateMethodObjectFromMember(evt, assemblyFilePath, fileName, evt.Attributes.ToString(), evt.Name, evt.EventHandlerType?.Name ?? string.Empty, []));
                 }
             }
-            catch (Exception e) when (e is FileLoadException or FileNotFoundException or BadImageFormatException)
+            catch (Exception e) when (e is FileLoadException or FileNotFoundException or BadImageFormatException or TypeLoadException or NotSupportedException)
             {
-                failedAssemblies.Add(assemblyFilePath);
+                Console.ForegroundColor = ConsoleColor.DarkYellow;
+                Console.WriteLine($"Warning: Skipping assembly {assemblyFilePath} as it could not be fully loaded for inspection.");
+                Console.WriteLine($"  - Reason: {e.GetType().Name}: {e.Message}");
+                Console.ResetColor();
             }
             catch (Exception e)
             {
-                Console.WriteLine($"Unable to process {assemblyFilePath} due to: {e.Message}");
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"Error: An unexpected error occurred while processing {fileName}. Details: {e.Message}");
+                Console.ResetColor();
             }
             finally
             {
@@ -1955,7 +1960,11 @@ public static class Dosai
         }
         if (fileAttributes.HasFlag(FileAttributes.Directory))
         {
-            filesToInspect.AddRange(from extension in fileExtensions from inputFile in new DirectoryInfo(path).EnumerateFiles($"*{extension}", SearchOption.AllDirectories) where !inputFile.FullName.EndsWith($".g{extension}") select inputFile.FullName);
+            filesToInspect.AddRange(
+                from extension in fileExtensions 
+                from inputFile in new DirectoryInfo(path).EnumerateFiles($"*{extension}", SearchOption.AllDirectories) 
+                where !inputFile.FullName.Contains("/obj/") && !inputFile.FullName.EndsWith($".g{extension}") 
+                select inputFile.FullName);
         }
         else
         {
