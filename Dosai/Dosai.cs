@@ -1,6 +1,7 @@
 ﻿using System.Diagnostics;
 using System.Globalization;
 using System.Reflection;
+using System.Reflection.PortableExecutable;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -11,11 +12,49 @@ using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.VisualBasic;
 using Microsoft.CodeAnalysis.VisualBasic.Syntax;
 using System.IO.Compression;
+using System.Runtime.Loader;
 using CompilationUnitSyntax = Microsoft.CodeAnalysis.CSharp.Syntax.CompilationUnitSyntax;
 using FieldDeclarationSyntax = Microsoft.CodeAnalysis.CSharp.Syntax.FieldDeclarationSyntax;
 using InvocationExpressionSyntax = Microsoft.CodeAnalysis.CSharp.Syntax.InvocationExpressionSyntax;
 
 namespace Depscan;
+
+internal static partial class FSharpRegex
+{
+    [GeneratedRegex(@"^\s*module\s+([\w\.]+)", RegexOptions.Compiled)]
+    internal static partial Regex Module();
+
+    [GeneratedRegex(@"^\s*type\s+(\w+)", RegexOptions.Compiled)]
+    internal static partial Regex Type();
+
+    [GeneratedRegex(@"^\s*let\s+(rec\s+)?(\w+)", RegexOptions.Compiled)]
+    internal static partial Regex Function();
+
+    [GeneratedRegex(@"^\s*member\s+(\w+|\.)\.(\w+)", RegexOptions.Compiled)]
+    internal static partial Regex Member();
+
+    [GeneratedRegex(@"^\s*new\s*\(", RegexOptions.Compiled)]
+    internal static partial Regex Constructor();
+
+    [GeneratedRegex(@"^\s*open\s+([\w\.]+)", RegexOptions.Multiline | RegexOptions.Compiled)]
+    internal static partial Regex Open();
+
+    [GeneratedRegex(@"(\w+)\s*\(", RegexOptions.Compiled)]
+    internal static partial Regex MethodCall();
+}
+
+/// <summary>
+/// An enhanced AssemblyLoadContext that resolves dependencies from a list of specified search paths.
+/// </summary>
+internal class InspectionAssemblyLoadContext(IEnumerable<string> searchPaths) : AssemblyLoadContext(isCollectible: true)
+{
+    private readonly List<string> _searchDirectories = searchPaths.Distinct().ToList();
+
+    protected override Assembly? Load(AssemblyName assemblyName)
+    {
+        return (from dir in _searchDirectories select Path.Combine(dir, assemblyName.Name + ".dll") into potentialPath where File.Exists(potentialPath) select LoadFromAssemblyPath(potentialPath)).FirstOrDefault();
+    }
+}
 
 /// <summary>
 /// Dotnet Source and Assembly Inspector
@@ -31,7 +70,7 @@ public static class Dosai
     /// </summary>
     private static string GenerateMethodSignature(IMethodSymbol? methodSymbol)
     {
-        if (methodSymbol == null)
+        if (methodSymbol is null)
             return string.Empty;
 
         var ns = methodSymbol.ContainingNamespace?.ToDisplayString() ?? "";
@@ -110,28 +149,26 @@ public static class Dosai
             tempExtractionDir = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
             Directory.CreateDirectory(tempExtractionDir);
             Console.WriteLine($"Extracting NuGet package: {nupkgPath} to {tempExtractionDir}");
-            using (var archive = ZipFile.OpenRead(nupkgPath))
+            using var archive = ZipFile.OpenRead(nupkgPath);
+            foreach (var entry in archive.Entries)
             {
-                foreach (var entry in archive.Entries)
+                if (entry.FullName.EndsWith("/", StringComparison.OrdinalIgnoreCase) ||
+                    entry.FullName.EndsWith(".nuspec", StringComparison.OrdinalIgnoreCase) ||
+                    entry.FullName.StartsWith("package/", StringComparison.OrdinalIgnoreCase) ||
+                    entry.FullName.StartsWith("_rels/", StringComparison.OrdinalIgnoreCase) ||
+                    entry.FullName.StartsWith("[Content_Types].xml", StringComparison.OrdinalIgnoreCase))
                 {
-                    if (entry.FullName.EndsWith("/", StringComparison.OrdinalIgnoreCase) ||
-                        entry.FullName.EndsWith(".nuspec", StringComparison.OrdinalIgnoreCase) ||
-                        entry.FullName.StartsWith("package/", StringComparison.OrdinalIgnoreCase) ||
-                        entry.FullName.StartsWith("_rels/", StringComparison.OrdinalIgnoreCase) ||
-                        entry.FullName.StartsWith("[Content_Types].xml", StringComparison.OrdinalIgnoreCase))
-                    {
-                        continue;
-                    }
-                    var entryExtension = Path.GetExtension(entry.FullName).ToLowerInvariant();
-                    if (!IsDotNetExtension(entryExtension)) continue;
-                    var destinationPath = Path.Combine(tempExtractionDir, entry.FullName);
-                    var destinationDir = Path.GetDirectoryName(destinationPath);
-                    if (!Directory.Exists(destinationDir))
-                    {
-                        if (destinationDir != null) Directory.CreateDirectory(destinationDir);
-                    }
-                    entry.ExtractToFile(destinationPath, overwrite: true);
+                    continue;
                 }
+                var entryExtension = Path.GetExtension(entry.FullName).ToLowerInvariant();
+                if (!IsDotNetExtension(entryExtension)) continue;
+                var destinationPath = Path.Combine(tempExtractionDir, entry.FullName);
+                var destinationDir = Path.GetDirectoryName(destinationPath);
+                if (!Directory.Exists(destinationDir))
+                {
+                    if (destinationDir is not null) Directory.CreateDirectory(destinationDir);
+                }
+                entry.ExtractToFile(destinationPath, overwrite: true);
             }
             return GetMethods(tempExtractionDir);
 
@@ -143,7 +180,7 @@ public static class Dosai
         }
         finally
         {
-            if (tempExtractionDir != null && Directory.Exists(tempExtractionDir))
+            if (tempExtractionDir is not null && Directory.Exists(tempExtractionDir))
             {
                 try
                 {
@@ -168,6 +205,71 @@ public static class Dosai
     }
     
     /// <summary>
+    /// Checks if a DLL is a managed .NET assembly by inspecting its PE header.
+    /// This avoids trying to load native DLLs, which would throw a BadImageFormatException.
+    /// </summary>
+    /// <param name="filePath">The path to the DLL file.</param>
+    /// <returns>True if the file is a managed assembly, false otherwise.</returns>
+    private static bool IsManagedAssembly(string filePath)
+    {
+        try
+        {
+            using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var peReader = new PEReader(fs);
+            return peReader.HasMetadata && peReader.PEHeaders.CorHeader is not null;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+    
+    /// <summary>
+    /// Discovers the paths of all installed .NET shared runtimes (like Microsoft.NETCore.App
+    /// and Microsoft.AspNetCore.App) by executing 'dotnet --list-runtimes'.
+    /// </summary>
+    /// <returns>A HashSet of directory paths containing the shared runtime assemblies.</returns>
+    private static HashSet<string> GetDotnetSharedRuntimePaths()
+    {
+        var runtimePaths = new HashSet<string>();
+        try
+        {
+            using var process = new Process();
+            process.StartInfo = new ProcessStartInfo
+            {
+                FileName = "dotnet",
+                Arguments = "--list-runtimes",
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+
+            process.Start();
+            var output = process.StandardOutput.ReadToEnd();
+            process.WaitForExit();
+
+            // The output format is like: Microsoft.NETCore.App 7.0.14 [/usr/local/share/dotnet/shared/Microsoft.NETCore.App]
+            var matches = Regex.Matches(output, @"\[(.*?)\]");
+            foreach (Match match in matches)
+            {
+                if (match.Groups.Count <= 1) continue;
+                var runtimeDir = Path.GetDirectoryName(match.Groups[1].Value);
+                if (runtimeDir is not null && Directory.Exists(runtimeDir))
+                {
+                    runtimePaths.Add(runtimeDir);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"Error: Could not execute 'dotnet --list-runtimes' to find shared frameworks. Please ensure the .NET SDK is installed and that 'dotnet' is in your system's PATH. Details: {ex.Message}");
+            Console.ResetColor();
+        }
+        return runtimePaths;
+    }
+    
+    /// <summary>
     /// Get all assembly information for the given path to assembly or directory of assemblies
     /// </summary>
     /// <param name="path">Filesystem path to assembly file or directory containing assembly files</param>
@@ -175,8 +277,8 @@ public static class Dosai
     private static List<AssemblyInformation> GetAssemblyInformation(string path)
     {
         var assembliesToInspect = GetFilesToInspect(path, Constants.AssemblyExtension, Constants.ExeExtension);
-        var assemblyInformation = new List<AssemblyInformation>();
-        var failedAssemblies = new List<string>();
+        List<AssemblyInformation> assemblyInformation = [];
+        List<string> failedAssemblies = [];
 
         foreach(var assemblyFilePath in assembliesToInspect)
         {
@@ -191,8 +293,8 @@ public static class Dosai
 
                 var fileVersionInfo = FileVersionInfo.GetVersionInfo(assemblyFilePath);
 #pragma warning disable CS0472 // The result of the expression is always the same since a value of this type is never equal to 'null'
-                var buildPart = fileVersionInfo.FileBuildPart == null ? string.Empty : $".{fileVersionInfo.FileBuildPart}";
-                var privatePart = fileVersionInfo.FilePrivatePart == null ? string.Empty : $".{fileVersionInfo.FilePrivatePart}";
+                var buildPart = $".{fileVersionInfo.FileBuildPart}";
+                var privatePart = $".{fileVersionInfo.FilePrivatePart}";
 #pragma warning restore CS0472 // The result of the expression is always the same since a value of this type is never equal to 'null'
 
                 var assemblyInfo = new AssemblyInformation
@@ -225,259 +327,175 @@ public static class Dosai
     {
         var assembliesToInspect = GetFilesToInspect(path, Constants.AssemblyExtension, Constants.ExeExtension);
         var assemblyMethods = new List<Method>();
-        var failedAssemblies = new List<string>();
-        foreach(var assemblyFilePath in assembliesToInspect)
+        var processedAssemblyIdentities = new HashSet<string>();
+        var sharedRuntimePaths = GetDotnetSharedRuntimePaths();
+        var runtimeDir = System.Runtime.InteropServices.RuntimeEnvironment.GetRuntimeDirectory();
+        var sharedDir = Path.GetFullPath(Path.Combine(runtimeDir, "..", ".."));
+        var dependencyDirs = new List<string> { Path.GetDirectoryName(path)! };
+        if (Directory.Exists(sharedDir))
+        {
+            if (Directory.Exists(Path.Combine(sharedDir, "Microsoft.NETCore.App")))
+            {
+                dependencyDirs.AddRange(Directory.GetDirectories(Path.Combine(sharedDir, "Microsoft.NETCore.App")));
+            }
+
+            if (Directory.Exists(Path.Combine(sharedDir, "Microsoft.AspNetCore.App")))
+            {
+                dependencyDirs.AddRange(Directory.GetDirectories(Path.Combine(sharedDir, "Microsoft.AspNetCore.App")));
+            }
+        }
+        foreach (var assemblyFilePath in assembliesToInspect)
         {
             var fileName = Path.GetFileName(assemblyFilePath);
-
+            if (!IsManagedAssembly(assemblyFilePath))
+            {
+                Console.WriteLine($"Info: Skipping native library or non-assembly file: {assemblyFilePath}");
+                continue;
+            }
+            var searchPaths = new List<string> { Path.GetDirectoryName(assemblyFilePath)! };
+            searchPaths.AddRange(dependencyDirs);
+            searchPaths.AddRange(sharedRuntimePaths);
+            var loadContext = new InspectionAssemblyLoadContext(searchPaths);
             try
             {
-                var assembly = Assembly.LoadFrom(assemblyFilePath);
-                var types = assembly.GetExportedTypes();
-                
-                foreach(var type in types)
+                var assemblyName = AssemblyName.GetAssemblyName(assemblyFilePath);
+                if (processedAssemblyIdentities.Contains(assemblyName.FullName))
                 {
-                    // Methods
-                    var methods = type.GetMethods();
-                    foreach(var method in methods)
+                    continue;
+                }
+                var assembly = loadContext.LoadFromAssemblyName(assemblyName);
+                Type[] types;
+                try
+                {
+                    types = assembly.GetTypes();
+                }
+                catch (ReflectionTypeLoadException ex)
+                {
+                    Console.WriteLine($"Warning: Could not load all types from {fileName}. Some types will be skipped.");
+                    if (ex.LoaderExceptions is not null)
                     {
+                        var uniqueLoaderErrors = ex.LoaderExceptions
+                            .Where(e => e is not null)
+                            .Select(e => e?.Message)
+                            .Distinct();
+
+                        foreach (var errorMessage in uniqueLoaderErrors)
+                        {
+                            Console.WriteLine($"  - {errorMessage}");
+                            if (errorMessage is null ||
+                                !errorMessage.Contains("The system cannot find the file specified")) continue;
+                            Console.WriteLine("    Suggestion: This error often means a .NET Shared Framework is missing. Ensure the machine running this analysis has the necessary .NET SDKs and Runtimes (e.g., ASP.NET Core Runtime) installed. Some projects might require Windows for building.");
+                        }
+                    }
+                    types = ex.Types.Where(t => t is not null).ToArray()!;
+                }
+
+                foreach (var type in types)
+                {
+                    foreach (var method in type.GetMethods())
+                    {
+                        if ($"{method.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" != fileName) continue;
+
                         var parameters = method.GetParameters().Select(p => p.ParameterType.FullName ?? p.ParameterType.Name).ToList();
                         var paramString = string.Join(",", parameters);
                         var returnType = method.ReturnType.FullName ?? method.ReturnType.Name;
-                        var methodName = method.Name;
                         var className = method.DeclaringType?.Name ?? "UnknownType";
                         var ns = method.DeclaringType?.Namespace ?? "";
-                        var assemblySignature = $"{ns}.{className}.{methodName}({paramString}):{returnType}";
-                        var isGenericMethod = method.IsGenericMethod;
-                        var isGenericMethodDefinition = method.IsGenericMethodDefinition;
-                        List<string> genericParameters = new List<string>();
-                        if (method.IsGenericMethodDefinition)
+                        var assemblySignature = $"{ns}.{className}.{method.Name}({paramString}):{returnType}";
+                        if (method.Name is ".ctor" or ".cctor")
                         {
-                            genericParameters = method.GetGenericArguments().Select(t => t.Name).ToList();
+                            assemblySignature = $"{ns}.{className}.{method.Name}({paramString})";
                         }
-                        if (method.Name == ".ctor" || method.Name == ".cctor")
+                        
+                        var methodParams = method.GetParameters().Select(p => new Parameter
                         {
-                            assemblySignature = $"{ns}.{className}.{methodName}({paramString})";
-                        }
-                        if ($"{method.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName)
-                        {
-                            // Get type information for inheritance
-                            var typ = method.DeclaringType;
-                            var baseType = typ?.BaseType?.Name;
-                            var implementedInterfaces = typ?.GetInterfaces().Select(i => i.Name).ToList();
+                            Name = p.Name,
+                            Type = p.ParameterType.FullName ?? p.ParameterType.Name,
+                            TypeFullName = p.ParameterType.FullName ?? p.ParameterType.Name,
+                            IsGenericParameter = p.ParameterType.IsGenericParameter
+                        }).ToList();
+                        
+                        var genericParameters = method.IsGenericMethodDefinition
+                            ? method.GetGenericArguments().Select(t => t.Name).ToList()
+                            : [];
 
-                            assemblyMethods.Add(new Method
-                            {
-                                Path = assemblyFilePath,
-                                FileName = fileName,
-                                Module = method.DeclaringType?.Module.ToString(),
-                                Namespace = method.DeclaringType?.Namespace,
-                                ClassName = typ?.Name ?? string.Empty,
-                                Attributes = method.Attributes.ToString(),
-                                Name = method.Name,
-                                ReturnType = method.ReturnType.FullName ?? method.ReturnType.Name,
-                                IsGenericMethod = isGenericMethod,
-                                IsGenericMethodDefinition = isGenericMethodDefinition,
-                                GenericParameters = genericParameters,
-                                Parameters = method.GetParameters().Select(p => new Parameter
-                                {
-                                    Name = p.Name,
-                                    Type = p.ParameterType.FullName ?? p.ParameterType.Name,
-                                    TypeFullName = p.ParameterType.FullName ?? p.ParameterType.Name,
-                                    IsGenericParameter = p.ParameterType.IsGenericParameter
-                                }).ToList(),
-                                CustomAttributes = method.GetCustomAttributesData().Select(attr => 
-                                    new CustomAttributeInfo {
-                                        Name = attr.AttributeType.Name,
-                                        FullName = attr.AttributeType.FullName,
-                                        ConstructorArguments = attr.ConstructorArguments.Select(arg => arg.Value?.ToString() ?? string.Empty).ToList(),
-                                        NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo {
-                                            Name = na.MemberName,
-                                            Value = na.TypedValue.Value?.ToString() ?? string.Empty
-                                        }).ToList()
-                                    }).ToList(),
-                                BaseType = baseType,
-                                ImplementedInterfaces = implementedInterfaces,
-                                MetadataToken = method.MetadataToken,
-                                AssemblySignature = assemblySignature
-                            });
-                        }
+                        assemblyMethods.Add(CreateMethodObjectFromMember(
+                            method, assemblyFilePath, fileName, method.Attributes.ToString(), method.Name, returnType,
+                            methodParams, method.MetadataToken, assemblySignature,
+                            method.IsGenericMethod, method.IsGenericMethodDefinition, genericParameters
+                        ));
                     }
-
-                    // Constructors
-                    var constructors = type.GetConstructors();
-                    foreach(var ctor in constructors)
-                    {
-                        if ($"{ctor.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName)
-                        {
-                            // Get type information for inheritance
-                            var typ = ctor.DeclaringType;
-                            var baseType = typ?.BaseType?.Name;
-                            var implementedInterfaces = typ?.GetInterfaces().Select(i => i.Name).ToList();
-                            assemblyMethods.Add(new Method
-                            {
-                                Path = assemblyFilePath,
-                                FileName = fileName,
-                                Module = ctor.DeclaringType?.Module.ToString(),
-                                Namespace = ctor.DeclaringType?.Namespace,
-                                ClassName = typ?.Name ?? string.Empty,
-                                Attributes = ctor.Attributes.ToString(),
-                                Name = ".ctor",
-                                ReturnType = "Void",
-                                Parameters = ctor.GetParameters().Select(p => new Parameter {
-                                    Name = p.Name,
-                                    Type = p.ParameterType.FullName
-                                }).ToList(),
-                                CustomAttributes = ctor.GetCustomAttributesData().Select(attr => 
-                                    new CustomAttributeInfo {
-                                        Name = attr.AttributeType.Name,
-                                        FullName = attr.AttributeType.FullName,
-                                        ConstructorArguments = attr.ConstructorArguments.Select(arg => arg.Value?.ToString() ?? string.Empty).ToList(),
-                                        NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo {
-                                            Name = na.MemberName,
-                                            Value = na.TypedValue.Value?.ToString() ?? string.Empty
-                                        }).ToList()
-                                    }).ToList(),
-                                BaseType = baseType,
-                                ImplementedInterfaces = implementedInterfaces,
-                                MetadataToken = ctor.MetadataToken,
-                                AssemblySignature = $"{typ?.Name}"
-                            });
-                        }
-                    }
-
-                    // Properties
-                    var properties = type.GetProperties();
-                    foreach(var prop in properties)
-                    {
-                        if ($"{prop.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName)
-                        {
-                            // Get type information for inheritance
-                            var typ = prop.DeclaringType;
-                            var baseType = typ?.BaseType?.Name;
-                            var implementedInterfaces = typ?.GetInterfaces().Select(i => i.Name).ToList();
-
-                            assemblyMethods.Add(new Method
-                            {
-                                Path = assemblyFilePath,
-                                FileName = fileName,
-                                Module = prop.DeclaringType?.Module.ToString(),
-                                Namespace = prop.DeclaringType?.Namespace,
-                                ClassName = typ?.Name ?? string.Empty,
-                                Attributes = "Property",
-                                Name = prop.Name,
-                                ReturnType = prop.PropertyType.Name,
-                                Parameters = [],
-                                CustomAttributes = prop.GetCustomAttributesData().Select(attr => 
-                                    new CustomAttributeInfo {
-                                        Name = attr.AttributeType.Name,
-                                        FullName = attr.AttributeType.FullName,
-                                        ConstructorArguments = attr.ConstructorArguments.Select(arg => arg.Value?.ToString() ?? string.Empty).ToList(),
-                                        NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo {
-                                            Name = na.MemberName,
-                                            Value = na.TypedValue.Value?.ToString() ?? string.Empty
-                                        }).ToList()
-                                    }).ToList(),
-                                BaseType = baseType,
-                                ImplementedInterfaces = implementedInterfaces,
-                            });
-                        }
-                    }
-
-                    // Fields
-                    var fields = type.GetFields();
-                    foreach(var field in fields)
-                    {
-                        if ($"{field.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName)
-                        {
-                            // Get type information for inheritance
-                            var typ = field.DeclaringType;
-                            var baseType = typ?.BaseType?.Name;
-                            var implementedInterfaces = typ?.GetInterfaces().Select(i => i.Name).ToList();
-
-                            assemblyMethods.Add(new Method
-                            {
-                                Path = assemblyFilePath,
-                                FileName = fileName,
-                                Module = field.DeclaringType?.Module.ToString(),
-                                Namespace = field.DeclaringType?.Namespace,
-                                ClassName = typ?.Name ?? string.Empty,
-                                Attributes = field.Attributes.ToString(),
-                                Name = field.Name,
-                                ReturnType = field.FieldType.Name,
-                                Parameters = [],
-                                CustomAttributes = field.GetCustomAttributesData().Select(attr => 
-                                    new CustomAttributeInfo {
-                                        Name = attr.AttributeType.Name,
-                                        FullName = attr.AttributeType.FullName,
-                                        ConstructorArguments = attr.ConstructorArguments.Select(arg => arg.Value?.ToString() ?? string.Empty).ToList(),
-                                        NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo {
-                                            Name = na.MemberName,
-                                            Value = na.TypedValue.Value?.ToString() ?? string.Empty
-                                        }).ToList()
-                                    }).ToList(),
-                                BaseType = baseType,
-                                ImplementedInterfaces = implementedInterfaces
-                            });
-                        }
-                    }
-
-                    // Events
-                    var events = type.GetEvents();
-                    foreach(var evt in events)
-                    {
-                        if ($"{evt.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName)
-                        {
-                            // Get type information for inheritance
-                            var typ = evt.DeclaringType;
-                            var baseType = typ?.BaseType?.Name;
-                            var implementedInterfaces = typ?.GetInterfaces().Select(i => i.Name).ToList();
-
-                            assemblyMethods.Add(new Method
-                            {
-                                Path = assemblyFilePath,
-                                FileName = fileName,
-                                Module = evt.DeclaringType?.Module.ToString(),
-                                Namespace = evt.DeclaringType?.Namespace,
-                                ClassName = typ?.Name ?? string.Empty,
-                                Attributes = evt.Attributes.ToString(),
-                                Name = evt.Name,
-                                ReturnType = evt.EventHandlerType?.Name ?? string.Empty,
-                                Parameters = [],
-                                CustomAttributes = evt.GetCustomAttributesData().Select(attr => 
-                                    new CustomAttributeInfo {
-                                        Name = attr.AttributeType.Name,
-                                        FullName = attr.AttributeType.FullName,
-                                        ConstructorArguments = attr.ConstructorArguments.Select(arg => arg.Value?.ToString() ?? string.Empty).ToList(),
-                                        NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo {
-                                            Name = na.MemberName,
-                                            Value = na.TypedValue.Value?.ToString() ?? string.Empty
-                                        }).ToList()
-                                    }).ToList(),
-                                BaseType = baseType,
-                                ImplementedInterfaces = implementedInterfaces
-                            });
-                        }
-                    }
+                    processedAssemblyIdentities.Add(assembly.FullName!);
+                    assemblyMethods.AddRange(from ctor in type.GetConstructors() where $"{ctor.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName let ctorParams = ctor.GetParameters().Select(p => new Parameter { Name = p.Name, Type = p.ParameterType.FullName }).ToList() let assemblySignature = $"{ctor.DeclaringType?.Name}" select CreateMethodObjectFromMember(ctor, assemblyFilePath, fileName, ctor.Attributes.ToString(), ".ctor", "Void", ctorParams, ctor.MetadataToken, assemblySignature));
+                    assemblyMethods.AddRange(from prop in type.GetProperties() where $"{prop.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName select CreateMethodObjectFromMember(prop, assemblyFilePath, fileName, "Property", prop.Name, prop.PropertyType.Name, []));
+                    assemblyMethods.AddRange(from field in type.GetFields() where $"{field.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName select CreateMethodObjectFromMember(field, assemblyFilePath, fileName, field.Attributes.ToString(), field.Name, field.FieldType.Name, []));
+                    assemblyMethods.AddRange(from evt in type.GetEvents() where $"{evt.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName select CreateMethodObjectFromMember(evt, assemblyFilePath, fileName, evt.Attributes.ToString(), evt.Name, evt.EventHandlerType?.Name ?? string.Empty, []));
                 }
             }
-            catch (Exception e) when (e is FileLoadException || e is FileNotFoundException || e is BadImageFormatException)
+            catch (Exception e) when (e is FileLoadException or FileNotFoundException or BadImageFormatException or TypeLoadException or NotSupportedException)
             {
-                failedAssemblies.Add(assemblyFilePath);
+                Console.WriteLine($"Warning: Skipping assembly {assemblyFilePath} as it could not be fully loaded for inspection.");
+                Console.WriteLine($"  - Reason: {e.GetType().Name}: {e.Message}");
             }
             catch (Exception e)
             {
-                Console.WriteLine($"Unable to process {assemblyFilePath} due to: {e.Message}");
+                Console.WriteLine($"Error: An unexpected error occurred while processing {fileName}. Details: {e.Message}");
+            }
+            finally
+            {
+                loadContext.Unload();
             }
         }
 
         return assemblyMethods;
+
+        Method CreateMethodObjectFromMember(
+            MemberInfo member, string filePath, string file, string attributes, string name, string returnType,
+            List<Parameter> parameters, int metadataToken = 0, string? assemblySignature = null,
+            bool isGeneric = false, bool isGenericDef = false, List<string>? genericParams = null)
+        {
+            var typ = member.DeclaringType;
+            var baseType = typ?.BaseType?.Name;
+            var implementedInterfaces = typ?.GetInterfaces().Select(i => i.Name).ToList() ?? [];
+
+            return new Method
+            {
+                Path = filePath,
+                FileName = file,
+                Module = typ?.Module.ToString(),
+                Namespace = typ?.Namespace,
+                ClassName = typ?.Name ?? string.Empty,
+                Attributes = attributes,
+                Name = name,
+                ReturnType = returnType,
+                Parameters = parameters,
+                CustomAttributes = member.GetCustomAttributesData().Select(attr =>
+                    new CustomAttributeInfo
+                    {
+                        Name = attr.AttributeType.Name,
+                        FullName = attr.AttributeType.FullName,
+                        ConstructorArguments = attr.ConstructorArguments.Select(arg => arg.Value?.ToString() ?? string.Empty).ToList(),
+                        NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo
+                        {
+                            Name = na.MemberName,
+                            Value = na.TypedValue.Value?.ToString() ?? string.Empty
+                        }).ToList()
+                    }).ToList(),
+                BaseType = baseType,
+                ImplementedInterfaces = implementedInterfaces,
+                MetadataToken = metadataToken,
+                AssemblySignature = assemblySignature,
+                IsGenericMethod = isGeneric,
+                IsGenericMethodDefinition = isGenericDef,
+                GenericParameters = genericParams ?? []
+            };
+        }
     }
 
     private static string GetContainingTypeNameVb(Microsoft.CodeAnalysis.VisualBasic.Syntax.FieldDeclarationSyntax member)
     {
         var parent = member.Parent;
-        while (parent != null)
+        while (parent is not null)
         {
             if (parent is ClassBlockSyntax classBlock)
                 return classBlock.ClassStatement.Identifier.Text;
@@ -517,33 +535,29 @@ public static class Dosai
                     var lineNumber = i + 1;
                     
                     // Extract module declarations
-                    var moduleMatch = Regex.Match(line, @"^\s*module\s+([\w\.]+)");
+                    var moduleMatch = FSharpRegex.Module().Match(line);
                     if (moduleMatch.Success)
                     {
                         currentModule = moduleMatch.Groups[1].Value;
                     }
                     
                     // Extract type declarations
-                    var typeMatch = Regex.Match(line, @"^\s*type\s+(\w+)");
+                    var typeMatch = FSharpRegex.Type().Match(line);
                     if (typeMatch.Success)
                     {
                         currentType = typeMatch.Groups[1].Value;
                     }
                     
                     // Extract function declarations: "let functionName" or "let rec functionName"
-                    var functionMatch = Regex.Match(line, @"^\s*let\s+(rec\s+)?(\w+)");
+                    var functionMatch = FSharpRegex.Function().Match(line);
                     if (functionMatch.Success)
                     {
                         var functionName = functionMatch.Groups[2].Value;
-                        
                         // Skip common F# keywords that might match the pattern
-                        if (functionName == "rec" || functionName == "in" || functionName == "and") 
+                        if (functionName is "rec" or "in" or "and") 
                             continue;
-                        
                         // Determine the containing context
-                        string containingContext = currentModule;
-                        if (!string.IsNullOrEmpty(currentType))
-                            containingContext = currentType;
+                        var containingContext = !string.IsNullOrEmpty(currentType) ? currentType : currentModule;
                         
                         fsharpMethods.Add(new Method
                         {
@@ -558,21 +572,16 @@ public static class Dosai
                             ReturnType = "Unknown",
                             LineNumber = lineNumber,
                             ColumnNumber = line.IndexOf(functionName, StringComparison.Ordinal) + 1,
-                            Parameters = new List<Parameter>(),
-                            CustomAttributes = new List<CustomAttributeInfo>()
+                            Parameters = [],
+                            CustomAttributes = []
                         });
                     }
-                    
                     // Extract member declarations: "member this.MemberName" or "member _.MemberName"
-                    var memberMatch = Regex.Match(line, @"^\s*member\s+(\w+|\.)\.(\w+)");
+                    var memberMatch = FSharpRegex.Member().Match(line);
                     if (memberMatch.Success)
                     {
-                        var instanceName = memberMatch.Groups[1].Value;
                         var memberName = memberMatch.Groups[2].Value;
-                        
-                        string containingType = currentType;
-                        if (string.IsNullOrEmpty(containingType))
-                            containingType = "Unknown";
+                        string containingType = !string.IsNullOrEmpty(currentType) ? currentType : "Unknown";
                         
                         fsharpMethods.Add(new Method
                         {
@@ -587,18 +596,15 @@ public static class Dosai
                             ReturnType = "Unknown",
                             LineNumber = lineNumber,
                             ColumnNumber = line.IndexOf(memberName, StringComparison.Ordinal) + 1,
-                            Parameters = new List<Parameter>(),
-                            CustomAttributes = new List<CustomAttributeInfo>()
+                            Parameters = [],
+                            CustomAttributes = []
                         });
                     }
-                    
                     // Extract constructor declarations: "new(args) ="
-                    var constructorMatch = Regex.Match(line, @"^\s*new\s*\(");
+                    var constructorMatch = FSharpRegex.Constructor().Match(line);
                     if (constructorMatch.Success)
                     {
-                        string containingType = currentType;
-                        if (string.IsNullOrEmpty(containingType))
-                            containingType = "Unknown";
+                        string containingType = !string.IsNullOrEmpty(currentType) ? currentType : "Unknown";
                         
                         fsharpMethods.Add(new Method
                         {
@@ -613,16 +619,13 @@ public static class Dosai
                             ReturnType = "Void",
                             LineNumber = lineNumber,
                             ColumnNumber = line.IndexOf("new", StringComparison.Ordinal) + 1,
-                            Parameters = new List<Parameter>(),
-                            CustomAttributes = new List<CustomAttributeInfo>()
+                            Parameters = [],
+                            CustomAttributes = []
                         });
                     }
                 }
-                
                 // Extract dependencies (open statements)
-                var openPattern = @"^\s*open\s+([\w\.]+)";
-                var openMatches = Regex.Matches(fileContent, openPattern, RegexOptions.Multiline);
-                
+                var openMatches = FSharpRegex.Open().Matches(fileContent);
                 foreach (Match match in openMatches)
                 {
                     var namespaceName = match.Groups[1].Value;
@@ -638,18 +641,14 @@ public static class Dosai
                         Module = "Unknown",
                         LineNumber = lineIndex,
                         ColumnNumber = match.Index - fileContent.LastIndexOf('\n', match.Index) + 1,
-                        NamespaceMembers = new List<string>()
+                        NamespaceMembers = []
                     });
                 }
-                
                 // Extract method calls (function calls with parentheses)
-                var callPattern = @"(\w+)\s*\(";
-                var callMatches = Regex.Matches(fileContent, callPattern);
-                
+                var callMatches = FSharpRegex.MethodCall().Matches(fileContent);
                 foreach (Match match in callMatches)
                 {
                     var methodName = match.Groups[1].Value;
-                    
                     // Skip common keywords
                     if (IsFSharpKeyword(methodName))
                         continue;
@@ -667,7 +666,7 @@ public static class Dosai
                         Module = "Unknown",
                         LineNumber = lineIndex,
                         ColumnNumber = match.Index - fileContent.LastIndexOf('\n', match.Index) + 1,
-                        Arguments = new List<string>()
+                        Arguments = []
                     });
                 }
             }
@@ -731,7 +730,7 @@ public static class Dosai
         var genericParameters = methodSymbol.TypeParameters.Select(tp => tp.Name).ToList();
 
         var metadataToken = 0;
-        if (assembly != null && SymbolEqualityComparer.Default.Equals(assembly, model.Compilation.Assembly))
+        if (assembly is not null && SymbolEqualityComparer.Default.Equals(assembly, model.Compilation.Assembly))
         {
             metadataToken = methodSymbol.MetadataToken;
         }
@@ -740,7 +739,7 @@ public static class Dosai
         string assemblySignature = methodSymbol.ToDisplayString();
 
         var baseType = containingType?.BaseType?.Name ?? "Object";
-        var implementedInterfaces = containingType?.AllInterfaces.Select(i => i.Name).ToList() ?? new List<string>();
+        var implementedInterfaces = containingType?.AllInterfaces.Select(i => i.Name).ToList() ?? [];
 
         return new Method
         {
@@ -803,8 +802,6 @@ public static class Dosai
         var fields = new List<FieldInfo>();
         var events = new List<EventInfo>();
         var constructors = new List<ConstructorInfo>();
-        var callEdges = new List<MethodCallEdge>();
-        var methodNodes = new List<MethodNode>();
         var sourceAssemblyMappings = new List<SourceAssemblyMapping>();
 #pragma warning disable IL3000
         var mscorlib = MetadataReference.CreateFromFile(Path.Combine(AppContext.BaseDirectory, typeof(object).Assembly.Location));
@@ -813,10 +810,7 @@ public static class Dosai
         {
             mscorlib
         };
-        foreach (var externalAssembly in assembliesToInspect)
-        {
-            metadataReferences.Add(MetadataReference.CreateFromFile(externalAssembly));
-        }
+        metadataReferences.AddRange(assembliesToInspect.Select(externalAssembly => MetadataReference.CreateFromFile(externalAssembly)));
 
         foreach (var sourceFilePath in sourcesToInspect)
         {
@@ -869,7 +863,7 @@ public static class Dosai
             var vbConstructorDeclarations = vbRoot?.DescendantNodes().OfType<ConstructorBlockSyntax>();
 
             // C# method declarations
-            if (csMethodDeclarations != null)
+            if (csMethodDeclarations is not null)
             {
                 foreach(var methodDeclaration in csMethodDeclarations)
                 {
@@ -879,7 +873,7 @@ public static class Dosai
                     var lineNumber = codeSpan.StartLinePosition.Line + 1;
                     var columnNumber = codeSpan.Span.Start.Character + 1;
 
-                    if (methodSymbol != null)
+                    if (methodSymbol is not null)
                     {
                         // Get the containing type for inheritance information
                         var containingType = methodSymbol.ContainingType;
@@ -891,11 +885,7 @@ public static class Dosai
                             metadataToken = methodSymbol.MetadataToken;
                         }
                         var isGenericMethod = methodSymbol.IsGenericMethod;
-                        List<string> genericParameters = new List<string>();
-                        if (methodSymbol.TypeParameters != null)
-                        {
-                            genericParameters = methodSymbol.TypeParameters.Select(tp => tp.Name).ToList();
-                        }
+                        List<string> genericParameters = methodSymbol.TypeParameters.Select(tp => tp.Name).ToList();
                         sourceMethods.Add(new Method
                         {
                             Path = Path.GetRelativePath(path, sourceFilePath),
@@ -938,7 +928,7 @@ public static class Dosai
             }
 
             // VB method declarations
-            if (vbMethodDeclarations != null)
+            if (vbMethodDeclarations is not null)
             {
                 foreach(var methodDeclaration in vbMethodDeclarations)
                 {
@@ -948,7 +938,7 @@ public static class Dosai
                     var lineNumber = codeSpan.StartLinePosition.Line + 1;
                     var columnNumber = codeSpan.Span.Start.Character + 1;
 
-                    if (method != null)
+                    if (method is not null)
                     {
                         // Get inheritance information
                         var containingType = method.ContainingType;
@@ -997,7 +987,7 @@ public static class Dosai
             }
 
             // C# property declarations
-            if (csPropertyDeclarations != null)
+            if (csPropertyDeclarations is not null)
             {
                 foreach(var propertyDeclaration in csPropertyDeclarations)
                 {
@@ -1007,7 +997,7 @@ public static class Dosai
                     var lineNumber = codeSpan.StartLinePosition.Line + 1;
                     var columnNumber = codeSpan.Span.Start.Character + 1;
 
-                    if (propertySymbol != null)
+                    if (propertySymbol is not null)
                     {
                         // Get inheritance information
                         var containingType = propertySymbol.ContainingType;
@@ -1042,19 +1032,19 @@ public static class Dosai
                                         Value = na.Value.Value?.ToString() ?? string.Empty
                                     }).ToList()
                                 }).ToList(),
-                            HasGetter = propertySymbol.GetMethod != null,
-                            HasSetter = propertySymbol.SetMethod != null,
+                            HasGetter = propertySymbol.GetMethod is not null,
+                            HasSetter = propertySymbol.SetMethod is not null,
                             Implements = propertySymbol.ExplicitInterfaceImplementations.Select(i => i.ToDisplayString()).ToList(),
                             BaseType = baseType,
                             ImplementedInterfaces = implementedInterfaces,
                             MetadataToken = metadataToken
                         });
-                        if (propertySymbol.GetMethod != null)
+                        if (propertySymbol.GetMethod is not null)
                         {
                             var getterMethod = CreateMethodFromSymbol(propertySymbol.GetMethod, model, sourceFilePath, fileName, path, lineNumber, columnNumber);
                             sourceMethods.Add(getterMethod);    
                         }
-                        if (propertySymbol.SetMethod != null)
+                        if (propertySymbol.SetMethod is not null)
                         {
                             var setterMethod = CreateMethodFromSymbol(propertySymbol.SetMethod, model, sourceFilePath, fileName, path, lineNumber, columnNumber);
                             sourceMethods.Add(setterMethod);
@@ -1064,7 +1054,7 @@ public static class Dosai
             }
 
             // VB property declarations
-            if (vbPropertyDeclarations != null)
+            if (vbPropertyDeclarations is not null)
             {
                 foreach(var propertyDeclaration in vbPropertyDeclarations)
                 {
@@ -1074,7 +1064,7 @@ public static class Dosai
                     var lineNumber = codeSpan.StartLinePosition.Line + 1;
                     var columnNumber = codeSpan.Span.Start.Character + 1;
 
-                    if (propertySymbol != null)
+                    if (propertySymbol is not null)
                     {
                         // Get inheritance information
                         var containingType = propertySymbol.ContainingType;
@@ -1109,20 +1099,20 @@ public static class Dosai
                                         Value = na.Value.Value?.ToString() ?? string.Empty
                                     }).ToList()
                                 }).ToList(),
-                            HasGetter = propertySymbol.GetMethod != null,
-                            HasSetter = propertySymbol.SetMethod != null,
+                            HasGetter = propertySymbol.GetMethod is not null,
+                            HasSetter = propertySymbol.SetMethod is not null,
                             Implements = propertySymbol.ExplicitInterfaceImplementations.Select(i => i.ToDisplayString()).ToList(),
                             BaseType = baseType,
                             ImplementedInterfaces = implementedInterfaces,
                             MetadataToken = metadataToken
                         });
-                        if (propertySymbol.GetMethod != null)
+                        if (propertySymbol.GetMethod is not null)
                         {
                             var getterMethod = CreateMethodFromSymbol(propertySymbol.GetMethod, model, sourceFilePath, fileName, path, lineNumber, columnNumber);
                             sourceMethods.Add(getterMethod);
                         }
 
-                        if (propertySymbol.SetMethod != null)
+                        if (propertySymbol.SetMethod is not null)
                         {
                             var setterMethod = CreateMethodFromSymbol(propertySymbol.SetMethod, model, sourceFilePath, fileName, path, lineNumber, columnNumber);
                             sourceMethods.Add(setterMethod);
@@ -1132,7 +1122,7 @@ public static class Dosai
             }
 
             // C# field declarations
-            if (csFieldDeclarations != null)
+            if (csFieldDeclarations is not null)
             {
                 foreach(var fieldDeclaration in csFieldDeclarations)
                 {
@@ -1142,7 +1132,7 @@ public static class Dosai
                     var typeSymbol = model.GetSymbolInfo(type).Symbol as ITypeSymbol;
                     // Get inheritance information for the containing type
                     INamedTypeSymbol? containingTypeSymbol = null;
-                    if (fieldDeclaration.Parent != null)
+                    if (fieldDeclaration.Parent is not null)
                     {
                         containingTypeSymbol = model.GetDeclaredSymbol(fieldDeclaration.Parent) as INamedTypeSymbol;
                     }
@@ -1175,8 +1165,9 @@ public static class Dosai
                                     return new CustomAttributeInfo {
                                         Name = attrSymbol?.ContainingType.Name,
                                         FullName = attrSymbol?.ContainingType.ToDisplayString(),
-                                        ConstructorArguments = attr.ArgumentList?.Arguments.Select(arg => arg.Expression.ToString()).ToList() ?? new List<string>(),
-                                        NamedArguments = new List<NamedArgumentInfo>()
+                                        ConstructorArguments = attr.ArgumentList?.Arguments.Select(arg => arg.Expression.ToString()).ToList() ??
+                                                               [],
+                                        NamedArguments = []
                                     };
                                 })).ToList(),
                             BaseType = baseType,
@@ -1188,7 +1179,7 @@ public static class Dosai
             }
 
             // VB field declarations
-            if (vbFieldDeclarations != null)
+            if (vbFieldDeclarations is not null)
             {
                 foreach(var fieldDeclaration in vbFieldDeclarations)
                 {
@@ -1197,17 +1188,17 @@ public static class Dosai
                     var firstVariable = variables.FirstOrDefault();
                     var asClause = firstVariable?.AsClause as SimpleAsClauseSyntax;
                     var type = asClause?.Type;
-                    var typeSymbol = type != null ? model.GetSymbolInfo(type).Symbol as ITypeSymbol : null;
+                    var typeSymbol = type is not null ? model.GetSymbolInfo(type).Symbol as ITypeSymbol : null;
                     // Get inheritance information for the containing type
                     INamedTypeSymbol? containingTypeSymbol = null;
-                    if (fieldDeclaration.Parent != null)
+                    if (fieldDeclaration.Parent is not null)
                     {
-                        if (model != null)
+                        if (model is not null)
                             containingTypeSymbol = model.GetDeclaredSymbol(fieldDeclaration.Parent) as INamedTypeSymbol;
                     }
                     var baseType = containingTypeSymbol?.BaseType?.Name;
                     var implementedInterfaces = containingTypeSymbol?.AllInterfaces.Select(i => i.Name).ToList();
-                    if (model != null)
+                    if (model is not null)
                     {
                         foreach(var variable in variables)
                         {
@@ -1235,8 +1226,9 @@ public static class Dosai
                                         return new CustomAttributeInfo {
                                             Name = attrSymbol?.ContainingType.Name,
                                             FullName = attrSymbol?.ContainingType.ToDisplayString(),
-                                            ConstructorArguments = attr.ArgumentList?.Arguments.Select(arg => arg.GetExpression().ToString()).ToList() ?? new List<string>(),
-                                            NamedArguments = new List<NamedArgumentInfo>()
+                                            ConstructorArguments = attr.ArgumentList?.Arguments.Select(arg => arg.GetExpression().ToString()).ToList() ??
+                                                                   [],
+                                            NamedArguments = []
                                         };
                                     })).ToList(),
                                 BaseType = baseType,
@@ -1249,7 +1241,7 @@ public static class Dosai
             }
 
             // C# event declarations
-            if (csEventDeclarations != null)
+            if (csEventDeclarations is not null)
             {
                 foreach(var eventDeclaration in csEventDeclarations)
                 {
@@ -1259,7 +1251,7 @@ public static class Dosai
                     var lineNumber = codeSpan.StartLinePosition.Line + 1;
                     var columnNumber = codeSpan.Span.Start.Character + 1;
 
-                    if (eventSymbol != null)
+                    if (eventSymbol is not null)
                     {
                         // Get inheritance information
                         var containingType = eventSymbol.ContainingType;
@@ -1303,7 +1295,7 @@ public static class Dosai
             }
 
             // C# event field declarations
-            if (csEventFieldDeclarations != null)
+            if (csEventFieldDeclarations is not null)
             {
                 foreach(var eventFieldDeclaration in csEventFieldDeclarations)
                 {
@@ -1323,7 +1315,7 @@ public static class Dosai
                         var baseType = containingType?.BaseType?.Name;
                         var implementedInterfaces = containingType?.AllInterfaces.Select(i => i.Name).ToList();
                         var metadataToken = 0;
-                        if (variableSymbol != null && SymbolEqualityComparer.Default.Equals(variableSymbol.ContainingAssembly, model?.Compilation.Assembly))
+                        if (variableSymbol is not null && SymbolEqualityComparer.Default.Equals(variableSymbol.ContainingAssembly, model?.Compilation.Assembly))
                         {
                             metadataToken = variableSymbol.MetadataToken;
                         }
@@ -1347,8 +1339,9 @@ public static class Dosai
                                     return new CustomAttributeInfo {
                                         Name = attrSymbol?.ContainingType.Name,
                                         FullName = attrSymbol?.ContainingType.ToDisplayString(),
-                                        ConstructorArguments = attr.ArgumentList?.Arguments.Select(arg => arg.Expression.ToString()).ToList() ?? new List<string>(),
-                                        NamedArguments = new List<NamedArgumentInfo>()
+                                        ConstructorArguments = attr.ArgumentList?.Arguments.Select(arg => arg.Expression.ToString()).ToList() ??
+                                                               [],
+                                        NamedArguments = []
                                     };
                                 })).ToList(),
                             BaseType = baseType,
@@ -1360,7 +1353,7 @@ public static class Dosai
             }
 
             // VB event declarations
-            if (vbEventDeclarations != null)
+            if (vbEventDeclarations is not null)
             {
                 foreach(var eventDeclaration in vbEventDeclarations)
                 {
@@ -1370,7 +1363,7 @@ public static class Dosai
                     var lineNumber = codeSpan.StartLinePosition.Line + 1;
                     var columnNumber = codeSpan.Span.Start.Character + 1;
 
-                    if (eventSymbol != null)
+                    if (eventSymbol is not null)
                     {
                         // Get inheritance information
                         var containingType = eventSymbol.ContainingType;
@@ -1414,7 +1407,7 @@ public static class Dosai
             }
 
             // C# constructor declarations
-            if (csConstructorDeclarations != null)
+            if (csConstructorDeclarations is not null)
             {
                 foreach(var constructorDeclaration in csConstructorDeclarations)
                 {
@@ -1424,7 +1417,7 @@ public static class Dosai
                     var lineNumber = codeSpan.StartLinePosition.Line + 1;
                     var columnNumber = codeSpan.Span.Start.Character + 1;
                     var metadataToken = 0;
-                    if (constructorSymbol != null)
+                    if (constructorSymbol is not null)
                     {
                         // Get inheritance information
                         var containingType = constructorSymbol.ContainingType;
@@ -1435,7 +1428,7 @@ public static class Dosai
                             metadataToken = constructorSymbol.MetadataToken;
                         }
                         var isGenericMethod = constructorSymbol.IsGenericMethod;
-                        List<string> genericParameters = new List<string>();
+                        List<string> genericParameters = [];
                         if (constructorSymbol.ContainingType?.IsGenericType ?? false)
                         {
                             genericParameters = constructorSymbol.ContainingType.TypeParameters.Select(tp => tp.Name).ToList();
@@ -1482,12 +1475,12 @@ public static class Dosai
             }
 
             // VB constructor declarations
-            if (vbConstructorDeclarations != null)
+            if (vbConstructorDeclarations is not null)
             {
                 foreach(var constructorDeclaration in vbConstructorDeclarations)
                 {
                     var ctorStmt = constructorDeclaration.SubNewStatement;
-                    if (ctorStmt != null)
+                    if (ctorStmt is not null)
                     {
                         var modifiers = ctorStmt.Modifiers;
                         var constructorSymbol = model.GetDeclaredSymbol(ctorStmt);
@@ -1495,7 +1488,7 @@ public static class Dosai
                         var lineNumber = codeSpan.StartLinePosition.Line + 1;
                         var columnNumber = codeSpan.Span.Start.Character + 1;
 
-                        if (constructorSymbol != null)
+                        if (constructorSymbol is not null)
                         {
                             // Get inheritance information
                             var containingType = constructorSymbol.ContainingType;
@@ -1544,7 +1537,7 @@ public static class Dosai
             }
 
             // using declarations
-            if (csUsingDirectives != null)
+            if (csUsingDirectives is not null)
             {
                 foreach(var usingDirective in csUsingDirectives)
                 {
@@ -1557,7 +1550,7 @@ public static class Dosai
                     var assembly = string.Empty;
                     var module = string.Empty;
 
-                    if (usingDirective.Name != null)
+                    if (usingDirective.Name is not null)
                     {
                         var nameInfo = model.GetSymbolInfo(usingDirective.Name);
                         INamespaceSymbol? nsSymbol = null;
@@ -1571,7 +1564,7 @@ public static class Dosai
                             nsSymbol = (INamespaceSymbol)nameInfo.CandidateSymbols.First();
                         }
 
-                        if (nsSymbol != null)
+                        if (nsSymbol is not null)
                         {
                             var nsMembers = nsSymbol.GetNamespaceMembers();
                             namespaceMembers.AddRange(nsMembers.Select(m => m.Name));
@@ -1597,7 +1590,7 @@ public static class Dosai
             }
 
             // import declarations
-            if (vbImportsDirectives != null)
+            if (vbImportsDirectives is not null)
             {
                 foreach(var importDirective in vbImportsDirectives)
                 {
@@ -1610,7 +1603,7 @@ public static class Dosai
                     var assembly = "";
                     var module = "";
 
-                    if (importDirective.Name != null)
+                    if (importDirective.Name is not null)
                     {
                         var nameInfo = model.GetSymbolInfo(importDirective.Name);
                         INamespaceSymbol? nsSymbol = null;
@@ -1622,7 +1615,7 @@ public static class Dosai
                         {
                             nsSymbol = (INamespaceSymbol)nameInfo.CandidateSymbols.First();
                         }
-                        if (nsSymbol != null)
+                        if (nsSymbol is not null)
                         {
                             var nsMembers = nsSymbol.GetNamespaceMembers();
                             namespaceMembers.AddRange(nsMembers.Select(m => m.Name));
@@ -1648,20 +1641,20 @@ public static class Dosai
             }
 
             // method calls
-            if (csMethodCalls != null)
+            if (csMethodCalls is not null)
             {
                 foreach(var methodCall in csMethodCalls)
                 {
-                    if (model != null)
+                    if (model is not null)
                         TrackCsMethodCall(methodCall, model, allMethodCalls, path, sourceFilePath, fileName);
                 }
             }
 
-            if (vbMethodCalls != null)
+            if (vbMethodCalls is not null)
             {
                 foreach(var methodCall in vbMethodCalls)
                 {
-                    if (model != null)
+                    if (model is not null)
                         TrackVbMethodCall(methodCall, model, allMethodCalls, path, sourceFilePath, fileName);
                 }
             }
@@ -1672,132 +1665,52 @@ public static class Dosai
         sourceMethods.AddRange(fsharpMethods);
         allUsingDirectives.AddRange(fsharpDependencies);
         allMethodCalls.AddRange(fsharpMethodCalls);
-        
-        string CreateNodeId(string ns, string className, string memberName) => $"{ns}.{className}.{memberName}";
-        foreach (var method in sourceMethods)
-        {
-            var nodeId = CreateNodeId(method.Namespace ?? string.Empty, method.ClassName ?? string.Empty, method.Name ?? string.Empty);
-            if (methodNodes.All(n => n.Id != nodeId))
+        // 1. Create a common, anonymous type for all discovered members.
+        var allMembers = sourceMethods.Select(m => new { m.Namespace, m.ClassName, m.Name, m.FileName })
+            .Concat(properties.Select(p => new { p.Namespace, p.ClassName, p.Name, p.FileName }))
+            .Concat(fields.Select(f => new { f.Namespace, f.ClassName, f.Name, f.FileName }))
+            .Concat(events.Select(e => new { e.Namespace, e.ClassName, e.Name, e.FileName }))
+            .Concat(constructors.Select(c => new { c.Namespace, c.ClassName, c.Name, c.FileName }));
+        // 2. Create unique method nodes efficiently using GroupBy.
+        var methodNodes = allMembers
+            .Where(m => m.Name is not null)
+            .GroupBy(m => CreateNodeId(m.Namespace ?? string.Empty, m.ClassName ?? string.Empty, m.Name!))
+            .Select(g => g.First())
+            .Select(m => new MethodNode
             {
-                methodNodes.Add(new MethodNode
-                {
-                    Id = nodeId,
-                    Name = method.Name ?? string.Empty,
-                    ClassName = method.ClassName ?? string.Empty,
-                    Namespace = method.Namespace ?? string.Empty,
-                    FileName = method.FileName ?? string.Empty
-                });
-            }
-        }
-        // Add nodes for Properties
-        foreach (var prop in properties)
+                Id = CreateNodeId(m.Namespace ?? string.Empty, m.ClassName ?? string.Empty, m.Name!),
+                Name = m.Name!,
+                ClassName = m.ClassName ?? string.Empty,
+                Namespace = m.Namespace ?? string.Empty,
+                FileName = m.FileName ?? string.Empty
+            })
+            .ToList();
+        // 3. Create Edges based on tracked method calls using a LINQ pipeline.
+        var callEdges = (from call in allMethodCalls
+            let callCallerClass = call.CallerClass
+            where callCallerClass != null
+            let callerMethod = call.CallerMethod
+            where callerMethod != null
+            let calledMethodName = call.CalledMethod
+            where calledMethodName != null
+            let value = call.ClassName
+            where value != null
+            where !string.IsNullOrEmpty(callCallerClass) && !string.IsNullOrEmpty(callerMethod) && !string.IsNullOrEmpty(value) && !string.IsNullOrEmpty(calledMethodName)
+        let sourceNodeId = CreateNodeId(call.CallerNamespace ?? "", callCallerClass, callerMethod)
+        let lastDotIndex = calledMethodName.LastIndexOf('.')
+        let targetMemberName = lastDotIndex >= 0 ? calledMethodName.Substring(lastDotIndex + 1) : calledMethodName
+        let targetNodeId = CreateNodeId(call.Namespace ?? "", value, targetMemberName)
+        where methodNodes.Any(n => n.Id == sourceNodeId)
+        select new MethodCallEdge
         {
-            var nodeId = CreateNodeId(prop.Namespace ?? string.Empty, prop.ClassName ?? string.Empty, prop.Name ?? string.Empty);
-            if (methodNodes.All(n => n.Id != nodeId))
-            {
-                methodNodes.Add(new MethodNode
-                {
-                    Id = nodeId,
-                    Name = prop.Name ?? string.Empty,
-                    ClassName = prop.ClassName ?? string.Empty,
-                    Namespace = prop.Namespace ?? string.Empty,
-                    FileName = prop.FileName ?? string.Empty
-                });
-            }
-        }
-        // Add nodes for Fields
-        foreach (var field in fields)
-        {
-            var nodeId = CreateNodeId(field.Namespace ?? string.Empty, field.ClassName ?? string.Empty, field.Name ?? string.Empty);
-            if (methodNodes.All(n => n.Id != nodeId))
-            {
-                methodNodes.Add(new MethodNode
-                {
-                    Id = nodeId,
-                    Name = field.Name ?? string.Empty,
-                    ClassName = field.ClassName ?? string.Empty,
-                    Namespace = field.Namespace ?? string.Empty,
-                    FileName = field.FileName ?? string.Empty
-                });
-            }
-        }
-        // Add nodes for Events
-        foreach (var evt in events)
-        {
-            var nodeId = CreateNodeId(evt.Namespace ?? string.Empty, evt.ClassName ?? string.Empty, evt.Name ?? string.Empty);
-            if (methodNodes.All(n => n.Id != nodeId))
-            {
-                methodNodes.Add(new MethodNode
-                {
-                    Id = nodeId,
-                    Name = evt.Name ?? string.Empty,
-                    ClassName = evt.ClassName ?? string.Empty,
-                    Namespace = evt.Namespace ?? string.Empty,
-                    FileName = evt.FileName ?? string.Empty
-                });
-            }
-        }
-        // Add nodes for Constructors
-        foreach (var ctor in constructors)
-        {
-            var nodeId = CreateNodeId(ctor.Namespace ?? string.Empty, ctor.ClassName ?? string.Empty, ctor.Name ?? string.Empty);
-            if (methodNodes.All(n => n.Id != nodeId))
-            {
-                methodNodes.Add(new MethodNode
-                {
-                    Id = nodeId,
-                    Name = ctor.Name ?? string.Empty,
-                    ClassName = ctor.ClassName ?? string.Empty,
-                    Namespace = ctor.Namespace ?? string.Empty,
-                    FileName = ctor.FileName ?? string.Empty
-                });
-            }
-        }
-        // 2. Create Edges based on tracked method calls
-        foreach (var call in allMethodCalls)
-        {
-            // Determine the source node (the method/property/etc that made the call)
-            if (!string.IsNullOrEmpty(call.CallerNamespace) &&
-                !string.IsNullOrEmpty(call.CallerClass) &&
-                !string.IsNullOrEmpty(call.CallerMethod))
-            {
-                var sourceNodeId = CreateNodeId(call.CallerNamespace, call.CallerClass, call.CallerMethod);
-                if (!string.IsNullOrEmpty(call.Namespace) &&
-                    !string.IsNullOrEmpty(call.ClassName) &&
-                    !string.IsNullOrEmpty(call.CalledMethod))
-                {
-                    string targetMemberName;
-                    var lastDotIndex = call.CalledMethod.LastIndexOf('.');
-                    if (lastDotIndex >= 0 && lastDotIndex < call.CalledMethod.Length - 1)
-                    {
-                        targetMemberName = call.CalledMethod.Substring(lastDotIndex + 1);
-                    }
-                    else
-                    {
-                        targetMemberName = call.CalledMethod;
-                    }
-                    var targetNodeId = CreateNodeId(call.Namespace, call.ClassName, targetMemberName);
-                    if (methodNodes.Any(n => n.Id == sourceNodeId))
-                    {
-                        callEdges.Add(new MethodCallEdge
-                        {
-                            SourceId = sourceNodeId,
-                            TargetId = targetNodeId,
-                            CallLocation = new CallLocation
-                            {
-                                FileName = call.FileName,
-                                LineNumber = call.LineNumber,
-                                ColumnNumber = call.ColumnNumber
-                            },
-                            CalledMethodName = call.CalledMethod, 
-                            Arguments = call.Arguments ?? new List<string>(),
-                            ArgumentExpressions = call.ArgumentExpressions ?? new List<string>(),
-                            CallType = call.CallType
-                        });
-                    }
-                }
-            }
-        }
+            SourceId = sourceNodeId,
+            TargetId = targetNodeId,
+            CallLocation = new CallLocation { FileName = call.FileName, LineNumber = call.LineNumber, ColumnNumber = call.ColumnNumber },
+            CalledMethodName = calledMethodName,
+            Arguments = call.Arguments ?? [],
+            ArgumentExpressions = call.ArgumentExpressions ?? [],
+            CallType = call.CallType
+        }).ToList();
         var callGraph = new CallGraph
         {
             Edges = callEdges,
@@ -1809,7 +1722,7 @@ public static class Dosai
         foreach (var asmMethod in assemblyMethods)
         {
             var asmSignature = asmMethod.AssemblySignature;
-            if (asmSignature != null)
+            if (asmSignature is not null)
             {
                 assemblyMemberLookup.TryAdd(asmSignature, asmMethod);
             }
@@ -1821,6 +1734,8 @@ public static class Dosai
             AddMapping(method, "Method");
         }
         return (sourceMethods, allUsingDirectives, allMethodCalls, properties, fields, events, constructors, callGraph, sourceAssemblyMappings);
+
+        string CreateNodeId(string ns, string className, string memberName) => $"{ns}.{className}.{memberName}";
 
         void AddMapping<T>(T sourceMember, string memberType) where T : class
         {
@@ -1873,7 +1788,7 @@ public static class Dosai
     private static string GetContainingTypeName(MemberDeclarationSyntax member)
     {
         var parent = member.Parent;
-        while (parent != null)
+        while (parent is not null)
         {
             if (parent is ClassDeclarationSyntax classDecl)
                 return classDecl.Identifier.Text;
@@ -1897,7 +1812,7 @@ public static class Dosai
         {
             var argType = model.GetTypeInfo(arg.Expression).Type;
             // Fallback to expression type if we can't get the type info
-            callArgsTypes.Add(argType != null ? argType.ToDisplayString() : arg.Expression.GetType().Name);
+            callArgsTypes.Add(argType is not null ? argType.ToDisplayString() : arg.Expression.GetType().Name);
             callArgExpressions.Add(arg.Expression.ToFullString());
         }
         var exprInfo = model.GetSymbolInfo(callExpression);
@@ -1913,44 +1828,25 @@ public static class Dosai
         var callerClass = string.Empty;
         var callType = CallType.MethodCall;
         
-        if (exprInfo.Symbol != null)
+        if (exprInfo.Symbol is not null)
         {
             switch (exprInfo.Symbol)
             {
-                case IMethodSymbol { MethodKind: MethodKind.PropertyGet } methodSymbol:
-                    callType = CallType.PropertyGet;
-                    calledMethod = methodSymbol.AssociatedSymbol?.Name ?? methodSymbol.Name;
-                    className = methodSymbol.AssociatedSymbol?.ContainingType?.Name ?? methodSymbol.ContainingType?.Name ?? "";
-                    namespaceString = methodSymbol.AssociatedSymbol?.ContainingNamespace?.ToDisplayString() ??
-                                methodSymbol.ContainingNamespace?.ToDisplayString() ?? "";
+                case IMethodSymbol { MethodKind: MethodKind.PropertyGet or MethodKind.PropertySet } propSymbol:
+                    callType = propSymbol.MethodKind == MethodKind.PropertyGet ? CallType.PropertyGet : CallType.PropertySet;
+                    calledMethod = propSymbol.AssociatedSymbol?.Name ?? propSymbol.Name;
+                    className = propSymbol.AssociatedSymbol?.ContainingType?.Name ?? propSymbol.ContainingType?.Name ?? "";
+                    namespaceString = propSymbol.AssociatedSymbol?.ContainingNamespace?.ToDisplayString() ??
+                                      propSymbol.ContainingNamespace?.ToDisplayString() ?? "";
                     break;
-                case IMethodSymbol { MethodKind: MethodKind.PropertySet } methodSymbol:
-                    callType = CallType.PropertySet;
-                    calledMethod = methodSymbol.AssociatedSymbol?.Name ?? methodSymbol.Name;
-                    className = methodSymbol.AssociatedSymbol?.ContainingType?.Name ?? methodSymbol.ContainingType?.Name ?? "";
-                    namespaceString = methodSymbol.AssociatedSymbol?.ContainingNamespace?.ToDisplayString() ??
-                                methodSymbol.ContainingNamespace?.ToDisplayString() ?? "";
-                    break;
-                case IMethodSymbol { MethodKind: MethodKind.EventAdd } methodSymbol:
-                    callType = CallType.EventSubscribe;
-                    calledMethod = methodSymbol.AssociatedSymbol?.Name ?? methodSymbol.Name;
-                    className = methodSymbol.AssociatedSymbol?.ContainingType?.Name ?? methodSymbol.ContainingType?.Name ?? "";
-                    namespaceString = methodSymbol.AssociatedSymbol?.ContainingNamespace?.ToDisplayString() ??
-                                methodSymbol.ContainingNamespace?.ToDisplayString() ?? "";
-                    break;
-                case IMethodSymbol { MethodKind: MethodKind.EventRemove } methodSymbol:
-                    callType = CallType.EventUnsubscribe;
-                    calledMethod = methodSymbol.AssociatedSymbol?.Name ?? methodSymbol.Name;
-                    className = methodSymbol.AssociatedSymbol?.ContainingType?.Name ?? methodSymbol.ContainingType?.Name ?? "";
-                    namespaceString = methodSymbol.AssociatedSymbol?.ContainingNamespace?.ToDisplayString() ??
-                                methodSymbol.ContainingNamespace?.ToDisplayString() ?? "";
-                    break;
-                case IMethodSymbol { MethodKind: MethodKind.Constructor } methodSymbol:
+                
+                case IMethodSymbol { MethodKind: MethodKind.Constructor } ctorSymbol:
                     callType = CallType.ConstructorCall;
-                    calledMethod = methodSymbol.ContainingType?.Name ?? methodSymbol.Name; // Constructor name is usually .ctor
-                    className = methodSymbol.ContainingType?.Name ?? "";
-                    namespaceString = methodSymbol.ContainingNamespace?.ToDisplayString() ?? "";
+                    calledMethod = ctorSymbol.ContainingType?.Name ?? ctorSymbol.Name;
+                    className = ctorSymbol.ContainingType?.Name ?? "";
+                    namespaceString = ctorSymbol.ContainingNamespace?.ToDisplayString() ?? "";
                     break;
+
                 case IMethodSymbol methodSymbol:
                     calledMethod = methodSymbol.ToDisplayString();
                     isInMetadata = methodSymbol.Locations.Any(l => l.IsInMetadata);
@@ -1960,6 +1856,7 @@ public static class Dosai
                     namespaceString = methodSymbol.ContainingNamespace?.ToDisplayString() ?? "";
                     className = methodSymbol.ContainingType?.Name ?? "";
                     break;
+
                 case IPropertySymbol propertySymbol:
                     callType = CallType.PropertyGet;
                     calledMethod = propertySymbol.Name;
@@ -2024,7 +1921,7 @@ public static class Dosai
         var callerNamespace = string.Empty;
         var callerClass = string.Empty;
 
-        if (exprInfo.Symbol != null)
+        if (exprInfo.Symbol is not null)
         {
             var methodSymbol = exprInfo.Symbol;
             calledMethod = methodSymbol.ToDisplayString();
@@ -2075,13 +1972,17 @@ public static class Dosai
     {
         var filesToInspect = new List<string>();
         var fileAttributes = File.GetAttributes(path);
-        if (fileExtensions == null || fileExtensions.Length == 0)
+        if (fileExtensions is null || fileExtensions.Length == 0)
         {
             return filesToInspect; // Return empty list if no extensions provided
         }
         if (fileAttributes.HasFlag(FileAttributes.Directory))
         {
-            filesToInspect.AddRange(from extension in fileExtensions from inputFile in new DirectoryInfo(path).EnumerateFiles($"*{extension}", SearchOption.AllDirectories) where !inputFile.FullName.EndsWith($".g{extension}") select inputFile.FullName);
+            filesToInspect.AddRange(
+                from extension in fileExtensions 
+                from inputFile in new DirectoryInfo(path).EnumerateFiles($"*{extension}", SearchOption.AllDirectories) 
+                where !inputFile.FullName.Contains("/obj/") && !inputFile.FullName.EndsWith($".g{extension}") 
+                select inputFile.FullName);
         }
         else
         {

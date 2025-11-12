@@ -3,20 +3,20 @@ namespace Depscan;
 public class MethodCalls
 {
     public string? Path { get; set; }
-    public string? FileName { get; set; }
+    public string? FileName { get; init; }
     public string? Assembly { get; set; }
     public string? Module { get; set; }
-    public string? Namespace { get; set; }
-    public string? ClassName { get; set; }
-    public string? CalledMethod { get; set; }
-    public int LineNumber { get; set; }
-    public int ColumnNumber { get; set; }
-    public List<string>? Arguments { get; set; }
-    public List<string>? ArgumentExpressions { get; set; }
-    public CallType CallType { get; set; } = CallType.Unknown;
-    public string? CallerMethod { get; set; }
-    public string? CallerNamespace { get; set; }
-    public string? CallerClass { get; set; }
+    public string? Namespace { get; init; }
+    public string? ClassName { get; init; }
+    public string? CalledMethod { get; init; }
+    public int LineNumber { get; init; }
+    public int ColumnNumber { get; init; }
+    public List<string>? Arguments { get; init; }
+    public List<string>? ArgumentExpressions { get; init; }
+    public CallType CallType { get; init; } = CallType.Unknown;
+    public string? CallerMethod { get; init; }
+    public string? CallerNamespace { get; init; }
+    public string? CallerClass { get; init; }
     public bool IsInternal { get; set; }
 }
 

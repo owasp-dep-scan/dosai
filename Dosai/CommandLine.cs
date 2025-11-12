@@ -8,7 +8,7 @@ public class CommandLine
 
     public static async Task<int> Main(string[] args)
     {
-        var rootCommand = new RootCommand("Dosai");
+        var rootCommand = new RootCommand("Dotnet Source and Assembly Inspector (Dosai) is a tool to list details about the namespaces and methods from sources and assemblies.");
 
         var pathOption = new Option<string?>(
                 name: "--path",

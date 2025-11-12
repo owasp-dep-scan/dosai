@@ -2,8 +2,8 @@ namespace Depscan;
 
 public class Parameter
 {
-    public string? Name { get; set; }
-    public string? Type { get; set; }
+    public string? Name { get; init; }
+    public string? Type { get; init; }
     public string? TypeFullName { get; set; }
     public bool IsGenericParameter { get; set; }
 }

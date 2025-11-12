@@ -25,7 +25,7 @@ List details about the namespaces, methods, dependencies, properties, fields, ev
 
 1. `dotnet build ./Dosai`
 2. Run a command such as:
-   - `dotnet run --project ./Dosai/ methods --path ./Dosai/bin/x64/Debug/net9.0/Dosai.dll`
+   - `dotnet run --project ./Dosai/ methods --path ./Dosai/bin/x64/Debug/net10.0/Dosai.dll`
    - `dotnet run --project ./Dosai/ methods --path ./Dosai/Dosai.cs`
    - `dotnet run --project ./Dosai/ methods --path ./MyPackage.1.0.0.nupkg`
 

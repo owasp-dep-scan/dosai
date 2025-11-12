@@ -90,7 +90,7 @@ namespace HelloWorld
         // Instance method using generics
         public List<string> GetNames()
         {
-            return new List<string> { "Alice", "Bob" };
+            return ["Alice", "Bob"];
         }
     }
 
