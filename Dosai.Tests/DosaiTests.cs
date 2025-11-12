@@ -98,15 +98,15 @@ public class DosaiTests
         var getNamesMethod = helloClassMethods?.FirstOrDefault(m => m.Name == "GetNames");
         Assert.NotNull(getNamesMethod);
         Assert.Equal("System.Collections.Generic.List<string>", getNamesMethod.ReturnType);
-        Assert.True(genericProcessorClassMethods?.Any(m => m.ImplementedInterfaces != null && m.ImplementedInterfaces.Contains("IGenericInterface")));
+        Assert.True(genericProcessorClassMethods?.Any(m => m.ImplementedInterfaces is not null && m.ImplementedInterfaces.Contains("IGenericInterface")));
         
         // Check that Hello class has inheritance info
         Assert.True(helloClassMethods?.Any(m => m.BaseType == "BaseClass"));
-        Assert.True(helloClassMethods?.Any(m => m.ImplementedInterfaces != null && m.ImplementedInterfaces.Contains("ITestInterface")));
+        Assert.True(helloClassMethods?.Any(m => m.ImplementedInterfaces is not null && m.ImplementedInterfaces.Contains("ITestInterface")));
         
         // Check that World class has interface info
-        Assert.True(worldClassMethods?.Any(m => m.ImplementedInterfaces != null && m.ImplementedInterfaces.Contains("ITestInterface")));
-        Assert.True(worldClassMethods?.Any(m => m.ImplementedInterfaces != null && m.ImplementedInterfaces.Contains("IAnotherInterface")));
+        Assert.True(worldClassMethods?.Any(m => m.ImplementedInterfaces is not null && m.ImplementedInterfaces.Contains("ITestInterface")));
+        Assert.True(worldClassMethods?.Any(m => m.ImplementedInterfaces is not null && m.ImplementedInterfaces.Contains("IAnotherInterface")));
         
         // Test method calls information
         AssertMethodCalls(methodCalls);
@@ -134,11 +134,11 @@ public class DosaiTests
     
         // Check that Hello class has inheritance info
         Assert.True(helloClassMethods?.Any(m => m.BaseType == "BaseClass"));
-        Assert.True(helloClassMethods?.Any(m => m.ImplementedInterfaces != null && m.ImplementedInterfaces.Contains("ITestInterface")));
+        Assert.True(helloClassMethods?.Any(m => m.ImplementedInterfaces is not null && m.ImplementedInterfaces.Contains("ITestInterface")));
     
         // Check that World class has interface info
-        Assert.True(worldClassMethods?.Any(m => m.ImplementedInterfaces != null && m.ImplementedInterfaces.Contains("ITestInterface")));
-        Assert.True(worldClassMethods?.Any(m => m.ImplementedInterfaces != null && m.ImplementedInterfaces.Contains("IAnotherInterface")));
+        Assert.True(worldClassMethods?.Any(m => m.ImplementedInterfaces is not null && m.ImplementedInterfaces.Contains("ITestInterface")));
+        Assert.True(worldClassMethods?.Any(m => m.ImplementedInterfaces is not null && m.ImplementedInterfaces.Contains("IAnotherInterface")));
     
         // Test method calls information
         AssertMethodCalls(methodCalls);
@@ -195,11 +195,11 @@ public class DosaiTests
         
         // Check that Hello class has inheritance info
         Assert.True(helloClassMethods?.Any(m => m.BaseType == "BaseClass"));
-        Assert.True(helloClassMethods?.Any(m => m.ImplementedInterfaces != null && m.ImplementedInterfaces.Contains("ITestInterface")));
+        Assert.True(helloClassMethods?.Any(m => m.ImplementedInterfaces is not null && m.ImplementedInterfaces.Contains("ITestInterface")));
         
         // Check that World class has interface info
-        Assert.True(worldClassMethods?.Any(m => m.ImplementedInterfaces != null && m.ImplementedInterfaces.Contains("ITestInterface")));
-        Assert.True(worldClassMethods?.Any(m => m.ImplementedInterfaces != null && m.ImplementedInterfaces.Contains("IAnotherInterface")));
+        Assert.True(worldClassMethods?.Any(m => m.ImplementedInterfaces is not null && m.ImplementedInterfaces.Contains("ITestInterface")));
+        Assert.True(worldClassMethods?.Any(m => m.ImplementedInterfaces is not null && m.ImplementedInterfaces.Contains("IAnotherInterface")));
         
         // Test method calls information
         AssertMethodCalls(methodCalls);
@@ -234,11 +234,11 @@ public class DosaiTests
     
         // Check that Hello class has inheritance info
         Assert.True(helloClassMethods?.Any(m => m.BaseType == "BaseClass"));
-        Assert.True(helloClassMethods?.Any(m => m.ImplementedInterfaces != null && m.ImplementedInterfaces.Contains("ITestInterface")));
+        Assert.True(helloClassMethods?.Any(m => m.ImplementedInterfaces is not null && m.ImplementedInterfaces.Contains("ITestInterface")));
     
         // Check that World class has interface info
-        Assert.True(worldClassMethods?.Any(m => m.ImplementedInterfaces != null && m.ImplementedInterfaces.Contains("ITestInterface")));
-        Assert.True(worldClassMethods?.Any(m => m.ImplementedInterfaces != null && m.ImplementedInterfaces.Contains("IAnotherInterface")));
+        Assert.True(worldClassMethods?.Any(m => m.ImplementedInterfaces is not null && m.ImplementedInterfaces.Contains("ITestInterface")));
+        Assert.True(worldClassMethods?.Any(m => m.ImplementedInterfaces is not null && m.ImplementedInterfaces.Contains("IAnotherInterface")));
     
         // Test method calls information
         AssertMethodCalls(methodCalls);
@@ -421,7 +421,7 @@ public class DosaiTests
 
             Assert.NotNull(matchingMethod);
 
-            if (expectedMethod.Parameters != null)
+            if (expectedMethod.Parameters is not null)
             {
                 foreach (var expectedParameter in expectedMethod.Parameters)
                 {
