@@ -114,4 +114,4 @@ See [Yara Usage docs](./YARA-USAGE.md)
 
 ## License
 
-Apache-2.0
+MIT
