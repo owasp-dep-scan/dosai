@@ -20,7 +20,7 @@ public class DosaiTests
         var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result, deserializeOptions);
         var actualMethods = methodsSlice?.Methods;
         
-        Assert.Equal(32, actualMethods?.Count);
+        Assert.Equal(36, actualMethods?.Count);
         AssertMethods(actualMethods, expectedMethodsDosaiTestDataCSharpDLL);
     }
 
@@ -36,7 +36,7 @@ public class DosaiTests
         var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result, deserializeOptions);
         var actualMethods = methodsSlice?.Methods;
         
-        Assert.Equal(21, actualMethods?.Count);
+        Assert.Equal(24, actualMethods?.Count);
         AssertMethods(actualMethods, expectedMethodsDosaiTestDataVBDLL);
     }
 
@@ -291,7 +291,7 @@ public class DosaiTests
         var actualMethods = methodsSlice?.Methods;
         var methodCalls = methodsSlice?.MethodCalls;
 
-        Assert.Equal(56, actualMethods?.Count);
+        Assert.Equal(60, actualMethods?.Count);
         AssertMethods(actualMethods, expectedMethodsDosaiTestDataCSharpDLL);
         AssertMethods(actualMethods, expectedMethodsHelloWorldCSharpSource);
         AssertMethods(actualMethods, expectedMethodsFooBarCSharpSource);
@@ -320,7 +320,7 @@ public class DosaiTests
         var actualMethods = methodsSlice?.Methods;
         var methodCalls = methodsSlice?.MethodCalls;
 
-        Assert.Equal(37, actualMethods?.Count);
+        Assert.Equal(40, actualMethods?.Count);
         AssertMethods(actualMethods, expectedMethodsDosaiTestDataVBDLL);
         AssertMethods(actualMethods, expectedMethodsHelloWorldVBSource);
         AssertMethods(actualMethods, expectedMethodsFooBarVBSource);
