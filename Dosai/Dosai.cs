@@ -1,6 +1,7 @@
 ﻿using System.Diagnostics;
 using System.Globalization;
 using System.Reflection;
+using System.Reflection.PortableExecutable;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -204,6 +205,26 @@ public static class Dosai
     }
     
     /// <summary>
+    /// Checks if a DLL is a managed .NET assembly by inspecting its PE header.
+    /// This avoids trying to load native DLLs, which would throw a BadImageFormatException.
+    /// </summary>
+    /// <param name="filePath">The path to the DLL file.</param>
+    /// <returns>True if the file is a managed assembly, false otherwise.</returns>
+    private static bool IsManagedAssembly(string filePath)
+    {
+        try
+        {
+            using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var peReader = new PEReader(fs);
+            return peReader.HasMetadata && peReader.PEHeaders.CorHeader is not null;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+    
+    /// <summary>
     /// Discovers the paths of all installed .NET shared runtimes (like Microsoft.NETCore.App
     /// and Microsoft.AspNetCore.App) by executing 'dotnet --list-runtimes'.
     /// </summary>
@@ -323,11 +344,14 @@ public static class Dosai
                 dependencyDirs.AddRange(Directory.GetDirectories(Path.Combine(sharedDir, "Microsoft.AspNetCore.App")));
             }
         }
-        var failedAssemblies = new List<string>();
-
         foreach (var assemblyFilePath in assembliesToInspect)
         {
             var fileName = Path.GetFileName(assemblyFilePath);
+            if (!IsManagedAssembly(assemblyFilePath))
+            {
+                Console.WriteLine($"Info: Skipping native library or non-assembly file: {assemblyFilePath}");
+                continue;
+            }
             var searchPaths = new List<string> { Path.GetDirectoryName(assemblyFilePath)! };
             searchPaths.AddRange(dependencyDirs);
             searchPaths.AddRange(sharedRuntimePaths);
@@ -360,9 +384,7 @@ public static class Dosai
                             Console.WriteLine($"  - {errorMessage}");
                             if (errorMessage is null ||
                                 !errorMessage.Contains("The system cannot find the file specified")) continue;
-                            Console.ForegroundColor = ConsoleColor.Yellow;
                             Console.WriteLine("    Suggestion: This error often means a .NET Shared Framework is missing. Ensure the machine running this analysis has the necessary .NET SDKs and Runtimes (e.g., ASP.NET Core Runtime) installed. Some projects might require Windows for building.");
-                            Console.ResetColor();
                         }
                     }
                     types = ex.Types.Where(t => t is not null).ToArray()!;
@@ -412,16 +434,12 @@ public static class Dosai
             }
             catch (Exception e) when (e is FileLoadException or FileNotFoundException or BadImageFormatException or TypeLoadException or NotSupportedException)
             {
-                Console.ForegroundColor = ConsoleColor.DarkYellow;
                 Console.WriteLine($"Warning: Skipping assembly {assemblyFilePath} as it could not be fully loaded for inspection.");
                 Console.WriteLine($"  - Reason: {e.GetType().Name}: {e.Message}");
-                Console.ResetColor();
             }
             catch (Exception e)
             {
-                Console.ForegroundColor = ConsoleColor.Red;
                 Console.WriteLine($"Error: An unexpected error occurred while processing {fileName}. Details: {e.Message}");
-                Console.ResetColor();
             }
             finally
             {
