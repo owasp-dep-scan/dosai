@@ -9,7 +9,7 @@
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
-    <Version>2.1.0</Version>
+    <Version>2.1.1</Version>
     <Title>OWASP Dosai</Title>
     <Authors>Team AppThreat &lt;cloud@appthreat.com&gt;</Authors>
     <Description>Dotnet Source and Assembly Inspector (Dosai) is a tool to list details about the namespaces and methods from sources and assemblies.</Description>
@@ -24,7 +24,7 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.0.0-2.final" />
     <PackageReference Include="Microsoft.CodeAnalysis.VisualBasic" Version="5.0.0-2.final" />
-    <PackageReference Include="System.CommandLine" Version="2.0.0-beta4.22272.1" />
+    <PackageReference Include="System.CommandLine" Version="2.0.0" />
     <None Include="..\README.md" Pack="true" PackagePath="\" />
     <PackageReference Include="System.Reflection.MetadataLoadContext" Version="10.0.0" />
   </ItemGroup>

@@ -8,14 +8,14 @@ List details about the namespaces, methods, dependencies, properties, fields, ev
 
 ### Commands:
 
-`methods` Retrieve details about the methods
-`--version` Show version information
-`-?`, `-h`, `--help` Show help and usage information
+- `methods` Retrieve details about the methods
 
 ### Options:
 
-`--path [path]` (REQUIRED) The file or directory to inspect (supports .dll, .exe, .cs, .vb, .fs, .nupkg)
-`--o` The output file location and name, default value when option not provided is 'dosai.json'
+- `--path [path]` (REQUIRED) The file or directory to inspect (supports .dll, .exe, .cs, .vb, .fs, .nupkg)
+- `--o [file]` (OPTIONAL) The output file location and name, default value when option not provided is 'dosai.json'
+- `--version` Show version information
+- `-?`, `-h`, `--help` Show help and usage information
 
 ---
 
