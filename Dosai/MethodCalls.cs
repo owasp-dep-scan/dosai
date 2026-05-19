@@ -14,6 +14,8 @@ public class MethodCalls
     public List<string>? Arguments { get; init; }
     public List<string>? ArgumentExpressions { get; init; }
     public CallType CallType { get; init; } = CallType.Unknown;
+    public string? SourceId { get; init; }
+    public string? TargetId { get; init; }
     public string? CallerMethod { get; init; }
     public string? CallerNamespace { get; init; }
     public string? CallerClass { get; init; }

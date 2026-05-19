@@ -1,6 +1,7 @@
 using Depscan;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Xml.Linq;
 using Xunit;
 
 namespace Dosai.Tests;
@@ -110,6 +111,78 @@ public class DosaiTests
         
         // Test method calls information
         AssertMethodCalls(methodCalls);
+    }
+
+    [Fact]
+    public void GetMethods_CSharpSource_CallGraphUsesStableNodeIdsAndValidEdges()
+    {
+        var sourcePath = GetFilePath(HelloWorldCSharpSource);
+        var result = Depscan.Dosai.GetMethods(sourcePath);
+        var deserializeOptions = new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() }
+        };
+        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result, deserializeOptions);
+        var callGraph = methodsSlice?.CallGraph;
+
+        Assert.NotNull(callGraph);
+        Assert.NotEmpty(callGraph.Nodes);
+        Assert.NotEmpty(callGraph.Edges);
+
+        var nodeIds = callGraph.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
+        Assert.Contains("HelloWorld.Hello.Appreciate():System.Threading.Tasks.Task", nodeIds);
+        Assert.Contains("System.Threading.Tasks.Task.Delay(int):System.Threading.Tasks.Task", nodeIds);
+        Assert.Contains("HelloWorld.GenericProcessor<T>..ctor(T)", nodeIds);
+        Assert.Contains("HelloWorld.GenericProcessor<T>.set_Value(T):void", nodeIds);
+
+        Assert.All(callGraph.Edges, edge =>
+        {
+            Assert.False(string.IsNullOrWhiteSpace(edge.Id));
+            Assert.Contains(edge.SourceId, nodeIds);
+            Assert.Contains(edge.TargetId, nodeIds);
+            Assert.True(edge.CallLocation.LineNumber > 0);
+            Assert.True(edge.CallLocation.ColumnNumber > 0);
+        });
+
+        Assert.Contains(callGraph.Edges, edge =>
+            edge.SourceId == "HelloWorld.Hello.Appreciate():System.Threading.Tasks.Task" &&
+            edge.TargetId == "System.Threading.Tasks.Task.Delay(int):System.Threading.Tasks.Task" &&
+            edge.CallType == CallType.MethodCall);
+        Assert.Contains(callGraph.Edges, edge =>
+            edge.SourceId == "HelloWorld.GenericProcessor<T>..ctor(T)" &&
+            edge.TargetId == "HelloWorld.GenericProcessor<T>.set_Value(T):void" &&
+            edge.CallType == CallType.PropertySet);
+    }
+
+    [Fact]
+    public void CallGraphExporter_ExportsMermaidGraphMlAndGexf()
+    {
+        var sourcePath = GetFilePath(HelloWorldCSharpSource);
+        var result = Depscan.Dosai.GetMethods(sourcePath);
+        var deserializeOptions = new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() }
+        };
+        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result, deserializeOptions);
+        var callGraph = methodsSlice?.CallGraph;
+
+        Assert.NotNull(callGraph);
+
+        var mermaid = CallGraphExporter.Export(callGraph, CallGraphExportFormat.Mermaid);
+        Assert.StartsWith("flowchart LR", mermaid);
+        Assert.Contains(" -->|\"MethodCall\"| ", mermaid);
+
+        var graphMl = CallGraphExporter.Export(callGraph, CallGraphExportFormat.GraphMl);
+        var graphMlDocument = XDocument.Parse(graphMl);
+        Assert.Equal("graphml", graphMlDocument.Root?.Name.LocalName);
+        Assert.Contains(graphMlDocument.Descendants(), element => element.Name.LocalName == "node");
+        Assert.Contains(graphMlDocument.Descendants(), element => element.Name.LocalName == "edge");
+
+        var gexf = CallGraphExporter.Export(callGraph, CallGraphExportFormat.Gexf);
+        var gexfDocument = XDocument.Parse(gexf);
+        Assert.Equal("gexf", gexfDocument.Root?.Name.LocalName);
+        Assert.Contains(gexfDocument.Descendants(), element => element.Name.LocalName == "node");
+        Assert.Contains(gexfDocument.Descendants(), element => element.Name.LocalName == "edge");
     }
 
     [Fact]
