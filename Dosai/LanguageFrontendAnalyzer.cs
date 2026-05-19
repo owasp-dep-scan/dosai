@@ -182,11 +182,11 @@ public static partial class LanguageFrontendAnalyzer
                 callScanOffset = bodyStart + 1;
             }
 
-            foreach (Match call in CppCall().Matches(line[callScanOffset..]))
+            foreach (Match call in CppCall().Matches(line, callScanOffset))
             {
                 var name = call.Groups["name"].Value;
                 if (IsKeyword(name)) continue;
-                calls.Add(CreateCall(basePath, file, currentSourceId, "C++", className, name, i + 1, callScanOffset + call.Index + 1));
+                calls.Add(CreateCall(basePath, file, currentSourceId, "C++", className, name, i + 1, call.Index + 1));
             }
         }
     }
@@ -406,7 +406,7 @@ write.table(pd, file = "", sep = "\t", row.names = FALSE, col.names = TRUE, quot
     {
         var keywords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
-            "if", "then", "else", "elif", "for", "while", "do", "match", "with", "try", "catch", "finally", "let", "rec", "and", "fun", "function", "in", "open", "module", "type", "namespace", "return", "static", "new", "NULL", "nullptr", "sizeof", "switch", "case", "library", "require", "function"
+            "if", "then", "else", "elif", "for", "while", "do", "match", "with", "try", "catch", "finally", "let", "rec", "and", "fun", "function", "in", "open", "module", "type", "namespace", "return", "static", "new", "NULL", "nullptr", "sizeof", "switch", "case", "library", "require" 
         };
         return keywords.Contains(word);
     }

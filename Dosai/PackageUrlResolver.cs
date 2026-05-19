@@ -50,9 +50,20 @@ public sealed partial class PackageUrlResolver
                 AttributesToSkip = FileAttributes.ReparsePoint
             }).ToList();
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or DirectoryNotFoundException or ArgumentException)
+        catch (DirectoryNotFoundException)
         {
-            // PURL enrichment is best-effort and must never fail analysis.
+            return [];
+        }
+        catch (IOException)
+        {
+            return [];
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return [];
+        }
+        catch (ArgumentException)
+        {
             return [];
         }
     }
