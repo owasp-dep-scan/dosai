@@ -19,8 +19,27 @@ flowchart TD
     PURL[PackageUrlResolver] --> Methods
     PURL --> CallGraph
     PURL --> DFGraph
+    DFGraph --> Transparency[TransparencyBuilder]
+    Transparency --> Weakness[Weakness candidates]
+    Transparency --> Agent[Agent context/report/diff/policy]
     CallGraph --> Exporters[Mermaid / GraphML / GEXF]
     DFGraph --> Exporters
+```
+
+## Transparency layer
+
+`TransparencyBuilder` derives higher-level review facts from lower-level compiler artifacts:
+
+- `EntryPoint` records from API endpoints and CLI sources.
+- `PackageReachability` facts from graph/data-flow PURLs.
+- `DangerousApiReachability` facts from sink nodes.
+- `WeaknessCandidate` records from source-to-sink slices.
+- `AgentContext` bundles for AI agents.
+
+This layer intentionally remains deterministic. It does not query vulnerability databases and does not make exploitability claims. It converts semantic evidence into structured facts.
+
+```text
+Roslyn operations -> nodes/edges/slices -> transparency facts -> reports/agent context/policy
 ```
 
 ## Source compilation model
@@ -159,6 +178,23 @@ Resolution uses:
 4. namespace/type/symbol prefix matching
 
 PURLs are best-effort and never fail analysis.
+
+## Weakness candidate model
+
+Weakness candidates are generated from sink categories. Each candidate includes:
+
+- kind and CWE mapping where applicable;
+- confidence and confidence reasons;
+- source/sink location;
+- slice id;
+- route/entrypoint when known;
+- PURLs and evidence strings.
+
+Confidence is deliberately simple and explainable:
+
+- `High` when the flow is tied to an entrypoint and a sink node.
+- `Medium` when the sink is clear but entrypoint correlation is absent.
+- `Low` for weaker evidence.
 
 ## Current limitations
 

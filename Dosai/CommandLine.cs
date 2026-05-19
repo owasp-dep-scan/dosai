@@ -54,6 +54,30 @@ public class CommandLine
             Description = "Print auto-detected data-flow sources and sinks to stdout for pattern diagnostics."
         };
 
+        var inputFileOption = new Option<string?>("--input")
+        {
+            Description = "Input Dosai JSON file",
+            Required = true
+        };
+
+        var oldInputFileOption = new Option<string?>("--old")
+        {
+            Description = "Previous data-flow JSON file",
+            Required = true
+        };
+
+        var newInputFileOption = new Option<string?>("--new")
+        {
+            Description = "New data-flow JSON file",
+            Required = true
+        };
+
+        var minSlicesOption = new Option<int>("--min-slices")
+        {
+            Description = "Minimum required data-flow slice count",
+            DefaultValueFactory = _ => 0
+        };
+
         rootCommand.Options.Add(pathOption);
         rootCommand.Options.Add(outputFileOption);
         rootCommand.Options.Add(callGraphFormatOption);
@@ -77,8 +101,38 @@ public class CommandLine
             printSourcesSinksOption
         };
 
+        var agentContextCommand = new Command("agent-context", "Generate compact AI-agent context from data-flow analysis")
+        {
+            pathOption,
+            outputFileOption,
+            patternsFileOption
+        };
+
+        var reportCommand = new Command("report", "Generate a Markdown report from data-flow JSON")
+        {
+            inputFileOption,
+            outputFileOption
+        };
+
+        var diffCommand = new Command("diff", "Diff two data-flow JSON files")
+        {
+            oldInputFileOption,
+            newInputFileOption,
+            outputFileOption
+        };
+
+        var policyCommand = new Command("policy", "Apply simple CI policy checks to data-flow JSON")
+        {
+            inputFileOption,
+            minSlicesOption
+        };
+
         rootCommand.Subcommands.Add(methodsCommand);
         rootCommand.Subcommands.Add(dataFlowsCommand);
+        rootCommand.Subcommands.Add(agentContextCommand);
+        rootCommand.Subcommands.Add(reportCommand);
+        rootCommand.Subcommands.Add(diffCommand);
+        rootCommand.Subcommands.Add(policyCommand);
 
         methodsCommand.SetAction(parseResult =>
             {
@@ -169,8 +223,81 @@ public class CommandLine
             return 0;
         });
 
+        agentContextCommand.SetAction(parseResult =>
+        {
+            var path = parseResult.GetValue(pathOption)!;
+            var outputFile = parseResult.GetValue(outputFileOption)!;
+            var patternsFile = parseResult.GetValue(patternsFileOption);
+            var result = DataFlowAnalyzer.Analyze(path, patternsFile);
+            var context = TransparencyBuilder.BuildAgentContext(result, path);
+            File.WriteAllText(outputFile, JsonSerializer.Serialize(context, JsonOptions()));
+            return 0;
+        });
+
+        reportCommand.SetAction(parseResult =>
+        {
+            var input = parseResult.GetValue(inputFileOption)!;
+            var outputFile = parseResult.GetValue(outputFileOption)!;
+            var result = JsonSerializer.Deserialize<DataFlowResult>(File.ReadAllText(input), JsonOptions());
+            if (result is null)
+            {
+                Console.Error.WriteLine("Could not read data-flow result.");
+                return 1;
+            }
+            File.WriteAllText(outputFile, TransparencyBuilder.ToMarkdownReport(result));
+            return 0;
+        });
+
+        diffCommand.SetAction(parseResult =>
+        {
+            var oldInput = parseResult.GetValue(oldInputFileOption)!;
+            var newInput = parseResult.GetValue(newInputFileOption)!;
+            var outputFile = parseResult.GetValue(outputFileOption)!;
+            var oldResult = JsonSerializer.Deserialize<DataFlowResult>(File.ReadAllText(oldInput), JsonOptions());
+            var newResult = JsonSerializer.Deserialize<DataFlowResult>(File.ReadAllText(newInput), JsonOptions());
+            if (oldResult is null || newResult is null)
+            {
+                Console.Error.WriteLine("Could not read one or both data-flow results.");
+                return 1;
+            }
+            File.WriteAllText(outputFile, TransparencyBuilder.DiffJson(oldResult, newResult));
+            return 0;
+        });
+
+        policyCommand.SetAction(parseResult =>
+        {
+            var input = parseResult.GetValue(inputFileOption)!;
+            var minSlices = parseResult.GetValue(minSlicesOption);
+            var result = JsonSerializer.Deserialize<DataFlowResult>(File.ReadAllText(input), JsonOptions());
+            if (result is null)
+            {
+                Console.Error.WriteLine("Could not read data-flow result.");
+                return 1;
+            }
+            var nodeIds = result.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
+            var invalidEdges = result.Edges.Count(edge => !nodeIds.Contains(edge.SourceId) || !nodeIds.Contains(edge.TargetId));
+            if (invalidEdges > 0)
+            {
+                Console.Error.WriteLine($"Policy failed: {invalidEdges} data-flow edges reference missing nodes.");
+                return 2;
+            }
+            if (result.Statistics.SliceCount < minSlices)
+            {
+                Console.Error.WriteLine($"Policy failed: expected at least {minSlices} slices, got {result.Statistics.SliceCount}.");
+                return 3;
+            }
+            Console.WriteLine("Policy passed.");
+            return 0;
+        });
+
         return rootCommand.Parse(args).Invoke();
     }
+
+    private static JsonSerializerOptions JsonOptions() => new()
+    {
+        WriteIndented = true,
+        Converters = { new JsonStringEnumConverter() }
+    };
 
     private static void PrintSourcesAndSinks(DataFlowResult result)
     {

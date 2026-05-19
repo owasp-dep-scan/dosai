@@ -58,6 +58,14 @@ dotnet run --project /Users/prabhu/work/owasp/dosai/Dosai/Dosai.csproj -- datafl
   --o /tmp/dosai-dataflows.json \
   --graph-format gexf \
   --graph-out /tmp/dosai-dataflows.gexf
+
+dotnet run --project /Users/prabhu/work/owasp/dosai/Dosai/Dosai.csproj -- agent-context \
+  --path /Users/prabhu/work/owasp/dosai/Dosai \
+  --o /tmp/dosai-agent-context.json
+
+dotnet run --project /Users/prabhu/work/owasp/dosai/Dosai/Dosai.csproj -- policy \
+  --input /tmp/dosai-dataflows.json \
+  --min-slices 0
 ```
 
 ## Data-flow heuristic policy

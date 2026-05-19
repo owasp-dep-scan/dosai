@@ -124,9 +124,14 @@ public sealed class DataFlowStatistics
 
 public sealed class DataFlowResult
 {
+    public AnalysisMetadata Metadata { get; set; } = new();
+    public List<EntryPoint> EntryPoints { get; set; } = [];
     public List<DataFlowNode> Nodes { get; set; } = [];
     public List<DataFlowEdge> Edges { get; set; } = [];
     public List<DataFlowSlice> Slices { get; set; } = [];
+    public List<PackageReachability> PackageReachability { get; set; } = [];
+    public List<DangerousApiReachability> DangerousApiReachability { get; set; } = [];
+    public List<WeaknessCandidate> WeaknessCandidates { get; set; } = [];
     public DataFlowPatternSet Patterns { get; set; } = new();
     public DataFlowStatistics Statistics { get; set; } = new();
     public List<string> Diagnostics { get; set; } = [];
@@ -156,7 +161,7 @@ public static partial class DataFlowAnalyzer
         }
 
         var patterns = LoadPatterns(patternsPath);
-        var result = new DataFlowResult { Patterns = patterns };
+        var result = new DataFlowResult { Patterns = patterns, Metadata = TransparencyBuilder.CreateMetadata(path) };
         var purlResolver = PackageUrlResolver.Create(path);
         var sourcesToInspect = GetSourceFiles(path);
         result.Statistics.FilesAnalyzed = sourcesToInspect.Count;
@@ -206,7 +211,38 @@ public static partial class DataFlowAnalyzer
         result.Statistics.SourceCount = result.Nodes.Count(n => n.IsSource);
         result.Statistics.SinkCount = result.Nodes.Count(n => n.IsSink);
         result.Statistics.SliceCount = result.Slices.Count;
+        result.EntryPoints = TransparencyBuilder.BuildEntryPoints(ApiEndpointAnalyzer.GetApiEndpoints(path));
+        AddDataFlowEntryPoints(result);
+        result.PackageReachability = TransparencyBuilder.BuildPackageReachability(result);
+        result.DangerousApiReachability = TransparencyBuilder.BuildDangerousApiReachability(result);
+        result.WeaknessCandidates = TransparencyBuilder.BuildWeaknessCandidates(result, result.EntryPoints);
         return result;
+    }
+
+    private static void AddDataFlowEntryPoints(DataFlowResult result)
+    {
+        var next = result.EntryPoints.Count;
+        foreach (var source in result.Nodes.Where(node => node.IsSource && node.Category == "cli" && node.MethodName == "Main"))
+        {
+            if (result.EntryPoints.Any(entryPoint => entryPoint.Kind == "Cli" && entryPoint.FileName == source.FileName && entryPoint.LineNumber == source.LineNumber))
+            {
+                continue;
+            }
+
+            result.EntryPoints.Add(new EntryPoint
+            {
+                Id = $"ep{++next}",
+                Kind = "Cli",
+                MethodName = source.MethodName,
+                ClassName = source.ClassName,
+                Namespace = source.Namespace,
+                FileName = source.FileName,
+                Path = source.Path,
+                LineNumber = source.LineNumber,
+                ColumnNumber = source.ColumnNumber,
+                InputNames = [source.Name]
+            });
+        }
     }
 
     private static void AnalyzeCompilationUnit(SemanticModel model, CSharpCompilationUnitSyntax root, DataFlowGraphBuilder graph, DataFlowPatternSet patterns, string basePath, string sourceFilePath)

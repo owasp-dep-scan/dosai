@@ -58,6 +58,31 @@ dotnet run --project ./Dosai -- dataflows \
   --graph-out dataflows.graphml
 ```
 
+The `dataflows.json` output includes `Metadata`, `EntryPoints`, `PackageReachability`, `DangerousApiReachability`, and `WeaknessCandidates` in addition to nodes, edges, and slices.
+
+### Agent context, reports, diff, and policy
+
+```bash
+dotnet run --project ./Dosai -- agent-context \
+  --path /path/to/repo \
+  --o agent-context.json
+
+dotnet run --project ./Dosai -- report \
+  --input dataflows.json \
+  --o dosai-report.md
+
+dotnet run --project ./Dosai -- diff \
+  --old old-dataflows.json \
+  --new new-dataflows.json \
+  --o dataflow-diff.json
+
+dotnet run --project ./Dosai -- policy \
+  --input dataflows.json \
+  --min-slices 1
+```
+
+The policy command validates graph edge endpoint integrity and an optional minimum slice count.
+
 ### Print detected sources/sinks
 
 ```bash
@@ -124,6 +149,22 @@ A data-flow slice contains:
 ```
 
 `SinkArgumentIndex == -1` means the tainted value was the receiver object, e.g. `model.File.CopyTo(...)`.
+
+## Weakness candidates
+
+Dosai converts source-to-sink slices into deterministic weakness candidates. These are semantic review artifacts, not vulnerability-management records.
+
+| Sink category     | Candidate kind                       | CWE     |
+| ----------------- | ------------------------------------ | ------- |
+| `command`         | `CommandInjectionCandidate`          | CWE-78  |
+| `file`            | `PathTraversalOrFileAccessCandidate` | CWE-22  |
+| `sql`             | `SqlInjectionCandidate`              | CWE-89  |
+| `network`         | `SsrfCandidate`                      | CWE-918 |
+| `redirect`        | `OpenRedirectCandidate`              | CWE-601 |
+| `deserialization` | `UnsafeDeserializationCandidate`     | CWE-502 |
+| `reflection`      | `UnsafeReflectionCandidate`          | CWE-470 |
+
+Each weakness candidate includes confidence, reasons, slice ID, source/sink locations, route where known, PURLs, and evidence strings.
 
 ## API endpoints
 

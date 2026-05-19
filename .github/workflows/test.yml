@@ -38,6 +38,10 @@ jobs:
         dotnet test
         dotnet run --project ./Dosai/ methods --path ./Dosai --o /tmp/dosai-methods.json --callgraph-format graphml --callgraph-out /tmp/dosai-callgraph.graphml
         dotnet run --project ./Dosai/ dataflows --path ./Dosai --o /tmp/dosai-dataflows.json --graph-format gexf --graph-out /tmp/dosai-dataflows.gexf
+        dotnet run --project ./Dosai/ agent-context --path ./Dosai --o /tmp/dosai-agent-context.json
+        dotnet run --project ./Dosai/ report --input /tmp/dosai-dataflows.json --o /tmp/dosai-report.md
+        dotnet run --project ./Dosai/ diff --old /tmp/dosai-dataflows.json --new /tmp/dosai-dataflows.json --o /tmp/dosai-diff.json
+        dotnet run --project ./Dosai/ policy --input /tmp/dosai-dataflows.json --min-slices 0
         python - <<'PY'
         import json, xml.etree.ElementTree as ET
         methods = json.load(open('/tmp/dosai-methods.json'))
@@ -47,6 +51,11 @@ jobs:
         dataflows = json.load(open('/tmp/dosai-dataflows.json'))
         df_node_ids = {node['Id'] for node in dataflows['Nodes']}
         assert all(edge['SourceId'] in df_node_ids and edge['TargetId'] in df_node_ids for edge in dataflows['Edges'])
+        assert 'WeaknessCandidates' in dataflows
+        assert 'PackageReachability' in dataflows
+        json.load(open('/tmp/dosai-agent-context.json'))
+        json.load(open('/tmp/dosai-diff.json'))
+        assert open('/tmp/dosai-report.md').read().startswith('# Dosai Analysis Report')
         ET.parse('/tmp/dosai-callgraph.graphml')
         ET.parse('/tmp/dosai-dataflows.gexf')
         PY

@@ -17,6 +17,9 @@ public sealed class ApiEndpoint
     public string? HttpMethod { get; set; }
     public string? Route { get; set; }
     public string? EndpointKind { get; set; }
+    public bool? AuthorizationRequired { get; set; }
+    public List<string> AuthorizationPolicies { get; set; } = [];
+    public List<string> Roles { get; set; } = [];
     public int LineNumber { get; set; }
     public int ColumnNumber { get; set; }
     public List<string> Urls { get; set; } = [];

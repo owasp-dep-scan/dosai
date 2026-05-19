@@ -130,9 +130,12 @@ public static class Dosai
         var apiEndpoints = ApiEndpointAnalyzer.GetApiEndpoints(path);
         methods.AddRange(sourceMethods);
         EnrichPackageUrls(purlResolver, methods, usings, methodCalls, properties, fields, events, constructors, callGraph, assemblyInformation, sourceAssemblyMapping);
+        var entryPoints = TransparencyBuilder.BuildEntryPoints(apiEndpoints, methods);
+        var packageReachability = TransparencyBuilder.BuildPackageReachability(callGraph);
 
         return JsonSerializer.Serialize(new MethodsSlice 
         { 
+            Metadata = TransparencyBuilder.CreateMetadata(path),
             Dependencies = usings, 
             Methods = methods, 
             MethodCalls = methodCalls, 
@@ -142,6 +145,8 @@ public static class Dosai
             Constructors = constructors,
             CallGraph = callGraph,
             ApiEndpoints = apiEndpoints,
+            EntryPoints = entryPoints,
+            PackageReachability = packageReachability,
             AssemblyInformation = assemblyInformation,
             SourceAssemblyMapping = sourceAssemblyMapping
         }, Options);

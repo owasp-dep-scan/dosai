@@ -422,6 +422,41 @@ class Program
         Assert.NotNull(methodsSlice);
         Assert.Contains(methodsSlice.ApiEndpoints ?? [], endpoint => endpoint.HttpMethod == "GET" && endpoint.Route == "api/[controller]/{id}" && endpoint.Urls.Contains("https://api.example.test/orders/"));
         Assert.Contains(methodsSlice.ApiEndpoints ?? [], endpoint => endpoint.HttpMethod == "POST" && endpoint.Route == "/upload" && endpoint.EndpointKind == "MinimalApi");
+        Assert.NotNull(methodsSlice.Metadata);
+        Assert.Contains(methodsSlice.EntryPoints ?? [], entryPoint => entryPoint.Kind == "HttpEndpoint" && entryPoint.Route == "api/[controller]/{id}");
+    }
+
+    [Fact]
+    public void GetDataFlows_OutputIncludesWeaknessCandidatesReachabilityAndAgentContext()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "WeaknessFlow.cs"), """
+using System.Diagnostics;
+
+class WeaknessFlow
+{
+    static void Main(string[] args)
+    {
+        var command = args[0];
+        Process.Start(command);
+    }
+}
+""");
+
+        var result = DataFlowAnalyzer.Analyze(tempDirectory.Path);
+
+        Assert.NotNull(result.Metadata);
+        Assert.Contains(result.EntryPoints, entryPoint => entryPoint.Kind == "Cli" && entryPoint.MethodName == "Main");
+        Assert.Contains(result.WeaknessCandidates, weakness => weakness.Kind == "CommandInjectionCandidate" && weakness.Cwe == "CWE-78");
+        Assert.Contains(result.DangerousApiReachability, api => api.Category == "command");
+
+        var context = TransparencyBuilder.BuildAgentContext(result, tempDirectory.Path);
+        Assert.Contains(context.HighRiskWeaknesses, weakness => weakness.Kind == "CommandInjectionCandidate");
+        Assert.Contains("Dosai found", context.Summary);
+
+        var markdown = TransparencyBuilder.ToMarkdownReport(result);
+        Assert.Contains("CommandInjectionCandidate", markdown);
+        Assert.Contains("WeaknessFlow.cs", markdown);
     }
 
     [Fact]

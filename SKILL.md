@@ -43,6 +43,27 @@ dotnet run --project ./Dosai -- dataflows \
   --print-sources-sinks
 ```
 
+### Generate agent context and reports
+
+```bash
+dotnet run --project ./Dosai -- agent-context \
+  --path ./path/to/repo \
+  --o agent-context.json
+
+dotnet run --project ./Dosai -- report \
+  --input dataflows.json \
+  --o dosai-report.md
+
+dotnet run --project ./Dosai -- diff \
+  --old old-dataflows.json \
+  --new new-dataflows.json \
+  --o dataflow-diff.json
+
+dotnet run --project ./Dosai -- policy \
+  --input dataflows.json \
+  --min-slices 1
+```
+
 ### Custom patterns
 
 ```json
