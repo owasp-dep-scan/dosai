@@ -93,26 +93,8 @@ jobs:
         dotnet build --no-restore ./Dosai
     - name: Dataflows, report, diff, and policy smoke
       run: |
-        mkdir -p /tmp/dosai-dataflow-smoke
-        cat > /tmp/dosai-dataflow-smoke/Program.cs <<'CS'
-        using System.Diagnostics;
-
-        class Program
-        {
-            static void Main(string[] args)
-            {
-                var command = args[0];
-                Run(command);
-            }
-
-            static void Run(string command)
-            {
-                Process.Start(command);
-            }
-        }
-        CS
-        dotnet run --no-build --project ./Dosai/Dosai.csproj -- dataflows --path /tmp/dosai-dataflow-smoke --o /tmp/dosai-dataflows.json --graph-format gexf --graph-out /tmp/dosai-dataflows.gexf
-        dotnet run --no-build --project ./Dosai/Dosai.csproj -- agent-context --path /tmp/dosai-dataflow-smoke --o /tmp/dosai-agent-context.json
+        dotnet run --no-build --project ./Dosai/Dosai.csproj -- dataflows --path ./Dosai --o /tmp/dosai-dataflows.json --graph-format gexf --graph-out /tmp/dosai-dataflows.gexf
+        dotnet run --no-build --project ./Dosai/Dosai.csproj -- agent-context --path ./Dosai --o /tmp/dosai-agent-context.json
         dotnet run --no-build --project ./Dosai/Dosai.csproj -- report --input /tmp/dosai-dataflows.json --o /tmp/dosai-report.md
         dotnet run --no-build --project ./Dosai/Dosai.csproj -- diff --old /tmp/dosai-dataflows.json --new /tmp/dosai-dataflows.json --o /tmp/dosai-diff.json
         dotnet run --no-build --project ./Dosai/Dosai.csproj -- policy --input /tmp/dosai-dataflows.json --min-slices 0
@@ -124,7 +106,8 @@ jobs:
         assert 'WeaknessCandidates' in dataflows
         assert 'PackageReachability' in dataflows
         assert dataflows['Statistics']['SliceCount'] >= 1
-        assert any(slice.get('SinkCategory') == 'command' for slice in dataflows['Slices'])
+        assert dataflows['Statistics']['FilesAnalyzed'] >= 1
+        assert any(slice.get('SinkCategory') in {'crypto', 'deserialization'} for slice in dataflows['Slices'])
         json.load(open('/tmp/dosai-agent-context.json'))
         json.load(open('/tmp/dosai-diff.json'))
         assert open('/tmp/dosai-report.md').read().startswith('# Dosai Analysis Report')

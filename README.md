@@ -31,6 +31,8 @@ dotnet run --project ./Dosai/Dosai.csproj -- dataflows \
 
 The data-flow engine performs field-sensitive property/field taint where receiver identity is available and emits simple interprocedural summaries for parameter-to-return and parameter-to-sink callees. Slices can carry taint kinds, field paths, confidence, and F#/R/VC++ frontend evidence for common script and native input and sink patterns.
 
+The analyzer is optimized for full source-tree CI runs: pattern matching is indexed by hot lookup kind, syntax text is cached for code-like matches, and slice construction uses indexed graph edges. Dosai's CI smoke test runs `dataflows --path ./Dosai` to guard this path.
+
 ### Cryptography and CBOM evidence
 
 `crypto` detects algorithms, operations, key and certificate material, TLS settings, weak algorithms, hardcoded material, static IVs and nonces, insecure RNG, disabled certificate validation, legacy TLS references, and low PBKDF2 iteration counts. Findings include source locations and best-effort reachability from CLI and API entry points when callgraph data is available.

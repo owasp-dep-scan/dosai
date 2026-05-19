@@ -150,6 +150,8 @@ The C# and VB path is operation based. `DataFlowOperationWalker` seeds taint fro
 
 The method summary pass records parameter-to-return and parameter-to-sink relationships. These summaries allow calls to local helper methods to preserve taint without inlining the callee body every time. Frontend analysis for F#, R, and VC++ adds conservative source-to-sink evidence for common script and native patterns.
 
+The hot path is optimized for full source-tree CI runs. Pattern lists are pre-indexed by commonly queried kind, syntax text is cached and only materialized for code-like matches, duplicate edges are suppressed, and slice edge collection uses an outgoing-edge index instead of scanning every graph edge for every slice. The repository CI smoke test runs `dataflows --path ./Dosai` to catch regressions in this path.
+
 ### Output
 
 The primary output is `DataFlowResult`. It contains `Nodes`, `Edges`, `Slices`, `EntryPoints`, `PackageReachability`, `DangerousApiReachability`, `WeaknessCandidates`, `Patterns`, `MethodSummaries`, `Statistics`, and `Diagnostics`.

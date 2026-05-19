@@ -123,6 +123,15 @@ Keys are normalized Roslyn symbol display strings. Values are ordered node trace
 - sink receiver flows, e.g. `model.File.CopyTo(stream)`
 - fallback invalid-operation sink matching for projects with unresolved legacy frameworks
 
+### Performance-sensitive implementation details
+
+The data-flow path is expected to run against the full `./Dosai` source tree in CI. Keep these optimizations intact when extending the walker:
+
+- `DataFlowPatternIndex` pre-splits patterns by source/sink/sanitizer role and hot lookup kind so tight loops do not repeatedly filter the full pattern lists.
+- `DataFlowOperationWalker.SyntaxText` caches `SyntaxNode.ToString()` results and code text is only requested for code-like pattern kinds.
+- `DataFlowGraphBuilder` de-duplicates edges and maintains outgoing edges by source node, allowing `AddSlice` to collect in-slice edge IDs from the trace nodes instead of scanning all graph edges.
+- Graph edge endpoint validity remains by construction: nodes are registered before edges, and slice edges are selected from the indexed graph.
+
 ### Why invalid-operation support exists
 
 Older ASP.NET/WebForms projects often do not compile cleanly in isolated analysis because framework assemblies are unavailable or target older TFMs. Roslyn still creates `IInvalidOperation` trees. Dosai uses syntax-based sink matching on those invalid operations so high-value flows are not missed.
@@ -198,16 +207,14 @@ Confidence is deliberately simple and explainable:
 
 ## Current limitations
 
-- Data-flow is intraprocedural except for simple call-return passthrough modeling.
+- Data-flow is mostly intraprocedural with lightweight summaries for parameter-to-return and parameter-to-sink callees.
 - Generic type flow is normalized for signatures but not fully substituted.
-- Sanitizers are represented as passthrough patterns today; a future `Sanitizer` target could stop propagation.
+- Sanitizers are pattern-driven and can stop propagation or suppress guarded true branches, but custom validation logic may require project-specific patterns.
 - Endpoint extraction is intentionally syntax-based and may capture routes from non-runtime code.
 - PURL attribution is package-asset based; source-only projects without assets/deps cannot always be attributed.
 
 ## Recommended engineering next steps
 
-1. Add explicit sanitizer patterns.
-2. Add interprocedural summaries for internal methods.
-3. Add field-sensitive object property flow.
-4. Cache Roslyn compilations and PURL resolver indexes for large monorepos.
-5. Add SARIF or CycloneDX properties for PURL-linked slices.
+1. Cache Roslyn compilations and PURL resolver indexes for large monorepos.
+2. Add richer alias and collection modeling for complex object graphs.
+3. Add SARIF or CycloneDX properties for PURL-linked slices.

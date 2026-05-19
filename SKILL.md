@@ -106,6 +106,13 @@ dotnet run --project ./Dosai -- dataflows \
 4. Run at least one CLI smoke test.
 5. Validate graph XML with Python or `xmllint`.
 
+## Data-flow performance guardrails
+
+- CI should keep a full-project data-flow smoke run against `./Dosai` so performance regressions are visible on normal pull requests.
+- `Dosai/DataFlow.cs` uses `DataFlowPatternIndex` to pre-split source, sink, passthrough, and sanitizer patterns by hot lookup kind. Add new repeated pattern scans to that index instead of filtering the full pattern lists in tight loops.
+- The operation walker caches syntax text and only materializes code strings for code-like pattern matching. Avoid unconditional `SyntaxNode.ToString()` calls when symbol, name, type, namespace, parameter, or attribute matching is enough.
+- Slice construction depends on de-duplicated edges and an outgoing-edge index keyed by source node. Preserve this shape so creating each slice does not scan the whole data-flow edge list.
+
 ## Common tasks
 
 ### Add a source pattern

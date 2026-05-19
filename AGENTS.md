@@ -36,6 +36,13 @@ dotnet test /Users/prabhu/work/owasp/dosai/Dosai.sln
 - Add tests for every new analysis heuristic.
 - For legacy projects with missing references, add safe fallback behavior instead of throwing.
 
+## Data-flow performance notes
+
+- The `dataflows` CI smoke test intentionally analyzes the full `Dosai` source tree (`--path ./Dosai`) rather than a tiny fixture.
+- Preserve the current scaling optimizations in `Dosai/DataFlow.cs`: indexed pattern subsets (`DataFlowPatternIndex`), cached syntax text in the operation walker, edge de-duplication, and source-indexed outgoing edges for slice construction.
+- When adding new source/sink/passthrough/sanitizer matching, route repeated lookups through the pattern index and avoid calling `SyntaxNode.ToString()` unless the selected pattern kind needs code text.
+- When changing slice construction, keep it near-linear in trace size by using indexed edges; avoid scanning every graph edge for every slice.
+
 ## Validation checklist
 
 Run before finishing changes:
