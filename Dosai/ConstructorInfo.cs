@@ -19,6 +19,7 @@ public class ConstructorInfo
     public string? BaseType { get; set; }
     public List<string>? ImplementedInterfaces { get; set; }
     public int MetadataToken { get; set; }
+    public string? Purl { get; set; }
     public bool IsGenericMethod { get; set; }
     public List<string>? GenericParameters { get; set; }
 }

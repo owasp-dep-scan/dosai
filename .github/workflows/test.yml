@@ -8,33 +8,233 @@ on:
   pull_request:
     branches: [ "main" ]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_VERSION: '10.0.x'
+
 jobs:
-  build:
+  unit-tests:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-      packages: write
-      id-token: write
-    strategy:
-      matrix:
-        dotnet: [ '10.0.x' ]
+      contents: read
+      packages: read
     steps:
-    - uses: actions/checkout@v4
-    - name: Setup .NET
-      uses: actions/setup-dotnet@v4
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       with:
-        dotnet-version: ${{ matrix.dotnet }}
+        persist-credentials: false
+    - name: Setup .NET
+      uses: actions/setup-dotnet@c2fa09f4bde5ebb9d1777cf28262a3eb3db3ced7  # v5.2.0
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}
         source-url: https://nuget.pkg.github.com/owasp-dep-scan/index.json
       env:
         NUGET_AUTH_TOKEN: ${{secrets.GITHUB_TOKEN}}
     - name: Restore dependencies
-      run: dotnet restore
+      run: dotnet restore Dosai.sln
     - name: Build
-      run: dotnet build --no-restore ./Dosai
-    - name: Test
+      run: dotnet build --no-restore Dosai.sln
+    - name: Unit tests
+      run: dotnet test --no-build Dosai.sln
+
+  smoke-methods:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      with:
+        persist-credentials: false
+    - name: Setup .NET
+      uses: actions/setup-dotnet@c2fa09f4bde5ebb9d1777cf28262a3eb3db3ced7  # v5.2.0
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}
+        source-url: https://nuget.pkg.github.com/owasp-dep-scan/index.json
+      env:
+        NUGET_AUTH_TOKEN: ${{secrets.GITHUB_TOKEN}}
+    - name: Restore and build CLI
       run: |
-        dotnet test
-        dotnet run --project ./Dosai/ methods --path ./Dosai
+        dotnet restore Dosai.sln
+        dotnet build --no-restore ./Dosai
+    - name: Methods and call graph smoke
+      run: |
+        dotnet run --no-build --project ./Dosai/Dosai.csproj -- methods --path ./Dosai --o /tmp/dosai-methods.json --callgraph-format graphml --callgraph-out /tmp/dosai-callgraph.graphml
+        python3 - <<'PY'
+        import json, xml.etree.ElementTree as ET
+        methods = json.load(open('/tmp/dosai-methods.json'))
+        callgraph = methods['CallGraph']
+        node_ids = {node['Id'] for node in callgraph['Nodes']}
+        assert all(edge['SourceId'] in node_ids and edge['TargetId'] in node_ids for edge in callgraph['Edges'])
+        ET.parse('/tmp/dosai-callgraph.graphml')
+        PY
+
+  smoke-dataflows:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      with:
+        persist-credentials: false
+    - name: Setup .NET
+      uses: actions/setup-dotnet@c2fa09f4bde5ebb9d1777cf28262a3eb3db3ced7  # v5.2.0
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}
+        source-url: https://nuget.pkg.github.com/owasp-dep-scan/index.json
+      env:
+        NUGET_AUTH_TOKEN: ${{secrets.GITHUB_TOKEN}}
+    - name: Restore and build CLI
+      run: |
+        dotnet restore Dosai.sln
+        dotnet build --no-restore ./Dosai
+    - name: Dataflows, report, and diff smoke
+      run: |
+        dotnet run --no-build --project ./Dosai/Dosai.csproj -- dataflows --path ./Dosai --o /tmp/dosai-dataflows.json --graph-format gexf --graph-out /tmp/dosai-dataflows.gexf
+        dotnet run --no-build --project ./Dosai/Dosai.csproj -- agent-context --path ./Dosai --o /tmp/dosai-agent-context.json
+        dotnet run --no-build --project ./Dosai/Dosai.csproj -- report --input /tmp/dosai-dataflows.json --o /tmp/dosai-report.md
+        dotnet run --no-build --project ./Dosai/Dosai.csproj -- diff --old /tmp/dosai-dataflows.json --new /tmp/dosai-dataflows.json --o /tmp/dosai-diff.json
+        python3 - <<'PY'
+        import json, xml.etree.ElementTree as ET
+        dataflows = json.load(open('/tmp/dosai-dataflows.json'))
+        df_node_ids = {node['Id'] for node in dataflows['Nodes']}
+        assert all(edge['SourceId'] in df_node_ids and edge['TargetId'] in df_node_ids for edge in dataflows['Edges'])
+        assert 'WeaknessCandidates' in dataflows
+        assert 'PackageReachability' in dataflows
+        assert dataflows['Statistics']['SliceCount'] >= 1
+        assert dataflows['Statistics']['FilesAnalyzed'] >= 1
+        assert any(slice.get('SinkCategory') in {'crypto', 'deserialization'} for slice in dataflows['Slices'])
+        json.load(open('/tmp/dosai-agent-context.json'))
+        json.load(open('/tmp/dosai-diff.json'))
+        assert open('/tmp/dosai-report.md').read().startswith('# Dosai Analysis Report')
+        ET.parse('/tmp/dosai-dataflows.gexf')
+        PY
+
+  smoke-crypto:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      with:
+        persist-credentials: false
+    - name: Setup .NET
+      uses: actions/setup-dotnet@c2fa09f4bde5ebb9d1777cf28262a3eb3db3ced7  # v5.2.0
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}
+        source-url: https://nuget.pkg.github.com/owasp-dep-scan/index.json
+      env:
+        NUGET_AUTH_TOKEN: ${{secrets.GITHUB_TOKEN}}
+    - name: Restore and build CLI
+      run: |
+        dotnet restore Dosai.sln
+        dotnet build --no-restore ./Dosai
+    - name: Crypto, CBOM, query, and MCP smoke
+      run: |
+        mkdir -p /tmp/dosai-crypto-smoke
+        cat > /tmp/dosai-crypto-smoke/CryptoWorkflow.cs <<'CS'
+        using System.Security.Cryptography;
+        using System.Text;
+
+        class CryptoWorkflow
+        {
+            static void Main(string[] args) => Hash(args[0]);
+
+            static byte[] Hash(string value)
+            {
+                using var md5 = MD5.Create();
+                return md5.ComputeHash(Encoding.UTF8.GetBytes(value));
+            }
+        }
+        CS
+        dotnet run --no-build --project ./Dosai/Dosai.csproj -- crypto --path /tmp/dosai-crypto-smoke --o /tmp/dosai-crypto.json --format dosai
+        dotnet run --no-build --project ./Dosai/Dosai.csproj -- crypto --path /tmp/dosai-crypto-smoke --o /tmp/dosai-cbom.json --format cyclonedx
+        dotnet run --no-build --project ./Dosai/Dosai.csproj -- query --input /tmp/dosai-crypto.json --query 'findings[ruleId~=CRYPTO]' --o /tmp/dosai-crypto-findings.json
+        printf '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"dosai.crypto","arguments":{"format":"cyclonedx"}}}\n' | dotnet run --no-build --project ./Dosai/Dosai.csproj -- mcp --path /tmp/dosai-crypto-smoke > /tmp/dosai-mcp-crypto.jsonl
+        python3 - <<'PY'
+        import json
+        crypto = json.load(open('/tmp/dosai-crypto.json'))
+        assert crypto['Statistics']['AssetCount'] >= 1
+        assert 'Findings' in crypto
+        assert any(f['RuleId'] == 'DOSAI-CRYPTO-WEAK-HASH-MD5' for f in crypto['Findings'])
+        cbom = json.load(open('/tmp/dosai-cbom.json'))
+        assert cbom['bomFormat'] == 'CycloneDX'
+        assert cbom['components']
+        evidence_types = {p['value'] for c in cbom['components'] for p in c.get('properties', []) if p.get('name') == 'dosai:crypto:evidenceType'}
+        assert 'asset' in evidence_types
+        assert 'operation' in evidence_types
+        json.load(open('/tmp/dosai-crypto-findings.json'))
+        assert 'CycloneDX' in open('/tmp/dosai-mcp-crypto.jsonl').read()
+        PY
+
+  smoke-r:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      with:
+        persist-credentials: false
+    - name: Setup .NET
+      uses: actions/setup-dotnet@c2fa09f4bde5ebb9d1777cf28262a3eb3db3ced7  # v5.2.0
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}
+        source-url: https://nuget.pkg.github.com/owasp-dep-scan/index.json
+      env:
+        NUGET_AUTH_TOKEN: ${{secrets.GITHUB_TOKEN}}
+    - name: Install R toolchain
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends r-base-core
+    - name: Restore and build CLI
+      run: |
+        dotnet restore Dosai.sln
+        dotnet build --no-restore ./Dosai
+    - name: R native parser smoke
+      run: |
+        mkdir -p /tmp/dosai-r-smoke
+        cat > /tmp/dosai-r-smoke/app.R <<'RS'
+        library(DBI)
+        run <- function(input, con) {
+          cmd <- input$cmd
+          system(cmd)
+          DBI::dbGetQuery(con, input$sql)
+        }
+        RS
+        dotnet run --no-build --project ./Dosai/Dosai.csproj -- methods --path /tmp/dosai-r-smoke --o /tmp/dosai-r-methods.json
+        python3 - <<'PY'
+        import json
+        r_methods = json.load(open('/tmp/dosai-r-methods.json'))
+        assert any(m['Module'] == 'R.NativeParser' and m['Name'] == 'run' for m in r_methods['Methods'])
+        assert any(d['Module'] == 'R.NativeParser' and d['Name'] == 'DBI' for d in r_methods['Dependencies'])
+        PY
+
+  publish:
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [unit-tests, smoke-methods, smoke-dataflows, smoke-crypto, smoke-r]
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      with:
+        persist-credentials: false
+    - name: Setup .NET
+      uses: actions/setup-dotnet@c2fa09f4bde5ebb9d1777cf28262a3eb3db3ced7  # v5.2.0
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}
+        source-url: https://nuget.pkg.github.com/owasp-dep-scan/index.json
+      env:
+        NUGET_AUTH_TOKEN: ${{secrets.GITHUB_TOKEN}}
+    - name: Restore dependencies
+      run: dotnet restore Dosai.sln
     - name: Publish binaries
       run: |
         dotnet publish ./Dosai/ -r linux-x64 --property:PublishDir=dosai-linux -p:PublishSingleFile=true --no-self-contained /p:UseAppHost=true /p:AssemblyName=Dosai
@@ -97,6 +297,6 @@ jobs:
           Dosai/dosai-linux-arm64-full/Dosai-linux-arm64-full
           Dosai/dosai-linux-musl-x64-full/Dosai-linux-musl-x64-full
           Dosai/dosai-linux-musl-arm64-full/Dosai-linux-musl-arm64-full
-      uses: softprops/action-gh-release@v1
+      uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda  # v3.0.0
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

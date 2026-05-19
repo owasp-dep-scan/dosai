@@ -20,6 +20,7 @@ public class Method
     public int MetadataToken { get; init; }
     public string? SourceSignature { get; init; }
     public string? AssemblySignature { get; init; }
+    public string? Purl { get; set; }
     public bool IsGenericMethod { get; init; }
     public List<string>? GenericParameters { get; init; }
     public bool IsGenericMethodDefinition { get; set; }
