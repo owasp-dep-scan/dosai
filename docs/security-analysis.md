@@ -60,6 +60,34 @@ dotnet run --project ./Dosai -- dataflows \
 
 The `dataflows.json` output includes `Metadata`, `EntryPoints`, `PackageReachability`, `DangerousApiReachability`, and `WeaknessCandidates` in addition to nodes, edges, and slices.
 
+For local triage, add `--print` to render each slice as a stack-trace-style path with code, file, line, column, symbols, PURLs, and edge transitions:
+
+```bash
+dotnet run --project ./Dosai -- dataflows \
+  --path /path/to/repo \
+  --o dataflows.json \
+  --print
+```
+
+Example printed flow:
+
+```text
+└─ DataFlow dfs1: cli → command (Medium)
+   Summary: cli data reaches command sink Start.
+   Stack (3 frames, 3 transitions):
+     at Source/cli args [dfn1] in Program.cs:5:5
+        code: args
+        symbol: string[] args
+     via VariableAssignment [dfe1] from dfn1 to dfn2 in Program.cs:6:13 label=command
+     at Assignment command [dfn2] in Program.cs:6:13
+        code: command = args[0]
+     via SinkArgument [dfe3] from dfn2 to dfn3 in Program.cs:7:23 label=fileName targetPurl=pkg:nuget/System.Diagnostics.Process
+     at Sink/command Start [dfn3] in Program.cs:7:9 [pkg:nuget/System.Diagnostics.Process]
+        code: Process.Start(command)
+```
+
+Without `--print`, `dataflows` is quiet by default and writes only the requested output files.
+
 ### Custom source, sink, passthrough, and sanitizer patterns
 
 Use `--patterns` when application-specific wrappers or framework conventions are not covered by the built-in packs.
@@ -96,6 +124,8 @@ dotnet run --project ./Dosai -- diff \
 For CI gates, validate graph edge endpoint integrity and project-specific slice-count expectations directly against `dataflows.json` or with `query`.
 
 ### Print detected sources/sinks
+
+`--print-sources-sinks` is a pattern diagnostics mode. It prints the matched sources and sinks, not the full source-to-sink path. Use `--print` when you want stack-trace-style path visualization.
 
 ```bash
 dotnet run --project ./Dosai -- dataflows \

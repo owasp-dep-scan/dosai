@@ -111,7 +111,7 @@ dotnet run --project ./Dosai/Dosai.csproj -- dataflows \
   --graph-out /tmp/dosai-dataflows.gexf
 ```
 
-Common options are `--patterns`, `--pattern-packs`, `--graph-format`, `--graph-out`, and `--print-sources-sinks`. Supported graph formats are `mermaid`, `graphml`, and `gexf`.
+Common options are `--patterns`, `--pattern-packs`, `--graph-format`, `--graph-out`, `--print`, and `--print-sources-sinks`. Supported graph formats are `mermaid`, `graphml`, and `gexf`. By default, `dataflows` writes the JSON and optional graph artifacts without printing flow details to stdout. Use `--print` for a human-readable path view, and use `--print-sources-sinks` only for source/sink pattern diagnostics.
 
 Use `--patterns` to merge project-specific source, sink, passthrough, and sanitizer patterns with Dosai's built-in patterns:
 
@@ -125,6 +125,41 @@ dotnet run --project ./Dosai/Dosai.csproj -- dataflows \
 ```
 
 For the JSON schema and examples, see [Data-flow custom patterns](./dataflow-patterns.md). For built-in pack contents, see [Built-in data-flow pattern pack catalog](./pattern-packs.md).
+
+Print stack-trace-style flow paths during local triage:
+
+```bash
+dotnet run --project ./Dosai/Dosai.csproj -- dataflows \
+  --path ./src \
+  --o /tmp/dosai-dataflows.json \
+  --print
+```
+
+Example `--print` output:
+
+```text
+Dosai Data-flow Analysis
+Summary: 1 flow, 1 source, 1 sink, 1 file analyzed, 1 weakness candidate
+Output: /tmp/dosai-dataflows.json
+Data-flow stack traces:
+└─ DataFlow dfs1: cli → command (Medium)
+   Summary: cli data reaches command sink Start.
+   Argument[0]: command
+   PURLs: pkg:nuget/System.Diagnostics.Process
+   Stack (3 frames, 3 transitions):
+     at Source/cli args [dfn1] in Program.cs:5:5
+        code: args
+        symbol: string[] args
+     via VariableAssignment [dfe1] from dfn1 to dfn2 in Program.cs:6:13 label=command
+     at Assignment command [dfn2] in Program.cs:6:13
+        code: command = args[0]
+     via SinkArgument [dfe3] from dfn2 to dfn3 in Program.cs:7:23 label=fileName targetPurl=pkg:nuget/System.Diagnostics.Process
+     at Sink/command Start [dfn3] in Program.cs:7:9 [pkg:nuget/System.Diagnostics.Process]
+        code: Process.Start(command)
+        symbol: System.Diagnostics.Process.Start(string)
+```
+
+The stack trace is a presentation of `Slices[].NodeIds` and `Slices[].EdgeIds`; the JSON remains the canonical machine-readable artifact.
 
 ### Implementation flow
 
