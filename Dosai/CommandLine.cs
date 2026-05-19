@@ -365,10 +365,17 @@ public class CommandLine
 
     private static void PrintDataFlowTree(DataFlowResult result, string outputFile)
     {
-        Console.WriteLine(BuildDataFlowTreeReport(result, outputFile));
+        WriteDataFlowTreeReport(Console.Out, result, outputFile);
     }
 
     public static string BuildDataFlowTreeReport(DataFlowResult result, string outputFile)
+    {
+        using var writer = new StringWriter();
+        WriteDataFlowTreeReport(writer, result, outputFile);
+        return writer.ToString();
+    }
+
+    public static void WriteDataFlowTreeReport(TextWriter writer, DataFlowResult result, string outputFile)
     {
         var nodesById = result.Nodes.ToDictionary(node => node.Id, StringComparer.Ordinal);
         var edgesById = result.Edges.ToDictionary(edge => edge.Id, StringComparer.Ordinal);
@@ -376,19 +383,18 @@ public class CommandLine
             .Where(weakness => !string.IsNullOrWhiteSpace(weakness.SliceId))
             .GroupBy(weakness => weakness.SliceId!, StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
-        var lines = new List<string>();
 
-        lines.Add("Dosai Data-flow Analysis");
-        lines.Add($"Summary: {result.Statistics.SliceCount} {Pluralize(result.Statistics.SliceCount, "flow")}, {result.Statistics.SourceCount} {Pluralize(result.Statistics.SourceCount, "source")}, {result.Statistics.SinkCount} {Pluralize(result.Statistics.SinkCount, "sink")}, {result.Statistics.FilesAnalyzed} {Pluralize(result.Statistics.FilesAnalyzed, "file")} analyzed, {result.WeaknessCandidates.Count} {Pluralize(result.WeaknessCandidates.Count, "weakness candidate")}");
-        lines.Add($"Output: {outputFile}");
+        writer.WriteLine("Dosai Data-flow Analysis");
+        writer.WriteLine($"Summary: {result.Statistics.SliceCount} {Pluralize(result.Statistics.SliceCount, "flow")}, {result.Statistics.SourceCount} {Pluralize(result.Statistics.SourceCount, "source")}, {result.Statistics.SinkCount} {Pluralize(result.Statistics.SinkCount, "sink")}, {result.Statistics.FilesAnalyzed} {Pluralize(result.Statistics.FilesAnalyzed, "file")} analyzed, {result.WeaknessCandidates.Count} {Pluralize(result.WeaknessCandidates.Count, "weakness candidate")}");
+        writer.WriteLine($"Output: {outputFile}");
 
         if (result.Slices.Count == 0)
         {
-            lines.Add("No data-flow slices found.");
-            return string.Join(Environment.NewLine, lines);
+            writer.WriteLine("No data-flow slices found.");
+            return;
         }
 
-        lines.Add("Data-flow stack traces:");
+        writer.WriteLine("Data-flow stack traces:");
         for (var index = 0; index < result.Slices.Count; index++)
         {
             var slice = result.Slices[index];
@@ -400,42 +406,41 @@ public class CommandLine
             var sliceConnector = isLastSlice ? "└─" : "├─";
             var childPrefix = isLastSlice ? "   " : "│  ";
             var flowTitle = $"DataFlow {slice.Id}: {slice.SourceCategory ?? source?.Category ?? "source"} → {slice.SinkCategory ?? sink?.Category ?? "sink"} ({slice.Confidence})";
-            lines.Add($"{sliceConnector} {flowTitle}");
-            lines.Add($"{childPrefix}Summary: {weakness?.Summary ?? slice.Summary ?? BuildFlowSummary(source, sink, slice)}");
+            writer.WriteLine($"{sliceConnector} {flowTitle}");
+            writer.WriteLine($"{childPrefix}Summary: {weakness?.Summary ?? slice.Summary ?? BuildFlowSummary(source, sink, slice)}");
             if (!string.IsNullOrWhiteSpace(slice.SinkArgument))
             {
                 var argumentLabel = slice.SinkArgumentIndex.HasValue ? $"Argument[{slice.SinkArgumentIndex}]" : "Argument";
-                lines.Add($"{childPrefix}{argumentLabel}: {TrimConsoleText(slice.SinkArgument)}");
+                writer.WriteLine($"{childPrefix}{argumentLabel}: {TrimConsoleText(slice.SinkArgument)}");
             }
             if (slice.Purls.Count > 0)
             {
-                lines.Add($"{childPrefix}PURLs: {string.Join(", ", slice.Purls)}");
+                writer.WriteLine($"{childPrefix}PURLs: {string.Join(", ", slice.Purls)}");
             }
-            AddDataPathLines(lines, childPrefix, slice, nodesById, edgesById);
+            WriteDataPathLines(writer, childPrefix, slice, nodesById, edgesById);
         }
-
-        return string.Join(Environment.NewLine, lines);
     }
 
     private static string BuildFlowSummary(DataFlowNode? source, DataFlowNode? sink, DataFlowSlice slice) =>
         $"{slice.SourceCategory ?? source?.Category ?? "source"} data reaches {slice.SinkCategory ?? sink?.Category ?? "sink"} sink {sink?.Name ?? slice.SinkId}.";
 
-    private static void AddDataPathLines(List<string> lines, string childPrefix, DataFlowSlice slice, IReadOnlyDictionary<string, DataFlowNode> nodesById, IReadOnlyDictionary<string, DataFlowEdge> edgesById)
+    private static void WriteDataPathLines(TextWriter writer, string childPrefix, DataFlowSlice slice, IReadOnlyDictionary<string, DataFlowNode> nodesById, IReadOnlyDictionary<string, DataFlowEdge> edgesById)
     {
-        var pathEntries = BuildDataPathEntries(slice, nodesById, edgesById).ToList();
-        lines.Add($"{childPrefix}Stack ({slice.NodeIds.Count} {Pluralize(slice.NodeIds.Count, "frame")}, {slice.EdgeIds.Count} {Pluralize(slice.EdgeIds.Count, "transition")}):");
-        if (pathEntries.Count == 0)
-        {
-            lines.Add($"{childPrefix}  <no node or edge details available for this slice>");
-            return;
-        }
+        writer.WriteLine($"{childPrefix}Stack ({slice.NodeIds.Count} {Pluralize(slice.NodeIds.Count, "frame")}, {slice.EdgeIds.Count} {Pluralize(slice.EdgeIds.Count, "transition")}):");
+        var wroteEntry = false;
 
-        foreach (var entry in pathEntries)
+        foreach (var entry in BuildDataPathEntries(slice, nodesById, edgesById))
         {
+            wroteEntry = true;
             foreach (var entryLine in entry.Split(Environment.NewLine))
             {
-                lines.Add($"{childPrefix}  {entryLine}");
+                writer.WriteLine($"{childPrefix}  {entryLine}");
             }
+        }
+
+        if (!wroteEntry)
+        {
+            writer.WriteLine($"{childPrefix}  <no node or edge details available for this slice>");
         }
     }
 
@@ -446,6 +451,17 @@ public class CommandLine
             .Where(edge => edge is not null)
             .Cast<DataFlowEdge>()
             .ToList();
+        var edgesByPair = new Dictionary<(string SourceId, string TargetId), List<DataFlowEdge>>();
+        foreach (var edge in sliceEdges)
+        {
+            var key = (edge.SourceId, edge.TargetId);
+            if (!edgesByPair.TryGetValue(key, out var edgesForPair))
+            {
+                edgesForPair = [];
+                edgesByPair[key] = edgesForPair;
+            }
+            edgesForPair.Add(edge);
+        }
         var emittedEdges = new HashSet<string>(StringComparer.Ordinal);
 
         for (var nodeIndex = 0; nodeIndex < slice.NodeIds.Count; nodeIndex++)
@@ -459,7 +475,12 @@ public class CommandLine
             }
 
             var nextNodeId = slice.NodeIds[nodeIndex + 1];
-            foreach (var edge in sliceEdges.Where(edge => edge.SourceId == nodeId && edge.TargetId == nextNodeId))
+            if (!edgesByPair.TryGetValue((nodeId, nextNodeId), out var pathEdges))
+            {
+                continue;
+            }
+
+            foreach (var edge in pathEdges)
             {
                 emittedEdges.Add(edge.Id);
                 yield return FormatEdgeTransition(edge);
