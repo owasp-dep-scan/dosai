@@ -1773,15 +1773,11 @@ public static class Dosai
             }
         }
 
-        // Process F# files
-        var (fsharpMethods, fsharpDependencies, fsharpMethodCalls) = GetFSharpMethods(path);
-        sourceMethods.AddRange(fsharpMethods);
-        allUsingDirectives.AddRange(fsharpDependencies);
-        allMethodCalls.AddRange(fsharpMethodCalls);
-        var (lightweightMethods, lightweightDependencies, lightweightMethodCalls) = LightweightLanguageFrontendAnalyzer.GetMethods(path, includeFSharp: false);
-        sourceMethods.AddRange(lightweightMethods);
-        allUsingDirectives.AddRange(lightweightDependencies);
-        allMethodCalls.AddRange(lightweightMethodCalls);
+        // Process non-Roslyn language frontends.
+        var (frontendMethods, frontendDependencies, frontendMethodCalls) = LanguageFrontendAnalyzer.GetMethods(path, includeFSharp: true);
+        sourceMethods.AddRange(frontendMethods);
+        allUsingDirectives.AddRange(frontendDependencies);
+        allMethodCalls.AddRange(frontendMethodCalls);
         var methodNodeLookup = new Dictionary<string, MethodNode>(StringComparer.Ordinal);
         foreach (var method in sourceMethods.Where(m => !string.IsNullOrWhiteSpace(m.Name)))
         {

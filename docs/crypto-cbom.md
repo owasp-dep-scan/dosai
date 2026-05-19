@@ -68,10 +68,10 @@ The `cdxgen-evidence` format is a sidecar containing normalized Dosai crypto evi
 
 ## Language coverage
 
-The crypto analyzer uses Roslyn `IOperation` for C# and VB where possible, plus conservative text frontends for:
+The crypto analyzer uses Roslyn `IOperation` for C# and VB where possible. Additional frontends cover:
 
 - F#: `.fs`, `.fsi`, `.fsx`
 - R: `.R`, `.Rmd`, `.qmd`
 - VC++/C/C++: `.c`, `.cpp`, `.cc`, `.cxx`, `.h`, `.hpp`, `.hh`
 
-The lightweight frontends are designed to provide safe early evidence without throwing on missing references or missing native build metadata.
+The F# frontend loads `FSharp.Compiler.Service` and labels F# method evidence with that module when available. The R frontend uses R's native parser through `Rscript` and `getParseData` when R is installed, with a managed fallback for environments without R. The VC++ frontend extracts conservative function, include, call, crypto, and sink evidence without requiring `compile_commands.json`.

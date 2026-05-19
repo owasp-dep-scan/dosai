@@ -241,7 +241,7 @@ public static partial class DataFlowAnalyzer
             AnalyzeCompilationUnit(model, root, graph, patterns, summaries, path, tree.FilePath);
         }
 
-        AnalyzeLightweightLanguageDataFlows(path, sourcesToInspect, patterns, result);
+        AnalyzeLanguageFrontendDataFlows(path, sourcesToInspect, patterns, result);
 
         result.Nodes = result.Nodes.OrderBy(n => n.FileName, StringComparer.Ordinal).ThenBy(n => n.LineNumber).ThenBy(n => n.ColumnNumber).ThenBy(n => n.Id, StringComparer.Ordinal).ToList();
         result.Edges = result.Edges.OrderBy(e => e.FileName, StringComparer.Ordinal).ThenBy(e => e.LineNumber).ThenBy(e => e.ColumnNumber).ThenBy(e => e.Id, StringComparer.Ordinal).ToList();
@@ -562,14 +562,14 @@ public static partial class DataFlowAnalyzer
             var extension = Path.GetExtension(path);
             return extension.Equals(Constants.CSharpSourceExtension, StringComparison.OrdinalIgnoreCase) ||
                    extension.Equals(Constants.VBSourceExtension, StringComparison.OrdinalIgnoreCase) ||
-                   IsLightweightLanguageExtension(extension)
+                   IsLanguageFrontendExtension(extension)
                 ? [path]
                 : [];
         }
 
         return new DirectoryInfo(path)
             .EnumerateFiles("*.*", SearchOption.AllDirectories)
-            .Where(file => file.Extension.Equals(Constants.CSharpSourceExtension, StringComparison.OrdinalIgnoreCase) || file.Extension.Equals(Constants.VBSourceExtension, StringComparison.OrdinalIgnoreCase) || IsLightweightLanguageExtension(file.Extension))
+            .Where(file => file.Extension.Equals(Constants.CSharpSourceExtension, StringComparison.OrdinalIgnoreCase) || file.Extension.Equals(Constants.VBSourceExtension, StringComparison.OrdinalIgnoreCase) || IsLanguageFrontendExtension(file.Extension))
             .Where(file => !file.FullName.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase))
             .Where(file => !file.FullName.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase))
             .Where(file => !file.Name.EndsWith($".g{file.Extension}", StringComparison.OrdinalIgnoreCase))
@@ -577,7 +577,7 @@ public static partial class DataFlowAnalyzer
             .ToList();
     }
 
-    private static bool IsLightweightLanguageExtension(string extension) => extension.Equals(Constants.FSharpSourceExtension, StringComparison.OrdinalIgnoreCase) ||
+    private static bool IsLanguageFrontendExtension(string extension) => extension.Equals(Constants.FSharpSourceExtension, StringComparison.OrdinalIgnoreCase) ||
         extension.Equals(Constants.FSharpSignatureExtension, StringComparison.OrdinalIgnoreCase) ||
         extension.Equals(Constants.FSharpScriptExtension, StringComparison.OrdinalIgnoreCase) ||
         extension.Equals(Constants.RSourceExtension, StringComparison.OrdinalIgnoreCase) ||
@@ -591,14 +591,14 @@ public static partial class DataFlowAnalyzer
         extension.Equals(".hpp", StringComparison.OrdinalIgnoreCase) ||
         extension.Equals(".hh", StringComparison.OrdinalIgnoreCase);
 
-    private static void AnalyzeLightweightLanguageDataFlows(string basePath, IEnumerable<string> files, DataFlowPatternSet patterns, DataFlowResult result)
+    private static void AnalyzeLanguageFrontendDataFlows(string basePath, IEnumerable<string> files, DataFlowPatternSet patterns, DataFlowResult result)
     {
         var nodeCounter = result.Nodes.Count;
         var edgeCounter = result.Edges.Count;
         var sliceCounter = result.Slices.Count;
-        foreach (var file in files.Where(file => IsLightweightLanguageExtension(Path.GetExtension(file))))
+        foreach (var file in files.Where(file => IsLanguageFrontendExtension(Path.GetExtension(file))))
         {
-            var language = DetectLightweightLanguage(file);
+            var language = DetectLanguageFrontend(file);
             var tainted = new Dictionary<string, DataFlowNode>(StringComparer.OrdinalIgnoreCase);
             var lines = File.ReadAllLines(file);
             string? currentMethod = null;
@@ -607,18 +607,18 @@ public static partial class DataFlowAnalyzer
             for (var index = 0; index < lines.Length; index++)
             {
                 var line = lines[index];
-                UpdateLightweightContext(line, language, ref currentNamespace, ref currentClass, ref currentMethod);
-                var sourceMatch = MatchLightweightSource(line, language, patterns);
+                UpdateLanguageContext(line, language, ref currentNamespace, ref currentClass, ref currentMethod);
+                var sourceMatch = MatchLanguageSource(line, language, patterns);
                 var assignedName = ExtractAssignedName(line, language);
                 if (sourceMatch is not null)
                 {
-                    var sourceNode = CreateLightweightNode(result, ref nodeCounter, "Source", assignedName ?? sourceMatch.Pattern, true, false, sourceMatch, basePath, file, index + 1, Math.Max(1, line.IndexOf(sourceMatch.Pattern, StringComparison.OrdinalIgnoreCase) + 1), currentNamespace, currentClass, currentMethod, line);
+                    var sourceNode = CreateLanguageNode(result, ref nodeCounter, "Source", assignedName ?? sourceMatch.Pattern, true, false, sourceMatch, basePath, file, index + 1, Math.Max(1, line.IndexOf(sourceMatch.Pattern, StringComparison.OrdinalIgnoreCase) + 1), currentNamespace, currentClass, currentMethod, line);
                     sourceNode.Properties["language"] = language;
-                    sourceNode.Properties["analysis"] = "lightweight";
+                    sourceNode.Properties["analysis"] = "language-frontend";
                     if (!string.IsNullOrWhiteSpace(assignedName)) tainted[assignedName] = sourceNode;
                 }
 
-                var sinkMatch = MatchLightweightSink(line, language, patterns);
+                var sinkMatch = MatchLanguageSink(line, language, patterns);
                 if (sinkMatch is null) continue;
                 var taintedInputs = tainted.Where(kvp => line.Contains(kvp.Key, StringComparison.OrdinalIgnoreCase)).Select(kvp => kvp.Value).ToList();
                 if (taintedInputs.Count == 0 && sourceMatch is not null)
@@ -627,9 +627,9 @@ public static partial class DataFlowAnalyzer
                 }
                 if (taintedInputs.Count == 0) continue;
 
-                var sinkNode = CreateLightweightNode(result, ref nodeCounter, "Sink", sinkMatch.Pattern, false, true, sinkMatch, basePath, file, index + 1, Math.Max(1, line.IndexOf(sinkMatch.Pattern, StringComparison.OrdinalIgnoreCase) + 1), currentNamespace, currentClass, currentMethod, line);
+                var sinkNode = CreateLanguageNode(result, ref nodeCounter, "Sink", sinkMatch.Pattern, false, true, sinkMatch, basePath, file, index + 1, Math.Max(1, line.IndexOf(sinkMatch.Pattern, StringComparison.OrdinalIgnoreCase) + 1), currentNamespace, currentClass, currentMethod, line);
                 sinkNode.Properties["language"] = language;
-                sinkNode.Properties["analysis"] = "lightweight";
+                sinkNode.Properties["analysis"] = "language-frontend";
                 foreach (var source in taintedInputs.DistinctBy(node => node.Id))
                 {
                     var edge = new DataFlowEdge
@@ -637,7 +637,7 @@ public static partial class DataFlowAnalyzer
                         Id = $"dfl{++edgeCounter}",
                         SourceId = source.Id,
                         TargetId = sinkNode.Id,
-                        Kind = "LightweightFlow",
+                        Kind = "LanguageFrontendFlow",
                         Label = assignedName,
                         SourcePurl = source.Purl,
                         TargetPurl = sinkNode.Purl,
@@ -659,14 +659,14 @@ public static partial class DataFlowAnalyzer
                         SinkArgumentIndex = 0,
                         TaintKinds = sourceMatch?.TaintKinds.Concat(sinkMatch.TaintKinds).Distinct(StringComparer.OrdinalIgnoreCase).ToList() ?? sinkMatch.TaintKinds,
                         Confidence = "Low",
-                        Summary = $"Lightweight {language} data flow from {source.Name} to {sinkNode.Name}."
+                        Summary = $"{language} frontend data flow from {source.Name} to {sinkNode.Name}."
                     });
                 }
             }
         }
     }
 
-    private static DataFlowNode CreateLightweightNode(DataFlowResult result, ref int nodeCounter, string kind, string name, bool isSource, bool isSink, DataFlowPattern pattern, string basePath, string file, int line, int column, string? namespaceName, string? className, string? methodName, string code)
+    private static DataFlowNode CreateLanguageNode(DataFlowResult result, ref int nodeCounter, string kind, string name, bool isSource, bool isSink, DataFlowPattern pattern, string basePath, string file, int line, int column, string? namespaceName, string? className, string? methodName, string code)
     {
         var node = new DataFlowNode
         {
@@ -692,14 +692,14 @@ public static partial class DataFlowAnalyzer
         return node;
     }
 
-    private static string DetectLightweightLanguage(string file) => Path.GetExtension(file).ToLowerInvariant() switch
+    private static string DetectLanguageFrontend(string file) => Path.GetExtension(file).ToLowerInvariant() switch
     {
         ".fs" or ".fsi" or ".fsx" => "fsharp",
         ".r" or ".rmd" or ".qmd" => "r",
         _ => "vcpp"
     };
 
-    private static void UpdateLightweightContext(string line, string language, ref string? namespaceName, ref string? className, ref string? methodName)
+    private static void UpdateLanguageContext(string line, string language, ref string? namespaceName, ref string? className, ref string? methodName)
     {
         var trimmed = line.Trim();
         if (language == "fsharp")
@@ -738,7 +738,7 @@ public static partial class DataFlowAnalyzer
         return match.Success ? match.Groups[1].Value : null;
     }
 
-    private static DataFlowPattern? MatchLightweightSource(string line, string language, DataFlowPatternSet patterns)
+    private static DataFlowPattern? MatchLanguageSource(string line, string language, DataFlowPatternSet patterns)
     {
         var defaults = language switch
         {
@@ -751,10 +751,10 @@ public static partial class DataFlowAnalyzer
         var token = defaults.FirstOrDefault(candidate => line.Contains(candidate, StringComparison.OrdinalIgnoreCase));
         return token is null
             ? null
-            : new DataFlowPattern { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Code, Pattern = token, Category = language == "r" ? "r-input" : language == "fsharp" ? "fsharp-input" : "native-input", Description = "Lightweight language input source", TaintKinds = ["user-input"], Confidence = "Low" };
+            : new DataFlowPattern { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Code, Pattern = token, Category = language == "r" ? "r-input" : language == "fsharp" ? "fsharp-input" : "native-input", Description = "Language frontend input source", TaintKinds = ["user-input"], Confidence = "Low" };
     }
 
-    private static DataFlowPattern? MatchLightweightSink(string line, string language, DataFlowPatternSet patterns)
+    private static DataFlowPattern? MatchLanguageSink(string line, string language, DataFlowPatternSet patterns)
     {
         var defaults = language switch
         {
@@ -768,7 +768,7 @@ public static partial class DataFlowAnalyzer
         {
             if (line.Contains(token, StringComparison.OrdinalIgnoreCase))
             {
-                return new DataFlowPattern { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Code, Pattern = token, Category = category, Description = "Lightweight language sink", TaintKinds = [category], Confidence = "Low" };
+                return new DataFlowPattern { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Code, Pattern = token, Category = category, Description = "Language frontend sink", TaintKinds = [category], Confidence = "Low" };
             }
         }
         return null;

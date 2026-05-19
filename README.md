@@ -36,7 +36,7 @@ dotnet run --project ./Dosai/Dosai.csproj -- dataflows \
   --graph-out /tmp/dosai-dataflows.graphml
 ```
 
-The data-flow engine performs field-sensitive property/field taint where receiver identity is available and emits simple interprocedural summaries for parameter-to-return and parameter-to-sink callees. Slices can carry taint kinds, field paths, confidence, and lightweight F#/R/VC++ source-to-sink evidence for common script/native input and sink patterns.
+The data-flow engine performs field-sensitive property/field taint where receiver identity is available and emits simple interprocedural summaries for parameter-to-return and parameter-to-sink callees. Slices can carry taint kinds, field paths, confidence, and F#/R/VC++ frontend evidence for common script and native input and sink patterns.
 
 ### Cryptography and CBOM evidence
 
@@ -71,15 +71,15 @@ dotnet run --project ./Dosai/Dosai.csproj -- crypto \
 
 The CycloneDX and cdxgen-evidence modes preserve Dosai properties such as `dosai:crypto:family`, `dosai:crypto:strength`, `dosai:crypto:reachableFromEntryPoint`, and `dosai:location` so downstream BOM tooling can correlate code-level crypto evidence with package BOMs.
 
-### Lightweight F#, R, and VC++ frontends
+### F#, R, and VC++ frontends
 
-Dosai now includes lightweight source frontends for additional ecosystems:
+Dosai includes source frontends for additional ecosystems:
 
-- F#: `.fs`, `.fsi`, `.fsx` function/module extraction, dependencies, calls, and lightweight data-flow sources/sinks.
-- R: `.R`, `.Rmd`, `.qmd` functions, library dependencies, Shiny/plumber-style inputs, SQL/shell/eval/network sinks.
+- F#: `.fs`, `.fsi`, `.fsx` function/module extraction, dependencies, calls, and data-flow sources/sinks. The frontend loads `FSharp.Compiler.Service` and marks F# evidence with the compiler service module when available.
+- R: `.R`, `.Rmd`, `.qmd` functions, library dependencies, Shiny/plumber-style inputs, SQL/shell/eval/network sinks. If `Rscript` is installed, Dosai uses R's native parser and `getParseData`; otherwise it falls back to managed lexical extraction.
 - VC++/C/C++: `.c`, `.cpp`, `.cc`, `.cxx`, `.h`, `.hpp`, `.hh` functions, includes, calls, native command/SQL/memory/crypto/TLS sinks.
 
-These frontends are intentionally conservative and are marked as lightweight evidence. They provide immediate inventory, callgraph, data-flow, and crypto coverage while leaving room for future full semantic frontends using FSharp.Compiler.Service and libclang/compile_commands.json.
+Frontend evidence is conservative when complete project metadata is unavailable. It provides inventory, callgraph, data-flow, and crypto coverage without failing analysis on missing references, missing R installations, or absent native build metadata.
 
 ### Querying JSON
 

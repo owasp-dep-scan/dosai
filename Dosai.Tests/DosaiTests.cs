@@ -251,6 +251,11 @@ class CryptoSample
 {
     static string StaticKey = "0123456789abcdef0123456789abcdef";
 
+    static void Main(string[] args)
+    {
+        Hash(args[0]);
+    }
+
     public static byte[] Hash(string input)
     {
         using var md5 = MD5.Create();
@@ -271,6 +276,7 @@ class CryptoSample
         Assert.Contains(result.Assets, asset => asset.Name == "MD5" && asset.Strength == "weak");
         Assert.Contains(result.Materials, material => material.Storage == "hardcoded" && material.Fingerprint is not null);
         Assert.Contains(result.Findings, finding => finding.RuleId == "DOSAI-CRYPTO-WEAK-HASH-MD5");
+        Assert.Contains(result.Findings, finding => finding.RuleId == "DOSAI-CRYPTO-WEAK-HASH-MD5" && finding.ReachableFromEntryPoint);
         Assert.Contains(result.Findings, finding => finding.RuleId == "DOSAI-CRYPTO-TLS-CERT-VALIDATION-DISABLED");
 
         var cdx = CryptoAnalyzer.GetCryptoAnalysis(tempDirectory.Path, "cyclonedx");
@@ -280,9 +286,15 @@ class CryptoSample
     }
 
     [Fact]
-    public void GetMethods_RAndVcxxSources_ReturnsLightweightMethodsCallsAndValidCallGraph()
+    public void GetMethods_FSharpRAndVcxxSources_ReturnsFrontendMethodsCallsAndValidCallGraph()
     {
         using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "App.fs"), """
+module Sample.App
+
+let run value =
+    printfn "%s" value
+""");
         File.WriteAllText(Path.Combine(tempDirectory.Path, "app.R"), """
 library(DBI)
 run <- function(input) {
@@ -302,7 +314,8 @@ int main(int argc, char** argv) {
         var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result, new JsonSerializerOptions { Converters = { new JsonStringEnumConverter() } });
 
         Assert.NotNull(methodsSlice);
-        Assert.Contains(methodsSlice!.Methods ?? [], method => method.Module == "R" && method.Name == "run");
+        Assert.Contains(methodsSlice!.Methods ?? [], method => method.Module == "FSharp.Compiler.Service" && method.Name == "run");
+        Assert.Contains(methodsSlice!.Methods ?? [], method => method.Name == "run" && method.Namespace == "R" && method.Module is "R.NativeParser" or "LanguageFrontend");
         Assert.Contains(methodsSlice.Methods ?? [], method => method.Module == "VC++" && method.Name == "main");
         Assert.Contains(methodsSlice.MethodCalls ?? [], call => call.CalledMethod == "system");
         Assert.NotNull(methodsSlice.CallGraph);
@@ -315,7 +328,7 @@ int main(int argc, char** argv) {
     }
 
     [Fact]
-    public void GetDataFlows_RAndVcxxSources_ReturnsLightweightSlicesWithValidEdges()
+    public void GetDataFlows_RAndVcxxSources_ReturnsFrontendSlicesWithValidEdges()
     {
         using var tempDirectory = new TemporaryDirectory();
         File.WriteAllText(Path.Combine(tempDirectory.Path, "app.R"), """
@@ -338,7 +351,7 @@ int main(int argc, char** argv) {
 
         Assert.NotNull(result);
         Assert.Contains(result!.Slices, slice => slice.SinkCategory == "command" && slice.Confidence == "Low");
-        Assert.Contains(result.Nodes, node => node.Properties.TryGetValue("analysis", out var analysis) && analysis == "lightweight");
+        Assert.Contains(result.Nodes, node => node.Properties.TryGetValue("analysis", out var analysis) && analysis == "language-frontend");
         var nodeIds = result.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
         Assert.All(result.Edges, edge =>
         {

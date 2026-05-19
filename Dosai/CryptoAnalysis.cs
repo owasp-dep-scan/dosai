@@ -657,16 +657,18 @@ public static class CryptoAnalyzer
 
     private sealed class CryptoReachability
     {
-        public static CryptoReachability Empty { get; } = new([], [], []);
+        public static CryptoReachability Empty { get; } = new([], [], [], []);
 
         private readonly Dictionary<string, string> _methodIdsByLooseKey;
         private readonly Dictionary<string, List<string>> _entryPointsByMethodId;
+        private readonly Dictionary<string, List<string>> _entryPointsByFile;
         private readonly List<EntryPoint> _entryPoints;
 
-        private CryptoReachability(Dictionary<string, string> methodIdsByLooseKey, Dictionary<string, List<string>> entryPointsByMethodId, List<EntryPoint> entryPoints)
+        private CryptoReachability(Dictionary<string, string> methodIdsByLooseKey, Dictionary<string, List<string>> entryPointsByMethodId, Dictionary<string, List<string>> entryPointsByFile, List<EntryPoint> entryPoints)
         {
             _methodIdsByLooseKey = methodIdsByLooseKey;
             _entryPointsByMethodId = entryPointsByMethodId;
+            _entryPointsByFile = entryPointsByFile;
             _entryPoints = entryPoints;
         }
 
@@ -681,47 +683,85 @@ public static class CryptoAnalyzer
             {
                 var id = method.SourceSignature ?? method.AssemblySignature;
                 if (string.IsNullOrWhiteSpace(id)) continue;
-                methodIdsByLooseKey.TryAdd(LooseKey(method.FileName, method.Namespace, method.ClassName, method.Name), id);
+                AddKey(methodIdsByLooseKey, id, method.FileName, method.Namespace, method.ClassName, method.Name);
+                AddKey(methodIdsByLooseKey, id, method.FileName, null, method.ClassName, method.Name);
+                AddKey(methodIdsByLooseKey, id, null, method.Namespace, method.ClassName, method.Name);
+                AddKey(methodIdsByLooseKey, id, null, null, method.ClassName, method.Name);
+                AddKey(methodIdsByLooseKey, id, method.FileName, null, null, method.Name);
             }
 
             var adjacency = callGraph.Edges.GroupBy(edge => edge.SourceId, StringComparer.Ordinal).ToDictionary(group => group.Key, group => group.Select(edge => edge.TargetId).Distinct(StringComparer.Ordinal).ToList(), StringComparer.Ordinal);
+            var reverseAdjacency = callGraph.Edges.GroupBy(edge => edge.TargetId, StringComparer.Ordinal).ToDictionary(group => group.Key, group => group.Select(edge => edge.SourceId).Distinct(StringComparer.Ordinal).ToList(), StringComparer.Ordinal);
             var byMethod = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+            var byFile = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
             foreach (var entry in entryPoints)
             {
                 var startIds = new HashSet<string>(StringComparer.Ordinal);
                 if (!string.IsNullOrWhiteSpace(entry.MethodId)) startIds.Add(entry.MethodId);
                 if (methodIdsByLooseKey.TryGetValue(LooseKey(entry.FileName, entry.Namespace, entry.ClassName, entry.MethodName), out var looseId)) startIds.Add(looseId);
+                if (methodIdsByLooseKey.TryGetValue(LooseKey(entry.FileName, null, entry.ClassName, entry.MethodName), out var fileClassId)) startIds.Add(fileClassId);
+                if (methodIdsByLooseKey.TryGetValue(LooseKey(null, null, entry.ClassName, entry.MethodName), out var classId)) startIds.Add(classId);
                 foreach (var method in methods.Where(method => string.Equals(method.FileName, entry.FileName, StringComparison.OrdinalIgnoreCase) && string.Equals(method.Name, entry.MethodName, StringComparison.OrdinalIgnoreCase)))
                 {
                     if (!string.IsNullOrWhiteSpace(method.SourceSignature)) startIds.Add(method.SourceSignature!);
                 }
 
-                foreach (var reachable in Walk(startIds, adjacency))
+                if (!string.IsNullOrWhiteSpace(entry.FileName))
                 {
-                    if (!byMethod.TryGetValue(reachable, out var entries))
-                    {
-                        entries = [];
-                        byMethod[reachable] = entries;
-                    }
-                    if (!entries.Contains(entry.Id, StringComparer.Ordinal)) entries.Add(entry.Id);
+                    AddEntry(byFile, entry.FileName!, entry.Id);
+                }
+
+                foreach (var reachable in Walk(startIds, adjacency).Concat(Walk(startIds, reverseAdjacency).Take(64)).Distinct(StringComparer.Ordinal))
+                {
+                    AddEntry(byMethod, reachable, entry.Id);
                 }
             }
-            return new CryptoReachability(methodIdsByLooseKey, byMethod, entryPoints);
+            return new CryptoReachability(methodIdsByLooseKey, byMethod, byFile, entryPoints);
         }
 
         public string? ResolveMethodId(string file, string? namespaceName, string? className, string? methodName)
         {
-            return _methodIdsByLooseKey.TryGetValue(LooseKey(Path.GetFileName(file), namespaceName, className, methodName), out var id) ? id : null;
+            var fileName = Path.GetFileName(file);
+            foreach (var key in new[]
+            {
+                LooseKey(fileName, namespaceName, className, methodName),
+                LooseKey(fileName, null, className, methodName),
+                LooseKey(null, namespaceName, className, methodName),
+                LooseKey(null, null, className, methodName),
+                LooseKey(fileName, null, null, methodName)
+            })
+            {
+                if (_methodIdsByLooseKey.TryGetValue(key, out var id)) return id;
+            }
+            return null;
         }
 
         public List<string> EntryPointsFor(string? methodId, string file, string? methodName)
         {
             if (!string.IsNullOrWhiteSpace(methodId) && _entryPointsByMethodId.TryGetValue(methodId, out var entries)) return entries.ToList();
-            return _entryPoints
+            var fileName = Path.GetFileName(file);
+            var direct = _entryPoints
                 .Where(entry => string.Equals(entry.FileName, Path.GetFileName(file), StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(methodName) && string.Equals(entry.MethodName, methodName, StringComparison.OrdinalIgnoreCase))
                 .Select(entry => entry.Id)
                 .Distinct(StringComparer.Ordinal)
                 .ToList();
+            if (direct.Count > 0) return direct;
+            return _entryPointsByFile.TryGetValue(fileName, out var fileEntries) ? fileEntries.ToList() : [];
+        }
+
+        private static void AddKey(Dictionary<string, string> index, string id, string? fileName, string? namespaceName, string? className, string? methodName)
+        {
+            index.TryAdd(LooseKey(fileName, namespaceName, className, methodName), id);
+        }
+
+        private static void AddEntry(Dictionary<string, List<string>> index, string key, string entryId)
+        {
+            if (!index.TryGetValue(key, out var entries))
+            {
+                entries = [];
+                index[key] = entries;
+            }
+            if (!entries.Contains(entryId, StringComparer.Ordinal)) entries.Add(entryId);
         }
 
         private static IEnumerable<string> Walk(IEnumerable<string> starts, Dictionary<string, List<string>> adjacency)

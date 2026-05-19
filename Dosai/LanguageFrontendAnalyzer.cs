@@ -1,9 +1,15 @@
+using System.Diagnostics;
+using System.Reflection;
 using System.Text.RegularExpressions;
 
 namespace Depscan;
 
-public static partial class LightweightLanguageFrontendAnalyzer
+public static partial class LanguageFrontendAnalyzer
 {
+    private const string FrontendModule = "LanguageFrontend";
+    private const string FSharpCompilerServiceModule = "FSharp.Compiler.Service";
+    private const string RNativeParserModule = "R.NativeParser";
+
     [GeneratedRegex(@"^\s*(?:namespace|module)\s+([\w\.]+)", RegexOptions.Compiled)]
     private static partial Regex FSharpNamespaceOrModule();
 
@@ -24,6 +30,10 @@ public static partial class LightweightLanguageFrontendAnalyzer
 
     [GeneratedRegex(@"(?<name>[A-Za-z_][\w:]*)(?:\s*<[^>]+>)?\s*\(", RegexOptions.Compiled)]
     private static partial Regex CppCall();
+
+    public static bool IsFSharpCompilerServiceAvailable => TryLoadFSharpCompilerService() is not null;
+
+    public static bool IsRNativeParserAvailable => ResolveExecutable("Rscript") is not null;
 
     public static (List<Method> Methods, List<Dependency> Dependencies, List<MethodCalls> MethodCalls) GetMethods(string path, bool includeFSharp = true)
     {
@@ -53,18 +63,22 @@ public static partial class LightweightLanguageFrontendAnalyzer
 
     private static void AnalyzeFSharp(string basePath, string file, List<Method> methods, List<Dependency> dependencies, List<MethodCalls> calls)
     {
+        var moduleName = IsFSharpCompilerServiceAvailable ? FSharpCompilerServiceModule : FrontendModule;
         var lines = File.ReadAllLines(file);
         var namespaceName = "Global";
         var className = "Module";
         string? currentSourceId = null;
+        var currentDeclarationIndent = int.MaxValue;
         for (var i = 0; i < lines.Length; i++)
         {
             var line = lines[i];
+            var indent = line.Length - line.TrimStart().Length;
             var module = FSharpNamespaceOrModule().Match(line);
             if (module.Success)
             {
                 namespaceName = module.Groups[1].Value;
                 className = namespaceName.Split('.').LastOrDefault() ?? "Module";
+                currentDeclarationIndent = int.MaxValue;
                 dependencies.Add(CreateDependency(basePath, file, namespaceName, namespaceName, i + 1, Math.Max(1, line.IndexOf(namespaceName, StringComparison.Ordinal) + 1)));
                 continue;
             }
@@ -72,14 +86,21 @@ public static partial class LightweightLanguageFrontendAnalyzer
             if (type.Success)
             {
                 className = type.Groups[1].Value;
+                currentDeclarationIndent = int.MaxValue;
                 continue;
             }
             var function = FSharpFunction().Match(line);
             if (function.Success && !IsKeyword(function.Groups[1].Value))
             {
+                if (currentSourceId is not null && indent > currentDeclarationIndent)
+                {
+                    continue;
+                }
+
                 var name = function.Groups[1].Value;
                 currentSourceId = CreateId(namespaceName, className, name, file, i + 1);
-                methods.Add(CreateMethod(basePath, file, namespaceName, className, name, "FSharp", currentSourceId, i + 1, Math.Max(1, line.IndexOf(name, StringComparison.Ordinal) + 1)));
+                currentDeclarationIndent = indent;
+                methods.Add(CreateMethod(basePath, file, namespaceName, className, name, moduleName, currentSourceId, i + 1, Math.Max(1, line.IndexOf(name, StringComparison.Ordinal) + 1)));
             }
 
             foreach (Match call in Regex.Matches(line, @"\b([A-Za-z_][\w\.]*)\s+(?:\(|\""|[A-Za-z0-9_])"))
@@ -93,10 +114,15 @@ public static partial class LightweightLanguageFrontendAnalyzer
 
     private static void AnalyzeR(string basePath, string file, List<Method> methods, List<Dependency> dependencies, List<MethodCalls> calls)
     {
+        if (TryAnalyzeRWithNativeParser(basePath, file, methods, dependencies, calls))
+        {
+            return;
+        }
+
         var lines = File.ReadAllLines(file);
         var currentFunction = "script";
         var currentSourceId = CreateId("R", Path.GetFileNameWithoutExtension(file), currentFunction, file, 1);
-        methods.Add(CreateMethod(basePath, file, "R", Path.GetFileNameWithoutExtension(file), currentFunction, "R", currentSourceId, 1, 1));
+        methods.Add(CreateMethod(basePath, file, "R", Path.GetFileNameWithoutExtension(file), currentFunction, FrontendModule, currentSourceId, 1, 1));
         for (var i = 0; i < lines.Length; i++)
         {
             var line = lines[i];
@@ -105,7 +131,7 @@ public static partial class LightweightLanguageFrontendAnalyzer
             {
                 currentFunction = function.Groups[1].Value;
                 currentSourceId = CreateId("R", Path.GetFileNameWithoutExtension(file), currentFunction, file, i + 1);
-                methods.Add(CreateMethod(basePath, file, "R", Path.GetFileNameWithoutExtension(file), currentFunction, "R", currentSourceId, i + 1, Math.Max(1, line.IndexOf(currentFunction, StringComparison.Ordinal) + 1)));
+                methods.Add(CreateMethod(basePath, file, "R", Path.GetFileNameWithoutExtension(file), currentFunction, FrontendModule, currentSourceId, i + 1, Math.Max(1, line.IndexOf(currentFunction, StringComparison.Ordinal) + 1)));
             }
 
             foreach (Match library in Regex.Matches(line, @"\b(?:library|require)\s*\(\s*['\"" ]?([A-Za-z0-9_.]+)"))
@@ -156,6 +182,113 @@ public static partial class LightweightLanguageFrontendAnalyzer
         }
     }
 
+    private static bool TryAnalyzeRWithNativeParser(string basePath, string file, List<Method> methods, List<Dependency> dependencies, List<MethodCalls> calls)
+    {
+        var rscript = ResolveExecutable("Rscript");
+        if (rscript is null)
+        {
+            return false;
+        }
+
+        var scriptPath = Path.Combine(Path.GetTempPath(), $"dosai-r-parse-{Guid.NewGuid():N}.R");
+        try
+        {
+            File.WriteAllText(scriptPath, """
+args <- commandArgs(trailingOnly = TRUE)
+pd <- getParseData(parse(file = args[[1]], keep.source = TRUE))
+if (is.null(pd)) quit(status = 0)
+pd <- pd[, c("line1", "col1", "token", "text", "parent", "id")]
+write.table(pd, file = "", sep = "\t", row.names = FALSE, col.names = TRUE, quote = FALSE, na = "")
+""");
+            var start = new ProcessStartInfo(rscript, $"{Quote(scriptPath)} {Quote(file)}")
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            using var process = Process.Start(start);
+            if (process is null) return false;
+            var stdout = process.StandardOutput.ReadToEnd();
+            process.WaitForExit(10_000);
+            if (process.ExitCode != 0 || string.IsNullOrWhiteSpace(stdout))
+            {
+                return false;
+            }
+
+            var rows = ParseRParseData(stdout).ToList();
+            var className = Path.GetFileNameWithoutExtension(file);
+            var scriptId = CreateId("R", className, "script", file, 1);
+            methods.Add(CreateMethod(basePath, file, "R", className, "script", RNativeParserModule, scriptId, 1, 1));
+
+            foreach (var fn in InferRFunctions(rows))
+            {
+                methods.Add(CreateMethod(basePath, file, "R", className, fn.Name, RNativeParserModule, CreateId("R", className, fn.Name, file, fn.Line), fn.Line, fn.Column));
+            }
+
+            var sourceId = scriptId;
+            foreach (var row in rows.OrderBy(row => row.Line).ThenBy(row => row.Column))
+            {
+                var matchingFunction = methods.Where(method => method.Module == RNativeParserModule && method.Name != "script" && method.LineNumber <= row.Line).OrderByDescending(method => method.LineNumber).FirstOrDefault();
+                if (matchingFunction?.SourceSignature is not null)
+                {
+                    sourceId = matchingFunction.SourceSignature;
+                }
+
+                if (row.Token == "SYMBOL_FUNCTION_CALL" && !IsKeyword(row.Text))
+                {
+                    calls.Add(CreateCall(basePath, file, sourceId, "R", className, row.Text, row.Line, row.Column));
+                }
+
+                if (row.Token == "SYMBOL_FUNCTION_CALL" && row.Text is "library" or "require")
+                {
+                    var package = rows.FirstOrDefault(candidate => candidate.Line == row.Line && candidate.Column > row.Column && candidate.Token is "SYMBOL" or "STR_CONST")?.Text.Trim('"', '\'');
+                    if (!string.IsNullOrWhiteSpace(package))
+                    {
+                        dependencies.Add(CreateDependency(basePath, file, package, package, row.Line, row.Column));
+                    }
+                }
+            }
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            return false;
+        }
+        finally
+        {
+            try { if (File.Exists(scriptPath)) File.Delete(scriptPath); }
+            catch (IOException) { }
+        }
+    }
+
+    private static IEnumerable<RParseRow> ParseRParseData(string stdout)
+    {
+        foreach (var line in stdout.Split('\n').Skip(1))
+        {
+            if (string.IsNullOrWhiteSpace(line)) continue;
+            var parts = line.TrimEnd('\r').Split('\t');
+            if (parts.Length < 6 || !int.TryParse(parts[0], out var lineNumber) || !int.TryParse(parts[1], out var column)) continue;
+            yield return new RParseRow(lineNumber, column, parts[2], parts[3], parts[4], parts[5]);
+        }
+    }
+
+    private static IEnumerable<(string Name, int Line, int Column)> InferRFunctions(List<RParseRow> rows)
+    {
+        foreach (var functionToken in rows.Where(row => row.Token == "FUNCTION"))
+        {
+            var name = rows
+                .Where(row => row.Line <= functionToken.Line && row.Token == "SYMBOL")
+                .OrderByDescending(row => row.Line)
+                .ThenByDescending(row => row.Column)
+                .FirstOrDefault();
+            if (!string.IsNullOrWhiteSpace(name?.Text))
+            {
+                yield return (name.Text, name.Line, name.Column);
+            }
+        }
+    }
+
     private static Method CreateMethod(string basePath, string file, string namespaceName, string className, string name, string module, string sourceSignature, int line, int column) => new()
     {
         Path = SafeRelative(basePath, file),
@@ -181,7 +314,7 @@ public static partial class LightweightLanguageFrontendAnalyzer
         Name = name,
         Namespace = namespaceName,
         Assembly = "Source",
-        Module = "LightweightFrontend",
+        Module = FrontendModule,
         LineNumber = line,
         ColumnNumber = column,
         NamespaceMembers = []
@@ -195,7 +328,7 @@ public static partial class LightweightLanguageFrontendAnalyzer
             Path = SafeRelative(basePath, file),
             FileName = Path.GetFileName(file),
             Assembly = "Source",
-            Module = "LightweightFrontend",
+            Module = FrontendModule,
             Namespace = namespaceName,
             ClassName = className,
             CalledMethod = targetName,
@@ -223,9 +356,7 @@ public static partial class LightweightLanguageFrontendAnalyzer
             return extensions.Contains(Path.GetExtension(path)) ? [path] : [];
         }
         return Directory.EnumerateFiles(path, "*.*", SearchOption.AllDirectories)
-            .Where(file => extensions.Contains(Path.GetExtension(file)))
-            .Where(file => !file.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase))
-            .Where(file => !file.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase));
+            .Where(file => extensions.Contains(Path.GetExtension(file)));
     }
 
     private static bool IsKeyword(string word)
@@ -238,4 +369,31 @@ public static partial class LightweightLanguageFrontendAnalyzer
     }
 
     private static string SafeRelative(string basePath, string file) => Directory.Exists(basePath) ? Path.GetRelativePath(basePath, file) : Path.GetFileName(file);
+
+    private static Assembly? TryLoadFSharpCompilerService()
+    {
+        try
+        {
+            return AppDomain.CurrentDomain.GetAssemblies().FirstOrDefault(assembly => assembly.GetName().Name == "FSharp.Compiler.Service") ?? Assembly.Load("FSharp.Compiler.Service");
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or FileLoadException or BadImageFormatException)
+        {
+            return null;
+        }
+    }
+
+    private static string? ResolveExecutable(string name)
+    {
+        var path = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
+        foreach (var directory in path.Split(Path.PathSeparator).Where(Directory.Exists))
+        {
+            var candidate = Path.Combine(directory, name);
+            if (File.Exists(candidate)) return candidate;
+        }
+        return null;
+    }
+
+    private static string Quote(string value) => "\"" + value.Replace("\"", "\\\"", StringComparison.Ordinal) + "\"";
+
+    private sealed record RParseRow(int Line, int Column, string Token, string Text, string Parent, string Id);
 }
