@@ -656,6 +656,62 @@ class QueryFlow { static void Main(string[] args) { Process.Start(args[0]); } }
     }
 
     [Fact]
+    public void CryptoWorkflow_CliFormatsQueryAliasesAndMcpTool_ReturnExpectedEvidence()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "CryptoWorkflow.cs"), """
+using System.Security.Cryptography;
+using System.Text;
+
+class CryptoWorkflow
+{
+    static void Main(string[] args) => Hash(args[0]);
+    static byte[] Hash(string value)
+    {
+        using var md5 = MD5.Create();
+        return md5.ComputeHash(Encoding.UTF8.GetBytes(value));
+    }
+}
+""");
+
+        var nativeOutput = Path.Combine(tempDirectory.Path, "crypto.json");
+        var cdxOutput = Path.Combine(tempDirectory.Path, "cbom.json");
+        var evidenceOutput = Path.Combine(tempDirectory.Path, "evidence.json");
+
+        Assert.Equal(0, CommandLine.Main(["crypto", "--path", tempDirectory.Path, "--o", nativeOutput, "--format", "dosai"]));
+        Assert.Equal(0, CommandLine.Main(["crypto", "--path", tempDirectory.Path, "--o", cdxOutput, "--format", "cyclonedx"]));
+        Assert.Equal(0, CommandLine.Main(["crypto", "--path", tempDirectory.Path, "--o", evidenceOutput, "--format", "cdxgen-evidence"]));
+
+        using var nativeDocument = JsonDocument.Parse(File.ReadAllText(nativeOutput));
+        Assert.True(nativeDocument.RootElement.GetProperty("Statistics").GetProperty("ReachableFindingCount").GetInt32() >= 1);
+
+        var findingQuery = JsonSerializer.Deserialize<List<JsonElement>>(DosaiQueryEngine.QueryJson(File.ReadAllText(nativeOutput), "findings[ruleId~=MD5]"));
+        var assetQuery = JsonSerializer.Deserialize<List<JsonElement>>(DosaiQueryEngine.QueryJson(File.ReadAllText(nativeOutput), "assets[family=hash]"));
+        Assert.NotNull(findingQuery);
+        Assert.NotEmpty(findingQuery);
+        Assert.NotNull(assetQuery);
+        Assert.NotEmpty(assetQuery);
+
+        using var cdxDocument = JsonDocument.Parse(File.ReadAllText(cdxOutput));
+        Assert.Equal("CycloneDX", cdxDocument.RootElement.GetProperty("bomFormat").GetString());
+        Assert.True(cdxDocument.RootElement.GetProperty("components").GetArrayLength() >= 1);
+        Assert.True(cdxDocument.RootElement.GetProperty("vulnerabilities").GetArrayLength() >= 1);
+
+        using var evidenceDocument = JsonDocument.Parse(File.ReadAllText(evidenceOutput));
+        Assert.Equal("crypto-evidence", evidenceDocument.RootElement.GetProperty("type").GetString());
+        Assert.True(evidenceDocument.RootElement.GetProperty("findings").GetArrayLength() >= 1);
+
+        using var input = new StringReader("""
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"dosai.crypto","arguments":{"format":"cyclonedx"}}}
+
+""");
+        using var output = new StringWriter();
+        McpServer.Run(tempDirectory.Path, null, null, input, output);
+        Assert.Contains("CycloneDX", output.ToString());
+        Assert.Contains("dosai:crypto:reachableFromEntryPoint", output.ToString());
+    }
+
+    [Fact]
     public void GetDataFlows_VisualBasic_CliSourceToProcessStart_ReturnsSlice()
     {
         using var tempDirectory = new TemporaryDirectory();

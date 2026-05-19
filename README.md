@@ -1,31 +1,22 @@
 # Dotnet Source and Assembly Inspector (Dosai)
 
-List details about the namespaces, methods, dependencies, properties, fields, events, constructors, and call graphs from a C# .NET source file, assembly, or NuGet package (.nupkg).
+Dosai inspects source code, assemblies, and NuGet packages. It extracts methods, dependencies, API endpoints, call graphs, data-flow slices, crypto evidence, and package reachability facts for security review.
 
 ## Usage
 
 `Dosai [command] [options]`
 
-### Commands:
+### Commands
 
-- `methods` Retrieve details about the methods
-- `dataflows` Build source-to-sink data-flow slices with framework pattern packs
-- `crypto` Detect cryptographic assets, operations, materials, misuse, reachability, and CBOM evidence
-- `agent-context` Generate compact agent context for AI/security review
-- `query` Filter Dosai JSON with expressions such as `slices[sinkCategory=sql]`
-- `mcp` Run an MCP-style JSON-RPC server over stdin/stdout
-- `report`, `diff`, `policy` Generate reports, compare data-flow runs, and apply CI checks
+Use `methods` for method inventory, endpoints, call graph, and dependency evidence. Use `dataflows` for source-to-sink slicing. Use `crypto` for cryptographic assets, materials, misuse findings, reachability, and CBOM evidence. `agent-context`, `query`, `mcp`, `report`, `diff`, and `policy` support review automation and CI workflows.
 
-### Options:
+### Common options
 
-- `--path [path]` (REQUIRED) The file or directory to inspect (supports .dll, .exe, .cs, .vb, .fs, .nupkg)
-- `--o [file]` (OPTIONAL) The output file location and name, default value when option not provided is 'dosai.json'
-- `--version` Show version information
-- `-?`, `-h`, `--help` Show help and usage information
+`--path` is the file or directory to inspect. `--o` sets the output path and defaults to `dosai.json`. Use `--help` for command-specific options.
 
 ### Data-flow analysis
 
-`dataflows` includes built-in .NET source/sink packs for ASP.NET, data access, filesystem, serialization, cloud/serverless, RPC, auth-sensitive APIs, and crypto-sensitive APIs. Custom pattern JSON can add `sources`, `sinks`, `passthroughs`, and `sanitizers`; sanitizer matches stop taint propagation and validators such as `Regex.IsMatch` suppress guarded true branches.
+`dataflows` includes built-in .NET source and sink packs for ASP.NET, data access, filesystem, serialization, cloud/serverless, RPC, auth-sensitive APIs, and crypto-sensitive APIs. Custom pattern JSON can add `sources`, `sinks`, `passthroughs`, and `sanitizers`. Sanitizer matches stop taint propagation, and validators such as `Regex.IsMatch` suppress guarded true branches.
 
 ```bash
 dotnet run --project ./Dosai/Dosai.csproj -- dataflows \
@@ -40,7 +31,7 @@ The data-flow engine performs field-sensitive property/field taint where receive
 
 ### Cryptography and CBOM evidence
 
-`crypto` detects cryptographic algorithms, operations, key/certificate-like material, TLS settings, weak algorithms, hardcoded material, static IVs/nonces, insecure RNG, disabled certificate validation, legacy TLS references, and low PBKDF2 iteration counts. Findings include source locations and best-effort reachability from CLI/API entry points when callgraph data is available.
+`crypto` detects algorithms, operations, key and certificate material, TLS settings, weak algorithms, hardcoded material, static IVs and nonces, insecure RNG, disabled certificate validation, legacy TLS references, and low PBKDF2 iteration counts. Findings include source locations and best-effort reachability from CLI and API entry points when callgraph data is available.
 
 Native Dosai JSON:
 
@@ -73,13 +64,9 @@ The CycloneDX and cdxgen-evidence modes preserve Dosai properties such as `dosai
 
 ### F#, R, and VC++ frontends
 
-Dosai includes source frontends for additional ecosystems:
+Dosai also analyzes F#, R, and VC++/C/C++ source. The F# frontend uses `FSharp.Compiler.Service` when available and records compiler-service evidence for `.fs`, `.fsi`, and `.fsx` files. The R frontend uses `Rscript` with R's native `getParseData` parser when R is installed, then falls back to managed lexical extraction if needed. The VC++ frontend extracts functions, includes, calls, native sinks, and crypto/TLS evidence from `.c`, `.cpp`, `.cc`, `.cxx`, `.h`, `.hpp`, and `.hh` files without requiring `compile_commands.json`.
 
-- F#: `.fs`, `.fsi`, `.fsx` function/module extraction, dependencies, calls, and data-flow sources/sinks. The frontend loads `FSharp.Compiler.Service` and marks F# evidence with the compiler service module when available.
-- R: `.R`, `.Rmd`, `.qmd` functions, library dependencies, Shiny/plumber-style inputs, SQL/shell/eval/network sinks. If `Rscript` is installed, Dosai uses R's native parser and `getParseData`; otherwise it falls back to managed lexical extraction.
-- VC++/C/C++: `.c`, `.cpp`, `.cc`, `.cxx`, `.h`, `.hpp`, `.hh` functions, includes, calls, native command/SQL/memory/crypto/TLS sinks.
-
-Frontend evidence is conservative when complete project metadata is unavailable. It provides inventory, callgraph, data-flow, and crypto coverage without failing analysis on missing references, missing R installations, or absent native build metadata.
+Frontend evidence is conservative when project metadata is incomplete. It still provides inventory, callgraph, data-flow, and crypto coverage without failing analysis on missing references, missing R installations, or absent native build metadata.
 
 ### Querying JSON
 
@@ -90,7 +77,7 @@ dotnet run --project ./Dosai/Dosai.csproj -- query \
   --o /tmp/sql-slices.json
 ```
 
-Supported collection aliases include `nodes`, `edges`, `slices`, `weaknesses`, `entrypoints`, `packages`, `dangerous`, and `summaries`. Filters support `=`, `!=`, `~=`, `>`, `<`, `>=`, and `<=`.
+Supported collection aliases include `nodes`, `edges`, `slices`, `weaknesses`, `entrypoints`, `packages`, `dangerous`, `summaries`, `assets`, `operations`, `materials`, `protocols`, and `findings`. Filters support `=`, `!=`, `~=`, `>`, `<`, `>=`, and `<=`.
 
 ### MCP-style stdio server
 
@@ -111,21 +98,21 @@ Endpoint extraction records richer auth context from attributes and common minim
 
 ### Running code directly from the code repository
 
-1. `dotnet build ./Dosai`
-2. Run a command such as:
-   - `dotnet run --project ./Dosai/ methods --path ./Dosai/bin/x64/Debug/net10.0/Dosai.dll`
-   - `dotnet run --project ./Dosai/ methods --path ./Dosai/Dosai.cs`
-   - `dotnet run --project ./Dosai/ methods --path ./MyPackage.1.0.0.nupkg`
+Build with `dotnet build ./Dosai`, then run a command such as:
+
+```bash
+dotnet run --project ./Dosai -- methods --path ./Dosai/Dosai.cs
+dotnet run --project ./Dosai -- methods --path ./MyPackage.1.0.0.nupkg
+dotnet run --project ./Dosai -- crypto --path ./Dosai --format cyclonedx --o /tmp/dosai-cbom.json
+```
 
 ### Generating a self-contained executable for a system
 
-- Windows: `dotnet publish -r win-x64 --self-contained`
-- Linux: `dotnet publish -r linux-x64 --self-contained`
+For Windows, run `dotnet publish -r win-x64 --self-contained`. For Linux, run `dotnet publish -r linux-x64 --self-contained`.
 
 ### Invoking the self-contained executable
 
-- Windows: `Dosai.exe methods --path ./Dosai/bin/x64/Debug/net8.0/Dosai.dll`
-- Linux: `Dosai methods --path ./Dosai/Dosai.cs`
+After publishing, invoke `Dosai.exe methods --path ./app.dll` on Windows or `Dosai methods --path ./src` on Linux.
 
 ### Run unit tests
 
