@@ -91,13 +91,12 @@ jobs:
       run: |
         dotnet restore Dosai.sln
         dotnet build --no-restore ./Dosai
-    - name: Dataflows, report, diff, and policy smoke
+    - name: Dataflows, report, and diff smoke
       run: |
         dotnet run --no-build --project ./Dosai/Dosai.csproj -- dataflows --path ./Dosai --o /tmp/dosai-dataflows.json --graph-format gexf --graph-out /tmp/dosai-dataflows.gexf
         dotnet run --no-build --project ./Dosai/Dosai.csproj -- agent-context --path ./Dosai --o /tmp/dosai-agent-context.json
         dotnet run --no-build --project ./Dosai/Dosai.csproj -- report --input /tmp/dosai-dataflows.json --o /tmp/dosai-report.md
         dotnet run --no-build --project ./Dosai/Dosai.csproj -- diff --old /tmp/dosai-dataflows.json --new /tmp/dosai-dataflows.json --o /tmp/dosai-diff.json
-        dotnet run --no-build --project ./Dosai/Dosai.csproj -- policy --input /tmp/dosai-dataflows.json --min-slices 0
         python3 - <<'PY'
         import json, xml.etree.ElementTree as ET
         dataflows = json.load(open('/tmp/dosai-dataflows.json'))

@@ -58,10 +58,6 @@ dotnet run --project ./Dosai -- diff \
   --old old-dataflows.json \
   --new new-dataflows.json \
   --o dataflow-diff.json
-
-dotnet run --project ./Dosai -- policy \
-  --input dataflows.json \
-  --min-slices 1
 ```
 
 ### Custom patterns

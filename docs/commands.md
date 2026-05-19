@@ -12,7 +12,6 @@ flowchart TD
     CLI --> Agent[agent-context]
     CLI --> Report[report]
     CLI --> Diff[diff]
-    CLI --> Policy[policy]
     CLI --> Query[query]
     CLI --> MCP[mcp]
 
@@ -25,7 +24,6 @@ flowchart TD
     Agent --> AgentJson[Agent context JSON]
     Report --> Markdown[Markdown report]
     Diff --> DiffJson[Diff JSON]
-    Policy --> ExitCode[CI exit code]
     Query --> QueryJson[Filtered JSON]
     MCP --> JsonRpc[Line-delimited JSON-RPC]
 ```
@@ -297,7 +295,7 @@ Markdown is a presentation artifact. It should not be treated as the canonical m
 
 ## `diff`
 
-`diff` compares two data-flow JSON files.
+`diff` compares two data-flow JSON files. It is a Dosai data-flow diff, not a generic JSON patch/diff tool.
 
 ```bash
 dotnet run --project ./Dosai/Dosai.csproj -- diff \
@@ -316,44 +314,15 @@ old DataFlowResult + new DataFlowResult -> TransparencyBuilder.DiffJson -> diff 
 
 The command deserializes two `DataFlowResult` objects and computes a deterministic JSON diff using transparency-layer comparison logic. It is designed for CI trend checks and review of analysis changes between commits.
 
-### Strengths
-
-`diff` helps separate new findings from existing backlog.
-
-### Weaknesses and edge cases
-
-Stable diffs depend on stable source locations, stable method IDs, and consistent analysis inputs. Large refactors can move many locations and produce noisy diffs.
-
-## `policy`
-
-`policy` applies basic CI gates to a data-flow JSON file.
-
-```bash
-dotnet run --project ./Dosai/Dosai.csproj -- policy \
-  --input /tmp/dosai-dataflows.json \
-  --min-slices 0
-```
-
-### Exit codes
-
-```text
-0  policy passed
-1  input could not be read as DataFlowResult
-2  at least one edge references a missing node
-3  slice count is below --min-slices
-```
-
-### Algorithm and logic
-
-The policy command first validates edge endpoint integrity. It builds a node ID set from `Nodes` and checks every edge `SourceId` and `TargetId`. It then compares `Statistics.SliceCount` with `--min-slices`.
+Because it deserializes typed Dosai data-flow output before comparing, it normalizes away JSON object property ordering and ignores unknown added properties. Slice ordering is ignored by converting slices to keyed sets. The current comparison intentionally focuses on source-to-sink slice identity using `SourceCategory`, `SinkCategory`, and `SinkArgument`, plus old/new statistics. It does not produce a generic tree edit script and does not compare arbitrary node, edge, metadata, or property additions/removals.
 
 ### Strengths
 
-The command is simple and deterministic. It catches corrupt graph outputs and can enforce minimum expected analysis coverage in smoke tests.
+`diff` helps separate new data-flow classes from existing backlog without the noise produced by raw JSON array ordering or formatting changes.
 
 ### Weaknesses and edge cases
 
-It is not a full risk policy engine. Severity thresholds, allowlists, and custom rules should be implemented as a future policy pack or by querying JSON with `query`.
+Stable diffs depend on stable source/sink categorization and sink argument labels. Large heuristic changes can still produce noisy diffs because the tool is comparing Dosai analysis facts, not raw JSON text.
 
 ## `query`
 
@@ -462,7 +431,6 @@ Need crypto or CBOM evidence?                crypto
 Need compact AI-agent context?               agent-context
 Need Markdown for humans?                    report
 Need compare two analysis runs?              diff
-Need CI graph and slice gate?                policy
 Need filter JSON in scripts?                 query
 Need agent tool access over stdio?           mcp
 ```
@@ -488,10 +456,6 @@ dotnet run --project ./Dosai -- crypto \
   --path ./src \
   --o /tmp/dosai-cbom.json \
   --format cyclonedx
-
-dotnet run --project ./Dosai -- policy \
-  --input /tmp/dosai-dataflows.json \
-  --min-slices 0
 ```
 
-This sequence validates compilation, method inventory, graph export integrity, data-flow analysis, CBOM generation, and baseline policy gates.
+This sequence validates compilation, method inventory, graph export integrity, data-flow analysis, and CBOM generation. CI smoke scripts should additionally validate graph edge endpoints and any project-specific slice-count expectations directly against the JSON output.

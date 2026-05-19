@@ -21,7 +21,7 @@ flowchart TD
     PURL --> DFGraph
     DFGraph --> Transparency[TransparencyBuilder]
     Transparency --> Weakness[Weakness candidates]
-    Transparency --> Agent[Agent context/report/diff/policy]
+    Transparency --> Agent[Agent context/report/diff]
     CallGraph --> Exporters[Mermaid / GraphML / GEXF]
     DFGraph --> Exporters
 ```
@@ -39,7 +39,7 @@ flowchart TD
 This layer intentionally remains deterministic. It does not query vulnerability databases and does not make exploitability claims. It converts semantic evidence into structured facts.
 
 ```text
-Roslyn operations -> nodes/edges/slices -> transparency facts -> reports/agent context/policy
+Roslyn operations -> nodes/edges/slices -> transparency facts -> reports/agent context/diff
 ```
 
 ## Source compilation model

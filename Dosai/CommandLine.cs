@@ -94,12 +94,6 @@ public class CommandLine
             Required = true
         };
 
-        var minSlicesOption = new Option<int>("--min-slices")
-        {
-            Description = "Minimum required data-flow slice count",
-            DefaultValueFactory = _ => 0
-        };
-
         var queryOption = new Option<string>("--query")
         {
             Description = "Query expression, for example: slices[sinkCategory=sql], nodes[isSource=true], weaknesses[confidence=High]",
@@ -159,12 +153,6 @@ public class CommandLine
             outputFileOption
         };
 
-        var policyCommand = new Command("policy", "Apply simple CI policy checks to data-flow JSON")
-        {
-            inputFileOption,
-            minSlicesOption
-        };
-
         var queryCommand = new Command("query", "Filter Dosai JSON with a compact query expression")
         {
             inputFileOption,
@@ -185,7 +173,6 @@ public class CommandLine
         rootCommand.Subcommands.Add(agentContextCommand);
         rootCommand.Subcommands.Add(reportCommand);
         rootCommand.Subcommands.Add(diffCommand);
-        rootCommand.Subcommands.Add(policyCommand);
         rootCommand.Subcommands.Add(queryCommand);
         rootCommand.Subcommands.Add(mcpCommand);
 
@@ -335,32 +322,6 @@ public class CommandLine
                 return 1;
             }
             File.WriteAllText(outputFile, TransparencyBuilder.DiffJson(oldResult, newResult));
-            return 0;
-        });
-
-        policyCommand.SetAction(parseResult =>
-        {
-            var input = parseResult.GetValue(inputFileOption)!;
-            var minSlices = parseResult.GetValue(minSlicesOption);
-            var result = JsonSerializer.Deserialize<DataFlowResult>(File.ReadAllText(input), JsonOptions());
-            if (result is null)
-            {
-                Console.Error.WriteLine("Could not read data-flow result.");
-                return 1;
-            }
-            var nodeIds = result.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
-            var invalidEdges = result.Edges.Count(edge => !nodeIds.Contains(edge.SourceId) || !nodeIds.Contains(edge.TargetId));
-            if (invalidEdges > 0)
-            {
-                Console.Error.WriteLine($"Policy failed: {invalidEdges} data-flow edges reference missing nodes.");
-                return 2;
-            }
-            if (result.Statistics.SliceCount < minSlices)
-            {
-                Console.Error.WriteLine($"Policy failed: expected at least {minSlices} slices, got {result.Statistics.SliceCount}.");
-                return 3;
-            }
-            Console.WriteLine("Policy passed.");
             return 0;
         });
 

@@ -8,7 +8,7 @@ Dosai inspects source code, assemblies, and NuGet packages. It extracts methods,
 
 ### Commands
 
-Use `methods` for method inventory, endpoints, call graph, and dependency evidence. Use `dataflows` for source-to-sink slicing. Use `crypto` for cryptographic assets, materials, misuse findings, reachability, and CBOM evidence. `agent-context`, `query`, `mcp`, `report`, `diff`, and `policy` support review automation and CI workflows.
+Use `methods` for method inventory, endpoints, call graph, and dependency evidence. Use `dataflows` for source-to-sink slicing. Use `crypto` for cryptographic assets, materials, misuse findings, reachability, and CBOM evidence. `agent-context`, `query`, `mcp`, `report`, and `diff` support review automation and CI workflows.
 
 For detailed command usage, implementation notes, algorithms, strengths, and limitations, see [the Dosai command reference](./docs/commands.md).
 

@@ -69,10 +69,6 @@ dotnet run --project /Users/prabhu/work/owasp/dosai/Dosai/Dosai.csproj -- datafl
 dotnet run --project /Users/prabhu/work/owasp/dosai/Dosai/Dosai.csproj -- agent-context \
   --path /Users/prabhu/work/owasp/dosai/Dosai \
   --o /tmp/dosai-agent-context.json
-
-dotnet run --project /Users/prabhu/work/owasp/dosai/Dosai/Dosai.csproj -- policy \
-  --input /tmp/dosai-dataflows.json \
-  --min-slices 0
 ```
 
 ## Data-flow heuristic policy

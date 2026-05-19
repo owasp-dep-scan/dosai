@@ -60,7 +60,7 @@ dotnet run --project ./Dosai -- dataflows \
 
 The `dataflows.json` output includes `Metadata`, `EntryPoints`, `PackageReachability`, `DangerousApiReachability`, and `WeaknessCandidates` in addition to nodes, edges, and slices.
 
-### Agent context, reports, diff, and policy
+### Agent context, reports, and diff
 
 ```bash
 dotnet run --project ./Dosai -- agent-context \
@@ -75,13 +75,9 @@ dotnet run --project ./Dosai -- diff \
   --old old-dataflows.json \
   --new new-dataflows.json \
   --o dataflow-diff.json
-
-dotnet run --project ./Dosai -- policy \
-  --input dataflows.json \
-  --min-slices 1
 ```
 
-The policy command validates graph edge endpoint integrity and an optional minimum slice count.
+For CI gates, validate graph edge endpoint integrity and project-specific slice-count expectations directly against `dataflows.json` or with `query`.
 
 ### Print detected sources/sinks
 
