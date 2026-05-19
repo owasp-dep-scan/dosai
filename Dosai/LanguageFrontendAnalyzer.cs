@@ -7,8 +7,8 @@ namespace Depscan;
 public static partial class LanguageFrontendAnalyzer
 {
     private const string FrontendModule = "LanguageFrontend";
-    private const string FSharpCompilerServiceModule = "FSharp.Compiler.Service";
     private const string RNativeParserModule = "R.NativeParser";
+    private static readonly TimeSpan DefaultRParserTimeout = TimeSpan.FromSeconds(10);
 
     [GeneratedRegex(@"^\s*(?:namespace|module)\s+([\w\.]+)", RegexOptions.Compiled)]
     private static partial Regex FSharpNamespaceOrModule();
@@ -63,7 +63,7 @@ public static partial class LanguageFrontendAnalyzer
 
     private static void AnalyzeFSharp(string basePath, string file, List<Method> methods, List<Dependency> dependencies, List<MethodCalls> calls)
     {
-        var moduleName = IsFSharpCompilerServiceAvailable ? FSharpCompilerServiceModule : FrontendModule;
+        const string moduleName = FrontendModule;
         var lines = File.ReadAllLines(file);
         var namespaceName = "Global";
         var className = "Module";
@@ -209,8 +209,16 @@ write.table(pd, file = "", sep = "\t", row.names = FALSE, col.names = TRUE, quot
             };
             using var process = Process.Start(start);
             if (process is null) return false;
-            var stdout = process.StandardOutput.ReadToEnd();
-            process.WaitForExit(10_000);
+            var stdoutTask = process.StandardOutput.ReadToEndAsync();
+            var stderrTask = process.StandardError.ReadToEndAsync();
+            if (!process.WaitForExit((int)RParserTimeout.TotalMilliseconds))
+            {
+                KillProcess(process);
+                return false;
+            }
+
+            var stdout = stdoutTask.GetAwaiter().GetResult();
+            _ = stderrTask.GetAwaiter().GetResult();
             if (process.ExitCode != 0 || string.IsNullOrWhiteSpace(stdout))
             {
                 return false;
@@ -259,6 +267,32 @@ write.table(pd, file = "", sep = "\t", row.names = FALSE, col.names = TRUE, quot
         {
             try { if (File.Exists(scriptPath)) File.Delete(scriptPath); }
             catch (IOException) { }
+        }
+    }
+
+    private static TimeSpan RParserTimeout
+    {
+        get
+        {
+            var configured = Environment.GetEnvironmentVariable("DOSAI_R_PARSE_TIMEOUT_MS");
+            return int.TryParse(configured, out var milliseconds) && milliseconds > 0
+                ? TimeSpan.FromMilliseconds(milliseconds)
+                : DefaultRParserTimeout;
+        }
+    }
+
+    private static void KillProcess(Process process)
+    {
+        try
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                process.WaitForExit(2_000);
+            }
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or NotSupportedException or System.ComponentModel.Win32Exception)
+        {
         }
     }
 

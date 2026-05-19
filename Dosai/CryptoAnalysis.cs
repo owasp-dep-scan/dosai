@@ -7,6 +7,8 @@ using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.Operations;
 using Microsoft.CodeAnalysis.VisualBasic;
+using CSharpSyntax = Microsoft.CodeAnalysis.CSharp.Syntax;
+using VisualBasicSyntax = Microsoft.CodeAnalysis.VisualBasic.Syntax;
 
 namespace Depscan;
 
@@ -204,9 +206,7 @@ public static class CryptoAnalyzer
         foreach (var tree in csharpTrees)
         {
             var model = csharpCompilation.GetSemanticModel(tree);
-            var operationNodes = tree.GetRoot().DescendantNodes()
-                .Where(node => node is Microsoft.CodeAnalysis.CSharp.Syntax.BaseMethodDeclarationSyntax or Microsoft.CodeAnalysis.CSharp.Syntax.AccessorDeclarationSyntax or Microsoft.CodeAnalysis.CSharp.Syntax.LocalFunctionStatementSyntax);
-            foreach (var operation in operationNodes.Select(node => model.GetOperation(node)).Where(operation => operation is not null))
+            foreach (var operation in GetCSharpOperationRoots(tree.GetRoot()).Select(node => model.GetOperation(node)).Where(operation => operation is not null))
             {
                 new CryptoOperationWalker(model, basePath, tree.FilePath, reachability, result).Visit(operation);
             }
@@ -216,13 +216,52 @@ public static class CryptoAnalyzer
         foreach (var tree in vbTrees)
         {
             var model = vbCompilation.GetSemanticModel(tree);
-            var operationNodes = tree.GetRoot().DescendantNodes()
-                .Where(node => node is Microsoft.CodeAnalysis.VisualBasic.Syntax.MethodBlockSyntax or Microsoft.CodeAnalysis.VisualBasic.Syntax.AccessorBlockSyntax);
-            foreach (var operation in operationNodes.Select(node => model.GetOperation(node)).Where(operation => operation is not null))
+            foreach (var operation in GetVisualBasicOperationRoots(tree.GetRoot()).Select(node => model.GetOperation(node)).Where(operation => operation is not null))
             {
                 new CryptoOperationWalker(model, basePath, tree.FilePath, reachability, result).Visit(operation);
             }
             AnalyzeLineFallback(basePath, tree.FilePath, File.ReadAllLines(tree.FilePath), reachability, result, language: "vb");
+        }
+    }
+
+    private static IEnumerable<SyntaxNode> GetCSharpOperationRoots(SyntaxNode root)
+    {
+        foreach (var method in root.DescendantNodes().OfType<CSharpSyntax.BaseMethodDeclarationSyntax>())
+        {
+            if (method.Body is not null) yield return method.Body;
+            if (method.ExpressionBody is not null) yield return method.ExpressionBody;
+            if (method is CSharpSyntax.ConstructorDeclarationSyntax { Initializer: not null } constructor) yield return constructor.Initializer;
+        }
+
+        foreach (var accessor in root.DescendantNodes().OfType<CSharpSyntax.AccessorDeclarationSyntax>())
+        {
+            if (accessor.Body is not null) yield return accessor.Body;
+            if (accessor.ExpressionBody is not null) yield return accessor.ExpressionBody;
+        }
+
+        foreach (var localFunction in root.DescendantNodes().OfType<CSharpSyntax.LocalFunctionStatementSyntax>())
+        {
+            if (localFunction.Body is not null) yield return localFunction.Body;
+            if (localFunction.ExpressionBody is not null) yield return localFunction.ExpressionBody;
+        }
+    }
+
+    private static IEnumerable<SyntaxNode> GetVisualBasicOperationRoots(SyntaxNode root)
+    {
+        foreach (var methodBlock in root.DescendantNodes().OfType<VisualBasicSyntax.MethodBlockSyntax>())
+        {
+            foreach (var statement in methodBlock.Statements)
+            {
+                yield return statement;
+            }
+        }
+
+        foreach (var accessorBlock in root.DescendantNodes().OfType<VisualBasicSyntax.AccessorBlockSyntax>())
+        {
+            foreach (var statement in accessorBlock.Statements)
+            {
+                yield return statement;
+            }
         }
     }
 

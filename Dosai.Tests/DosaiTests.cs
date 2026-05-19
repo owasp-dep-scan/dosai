@@ -314,7 +314,7 @@ int main(int argc, char** argv) {
         var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result, new JsonSerializerOptions { Converters = { new JsonStringEnumConverter() } });
 
         Assert.NotNull(methodsSlice);
-        Assert.Contains(methodsSlice!.Methods ?? [], method => method.Module == "FSharp.Compiler.Service" && method.Name == "run");
+        Assert.Contains(methodsSlice!.Methods ?? [], method => method.Module == "LanguageFrontend" && method.Name == "run");
         Assert.Contains(methodsSlice!.Methods ?? [], method => method.Name == "run" && method.Namespace == "R" && method.Module is "R.NativeParser" or "LanguageFrontend");
         if (LanguageFrontendAnalyzer.IsRNativeParserAvailable)
         {
@@ -330,6 +330,47 @@ int main(int argc, char** argv) {
             Assert.Contains(edge.SourceId, nodeIds);
             Assert.Contains(edge.TargetId, nodeIds);
         });
+    }
+
+    [Fact]
+    public void GetMethods_RNativeParserTimeout_FallsBackToRegexFrontend()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var tempDirectory = new TemporaryDirectory();
+        var toolDirectory = Path.Combine(tempDirectory.Path, "tools");
+        Directory.CreateDirectory(toolDirectory);
+        var fakeRscript = Path.Combine(toolDirectory, "Rscript");
+        File.WriteAllText(fakeRscript, "#!/bin/sh\nsleep 5\n");
+        File.SetUnixFileMode(fakeRscript, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "app.R"), """
+run <- function(input) {
+  print(input)
+}
+""");
+
+        var originalPath = Environment.GetEnvironmentVariable("PATH");
+        var originalTimeout = Environment.GetEnvironmentVariable("DOSAI_R_PARSE_TIMEOUT_MS");
+        try
+        {
+            Environment.SetEnvironmentVariable("PATH", toolDirectory + Path.PathSeparator + originalPath);
+            Environment.SetEnvironmentVariable("DOSAI_R_PARSE_TIMEOUT_MS", "100");
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
+            var (methods, _, _) = LanguageFrontendAnalyzer.GetMethods(tempDirectory.Path);
+
+            stopwatch.Stop();
+            Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(3), $"R parser timeout should be enforced before fallback, but took {stopwatch.Elapsed}.");
+            Assert.Contains(methods, method => method.Name == "run" && method.Module == "LanguageFrontend");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("PATH", originalPath);
+            Environment.SetEnvironmentVariable("DOSAI_R_PARSE_TIMEOUT_MS", originalTimeout);
+        }
     }
 
     [Fact]
@@ -601,13 +642,13 @@ using System;
 
 class RouteAttribute : Attribute { public RouteAttribute(string value) { } }
 class HttpPostAttribute : Attribute { public HttpPostAttribute(string value) { } }
-class AuthorizeAttribute : Attribute { public string? Policy { get; set; } public string? Roles { get; set; } public string? AuthenticationSchemes { get; set; } }
+class AuthorizeAttribute : Attribute { public AuthorizeAttribute() { } public AuthorizeAttribute(string policy) { } public string? Policy { get; set; } public string? Roles { get; set; } public string? AuthenticationSchemes { get; set; } }
 class RequiredScopeAttribute : Attribute { public RequiredScopeAttribute(string scope) { } }
 class EnableCorsAttribute : Attribute { public EnableCorsAttribute(string policy) { } }
 class ValidateAntiForgeryTokenAttribute : Attribute { }
 
+[Authorize("OrdersPolicy", Roles = "Admin,Auditor", AuthenticationSchemes = "Bearer")]
 [Route("api/orders")]
-[Authorize(Roles = "Admin,Auditor", Policy = "OrdersPolicy", AuthenticationSchemes = "Bearer")]
 class OrdersController
 {
     [HttpPost("{id}")]
@@ -684,6 +725,9 @@ class CryptoWorkflow
 
         using var nativeDocument = JsonDocument.Parse(File.ReadAllText(nativeOutput));
         Assert.True(nativeDocument.RootElement.GetProperty("Statistics").GetProperty("ReachableFindingCount").GetInt32() >= 1);
+
+        var semanticAnalysis = CryptoAnalyzer.Analyze(tempDirectory.Path);
+        Assert.Contains(semanticAnalysis.Operations, operation => operation.Algorithm == "MD5" && operation.Properties.TryGetValue("source", out var source) && source == "roslyn");
 
         var findingQuery = JsonSerializer.Deserialize<List<JsonElement>>(DosaiQueryEngine.QueryJson(File.ReadAllText(nativeOutput), "findings[ruleId~=MD5]"));
         var assetQuery = JsonSerializer.Deserialize<List<JsonElement>>(DosaiQueryEngine.QueryJson(File.ReadAllText(nativeOutput), "assets[family=hash]"));

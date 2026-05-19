@@ -86,6 +86,7 @@ public static partial class ApiEndpointAnalyzer
 
             var classRoute = method.Ancestors().OfType<TypeDeclarationSyntax>().FirstOrDefault()?.AttributeLists
                 .SelectMany(list => list.Attributes)
+                .Where(IsRouteAttribute)
                 .Select(GetRouteTemplate)
                 .FirstOrDefault(route => !string.IsNullOrWhiteSpace(route));
             foreach (var endpoint in endpointAttributes)
@@ -172,7 +173,7 @@ public static partial class ApiEndpointAnalyzer
         var name = attribute.Name.ToString();
         var httpMethod = AttributeHttpMethod(name);
         var route = GetRouteTemplate(attribute);
-        if (httpMethod is null && !name.EndsWith("Route", StringComparison.OrdinalIgnoreCase))
+        if (httpMethod is null && !IsRouteAttribute(attribute))
         {
             return null;
         }
@@ -298,6 +299,10 @@ public static partial class ApiEndpointAnalyzer
 
     private static string AttributeName(AttributeSyntax attribute) => attribute.Name.ToString();
 
+    private static bool IsRouteAttribute(AttributeSyntax attribute) => NormalizeAttributeName(AttributeName(attribute)).Equals("Route", StringComparison.OrdinalIgnoreCase);
+
+    private static string NormalizeAttributeName(string attributeName) => attributeName.Split('.').Last().Replace("Attribute", string.Empty, StringComparison.OrdinalIgnoreCase);
+
     private static void AddAttributeValues(AttributeSyntax attribute, List<string> target, params string[] names)
     {
         foreach (var argument in attribute.ArgumentList?.Arguments ?? [])
@@ -327,7 +332,7 @@ public static partial class ApiEndpointAnalyzer
 
     private static string? AttributeHttpMethod(string attributeName)
     {
-        attributeName = attributeName.Split('.').Last().Replace("Attribute", string.Empty, StringComparison.OrdinalIgnoreCase);
+        attributeName = NormalizeAttributeName(attributeName);
         return attributeName.ToLowerInvariant() switch
         {
             "httpget" => "GET",
