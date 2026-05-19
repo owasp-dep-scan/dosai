@@ -39,6 +39,11 @@ public class CommandLine
             Description = "Optional JSON file containing source, sink, and passthrough patterns for data-flow slicing. Built-in .NET web/http/rpc/cli defaults are always included."
         };
 
+        var patternPacksOption = new Option<string?>("--pattern-packs")
+        {
+            Description = "Comma-separated built-in data-flow pattern packs to enable: all, aspnet, data, filesystem, serialization, cloud, rpc, auth. Defaults to all."
+        };
+
         var dataFlowFormatOption = new Option<string?>("--graph-format")
         {
             Description = "Export the data-flow graph separately in one of: mermaid, graphml, gexf"
@@ -78,6 +83,12 @@ public class CommandLine
             DefaultValueFactory = _ => 0
         };
 
+        var queryOption = new Option<string>("--query")
+        {
+            Description = "Query expression, for example: slices[sinkCategory=sql], nodes[isSource=true], weaknesses[confidence=High]",
+            Required = true
+        };
+
         rootCommand.Options.Add(pathOption);
         rootCommand.Options.Add(outputFileOption);
         rootCommand.Options.Add(callGraphFormatOption);
@@ -96,6 +107,7 @@ public class CommandLine
             pathOption,
             outputFileOption,
             patternsFileOption,
+            patternPacksOption,
             dataFlowFormatOption,
             dataFlowGraphOutputFileOption,
             printSourcesSinksOption
@@ -105,7 +117,8 @@ public class CommandLine
         {
             pathOption,
             outputFileOption,
-            patternsFileOption
+            patternsFileOption,
+            patternPacksOption
         };
 
         var reportCommand = new Command("report", "Generate a Markdown report from data-flow JSON")
@@ -127,12 +140,28 @@ public class CommandLine
             minSlicesOption
         };
 
+        var queryCommand = new Command("query", "Filter Dosai JSON with a compact query expression")
+        {
+            inputFileOption,
+            outputFileOption,
+            queryOption
+        };
+
+        var mcpCommand = new Command("mcp", "Run an MCP-style JSON-RPC server over stdin/stdout")
+        {
+            pathOption,
+            patternsFileOption,
+            patternPacksOption
+        };
+
         rootCommand.Subcommands.Add(methodsCommand);
         rootCommand.Subcommands.Add(dataFlowsCommand);
         rootCommand.Subcommands.Add(agentContextCommand);
         rootCommand.Subcommands.Add(reportCommand);
         rootCommand.Subcommands.Add(diffCommand);
         rootCommand.Subcommands.Add(policyCommand);
+        rootCommand.Subcommands.Add(queryCommand);
+        rootCommand.Subcommands.Add(mcpCommand);
 
         methodsCommand.SetAction(parseResult =>
             {
@@ -184,11 +213,12 @@ public class CommandLine
             var path = parseResult.GetValue(pathOption);
             var outputFile = parseResult.GetValue(outputFileOption);
             var patternsFile = parseResult.GetValue(patternsFileOption);
+            var patternPacks = parseResult.GetValue(patternPacksOption);
             var graphFormat = parseResult.GetValue(dataFlowFormatOption);
             var graphOutputFile = parseResult.GetValue(dataFlowGraphOutputFileOption);
             var printSourcesSinks = parseResult.GetValue(printSourcesSinksOption);
 
-            var result = DataFlowAnalyzer.GetDataFlows(path!, patternsFile);
+            var result = DataFlowAnalyzer.GetDataFlows(path!, patternsFile, patternPacks);
             File.WriteAllText(outputFile!, result);
 
             var options = new JsonSerializerOptions
@@ -228,7 +258,8 @@ public class CommandLine
             var path = parseResult.GetValue(pathOption)!;
             var outputFile = parseResult.GetValue(outputFileOption)!;
             var patternsFile = parseResult.GetValue(patternsFileOption);
-            var result = DataFlowAnalyzer.Analyze(path, patternsFile);
+            var patternPacks = parseResult.GetValue(patternPacksOption);
+            var result = DataFlowAnalyzer.Analyze(path, patternsFile, patternPacks);
             var context = TransparencyBuilder.BuildAgentContext(result, path);
             File.WriteAllText(outputFile, JsonSerializer.Serialize(context, JsonOptions()));
             return 0;
@@ -288,6 +319,23 @@ public class CommandLine
             }
             Console.WriteLine("Policy passed.");
             return 0;
+        });
+
+        queryCommand.SetAction(parseResult =>
+        {
+            var input = parseResult.GetValue(inputFileOption)!;
+            var outputFile = parseResult.GetValue(outputFileOption)!;
+            var query = parseResult.GetValue(queryOption)!;
+            File.WriteAllText(outputFile, DosaiQueryEngine.QueryJson(File.ReadAllText(input), query));
+            return 0;
+        });
+
+        mcpCommand.SetAction(parseResult =>
+        {
+            var path = parseResult.GetValue(pathOption);
+            var patternsFile = parseResult.GetValue(patternsFileOption);
+            var patternPacks = parseResult.GetValue(patternPacksOption);
+            return McpServer.Run(path, patternsFile, patternPacks);
         });
 
         return rootCommand.Parse(args).Invoke();

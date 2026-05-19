@@ -20,6 +20,12 @@ public sealed class ApiEndpoint
     public bool? AuthorizationRequired { get; set; }
     public List<string> AuthorizationPolicies { get; set; } = [];
     public List<string> Roles { get; set; } = [];
+    public bool AllowAnonymous { get; set; }
+    public List<string> AuthenticationSchemes { get; set; } = [];
+    public List<string> RequiredClaims { get; set; } = [];
+    public List<string> RequiredScopes { get; set; } = [];
+    public List<string> CorsPolicies { get; set; } = [];
+    public bool? AntiForgeryRequired { get; set; }
     public int LineNumber { get; set; }
     public int ColumnNumber { get; set; }
     public List<string> Urls { get; set; } = [];
@@ -66,6 +72,7 @@ public static partial class ApiEndpointAnalyzer
         foreach (var method in root.DescendantNodes().OfType<MethodDeclarationSyntax>())
         {
             var attributes = method.AttributeLists.SelectMany(list => list.Attributes).ToList();
+            var classAttributes = method.Ancestors().OfType<TypeDeclarationSyntax>().FirstOrDefault()?.AttributeLists.SelectMany(list => list.Attributes).ToList() ?? [];
             var endpointAttributes = attributes
                 .Select(attribute => CreateEndpointFromAttribute(basePath, sourceFile, method, attribute))
                 .Where(endpoint => endpoint is not null)
@@ -88,6 +95,7 @@ public static partial class ApiEndpointAnalyzer
                 endpoint.MethodName = method.Identifier.Text;
                 endpoint.Route = CombineRoutes(classRoute, endpoint.Route);
                 endpoint.Urls = urls;
+                ApplyAuthorizationMetadata(endpoint, classAttributes.Concat(attributes));
                 endpoints.Add(endpoint);
             }
         }
@@ -104,7 +112,7 @@ public static partial class ApiEndpointAnalyzer
             var firstArgument = invocation.ArgumentList.Arguments.FirstOrDefault()?.Expression;
             var route = firstArgument is LiteralExpressionSyntax literal ? literal.Token.ValueText : firstArgument?.ToString().Trim('"');
             var location = invocation.GetLocation().GetLineSpan().StartLinePosition;
-            endpoints.Add(new ApiEndpoint
+            var endpoint = new ApiEndpoint
             {
                 Path = Path.GetRelativePath(basePath, sourceFile),
                 FileName = Path.GetFileName(sourceFile),
@@ -114,7 +122,9 @@ public static partial class ApiEndpointAnalyzer
                 LineNumber = location.Line + 1,
                 ColumnNumber = location.Character + 1,
                 Urls = urls
-            });
+            };
+            ApplyMinimalApiAuthorizationMetadata(endpoint, invocation);
+            endpoints.Add(endpoint);
         }
     }
 
@@ -139,7 +149,7 @@ public static partial class ApiEndpointAnalyzer
                 }
 
                 var location = statement.GetLocation().GetLineSpan().StartLinePosition;
-                endpoints.Add(new ApiEndpoint
+                var endpoint = new ApiEndpoint
                 {
                     Path = Path.GetRelativePath(basePath, sourceFile),
                     FileName = Path.GetFileName(sourceFile),
@@ -150,7 +160,9 @@ public static partial class ApiEndpointAnalyzer
                     LineNumber = location.Line + 1,
                     ColumnNumber = location.Character + 1,
                     Urls = urls
-                });
+                };
+                ApplyVbAuthorizationMetadata(endpoint, attributes);
+                endpoints.Add(endpoint);
             }
         }
     }
@@ -187,6 +199,124 @@ public static partial class ApiEndpointAnalyzer
             null => null,
             _ => firstArgument.ToString().Trim('"')
         };
+    }
+
+    private static void ApplyAuthorizationMetadata(ApiEndpoint endpoint, IEnumerable<AttributeSyntax> attributes)
+    {
+        var attributeList = attributes.ToList();
+        endpoint.AllowAnonymous = attributeList.Any(attribute => AttributeName(attribute).Contains("AllowAnonymous", StringComparison.OrdinalIgnoreCase));
+        var authorizeAttributes = attributeList.Where(attribute => AttributeName(attribute).Contains("Authorize", StringComparison.OrdinalIgnoreCase)).ToList();
+        if (endpoint.AllowAnonymous)
+        {
+            endpoint.AuthorizationRequired = false;
+        }
+        else if (authorizeAttributes.Count > 0)
+        {
+            endpoint.AuthorizationRequired = true;
+        }
+
+        foreach (var attribute in authorizeAttributes)
+        {
+            AddAttributeValues(attribute, endpoint.AuthorizationPolicies, "Policy");
+            AddAttributeValues(attribute, endpoint.Roles, "Roles");
+            AddAttributeValues(attribute, endpoint.AuthenticationSchemes, "AuthenticationSchemes");
+            var firstLiteral = GetRouteTemplate(attribute);
+            if (!string.IsNullOrWhiteSpace(firstLiteral))
+            {
+                AddDistinct(endpoint.AuthorizationPolicies, firstLiteral);
+            }
+        }
+
+        foreach (var attribute in attributeList.Where(attribute => AttributeName(attribute).Contains("RequiredScope", StringComparison.OrdinalIgnoreCase)))
+        {
+            AddAttributeValues(attribute, endpoint.RequiredScopes, "RequiredScopes", "Scope", "Scopes");
+            var firstLiteral = GetRouteTemplate(attribute);
+            if (!string.IsNullOrWhiteSpace(firstLiteral)) AddDistinct(endpoint.RequiredScopes, firstLiteral);
+        }
+
+        foreach (var attribute in attributeList.Where(attribute => AttributeName(attribute).Contains("RequireClaim", StringComparison.OrdinalIgnoreCase)))
+        {
+            var firstLiteral = GetRouteTemplate(attribute);
+            if (!string.IsNullOrWhiteSpace(firstLiteral)) AddDistinct(endpoint.RequiredClaims, firstLiteral);
+        }
+
+        foreach (var attribute in attributeList.Where(attribute => AttributeName(attribute).Contains("EnableCors", StringComparison.OrdinalIgnoreCase)))
+        {
+            var firstLiteral = GetRouteTemplate(attribute);
+            if (!string.IsNullOrWhiteSpace(firstLiteral)) AddDistinct(endpoint.CorsPolicies, firstLiteral);
+        }
+
+        if (attributeList.Any(attribute => AttributeName(attribute).Contains("ValidateAntiForgeryToken", StringComparison.OrdinalIgnoreCase) || AttributeName(attribute).Contains("AutoValidateAntiforgeryToken", StringComparison.OrdinalIgnoreCase)))
+        {
+            endpoint.AntiForgeryRequired = true;
+        }
+        if (attributeList.Any(attribute => AttributeName(attribute).Contains("IgnoreAntiforgeryToken", StringComparison.OrdinalIgnoreCase)))
+        {
+            endpoint.AntiForgeryRequired = false;
+        }
+    }
+
+    private static void ApplyMinimalApiAuthorizationMetadata(ApiEndpoint endpoint, InvocationExpressionSyntax mapInvocation)
+    {
+        var chainText = mapInvocation.AncestorsAndSelf().OfType<InvocationExpressionSyntax>().LastOrDefault()?.ToString() ?? mapInvocation.ToString();
+        if (chainText.Contains("AllowAnonymous", StringComparison.OrdinalIgnoreCase))
+        {
+            endpoint.AllowAnonymous = true;
+            endpoint.AuthorizationRequired = false;
+        }
+        else if (chainText.Contains("RequireAuthorization", StringComparison.OrdinalIgnoreCase))
+        {
+            endpoint.AuthorizationRequired = true;
+            foreach (Match match in QuotedStringRegex().Matches(chainText))
+            {
+                var value = match.Groups[1].Value;
+                if (!string.Equals(value, endpoint.Route, StringComparison.Ordinal)) AddDistinct(endpoint.AuthorizationPolicies, value);
+            }
+        }
+
+        foreach (Match match in Regex.Matches(chainText, @"RequireCors\s*\(\s*""([^""]+)""", RegexOptions.IgnoreCase))
+        {
+            AddDistinct(endpoint.CorsPolicies, match.Groups[1].Value);
+        }
+        if (chainText.Contains("DisableAntiforgery", StringComparison.OrdinalIgnoreCase)) endpoint.AntiForgeryRequired = false;
+        if (chainText.Contains("RequireAntiforgery", StringComparison.OrdinalIgnoreCase)) endpoint.AntiForgeryRequired = true;
+    }
+
+    private static void ApplyVbAuthorizationMetadata(ApiEndpoint endpoint, IEnumerable<VbAttributeSyntax> attributes)
+    {
+        var text = string.Join(" ", attributes.Select(attribute => attribute.ToString()));
+        if (text.Contains("AllowAnonymous", StringComparison.OrdinalIgnoreCase))
+        {
+            endpoint.AllowAnonymous = true;
+            endpoint.AuthorizationRequired = false;
+        }
+        else if (text.Contains("Authorize", StringComparison.OrdinalIgnoreCase))
+        {
+            endpoint.AuthorizationRequired = true;
+        }
+    }
+
+    private static string AttributeName(AttributeSyntax attribute) => attribute.Name.ToString();
+
+    private static void AddAttributeValues(AttributeSyntax attribute, List<string> target, params string[] names)
+    {
+        foreach (var argument in attribute.ArgumentList?.Arguments ?? [])
+        {
+            var name = argument.NameEquals?.Name.Identifier.Text ?? argument.NameColon?.Name.Identifier.Text;
+            if (name is null || !names.Contains(name, StringComparer.OrdinalIgnoreCase)) continue;
+            AddCommaSeparated(target, argument.Expression.ToString().Trim('"'));
+        }
+    }
+
+    private static void AddCommaSeparated(List<string> target, string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return;
+        foreach (var item in value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)) AddDistinct(target, item);
+    }
+
+    private static void AddDistinct(List<string> target, string value)
+    {
+        if (!string.IsNullOrWhiteSpace(value) && !target.Contains(value, StringComparer.Ordinal)) target.Add(value);
     }
 
     private static string? GetVbAttributeLiteral(VbAttributeSyntax attribute)
@@ -250,4 +380,7 @@ public static partial class ApiEndpointAnalyzer
 
     [GeneratedRegex(@"https?://[^\s\""'<>]+", RegexOptions.Compiled | RegexOptions.IgnoreCase)]
     private static partial Regex AbsoluteUrlRegex();
+
+    [GeneratedRegex("\\\"([^\\\"]+)\\\"", RegexOptions.Compiled)]
+    private static partial Regex QuotedStringRegex();
 }

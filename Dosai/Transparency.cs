@@ -5,8 +5,8 @@ namespace Depscan;
 
 public sealed class AnalysisMetadata
 {
-    public string SchemaVersion { get; set; } = "3.1.0";
-    public string AnalyzerVersion { get; set; } = typeof(Dosai).Assembly.GetName().Version?.ToString() ?? "3.1.0";
+    public string SchemaVersion { get; set; } = "3.2.0";
+    public string AnalyzerVersion { get; set; } = typeof(Dosai).Assembly.GetName().Version?.ToString() ?? "3.2.0";
     public DateTimeOffset GeneratedAt { get; set; } = DateTimeOffset.UtcNow;
     public string? InputPath { get; set; }
     public string Tool { get; set; } = "Dosai";
@@ -29,6 +29,12 @@ public sealed class EntryPoint
     public bool? AuthorizationRequired { get; set; }
     public List<string> AuthorizationPolicies { get; set; } = [];
     public List<string> Roles { get; set; } = [];
+    public bool AllowAnonymous { get; set; }
+    public List<string> AuthenticationSchemes { get; set; } = [];
+    public List<string> RequiredClaims { get; set; } = [];
+    public List<string> RequiredScopes { get; set; } = [];
+    public List<string> CorsPolicies { get; set; } = [];
+    public bool? AntiForgeryRequired { get; set; }
     public List<string> Urls { get; set; } = [];
     public List<string> InputNames { get; set; } = [];
 }
@@ -117,7 +123,13 @@ public static class TransparencyBuilder
                 Urls = endpoint.Urls,
                 AuthorizationRequired = endpoint.AuthorizationRequired,
                 AuthorizationPolicies = endpoint.AuthorizationPolicies,
-                Roles = endpoint.Roles
+                Roles = endpoint.Roles,
+                AllowAnonymous = endpoint.AllowAnonymous,
+                AuthenticationSchemes = endpoint.AuthenticationSchemes,
+                RequiredClaims = endpoint.RequiredClaims,
+                RequiredScopes = endpoint.RequiredScopes,
+                CorsPolicies = endpoint.CorsPolicies,
+                AntiForgeryRequired = endpoint.AntiForgeryRequired
             });
         }
 

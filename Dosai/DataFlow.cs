@@ -16,7 +16,8 @@ public enum DataFlowPatternTarget
 {
     Source,
     Sink,
-    Passthrough
+    Passthrough,
+    Sanitizer
 }
 
 public enum DataFlowPatternKind
@@ -56,6 +57,16 @@ public sealed class DataFlowPatternSet
     public List<DataFlowPattern> Sources { get; set; } = [];
     public List<DataFlowPattern> Sinks { get; set; } = [];
     public List<DataFlowPattern> Passthroughs { get; set; } = [];
+    public List<DataFlowPattern> Sanitizers { get; set; } = [];
+    public List<string> PatternPacks { get; set; } = [];
+}
+
+public sealed class DataFlowMethodSummary
+{
+    public required string Method { get; set; }
+    public List<int> ReturnParameterIndexes { get; set; } = [];
+    public List<int> SinkParameterIndexes { get; set; } = [];
+    public List<string> SinkCategories { get; set; } = [];
 }
 
 public sealed class DataFlowNode
@@ -133,6 +144,7 @@ public sealed class DataFlowResult
     public List<DangerousApiReachability> DangerousApiReachability { get; set; } = [];
     public List<WeaknessCandidate> WeaknessCandidates { get; set; } = [];
     public DataFlowPatternSet Patterns { get; set; } = new();
+    public List<DataFlowMethodSummary> MethodSummaries { get; set; } = [];
     public DataFlowStatistics Statistics { get; set; } = new();
     public List<string> Diagnostics { get; set; } = [];
 }
@@ -147,20 +159,20 @@ public static partial class DataFlowAnalyzer
         Converters = { new JsonStringEnumConverter() }
     };
 
-    public static string GetDataFlows(string path, string? patternsPath = null)
+    public static string GetDataFlows(string path, string? patternsPath = null, string? patternPacks = null)
     {
-        var result = Analyze(path, patternsPath);
+        var result = Analyze(path, patternsPath, patternPacks);
         return JsonSerializer.Serialize(result, JsonOptions);
     }
 
-    public static DataFlowResult Analyze(string path, string? patternsPath = null)
+    public static DataFlowResult Analyze(string path, string? patternsPath = null, string? patternPacks = null)
     {
         if (!File.Exists(path) && !Directory.Exists(path))
         {
             throw new FileNotFoundException($"Path does not exist: {path}", path);
         }
 
-        var patterns = LoadPatterns(patternsPath);
+        var patterns = LoadPatterns(patternsPath, patternPacks);
         var result = new DataFlowResult { Patterns = patterns, Metadata = TransparencyBuilder.CreateMetadata(path) };
         var purlResolver = PackageUrlResolver.Create(path);
         var sourcesToInspect = GetSourceFiles(path);
@@ -187,25 +199,42 @@ public static partial class DataFlowAnalyzer
             references: references,
             options: new VisualBasicCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
 
-        var graph = new DataFlowGraphBuilder(result, purlResolver);
+        var summaries = new Dictionary<string, DataFlowMethodSummary>(StringComparer.Ordinal);
 
         foreach (var tree in csharpTrees)
         {
             var model = csharpCompilation.GetSemanticModel(tree);
             var root = tree.GetCompilationUnitRoot();
-            AnalyzeCompilationUnit(model, root, graph, patterns, path, tree.FilePath);
+            CollectCompilationUnitSummaries(model, root, summaries, patterns);
         }
 
         foreach (var tree in vbTrees)
         {
             var model = vbCompilation.GetSemanticModel(tree);
             var root = tree.GetCompilationUnitRoot();
-            AnalyzeCompilationUnit(model, root, graph, patterns, path, tree.FilePath);
+            CollectCompilationUnitSummaries(model, root, summaries, patterns);
+        }
+
+        var graph = new DataFlowGraphBuilder(result, purlResolver);
+
+        foreach (var tree in csharpTrees)
+        {
+            var model = csharpCompilation.GetSemanticModel(tree);
+            var root = tree.GetCompilationUnitRoot();
+            AnalyzeCompilationUnit(model, root, graph, patterns, summaries, path, tree.FilePath);
+        }
+
+        foreach (var tree in vbTrees)
+        {
+            var model = vbCompilation.GetSemanticModel(tree);
+            var root = tree.GetCompilationUnitRoot();
+            AnalyzeCompilationUnit(model, root, graph, patterns, summaries, path, tree.FilePath);
         }
 
         result.Nodes = result.Nodes.OrderBy(n => n.FileName, StringComparer.Ordinal).ThenBy(n => n.LineNumber).ThenBy(n => n.ColumnNumber).ThenBy(n => n.Id, StringComparer.Ordinal).ToList();
         result.Edges = result.Edges.OrderBy(e => e.FileName, StringComparer.Ordinal).ThenBy(e => e.LineNumber).ThenBy(e => e.ColumnNumber).ThenBy(e => e.Id, StringComparer.Ordinal).ToList();
         result.Slices = result.Slices.OrderBy(s => s.Id, StringComparer.Ordinal).ToList();
+        result.MethodSummaries = summaries.Values.OrderBy(summary => summary.Method, StringComparer.Ordinal).ToList();
         result.Statistics.NodeCount = result.Nodes.Count;
         result.Statistics.EdgeCount = result.Edges.Count;
         result.Statistics.SourceCount = result.Nodes.Count(n => n.IsSource);
@@ -245,7 +274,7 @@ public static partial class DataFlowAnalyzer
         }
     }
 
-    private static void AnalyzeCompilationUnit(SemanticModel model, CSharpCompilationUnitSyntax root, DataFlowGraphBuilder graph, DataFlowPatternSet patterns, string basePath, string sourceFilePath)
+    private static void CollectCompilationUnitSummaries(SemanticModel model, CSharpCompilationUnitSyntax root, Dictionary<string, DataFlowMethodSummary> summaries, DataFlowPatternSet patterns)
     {
         var operationNodes = root.DescendantNodes()
             .Where(node => node is Microsoft.CodeAnalysis.CSharp.Syntax.BaseMethodDeclarationSyntax or Microsoft.CodeAnalysis.CSharp.Syntax.AccessorDeclarationSyntax or Microsoft.CodeAnalysis.CSharp.Syntax.LocalFunctionStatementSyntax);
@@ -254,12 +283,12 @@ public static partial class DataFlowAnalyzer
             var operation = model.GetOperation(node);
             if (operation is not null)
             {
-                new DataFlowOperationWalker(model, graph, patterns, basePath, sourceFilePath).Visit(operation);
+                new DataFlowSummaryCollector(model, summaries, patterns).Visit(operation);
             }
         }
     }
 
-    private static void AnalyzeCompilationUnit(SemanticModel model, VisualBasicCompilationUnitSyntax root, DataFlowGraphBuilder graph, DataFlowPatternSet patterns, string basePath, string sourceFilePath)
+    private static void CollectCompilationUnitSummaries(SemanticModel model, VisualBasicCompilationUnitSyntax root, Dictionary<string, DataFlowMethodSummary> summaries, DataFlowPatternSet patterns)
     {
         var operationNodes = root.DescendantNodes()
             .Where(node => node is Microsoft.CodeAnalysis.VisualBasic.Syntax.MethodBlockSyntax or Microsoft.CodeAnalysis.VisualBasic.Syntax.AccessorBlockSyntax);
@@ -268,14 +297,43 @@ public static partial class DataFlowAnalyzer
             var operation = model.GetOperation(node);
             if (operation is not null)
             {
-                new DataFlowOperationWalker(model, graph, patterns, basePath, sourceFilePath).Visit(operation);
+                new DataFlowSummaryCollector(model, summaries, patterns).Visit(operation);
             }
         }
     }
 
-    private static DataFlowPatternSet LoadPatterns(string? patternsPath)
+    private static void AnalyzeCompilationUnit(SemanticModel model, CSharpCompilationUnitSyntax root, DataFlowGraphBuilder graph, DataFlowPatternSet patterns, Dictionary<string, DataFlowMethodSummary> summaries, string basePath, string sourceFilePath)
+    {
+        var operationNodes = root.DescendantNodes()
+            .Where(node => node is Microsoft.CodeAnalysis.CSharp.Syntax.BaseMethodDeclarationSyntax or Microsoft.CodeAnalysis.CSharp.Syntax.AccessorDeclarationSyntax or Microsoft.CodeAnalysis.CSharp.Syntax.LocalFunctionStatementSyntax);
+        foreach (var node in operationNodes)
+        {
+            var operation = model.GetOperation(node);
+            if (operation is not null)
+            {
+                new DataFlowOperationWalker(model, graph, patterns, summaries, basePath, sourceFilePath).Visit(operation);
+            }
+        }
+    }
+
+    private static void AnalyzeCompilationUnit(SemanticModel model, VisualBasicCompilationUnitSyntax root, DataFlowGraphBuilder graph, DataFlowPatternSet patterns, Dictionary<string, DataFlowMethodSummary> summaries, string basePath, string sourceFilePath)
+    {
+        var operationNodes = root.DescendantNodes()
+            .Where(node => node is Microsoft.CodeAnalysis.VisualBasic.Syntax.MethodBlockSyntax or Microsoft.CodeAnalysis.VisualBasic.Syntax.AccessorBlockSyntax);
+        foreach (var node in operationNodes)
+        {
+            var operation = model.GetOperation(node);
+            if (operation is not null)
+            {
+                new DataFlowOperationWalker(model, graph, patterns, summaries, basePath, sourceFilePath).Visit(operation);
+            }
+        }
+    }
+
+    private static DataFlowPatternSet LoadPatterns(string? patternsPath, string? patternPacks)
     {
         var defaults = CreateDefaultPatterns();
+        ApplyPatternPacks(defaults, patternPacks);
         if (string.IsNullOrWhiteSpace(patternsPath))
         {
             return defaults;
@@ -286,7 +344,92 @@ public static partial class DataFlowAnalyzer
         defaults.Sources.AddRange(NormalizeTargets(userPatterns.Sources, DataFlowPatternTarget.Source));
         defaults.Sinks.AddRange(NormalizeTargets(userPatterns.Sinks, DataFlowPatternTarget.Sink));
         defaults.Passthroughs.AddRange(NormalizeTargets(userPatterns.Passthroughs, DataFlowPatternTarget.Passthrough));
+        defaults.Sanitizers.AddRange(NormalizeTargets(userPatterns.Sanitizers, DataFlowPatternTarget.Sanitizer));
         return defaults;
+    }
+
+    private static void ApplyPatternPacks(DataFlowPatternSet patterns, string? patternPacks)
+    {
+        var requested = (patternPacks ?? "all")
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(pack => pack.ToLowerInvariant())
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (requested.Count == 0 || requested.Contains("all"))
+        {
+            requested = ["aspnet", "data", "filesystem", "serialization", "cloud", "rpc", "auth"];
+        }
+        patterns.PatternPacks = requested.OrderBy(pack => pack, StringComparer.OrdinalIgnoreCase).ToList();
+
+        if (requested.Contains("aspnet"))
+        {
+            patterns.Sources.AddRange([
+                new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Type, Pattern = "Microsoft.AspNetCore.Mvc.IActionResult", Match = DataFlowMatchKind.Contains, Category = "http", Description = "ASP.NET MVC action result context" },
+                new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Attribute, Pattern = "FromBody", Match = DataFlowMatchKind.Contains, Category = "http", Description = "ASP.NET model-bound body input" },
+                new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Attribute, Pattern = "FromQuery", Match = DataFlowMatchKind.Contains, Category = "http", Description = "ASP.NET query input" },
+                new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Attribute, Pattern = "FromForm", Match = DataFlowMatchKind.Contains, Category = "http", Description = "ASP.NET form input" },
+                new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Attribute, Pattern = "FromRoute", Match = DataFlowMatchKind.Contains, Category = "http", Description = "ASP.NET route input" }
+            ]);
+            patterns.Sinks.AddRange([
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "Microsoft.AspNetCore.Mvc.ControllerBase.Redirect", Match = DataFlowMatchKind.Contains, Category = "redirect", Description = "ASP.NET redirect" },
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "Microsoft.AspNetCore.Mvc.ControllerBase.LocalRedirect", Match = DataFlowMatchKind.Contains, Category = "redirect", Description = "ASP.NET local redirect" }
+            ]);
+        }
+
+        if (requested.Contains("data"))
+        {
+            patterns.Sinks.AddRange([
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "Dapper.SqlMapper.Query", Match = DataFlowMatchKind.Contains, Category = "sql", Description = "Dapper raw SQL query" },
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "Dapper.SqlMapper.Execute", Match = DataFlowMatchKind.Contains, Category = "sql", Description = "Dapper raw SQL execution" },
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "Npgsql.NpgsqlCommand", Match = DataFlowMatchKind.Contains, Category = "sql", Description = "PostgreSQL command" }
+            ]);
+            patterns.Sanitizers.AddRange([
+                new() { Target = DataFlowPatternTarget.Sanitizer, Kind = DataFlowPatternKind.Name, Pattern = "AddWithValue", Match = DataFlowMatchKind.Exact, Category = "sql-parameterization", Description = "Parameterized SQL binding" },
+                new() { Target = DataFlowPatternTarget.Sanitizer, Kind = DataFlowPatternKind.Name, Pattern = "Add", Match = DataFlowMatchKind.Exact, Category = "sql-parameterization", Description = "Parameterized SQL binding" }
+            ]);
+        }
+
+        if (requested.Contains("filesystem"))
+        {
+            patterns.Sanitizers.AddRange([
+                new() { Target = DataFlowPatternTarget.Sanitizer, Kind = DataFlowPatternKind.Method, Pattern = "System.IO.Path.GetFileName", Match = DataFlowMatchKind.Contains, Category = "path-validation", Description = "Path traversal limiting filename extraction" },
+                new() { Target = DataFlowPatternTarget.Sanitizer, Kind = DataFlowPatternKind.Method, Pattern = "System.IO.Path.GetFullPath", Match = DataFlowMatchKind.Contains, Category = "path-normalization", Description = "Path normalization" }
+            ]);
+        }
+
+        if (requested.Contains("serialization"))
+        {
+            patterns.Sinks.AddRange([
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "Newtonsoft.Json.JsonConvert.DeserializeObject", Match = DataFlowMatchKind.Contains, Category = "deserialization", Description = "JSON deserialization" },
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "System.Text.Json.JsonSerializer.Deserialize", Match = DataFlowMatchKind.Contains, Category = "deserialization", Description = "JSON deserialization" },
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "YamlDotNet.Serialization.IDeserializer.Deserialize", Match = DataFlowMatchKind.Contains, Category = "deserialization", Description = "YAML deserialization" }
+            ]);
+        }
+
+        if (requested.Contains("cloud"))
+        {
+            patterns.Sources.AddRange([
+                new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Attribute, Pattern = "QueueTrigger", Match = DataFlowMatchKind.Contains, Category = "serverless", Description = "Azure Queue trigger" },
+                new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Attribute, Pattern = "ServiceBusTrigger", Match = DataFlowMatchKind.Contains, Category = "serverless", Description = "Azure Service Bus trigger" },
+                new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Attribute, Pattern = "KafkaTrigger", Match = DataFlowMatchKind.Contains, Category = "serverless", Description = "Kafka trigger" }
+            ]);
+        }
+
+        if (requested.Contains("rpc"))
+        {
+            patterns.Sources.AddRange([
+                new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Namespace, Pattern = "Orleans", Match = DataFlowMatchKind.Prefix, Category = "rpc", Description = "Orleans grain request" },
+                new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Namespace, Pattern = "Grpc", Match = DataFlowMatchKind.Prefix, Category = "rpc", Description = "gRPC request" }
+            ]);
+        }
+
+        if (requested.Contains("auth"))
+        {
+            patterns.Sinks.AddRange([
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Name, Pattern = "CreateToken", Match = DataFlowMatchKind.Exact, Category = "auth", Description = "Token creation" },
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Name, Pattern = "SignInAsync", Match = DataFlowMatchKind.Exact, Category = "auth", Description = "Authentication sign-in" },
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Name, Pattern = "GeneratePasswordResetTokenAsync", Match = DataFlowMatchKind.Exact, Category = "auth", Description = "Password reset token generation" }
+            ]);
+        }
     }
 
     private static IEnumerable<DataFlowPattern> NormalizeTargets(IEnumerable<DataFlowPattern> patterns, DataFlowPatternTarget target)
@@ -369,6 +512,15 @@ public static partial class DataFlowAnalyzer
             new() { Target = DataFlowPatternTarget.Passthrough, Kind = DataFlowPatternKind.Method, Pattern = "ToString", Match = DataFlowMatchKind.Contains, Category = "string" },
             new() { Target = DataFlowPatternTarget.Passthrough, Kind = DataFlowPatternKind.Method, Pattern = "Trim", Match = DataFlowMatchKind.Contains, Category = "string" },
             new() { Target = DataFlowPatternTarget.Passthrough, Kind = DataFlowPatternKind.Method, Pattern = "Replace", Match = DataFlowMatchKind.Contains, Category = "string" }
+        ],
+        Sanitizers =
+        [
+            new() { Target = DataFlowPatternTarget.Sanitizer, Kind = DataFlowPatternKind.Method, Pattern = "System.Text.Encodings.Web.HtmlEncoder.Encode", Match = DataFlowMatchKind.Contains, Category = "html-encoding", Description = "HTML encoding" },
+            new() { Target = DataFlowPatternTarget.Sanitizer, Kind = DataFlowPatternKind.Method, Pattern = "System.Net.WebUtility.HtmlEncode", Match = DataFlowMatchKind.Contains, Category = "html-encoding", Description = "HTML encoding" },
+            new() { Target = DataFlowPatternTarget.Sanitizer, Kind = DataFlowPatternKind.Method, Pattern = "System.Uri.EscapeDataString", Match = DataFlowMatchKind.Contains, Category = "url-encoding", Description = "URL component encoding" },
+            new() { Target = DataFlowPatternTarget.Sanitizer, Kind = DataFlowPatternKind.Method, Pattern = "System.Text.RegularExpressions.Regex.IsMatch", Match = DataFlowMatchKind.Contains, Category = "validation", Description = "Regex validator used as a guard" },
+            new() { Target = DataFlowPatternTarget.Sanitizer, Kind = DataFlowPatternKind.Name, Pattern = "IsMatch", Match = DataFlowMatchKind.Exact, Category = "validation", Description = "Validator method used as a guard or sanitizer" },
+            new() { Target = DataFlowPatternTarget.Sanitizer, Kind = DataFlowPatternKind.Name, Pattern = "TryParse", Match = DataFlowMatchKind.Exact, Category = "validation", Description = "Parse validator" }
         ]
     };
 
@@ -450,7 +602,201 @@ public static partial class DataFlowAnalyzer
         }
     }
 
-    private sealed class DataFlowOperationWalker(SemanticModel model, DataFlowGraphBuilder graph, DataFlowPatternSet patterns, string basePath, string sourceFilePath) : OperationWalker
+    private sealed class DataFlowSummaryCollector(SemanticModel model, Dictionary<string, DataFlowMethodSummary> summaries, DataFlowPatternSet patterns) : OperationWalker
+    {
+        private IMethodSymbol? _currentMethod;
+
+        public override void VisitMethodBodyOperation(IMethodBodyOperation operation)
+        {
+            var previousMethod = _currentMethod;
+            _currentMethod = model.GetEnclosingSymbol(operation.Syntax.SpanStart) as IMethodSymbol;
+            base.VisitMethodBodyOperation(operation);
+            _currentMethod = previousMethod;
+        }
+
+        public override void VisitBlock(IBlockOperation operation)
+        {
+            var previousMethod = _currentMethod;
+            if (_currentMethod is null)
+            {
+                _currentMethod = model.GetEnclosingSymbol(operation.Syntax.SpanStart) as IMethodSymbol;
+            }
+            base.VisitBlock(operation);
+            _currentMethod = previousMethod;
+        }
+
+        public override void VisitReturn(IReturnOperation operation)
+        {
+            if (_currentMethod is not null && operation.ReturnedValue is not null)
+            {
+                foreach (var parameterIndex in FindParameterIndexes(operation.ReturnedValue, _currentMethod))
+                {
+                    AddUnique(GetSummary(_currentMethod).ReturnParameterIndexes, parameterIndex);
+                }
+            }
+            base.VisitReturn(operation);
+        }
+
+        public override void VisitInvocation(IInvocationOperation operation)
+        {
+            RecordSinkSummary(operation, operation.TargetMethod, operation.Arguments);
+            base.VisitInvocation(operation);
+        }
+
+        public override void VisitObjectCreation(IObjectCreationOperation operation)
+        {
+            RecordSinkSummary(operation, operation.Constructor, operation.Arguments);
+            base.VisitObjectCreation(operation);
+        }
+
+        private void RecordSinkSummary(IOperation operation, IMethodSymbol? targetMethod, IEnumerable<IArgumentOperation> arguments)
+        {
+            if (_currentMethod is null || targetMethod is null)
+            {
+                return;
+            }
+
+            var sinkPatterns = MatchSymbol(targetMethod, operation.Syntax, patterns.Sinks).Concat(MatchCode(operation.Syntax.ToString(), patterns.Sinks)).ToList();
+            if (sinkPatterns.Count == 0)
+            {
+                return;
+            }
+
+            var summary = GetSummary(_currentMethod);
+            foreach (var argument in arguments)
+            {
+                foreach (var parameterIndex in FindParameterIndexes(argument.Value, _currentMethod))
+                {
+                    AddUnique(summary.SinkParameterIndexes, parameterIndex);
+                    foreach (var category in sinkPatterns.Select(pattern => pattern.Category).Where(category => !string.IsNullOrWhiteSpace(category)).Distinct(StringComparer.Ordinal))
+                    {
+                        if (!summary.SinkCategories.Contains(category!, StringComparer.Ordinal))
+                        {
+                            summary.SinkCategories.Add(category!);
+                        }
+                    }
+                }
+            }
+        }
+
+        private DataFlowMethodSummary GetSummary(IMethodSymbol method)
+        {
+            var key = DescribeSymbol(method);
+            if (!summaries.TryGetValue(key, out var summary))
+            {
+                summary = new DataFlowMethodSummary { Method = key };
+                summaries[key] = summary;
+            }
+            return summary;
+        }
+
+        private static IEnumerable<int> FindParameterIndexes(IOperation operation, IMethodSymbol method)
+        {
+            operation = Strip(operation);
+            if (operation is IParameterReferenceOperation parameterReference)
+            {
+                var index = method.Parameters.IndexOf(parameterReference.Parameter);
+                if (index >= 0)
+                {
+                    yield return index;
+                }
+            }
+
+            foreach (var child in operation.ChildOperations)
+            {
+                foreach (var index in FindParameterIndexes(child, method))
+                {
+                    yield return index;
+                }
+            }
+        }
+
+        private static void AddUnique(List<int> values, int value)
+        {
+            if (!values.Contains(value))
+            {
+                values.Add(value);
+                values.Sort();
+            }
+        }
+
+        private static IEnumerable<DataFlowPattern> MatchSymbol(ISymbol symbol, SyntaxNode syntax, IEnumerable<DataFlowPattern> candidatePatterns)
+        {
+            var normalizedSymbol = DescribeSymbol(symbol);
+            var name = symbol.Name;
+            var containingType = Normalize((symbol.ContainingType ?? symbol as INamedTypeSymbol)?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty);
+            var namespaceName = symbol.ContainingNamespace?.ToDisplayString() ?? string.Empty;
+            var code = syntax.ToString();
+
+            foreach (var pattern in candidatePatterns)
+            {
+                var value = pattern.Kind switch
+                {
+                    DataFlowPatternKind.Method => normalizedSymbol,
+                    DataFlowPatternKind.Symbol => normalizedSymbol,
+                    DataFlowPatternKind.Type => containingType,
+                    DataFlowPatternKind.Namespace => namespaceName,
+                    DataFlowPatternKind.Name => name,
+                    DataFlowPatternKind.Code => code,
+                    DataFlowPatternKind.Attribute => string.Join(' ', symbol.GetAttributes().Select(a => a.AttributeClass?.Name ?? string.Empty)),
+                    _ => normalizedSymbol
+                };
+
+                if (PatternMatches(value, pattern))
+                {
+                    yield return pattern;
+                }
+            }
+        }
+
+        private static IEnumerable<DataFlowPattern> MatchCode(string code, IEnumerable<DataFlowPattern> candidatePatterns)
+        {
+            foreach (var pattern in candidatePatterns)
+            {
+                var canMatchCode = pattern.Kind is DataFlowPatternKind.Code or DataFlowPatternKind.Method or DataFlowPatternKind.Symbol or DataFlowPatternKind.Name;
+                if (canMatchCode && PatternMatches(code, pattern))
+                {
+                    yield return pattern;
+                }
+            }
+        }
+
+        private static bool PatternMatches(string value, DataFlowPattern pattern)
+        {
+            return pattern.Match switch
+            {
+                DataFlowMatchKind.Exact => value.Equals(pattern.Pattern, StringComparison.OrdinalIgnoreCase),
+                DataFlowMatchKind.Prefix => value.StartsWith(pattern.Pattern, StringComparison.OrdinalIgnoreCase),
+                DataFlowMatchKind.Suffix => value.EndsWith(pattern.Pattern, StringComparison.OrdinalIgnoreCase),
+                DataFlowMatchKind.Regex => Regex.IsMatch(value, pattern.Pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant),
+                _ => value.Contains(pattern.Pattern, StringComparison.OrdinalIgnoreCase)
+            };
+        }
+
+        private static IOperation Strip(IOperation operation)
+        {
+            while (operation is IConversionOperation conversion)
+            {
+                operation = conversion.Operand;
+            }
+            return operation;
+        }
+
+        private static string DescribeSymbol(ISymbol symbol)
+        {
+            if (symbol is IMethodSymbol methodSymbol)
+            {
+                var containingType = Normalize(methodSymbol.ContainingType?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty);
+                var methodName = methodSymbol.MethodKind == MethodKind.Constructor ? ".ctor" : methodSymbol.Name;
+                var parameters = string.Join(",", methodSymbol.Parameters.Select(p => Normalize(p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat))));
+                return $"{containingType}.{methodName}({parameters})";
+            }
+
+            return Normalize(symbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat));
+        }
+    }
+
+    private sealed class DataFlowOperationWalker(SemanticModel model, DataFlowGraphBuilder graph, DataFlowPatternSet patterns, Dictionary<string, DataFlowMethodSummary> summaries, string basePath, string sourceFilePath) : OperationWalker
     {
         private readonly Dictionary<string, TaintTrace> _taintedSymbols = new(StringComparer.Ordinal);
         private IMethodSymbol? _currentMethod;
@@ -496,6 +842,21 @@ public static partial class DataFlowAnalyzer
         {
             AssignTarget(operation.Target, operation.Value, operation.Syntax, "CompoundAssignment");
             base.VisitCompoundAssignment(operation);
+        }
+
+        public override void VisitConditional(IConditionalOperation operation)
+        {
+            var guardedKeys = GetSanitizedGuardKeys(operation.Condition).ToList();
+            Visit(operation.Condition);
+            if (guardedKeys.Count == 0 || operation.WhenTrue is null)
+            {
+                Visit(operation.WhenTrue);
+            }
+            else
+            {
+                VisitWithSuppressedTaint(guardedKeys, operation.WhenTrue);
+            }
+            Visit(operation.WhenFalse);
         }
 
         public override void VisitInvocation(IInvocationOperation operation)
@@ -582,6 +943,7 @@ public static partial class DataFlowAnalyzer
         {
             if (GetTaint(value) is not { } taint)
             {
+                _taintedSymbols.Remove(SymbolKey(symbol));
                 return;
             }
 
@@ -610,7 +972,17 @@ public static partial class DataFlowAnalyzer
             var symbol = GetReferencedSymbol(target);
             if (symbol is not null)
             {
-                AssignSymbol(symbol, value, syntax, edgeKind);
+                var taintKey = TaintKey(target) ?? SymbolKey(symbol);
+                if (GetTaint(value) is not { } taint)
+                {
+                    _taintedSymbols.Remove(taintKey);
+                    if (taintKey != SymbolKey(symbol)) _taintedSymbols.Remove(SymbolKey(symbol));
+                    return;
+                }
+
+                var assignmentNode = graph.AddNode("Assignment", symbol.Name, syntax, model, basePath, sourceFilePath, _currentMethod, isSource: false, isSink: false, matchedPatterns: [], category: null, symbol: symbol.ToDisplayString(), typeName: GetSymbolType(symbol), code: syntax.ToString());
+                graph.AddEdges(taint.NodeIds, assignmentNode.Id, edgeKind, syntax, sourceFilePath, symbol.Name);
+                _taintedSymbols[taintKey] = taint.Append(assignmentNode.Id);
             }
         }
 
@@ -620,6 +992,8 @@ public static partial class DataFlowAnalyzer
             {
                 return;
             }
+
+            ProcessInterproceduralSink(operation, targetMethod, arguments);
 
             var matchedSinkPatterns = MatchSymbol(targetMethod, operation.Syntax, patterns.Sinks).ToList();
             if (matchedSinkPatterns.Count == 0)
@@ -660,6 +1034,132 @@ public static partial class DataFlowAnalyzer
                     code: operation.Syntax.ToString());
                 graph.AddEdges(taint.NodeIds, sinkNode.Id, "SinkArgument", argument.Syntax, sourceFilePath, argument.Parameter?.Name ?? $"arg{index}");
                 graph.AddSlice(taint, sinkNode, matchedSinkPatterns.FirstOrDefault(), argument.Syntax.ToString(), index);
+            }
+        }
+
+        private void ProcessInterproceduralSink(IOperation operation, IMethodSymbol targetMethod, IEnumerable<IArgumentOperation> arguments)
+        {
+            if (!TryGetSummary(targetMethod, out var summary) || summary.SinkParameterIndexes.Count == 0)
+            {
+                return;
+            }
+
+            var argumentList = arguments.ToList();
+            foreach (var parameterIndex in summary.SinkParameterIndexes.Where(index => index >= 0 && index < argumentList.Count))
+            {
+                var argument = argumentList[parameterIndex];
+                if (GetTaint(argument.Value) is not { } taint)
+                {
+                    continue;
+                }
+
+                var category = summary.SinkCategories.FirstOrDefault() ?? "interprocedural";
+                var summaryPattern = new DataFlowPattern
+                {
+                    Target = DataFlowPatternTarget.Sink,
+                    Kind = DataFlowPatternKind.Method,
+                    Pattern = DescribeSymbol(targetMethod),
+                    Category = category,
+                    Description = "Sink reached through a summarized callee"
+                };
+                var sinkNode = graph.AddNode("Sink", targetMethod.Name, operation, model, basePath, sourceFilePath, _currentMethod,
+                    isSource: false,
+                    isSink: true,
+                    matchedPatterns: [summaryPattern],
+                    category: category,
+                    symbol: DescribeSymbol(targetMethod),
+                    typeName: Normalize(targetMethod.ReturnType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)),
+                    code: operation.Syntax.ToString());
+                sinkNode.Properties["summaryMethod"] = summary.Method;
+                graph.AddEdges(taint.NodeIds, sinkNode.Id, "InterproceduralSink", argument.Syntax, sourceFilePath, argument.Parameter?.Name ?? $"arg{parameterIndex}");
+                graph.AddSlice(taint, sinkNode, summaryPattern, argument.Syntax.ToString(), parameterIndex);
+            }
+        }
+
+        private bool TryGetSummary(IMethodSymbol method, out DataFlowMethodSummary summary)
+        {
+            if (summaries.TryGetValue(DescribeSymbol(method), out summary!))
+            {
+                return true;
+            }
+
+            if (method.OriginalDefinition is not null && summaries.TryGetValue(DescribeSymbol(method.OriginalDefinition), out summary!))
+            {
+                return true;
+            }
+
+            summary = null!;
+            return false;
+        }
+
+        private bool IsSanitized(IOperation operation)
+        {
+            if (operation is IInvocationOperation invocation && MatchSymbol(invocation.TargetMethod, operation.Syntax, patterns.Sanitizers).Any())
+            {
+                return true;
+            }
+
+            if (operation is IObjectCreationOperation objectCreation && objectCreation.Constructor is not null && MatchSymbol(objectCreation.Constructor, operation.Syntax, patterns.Sanitizers).Any())
+            {
+                return true;
+            }
+
+            return MatchCode(operation.Syntax.ToString(), patterns.Sanitizers).Any();
+        }
+
+        private IEnumerable<string> GetSanitizedGuardKeys(IOperation condition)
+        {
+            condition = Strip(condition);
+            if (condition is IUnaryOperation { OperatorKind: UnaryOperatorKind.Not } negated)
+            {
+                condition = Strip(negated.Operand);
+            }
+
+            if (condition is IInvocationOperation invocation && MatchSymbol(invocation.TargetMethod, invocation.Syntax, patterns.Sanitizers).Any())
+            {
+                foreach (var argument in invocation.Arguments)
+                {
+                    if (TaintKey(argument.Value) is { } key)
+                    {
+                        yield return key;
+                    }
+                    if (GetReferencedSymbol(argument.Value) is { } symbol)
+                    {
+                        yield return SymbolKey(symbol);
+                    }
+                }
+            }
+
+            foreach (var child in condition.ChildOperations)
+            {
+                foreach (var key in GetSanitizedGuardKeys(child))
+                {
+                    yield return key;
+                }
+            }
+        }
+
+        private void VisitWithSuppressedTaint(IEnumerable<string> keys, IOperation operation)
+        {
+            var saved = new Dictionary<string, TaintTrace?>(StringComparer.Ordinal);
+            foreach (var key in keys.Distinct(StringComparer.Ordinal))
+            {
+                saved[key] = _taintedSymbols.TryGetValue(key, out var trace) ? trace : null;
+                _taintedSymbols.Remove(key);
+            }
+
+            Visit(operation);
+
+            foreach (var (key, trace) in saved)
+            {
+                if (trace is null)
+                {
+                    _taintedSymbols.Remove(key);
+                }
+                else
+                {
+                    _taintedSymbols[key] = trace;
+                }
             }
         }
 
@@ -741,6 +1241,16 @@ public static partial class DataFlowAnalyzer
             }
 
             operation = Strip(operation);
+            if (IsSanitized(operation))
+            {
+                return null;
+            }
+
+            if (TaintKey(operation) is { } operationKey && _taintedSymbols.TryGetValue(operationKey, out var operationTaint))
+            {
+                return operationTaint;
+            }
+
             if (GetReferencedSymbol(operation) is { } existingSymbol && _taintedSymbols.TryGetValue(SymbolKey(existingSymbol), out var existing))
             {
                 return existing;
@@ -763,6 +1273,17 @@ public static partial class DataFlowAnalyzer
             if (operation is IInvocationOperation invocation)
             {
                 var argTaint = Combine(invocation.Arguments.Select(a => GetTaint(a.Value)));
+                if (argTaint is not null && TryGetSummary(invocation.TargetMethod, out var invocationSummary))
+                {
+                    var argumentList = invocation.Arguments.ToList();
+                    var matchingIndexes = invocationSummary.ReturnParameterIndexes.Where(index => index >= 0 && index < argumentList.Count && GetTaint(argumentList[index].Value) is not null).ToList();
+                    if (matchingIndexes.Count > 0)
+                    {
+                        var node = graph.AddNode("CallSummary", invocation.TargetMethod.Name, operation, model, basePath, sourceFilePath, _currentMethod, isSource: false, isSink: false, matchedPatterns: [], category: null, symbol: DescribeSymbol(invocation.TargetMethod), typeName: Normalize(invocation.Type?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty), code: operation.Syntax.ToString());
+                        graph.AddEdges(argTaint.NodeIds, node.Id, "InterproceduralReturn", operation.Syntax, sourceFilePath, string.Join(",", matchingIndexes));
+                        return argTaint.Append(node.Id);
+                    }
+                }
                 if (argTaint is not null && ShouldPropagateThrough(invocation.TargetMethod))
                 {
                     var node = graph.AddNode("Call", invocation.TargetMethod.Name, operation, model, basePath, sourceFilePath, _currentMethod, isSource: false, isSink: false, matchedPatterns: [], category: null, symbol: DescribeSymbol(invocation.TargetMethod), typeName: Normalize(invocation.Type?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty), code: operation.Syntax.ToString());
@@ -929,6 +1450,35 @@ public static partial class DataFlowAnalyzer
         };
 
         private static string SymbolKey(ISymbol symbol) => DescribeSymbol(symbol);
+
+        private static string? TaintKey(IOperation operation)
+        {
+            operation = Strip(operation);
+            return operation switch
+            {
+                ILocalReferenceOperation local => SymbolKey(local.Local),
+                IParameterReferenceOperation parameter => SymbolKey(parameter.Parameter),
+                IFieldReferenceOperation field => MemberTaintKey(field.Field, field.Instance),
+                IPropertyReferenceOperation property => MemberTaintKey(property.Property, property.Instance),
+                _ => null
+            };
+        }
+
+        private static string MemberTaintKey(ISymbol member, IOperation? instance)
+        {
+            if (instance is null)
+            {
+                return SymbolKey(member);
+            }
+
+            instance = Strip(instance);
+            if (GetReferencedSymbol(instance) is { } instanceSymbol)
+            {
+                return $"{SymbolKey(member)}@{SymbolKey(instanceSymbol)}";
+            }
+
+            return $"{SymbolKey(member)}@{instance.Syntax}";
+        }
 
         private static string GetOperationName(IOperation operation) => GetReferencedSymbol(operation)?.Name ?? operation.Kind.ToString();
 

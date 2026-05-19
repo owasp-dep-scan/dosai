@@ -360,6 +360,174 @@ class AdvancedFlow
     }
 
     [Fact]
+    public void GetDataFlows_SanitizerAndValidator_StopFlowsToSink()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "SanitizedFlow.cs"), """
+using System.Diagnostics;
+using System.Net;
+using System.Text.RegularExpressions;
+
+class SanitizedFlow
+{
+    static void Main(string[] args)
+    {
+        var encoded = WebUtility.HtmlEncode(args[0]);
+        Process.Start(encoded);
+
+        var guarded = args[1];
+        if (Regex.IsMatch(guarded, "^[a-z]+$"))
+        {
+            Process.Start(guarded);
+        }
+    }
+}
+""");
+
+        var result = DataFlowAnalyzer.Analyze(tempDirectory.Path);
+
+        Assert.Contains(result.Patterns.Sanitizers, pattern => pattern.Category == "html-encoding");
+        Assert.Contains(result.Patterns.Sanitizers, pattern => pattern.Category == "validation");
+        Assert.DoesNotContain(result.Slices, slice => slice.SinkCategory == "command");
+    }
+
+    [Fact]
+    public void GetDataFlows_FieldSensitiveObjectTaint_DoesNotTaintSiblingInstance()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "FieldFlow.cs"), """
+using System.Diagnostics;
+
+class Box { public string? Value { get; set; } }
+class FieldFlow
+{
+    static void Main(string[] args)
+    {
+        var tainted = new Box();
+        var clean = new Box();
+        tainted.Value = args[0];
+        Process.Start(clean.Value);
+    }
+}
+""");
+
+        var result = DataFlowAnalyzer.Analyze(tempDirectory.Path);
+
+        Assert.DoesNotContain(result.Slices, slice => slice.SinkCategory == "command");
+    }
+
+    [Fact]
+    public void GetDataFlows_InterproceduralSummary_ReplaysCalleeSinkAtCallSite()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "SummaryFlow.cs"), """
+using System.Diagnostics;
+
+class SummaryFlow
+{
+    static void Main(string[] args)
+    {
+        Run(args[0]);
+    }
+
+    static void Run(string command)
+    {
+        Process.Start(command);
+    }
+}
+""");
+
+        var result = DataFlowAnalyzer.Analyze(tempDirectory.Path);
+
+        Assert.Contains(result.MethodSummaries, summary => summary.Method.Contains("SummaryFlow.Run") && summary.SinkParameterIndexes.Contains(0));
+        Assert.Contains(result.Slices, slice => slice.SinkCategory == "command" && result.Nodes.Any(node => node.Id == slice.SinkId && node.Kind == "Sink" && node.Properties.ContainsKey("summaryMethod")));
+    }
+
+    [Fact]
+    public void GetDataFlows_PatternPacks_CanSelectAdditionalFrameworkPatterns()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "DapperFlow.cs"), """
+namespace Dapper { public static class SqlMapper { public static void Execute(object connection, string sql) { } } }
+class DapperFlow
+{
+    static void Main(string[] args)
+    {
+        Dapper.SqlMapper.Execute(new object(), args[0]);
+    }
+}
+""");
+
+        var result = DataFlowAnalyzer.Analyze(tempDirectory.Path, patternPacks: "data");
+
+        Assert.Contains(result.Patterns.PatternPacks, pack => pack == "data");
+        Assert.Contains(result.Slices, slice => slice.SinkCategory == "sql");
+    }
+
+    [Fact]
+    public void GetMethods_CSharpSource_CapturesRicherAuthorizationMetadata()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "AuthEndpoints.cs"), """
+using System;
+
+class RouteAttribute : Attribute { public RouteAttribute(string value) { } }
+class HttpPostAttribute : Attribute { public HttpPostAttribute(string value) { } }
+class AuthorizeAttribute : Attribute { public string? Policy { get; set; } public string? Roles { get; set; } public string? AuthenticationSchemes { get; set; } }
+class RequiredScopeAttribute : Attribute { public RequiredScopeAttribute(string scope) { } }
+class EnableCorsAttribute : Attribute { public EnableCorsAttribute(string policy) { } }
+class ValidateAntiForgeryTokenAttribute : Attribute { }
+
+[Route("api/orders")]
+[Authorize(Roles = "Admin,Auditor", Policy = "OrdersPolicy", AuthenticationSchemes = "Bearer")]
+class OrdersController
+{
+    [HttpPost("{id}")]
+    [RequiredScope("orders.write")]
+    [EnableCors("Internal")]
+    [ValidateAntiForgeryToken]
+    public string Update(string id) => id;
+}
+""");
+
+        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(tempDirectory.Path), new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() }
+        });
+
+        var endpoint = Assert.Single(methodsSlice?.ApiEndpoints ?? [], endpoint => endpoint.Route == "api/orders/{id}");
+        Assert.True(endpoint.AuthorizationRequired);
+        Assert.Contains("OrdersPolicy", endpoint.AuthorizationPolicies);
+        Assert.Contains("Admin", endpoint.Roles);
+        Assert.Contains("Auditor", endpoint.Roles);
+        Assert.Contains("Bearer", endpoint.AuthenticationSchemes);
+        Assert.Contains("orders.write", endpoint.RequiredScopes);
+        Assert.Contains("Internal", endpoint.CorsPolicies);
+        Assert.True(endpoint.AntiForgeryRequired);
+        Assert.Contains(methodsSlice?.EntryPoints ?? [], entryPoint => entryPoint.Route == "api/orders/{id}" && entryPoint.AuthorizationRequired == true && entryPoint.Roles.Contains("Admin"));
+    }
+
+    [Fact]
+    public void QueryEngine_FiltersDataFlowJsonAndMcpListsTools()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "QueryFlow.cs"), """
+using System.Diagnostics;
+class QueryFlow { static void Main(string[] args) { Process.Start(args[0]); } }
+""");
+
+        var json = DataFlowAnalyzer.GetDataFlows(tempDirectory.Path);
+        var queryResult = JsonSerializer.Deserialize<List<JsonElement>>(DosaiQueryEngine.QueryJson(json, "slices[sinkCategory=command]"));
+        Assert.NotNull(queryResult);
+        Assert.NotEmpty(queryResult);
+
+        using var input = new StringReader("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n");
+        using var output = new StringWriter();
+        McpServer.Run(tempDirectory.Path, null, null, input, output);
+        Assert.Contains("dosai.dataflows", output.ToString());
+    }
+
+    [Fact]
     public void GetDataFlows_VisualBasic_CliSourceToProcessStart_ReturnsSlice()
     {
         using var tempDirectory = new TemporaryDirectory();

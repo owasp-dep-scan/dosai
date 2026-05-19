@@ -9,6 +9,11 @@ List details about the namespaces, methods, dependencies, properties, fields, ev
 ### Commands:
 
 - `methods` Retrieve details about the methods
+- `dataflows` Build source-to-sink data-flow slices with framework pattern packs
+- `agent-context` Generate compact agent context for AI/security review
+- `query` Filter Dosai JSON with expressions such as `slices[sinkCategory=sql]`
+- `mcp` Run an MCP-style JSON-RPC server over stdin/stdout
+- `report`, `diff`, `policy` Generate reports, compare data-flow runs, and apply CI checks
 
 ### Options:
 
@@ -16,6 +21,45 @@ List details about the namespaces, methods, dependencies, properties, fields, ev
 - `--o [file]` (OPTIONAL) The output file location and name, default value when option not provided is 'dosai.json'
 - `--version` Show version information
 - `-?`, `-h`, `--help` Show help and usage information
+
+### Data-flow analysis
+
+`dataflows` includes built-in .NET source/sink packs for ASP.NET, data access, filesystem, serialization, cloud/serverless, RPC, and auth-sensitive APIs. Custom pattern JSON can add `sources`, `sinks`, `passthroughs`, and `sanitizers`; sanitizer matches stop taint propagation and validators such as `Regex.IsMatch` suppress guarded true branches.
+
+```bash
+dotnet run --project ./Dosai/Dosai.csproj -- dataflows \
+  --path ./Dosai \
+  --o /tmp/dosai-dataflows.json \
+  --pattern-packs all \
+  --graph-format graphml \
+  --graph-out /tmp/dosai-dataflows.graphml
+```
+
+The data-flow engine performs field-sensitive property/field taint where receiver identity is available and emits simple interprocedural summaries for parameter-to-return and parameter-to-sink callees.
+
+### Querying JSON
+
+```bash
+dotnet run --project ./Dosai/Dosai.csproj -- query \
+  --input /tmp/dosai-dataflows.json \
+  --query 'slices[sinkCategory=sql]' \
+  --o /tmp/sql-slices.json
+```
+
+Supported collection aliases include `nodes`, `edges`, `slices`, `weaknesses`, `entrypoints`, `packages`, `dangerous`, and `summaries`. Filters support `=`, `!=`, `~=`, `>`, `<`, `>=`, and `<=`.
+
+### MCP-style stdio server
+
+```bash
+printf '{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n' | \
+  dotnet run --project ./Dosai/Dosai.csproj -- mcp --path ./Dosai
+```
+
+The server exposes `dosai.methods`, `dosai.dataflows`, `dosai.agent_context`, and `dosai.query` tool calls as line-delimited JSON-RPC responses.
+
+### API authorization metadata
+
+Endpoint extraction records richer auth context from attributes and common minimal API chains, including authorization policies, roles, authentication schemes, required scopes/claims, CORS policies, anonymous access, and antiforgery hints.
 
 ---
 
