@@ -245,7 +245,7 @@ write.table(pd, file = "", sep = "\t", row.names = FALSE, col.names = TRUE, quot
                     var package = rows.FirstOrDefault(candidate => candidate.Line == row.Line && candidate.Column > row.Column && candidate.Token is "SYMBOL" or "STR_CONST")?.Text.Trim('"', '\'');
                     if (!string.IsNullOrWhiteSpace(package))
                     {
-                        dependencies.Add(CreateDependency(basePath, file, package, package, row.Line, row.Column));
+                        dependencies.Add(CreateDependency(basePath, file, package, package, row.Line, row.Column, RNativeParserModule));
                     }
                 }
             }
@@ -307,14 +307,14 @@ write.table(pd, file = "", sep = "\t", row.names = FALSE, col.names = TRUE, quot
         SourceSignature = sourceSignature
     };
 
-    private static Dependency CreateDependency(string basePath, string file, string name, string namespaceName, int line, int column) => new()
+    private static Dependency CreateDependency(string basePath, string file, string name, string namespaceName, int line, int column, string module = FrontendModule) => new()
     {
         Path = SafeRelative(basePath, file),
         FileName = Path.GetFileName(file),
         Name = name,
         Namespace = namespaceName,
         Assembly = "Source",
-        Module = FrontendModule,
+        Module = module,
         LineNumber = line,
         ColumnNumber = column,
         NamespaceMembers = []
@@ -384,11 +384,15 @@ write.table(pd, file = "", sep = "\t", row.names = FALSE, col.names = TRUE, quot
 
     private static string? ResolveExecutable(string name)
     {
+        var candidates = name.Equals("Rscript", StringComparison.OrdinalIgnoreCase) ? new[] { name, "Rscript", "rscript" } : [name];
         var path = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
         foreach (var directory in path.Split(Path.PathSeparator).Where(Directory.Exists))
         {
-            var candidate = Path.Combine(directory, name);
-            if (File.Exists(candidate)) return candidate;
+            foreach (var executable in candidates.Distinct(StringComparer.Ordinal))
+            {
+                var candidate = Path.Combine(directory, executable);
+                if (File.Exists(candidate)) return candidate;
+            }
         }
         return null;
     }

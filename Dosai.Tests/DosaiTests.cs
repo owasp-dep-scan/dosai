@@ -316,6 +316,11 @@ int main(int argc, char** argv) {
         Assert.NotNull(methodsSlice);
         Assert.Contains(methodsSlice!.Methods ?? [], method => method.Module == "FSharp.Compiler.Service" && method.Name == "run");
         Assert.Contains(methodsSlice!.Methods ?? [], method => method.Name == "run" && method.Namespace == "R" && method.Module is "R.NativeParser" or "LanguageFrontend");
+        if (LanguageFrontendAnalyzer.IsRNativeParserAvailable)
+        {
+            Assert.Contains(methodsSlice.Methods ?? [], method => method.Name == "run" && method.Module == "R.NativeParser");
+            Assert.Contains(methodsSlice.Dependencies ?? [], dependency => dependency.Name == "DBI" && dependency.Module == "R.NativeParser");
+        }
         Assert.Contains(methodsSlice.Methods ?? [], method => method.Module == "VC++" && method.Name == "main");
         Assert.Contains(methodsSlice.MethodCalls ?? [], call => call.CalledMethod == "system");
         Assert.NotNull(methodsSlice.CallGraph);
