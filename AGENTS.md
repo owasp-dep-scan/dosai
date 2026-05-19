@@ -87,6 +87,7 @@ When adding a new source/sink:
 - AI-agent and automation workflows: `docs/agent-workflows.md`
 - Query language: `docs/query-language.md`
 - Data-flow custom patterns: `docs/dataflow-patterns.md`
+- Built-in data-flow pattern packs: `docs/pattern-packs.md`
 - PURL/supply-chain details: `docs/supply-chain-purl.md`
 - Graph exports: `docs/graph-formats.md`
 - Threat model: `THREAT_MODEL.md`

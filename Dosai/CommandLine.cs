@@ -46,7 +46,7 @@ public class CommandLine
 
         var patternPacksOption = new Option<string?>("--pattern-packs")
         {
-            Description = "Comma-separated built-in data-flow pattern packs to enable: all, aspnet, data, filesystem, serialization, cloud, rpc, auth. Defaults to all.",
+            Description = "Comma-separated built-in data-flow pattern packs to enable: all, aspnet, data, filesystem, serialization, cloud, rpc, auth, crypto. Defaults to all.",
             Arity = ArgumentArity.ExactlyOne
         };
 

@@ -21,7 +21,7 @@ dotnet run --project ./Dosai/Dosai.csproj -- dataflows \
   --o /tmp/dosai-dataflows.json
 ```
 
-Supported pattern packs are `all`, `aspnet`, `data`, `filesystem`, `serialization`, `cloud`, `rpc`, `auth`, and `crypto`.
+Supported pattern packs are `all`, `aspnet`, `data`, `filesystem`, `serialization`, `cloud`, `rpc`, `auth`, and `crypto`. See [Built-in data-flow pattern pack catalog](./pattern-packs.md) for the always-on defaults and the exact patterns added by each pack.
 
 ## Pattern file shape
 

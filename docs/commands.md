@@ -124,7 +124,7 @@ dotnet run --project ./Dosai/Dosai.csproj -- dataflows \
   --print-sources-sinks
 ```
 
-For the JSON schema and examples, see [Data-flow custom patterns](./dataflow-patterns.md).
+For the JSON schema and examples, see [Data-flow custom patterns](./dataflow-patterns.md). For built-in pack contents, see [Built-in data-flow pattern pack catalog](./pattern-packs.md).
 
 ### Implementation flow
 

@@ -64,7 +64,7 @@ For prompt-sized triage loops, MCP tool calls, and query-first workflows, see `d
 
 ### Custom patterns
 
-Pass project-specific data-flow patterns with `--patterns`. Pattern files are merged with built-in defaults and can define `sources`, `sinks`, `passthroughs`, and `sanitizers`. See `docs/dataflow-patterns.md` for the full schema and examples.
+Pass project-specific data-flow patterns with `--patterns`. Pattern files are merged with built-in defaults and can define `sources`, `sinks`, `passthroughs`, and `sanitizers`. See `docs/dataflow-patterns.md` for the full schema and examples, and `docs/pattern-packs.md` for the built-in pack catalog.
 
 ```json
 {

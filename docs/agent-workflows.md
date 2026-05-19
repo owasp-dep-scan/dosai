@@ -169,5 +169,6 @@ Then validate graph edge integrity directly against `Nodes` and `Edges`, and app
 - Command reference: `docs/commands.md`
 - Query syntax: `docs/query-language.md`
 - Data-flow custom patterns: `docs/dataflow-patterns.md`
+- Built-in data-flow pattern packs: `docs/pattern-packs.md`
 - Graph exports: `docs/graph-formats.md`
 - Crypto and CBOM: `docs/crypto-cbom.md`
