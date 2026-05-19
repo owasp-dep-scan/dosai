@@ -1039,6 +1039,8 @@ public static partial class DataFlowAnalyzer
     private sealed class DataFlowOperationWalker(SemanticModel model, DataFlowGraphBuilder graph, DataFlowPatternSet patterns, Dictionary<string, DataFlowMethodSummary> summaries, string basePath, string sourceFilePath) : OperationWalker
     {
         private readonly Dictionary<string, TaintTrace> _taintedSymbols = new(StringComparer.Ordinal);
+        private readonly DataFlowPatternIndex _patternIndex = new(patterns);
+        private readonly Dictionary<SyntaxNode, string> _syntaxTextCache = new();
         private IMethodSymbol? _currentMethod;
 
         public override void VisitMethodBodyOperation(IMethodBodyOperation operation)
@@ -1154,26 +1156,27 @@ public static partial class DataFlowAnalyzer
         private IEnumerable<DataFlowPattern> MatchParameterSource(IParameterSymbol parameter, IMethodSymbol methodSymbol)
         {
             var parameterText = $"{parameter.Name} {Normalize(parameter.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat))}";
-            foreach (var pattern in patterns.Sources.Where(p => p.Kind == DataFlowPatternKind.Parameter && (PatternMatches(parameter.Name, p) || PatternMatches(parameterText, p))))
+            foreach (var pattern in _patternIndex.SourceParameters.Where(p => PatternMatches(parameter.Name, p) || PatternMatches(parameterText, p)))
             {
                 yield return pattern;
             }
 
             if (methodSymbol.Name == "Main" && parameter.Name.Equals("args", StringComparison.OrdinalIgnoreCase))
             {
-                foreach (var pattern in patterns.Sources.Where(p => p.Kind == DataFlowPatternKind.Parameter && PatternMatches("Main", p)))
+                foreach (var pattern in _patternIndex.SourceParameters.Where(p => PatternMatches("Main", p)))
                 {
                     yield return pattern;
                 }
             }
 
             var methodAttributes = methodSymbol.GetAttributes().Concat(parameter.GetAttributes()).Select(a => a.AttributeClass?.Name ?? string.Empty).ToList();
-            foreach (var pattern in patterns.Sources.Where(p => p.Kind == DataFlowPatternKind.Attribute && methodAttributes.Any(attribute => PatternMatches(attribute, p))))
+            foreach (var pattern in _patternIndex.SourceAttributes.Where(p => methodAttributes.Any(attribute => PatternMatches(attribute, p))))
             {
                 yield return pattern;
             }
 
-            foreach (var pattern in patterns.Sources.Where(p => p.Kind == DataFlowPatternKind.Type && PatternMatches(Normalize(parameter.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)), p)))
+            var parameterType = Normalize(parameter.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat));
+            foreach (var pattern in _patternIndex.SourceTypes.Where(p => PatternMatches(parameterType, p)))
             {
                 yield return pattern;
             }
@@ -1187,7 +1190,8 @@ public static partial class DataFlowAnalyzer
                 return;
             }
 
-            var matchedSinkPatterns = MatchCode(value.Syntax.ToString(), patterns.Sinks).ToList();
+            var valueText = _patternIndex.SinkCodeLike.Count == 0 ? null : SyntaxText(value.Syntax);
+            var matchedSinkPatterns = valueText is null ? [] : MatchCode(valueText, _patternIndex.SinkCodeLike).ToList();
             if (matchedSinkPatterns.Count > 0)
             {
                 var sinkNode = graph.AddNode("Sink", GetOperationName(value), value, model, basePath, sourceFilePath, _currentMethod,
@@ -1197,12 +1201,12 @@ public static partial class DataFlowAnalyzer
                     category: matchedSinkPatterns.FirstOrDefault()?.Category,
                     symbol: GetOperationSymbol(value),
                     typeName: Normalize(value.Type?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty),
-                    code: value.Syntax.ToString());
+                    code: valueText);
                 graph.AddEdges(taint.NodeIds, sinkNode.Id, "SinkExpression", value.Syntax, sourceFilePath, symbol.Name);
-                graph.AddSlice(taint, sinkNode, matchedSinkPatterns.FirstOrDefault(), value.Syntax.ToString(), 0);
+                graph.AddSlice(taint, sinkNode, matchedSinkPatterns.FirstOrDefault(), valueText, 0);
             }
 
-            var assignmentNode = graph.AddNode("Assignment", symbol.Name, syntax, model, basePath, sourceFilePath, _currentMethod, isSource: false, isSink: false, matchedPatterns: [], category: null, symbol: symbol.ToDisplayString(), typeName: GetSymbolType(symbol), code: syntax.ToString());
+            var assignmentNode = graph.AddNode("Assignment", symbol.Name, syntax, model, basePath, sourceFilePath, _currentMethod, isSource: false, isSink: false, matchedPatterns: [], category: null, symbol: symbol.ToDisplayString(), typeName: GetSymbolType(symbol), code: SyntaxText(syntax));
             graph.AddEdges(taint.NodeIds, assignmentNode.Id, edgeKind, syntax, sourceFilePath, symbol.Name);
             _taintedSymbols[SymbolKey(symbol)] = taint.Append(assignmentNode.Id);
         }
@@ -1220,7 +1224,7 @@ public static partial class DataFlowAnalyzer
                     return;
                 }
 
-                var assignmentNode = graph.AddNode("Assignment", symbol.Name, syntax, model, basePath, sourceFilePath, _currentMethod, isSource: false, isSink: false, matchedPatterns: [], category: null, symbol: symbol.ToDisplayString(), typeName: GetSymbolType(symbol), code: syntax.ToString());
+                var assignmentNode = graph.AddNode("Assignment", symbol.Name, syntax, model, basePath, sourceFilePath, _currentMethod, isSource: false, isSink: false, matchedPatterns: [], category: null, symbol: symbol.ToDisplayString(), typeName: GetSymbolType(symbol), code: SyntaxText(syntax));
                 if (taint.TaintKinds.Count > 0) assignmentNode.Properties["taintKinds"] = string.Join(',', taint.TaintKinds);
                 if (taint.FieldPaths.Count > 0) assignmentNode.Properties["fieldPaths"] = string.Join(',', taint.FieldPaths);
                 graph.AddEdges(taint.NodeIds, assignmentNode.Id, edgeKind, syntax, sourceFilePath, symbol.Name);
@@ -1235,15 +1239,17 @@ public static partial class DataFlowAnalyzer
                 return;
             }
 
-            ProcessInterproceduralSink(operation, targetMethod, arguments);
+            var argumentList = arguments.ToList();
+            var argumentTaints = argumentList.Select(argument => GetTaint(argument.Value)).ToList();
+            ProcessInterproceduralSink(operation, targetMethod, argumentList, argumentTaints);
 
-            var matchedSinkPatterns = MatchSymbol(targetMethod, operation.Syntax, patterns.Sinks).ToList();
+            var matchedSinkPatterns = MatchSymbol(targetMethod, operation.Syntax, _patternIndex.Sinks).ToList();
             if (matchedSinkPatterns.Count == 0)
             {
                 return;
             }
 
-            var argumentList = arguments.ToList();
+            var operationText = SyntaxText(operation.Syntax);
             if (operation is IInvocationOperation { Instance: not null } invocation && GetTaint(invocation.Instance) is { } receiverTaint)
             {
                 var sinkNode = graph.AddNode("Sink", targetMethod.Name, operation, model, basePath, sourceFilePath, _currentMethod,
@@ -1253,15 +1259,15 @@ public static partial class DataFlowAnalyzer
                     category: matchedSinkPatterns.FirstOrDefault()?.Category,
                     symbol: DescribeSymbol(targetMethod),
                     typeName: Normalize(targetMethod.ReturnType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)),
-                    code: operation.Syntax.ToString());
+                    code: operationText);
                 graph.AddEdges(receiverTaint.NodeIds, sinkNode.Id, "SinkReceiver", invocation.Instance.Syntax, sourceFilePath, "receiver");
-                graph.AddSlice(receiverTaint, sinkNode, matchedSinkPatterns.FirstOrDefault(), invocation.Instance.Syntax.ToString(), -1);
+                graph.AddSlice(receiverTaint, sinkNode, matchedSinkPatterns.FirstOrDefault(), SyntaxText(invocation.Instance.Syntax), -1);
             }
 
             for (var index = 0; index < argumentList.Count; index++)
             {
                 var argument = argumentList[index];
-                if (GetTaint(argument.Value) is not { } taint)
+                if (argumentTaints[index] is not { } taint)
                 {
                     continue;
                 }
@@ -1273,24 +1279,23 @@ public static partial class DataFlowAnalyzer
                     category: matchedSinkPatterns.FirstOrDefault()?.Category,
                     symbol: DescribeSymbol(targetMethod),
                     typeName: Normalize(targetMethod.ReturnType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)),
-                    code: operation.Syntax.ToString());
+                    code: operationText);
                 graph.AddEdges(taint.NodeIds, sinkNode.Id, "SinkArgument", argument.Syntax, sourceFilePath, argument.Parameter?.Name ?? $"arg{index}");
-                graph.AddSlice(taint, sinkNode, matchedSinkPatterns.FirstOrDefault(), argument.Syntax.ToString(), index);
+                graph.AddSlice(taint, sinkNode, matchedSinkPatterns.FirstOrDefault(), SyntaxText(argument.Syntax), index);
             }
         }
 
-        private void ProcessInterproceduralSink(IOperation operation, IMethodSymbol targetMethod, IEnumerable<IArgumentOperation> arguments)
+        private void ProcessInterproceduralSink(IOperation operation, IMethodSymbol targetMethod, IReadOnlyList<IArgumentOperation> argumentList, IReadOnlyList<TaintTrace?> argumentTaints)
         {
             if (!TryGetSummary(targetMethod, out var summary) || summary.SinkParameterIndexes.Count == 0)
             {
                 return;
             }
 
-            var argumentList = arguments.ToList();
             foreach (var parameterIndex in summary.SinkParameterIndexes.Where(index => index >= 0 && index < argumentList.Count))
             {
                 var argument = argumentList[parameterIndex];
-                if (GetTaint(argument.Value) is not { } taint)
+                if (argumentTaints[parameterIndex] is not { } taint)
                 {
                     continue;
                 }
@@ -1311,10 +1316,10 @@ public static partial class DataFlowAnalyzer
                     category: category,
                     symbol: DescribeSymbol(targetMethod),
                     typeName: Normalize(targetMethod.ReturnType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)),
-                    code: operation.Syntax.ToString());
+                    code: SyntaxText(operation.Syntax));
                 sinkNode.Properties["summaryMethod"] = summary.Method;
                 graph.AddEdges(taint.NodeIds, sinkNode.Id, "InterproceduralSink", argument.Syntax, sourceFilePath, argument.Parameter?.Name ?? $"arg{parameterIndex}");
-                graph.AddSlice(taint, sinkNode, summaryPattern, argument.Syntax.ToString(), parameterIndex);
+                graph.AddSlice(taint, sinkNode, summaryPattern, SyntaxText(argument.Syntax), parameterIndex);
             }
         }
 
@@ -1336,17 +1341,17 @@ public static partial class DataFlowAnalyzer
 
         private bool IsSanitized(IOperation operation)
         {
-            if (operation is IInvocationOperation invocation && MatchSymbol(invocation.TargetMethod, operation.Syntax, patterns.Sanitizers).Any())
+            if (operation is IInvocationOperation invocation && MatchSymbol(invocation.TargetMethod, operation.Syntax, _patternIndex.Sanitizers).Any())
             {
                 return true;
             }
 
-            if (operation is IObjectCreationOperation objectCreation && objectCreation.Constructor is not null && MatchSymbol(objectCreation.Constructor, operation.Syntax, patterns.Sanitizers).Any())
+            if (operation is IObjectCreationOperation objectCreation && objectCreation.Constructor is not null && MatchSymbol(objectCreation.Constructor, operation.Syntax, _patternIndex.Sanitizers).Any())
             {
                 return true;
             }
 
-            return MatchCode(operation.Syntax.ToString(), patterns.Sanitizers).Any();
+            return _patternIndex.SanitizerCodeLike.Count > 0 && MatchCode(SyntaxText(operation.Syntax), _patternIndex.SanitizerCodeLike).Any();
         }
 
         private IEnumerable<string> GetSanitizedGuardKeys(IOperation condition)
@@ -1357,7 +1362,7 @@ public static partial class DataFlowAnalyzer
                 condition = Strip(negated.Operand);
             }
 
-            if (condition is IInvocationOperation invocation && MatchSymbol(invocation.TargetMethod, invocation.Syntax, patterns.Sanitizers).Any())
+            if (condition is IInvocationOperation invocation && MatchSymbol(invocation.TargetMethod, invocation.Syntax, _patternIndex.Sanitizers).Any())
             {
                 foreach (var argument in invocation.Arguments)
                 {
@@ -1407,13 +1412,20 @@ public static partial class DataFlowAnalyzer
 
         private void ProcessCodeSink(IOperation operation, IEnumerable<IArgumentOperation> arguments)
         {
-            var matchedSinkPatterns = MatchCode(operation.Syntax.ToString(), patterns.Sinks).ToList();
+            if (_patternIndex.SinkCodeLike.Count == 0)
+            {
+                return;
+            }
+
+            var operationText = SyntaxText(operation.Syntax);
+            var matchedSinkPatterns = MatchCode(operationText, _patternIndex.SinkCodeLike).ToList();
             if (matchedSinkPatterns.Count == 0)
             {
                 return;
             }
 
             var argumentList = arguments.ToList();
+            var argumentTaints = argumentList.Select(argument => GetTaint(argument.Value)).ToList();
             if (operation is IInvocationOperation { Instance: not null } invocation && GetTaint(invocation.Instance) is { } receiverTaint)
             {
                 var sinkNode = graph.AddNode("Sink", GetOperationName(operation), operation, model, basePath, sourceFilePath, _currentMethod,
@@ -1423,15 +1435,15 @@ public static partial class DataFlowAnalyzer
                     category: matchedSinkPatterns.FirstOrDefault()?.Category,
                     symbol: GetOperationSymbol(operation),
                     typeName: Normalize(operation.Type?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty),
-                    code: operation.Syntax.ToString());
+                    code: operationText);
                 graph.AddEdges(receiverTaint.NodeIds, sinkNode.Id, "SinkReceiver", invocation.Instance.Syntax, sourceFilePath, "receiver");
-                graph.AddSlice(receiverTaint, sinkNode, matchedSinkPatterns.FirstOrDefault(), invocation.Instance.Syntax.ToString(), -1);
+                graph.AddSlice(receiverTaint, sinkNode, matchedSinkPatterns.FirstOrDefault(), SyntaxText(invocation.Instance.Syntax), -1);
             }
 
             for (var index = 0; index < argumentList.Count; index++)
             {
                 var argument = argumentList[index];
-                if (GetTaint(argument.Value) is not { } taint)
+                if (argumentTaints[index] is not { } taint)
                 {
                     continue;
                 }
@@ -1443,15 +1455,21 @@ public static partial class DataFlowAnalyzer
                     category: matchedSinkPatterns.FirstOrDefault()?.Category,
                     symbol: GetOperationSymbol(operation),
                     typeName: Normalize(operation.Type?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty),
-                    code: operation.Syntax.ToString());
+                    code: operationText);
                 graph.AddEdges(taint.NodeIds, sinkNode.Id, "SinkArgument", argument.Syntax, sourceFilePath, argument.Parameter?.Name ?? $"arg{index}");
-                graph.AddSlice(taint, sinkNode, matchedSinkPatterns.FirstOrDefault(), argument.Syntax.ToString(), index);
+                graph.AddSlice(taint, sinkNode, matchedSinkPatterns.FirstOrDefault(), SyntaxText(argument.Syntax), index);
             }
         }
 
         private void ProcessInvalidCodeSink(IInvalidOperation operation)
         {
-            var matchedSinkPatterns = MatchCode(operation.Syntax.ToString(), patterns.Sinks).ToList();
+            if (_patternIndex.SinkCodeLike.Count == 0)
+            {
+                return;
+            }
+
+            var operationText = SyntaxText(operation.Syntax);
+            var matchedSinkPatterns = MatchCode(operationText, _patternIndex.SinkCodeLike).ToList();
             if (matchedSinkPatterns.Count == 0)
             {
                 return;
@@ -1470,9 +1488,9 @@ public static partial class DataFlowAnalyzer
                 category: matchedSinkPatterns.FirstOrDefault()?.Category,
                 symbol: GetOperationSymbol(operation),
                 typeName: Normalize(operation.Type?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty),
-                code: operation.Syntax.ToString());
+                code: operationText);
             graph.AddEdges(taint.NodeIds, sinkNode.Id, "SinkExpression", operation.Syntax, sourceFilePath, operation.Kind.ToString());
-            graph.AddSlice(taint, sinkNode, matchedSinkPatterns.FirstOrDefault(), operation.Syntax.ToString(), 0);
+            graph.AddSlice(taint, sinkNode, matchedSinkPatterns.FirstOrDefault(), operationText, 0);
         }
 
         private TaintTrace? GetTaint(IOperation? operation)
@@ -1508,34 +1526,35 @@ public static partial class DataFlowAnalyzer
                     category: matchedSourcePatterns.FirstOrDefault()?.Category,
                     symbol: GetOperationSymbol(operation),
                     typeName: Normalize(operation.Type?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty),
-                    code: operation.Syntax.ToString());
+                    code: SyntaxText(operation.Syntax));
                 return new TaintTrace([sourceNode.Id], matchedSourcePatterns.SelectMany(pattern => pattern.TaintKinds.Count > 0 ? pattern.TaintKinds : [pattern.Category ?? "user-input"]).Distinct(StringComparer.OrdinalIgnoreCase).ToList(), []);
             }
 
             if (operation is IInvocationOperation invocation)
             {
-                var argTaint = Combine(invocation.Arguments.Select(a => GetTaint(a.Value)));
+                var argumentList = invocation.Arguments.ToList();
+                var argumentTaints = argumentList.Select(argument => GetTaint(argument.Value)).ToList();
+                var argTaint = Combine(argumentTaints);
                 var receiverTaint = GetTaint(invocation.Instance);
                 if (receiverTaint is not null && ShouldPropagateReceiverThrough(invocation.TargetMethod))
                 {
-                    var node = graph.AddNode("Call", invocation.TargetMethod.Name, operation, model, basePath, sourceFilePath, _currentMethod, isSource: false, isSink: false, matchedPatterns: [], category: null, symbol: DescribeSymbol(invocation.TargetMethod), typeName: Normalize(invocation.Type?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty), code: operation.Syntax.ToString());
+                    var node = graph.AddNode("Call", invocation.TargetMethod.Name, operation, model, basePath, sourceFilePath, _currentMethod, isSource: false, isSink: false, matchedPatterns: [], category: null, symbol: DescribeSymbol(invocation.TargetMethod), typeName: Normalize(invocation.Type?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty), code: SyntaxText(operation.Syntax));
                     graph.AddEdges(receiverTaint.NodeIds, node.Id, "ReceiverReturn", operation.Syntax, sourceFilePath, invocation.TargetMethod.Name);
                     return receiverTaint.Append(node.Id);
                 }
                 if (argTaint is not null && TryGetSummary(invocation.TargetMethod, out var invocationSummary))
                 {
-                    var argumentList = invocation.Arguments.ToList();
-                    var matchingIndexes = invocationSummary.ReturnParameterIndexes.Where(index => index >= 0 && index < argumentList.Count && GetTaint(argumentList[index].Value) is not null).ToList();
+                    var matchingIndexes = invocationSummary.ReturnParameterIndexes.Where(index => index >= 0 && index < argumentTaints.Count && argumentTaints[index] is not null).ToList();
                     if (matchingIndexes.Count > 0)
                     {
-                        var node = graph.AddNode("CallSummary", invocation.TargetMethod.Name, operation, model, basePath, sourceFilePath, _currentMethod, isSource: false, isSink: false, matchedPatterns: [], category: null, symbol: DescribeSymbol(invocation.TargetMethod), typeName: Normalize(invocation.Type?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty), code: operation.Syntax.ToString());
+                        var node = graph.AddNode("CallSummary", invocation.TargetMethod.Name, operation, model, basePath, sourceFilePath, _currentMethod, isSource: false, isSink: false, matchedPatterns: [], category: null, symbol: DescribeSymbol(invocation.TargetMethod), typeName: Normalize(invocation.Type?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty), code: SyntaxText(operation.Syntax));
                         graph.AddEdges(argTaint.NodeIds, node.Id, "InterproceduralReturn", operation.Syntax, sourceFilePath, string.Join(",", matchingIndexes));
                         return argTaint.Append(node.Id);
                     }
                 }
                 if (argTaint is not null && ShouldPropagateThrough(invocation.TargetMethod))
                 {
-                    var node = graph.AddNode("Call", invocation.TargetMethod.Name, operation, model, basePath, sourceFilePath, _currentMethod, isSource: false, isSink: false, matchedPatterns: [], category: null, symbol: DescribeSymbol(invocation.TargetMethod), typeName: Normalize(invocation.Type?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty), code: operation.Syntax.ToString());
+                    var node = graph.AddNode("Call", invocation.TargetMethod.Name, operation, model, basePath, sourceFilePath, _currentMethod, isSource: false, isSink: false, matchedPatterns: [], category: null, symbol: DescribeSymbol(invocation.TargetMethod), typeName: Normalize(invocation.Type?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty), code: SyntaxText(operation.Syntax));
                     graph.AddEdges(argTaint.NodeIds, node.Id, "CallReturn", operation.Syntax, sourceFilePath, invocation.TargetMethod.Name);
                     return argTaint.Append(node.Id);
                 }
@@ -1544,13 +1563,13 @@ public static partial class DataFlowAnalyzer
 
             if (operation is IObjectCreationOperation objectCreation)
             {
-                return Combine(objectCreation.Arguments.Select(a => GetTaint(a.Value)));
+                return Combine(objectCreation.Arguments.Select(argument => GetTaint(argument.Value)));
             }
 
             var childTaint = Combine(operation.ChildOperations.Select(GetTaint));
             if (childTaint is not null && CreatesExpressionNode(operation))
             {
-                var expressionNode = graph.AddNode("Expression", GetOperationName(operation), operation, model, basePath, sourceFilePath, _currentMethod, isSource: false, isSink: false, matchedPatterns: [], category: null, symbol: GetOperationSymbol(operation), typeName: Normalize(operation.Type?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty), code: operation.Syntax.ToString());
+                var expressionNode = graph.AddNode("Expression", GetOperationName(operation), operation, model, basePath, sourceFilePath, _currentMethod, isSource: false, isSink: false, matchedPatterns: [], category: null, symbol: GetOperationSymbol(operation), typeName: Normalize(operation.Type?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty), code: SyntaxText(operation.Syntax));
                 graph.AddEdges(childTaint.NodeIds, expressionNode.Id, "Expression", operation.Syntax, sourceFilePath, operation.Kind.ToString());
                 return childTaint.Append(expressionNode.Id);
             }
@@ -1560,14 +1579,18 @@ public static partial class DataFlowAnalyzer
 
         private IEnumerable<DataFlowPattern> MatchOperationSource(IOperation operation)
         {
-            foreach (var pattern in patterns.Sources.Where(p => p.Kind == DataFlowPatternKind.Code && PatternMatches(operation.Syntax.ToString(), p)))
+            if (_patternIndex.SourceCode.Count > 0)
             {
-                yield return pattern;
+                var operationText = SyntaxText(operation.Syntax);
+                foreach (var pattern in _patternIndex.SourceCode.Where(p => PatternMatches(operationText, p)))
+                {
+                    yield return pattern;
+                }
             }
 
             if (operation is IParameterReferenceOperation parameterReference)
             {
-                foreach (var pattern in MatchParameterSource(parameterReference.Parameter, _currentMethod ?? parameterReference.Parameter.ContainingSymbol as IMethodSymbol ?? parameterReference.Parameter.ContainingSymbol as IMethodSymbol ?? throw new InvalidOperationException("Parameter without containing method")))
+                foreach (var pattern in MatchParameterSource(parameterReference.Parameter, _currentMethod ?? parameterReference.Parameter.ContainingSymbol as IMethodSymbol ?? throw new InvalidOperationException("Parameter without containing method")))
                 {
                     yield return pattern;
                 }
@@ -1575,7 +1598,7 @@ public static partial class DataFlowAnalyzer
 
             if (GetReferencedSymbol(operation) is { } symbol)
             {
-                foreach (var pattern in MatchSymbol(symbol, operation.Syntax, patterns.Sources))
+                foreach (var pattern in MatchSymbol(symbol, operation.Syntax, _patternIndex.Sources))
                 {
                     yield return pattern;
                 }
@@ -1584,7 +1607,7 @@ public static partial class DataFlowAnalyzer
             if (operation.Type is not null)
             {
                 var typeName = Normalize(operation.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat));
-                foreach (var pattern in patterns.Sources.Where(p => p.Kind == DataFlowPatternKind.Type && PatternMatches(typeName, p)))
+                foreach (var pattern in _patternIndex.SourceTypes.Where(p => PatternMatches(typeName, p)))
                 {
                     yield return pattern;
                 }
@@ -1596,7 +1619,7 @@ public static partial class DataFlowAnalyzer
             var symbolName = DescribeSymbol(methodSymbol);
             var containingType = Normalize(methodSymbol.ContainingType?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty);
             var namespaceName = methodSymbol.ContainingNamespace?.ToDisplayString() ?? string.Empty;
-            var matchedPassthrough = patterns.Passthroughs.Any(pattern => PatternMatches(pattern.Kind switch
+            var matchedPassthrough = _patternIndex.Passthroughs.Any(pattern => PatternMatches(pattern.Kind switch
             {
                 DataFlowPatternKind.Method => symbolName,
                 DataFlowPatternKind.Symbol => symbolName,
@@ -1619,13 +1642,14 @@ public static partial class DataFlowAnalyzer
                    name is "First" or "FirstOrDefault" or "Single" or "SingleOrDefault" or "Last" or "LastOrDefault" or "ElementAt" or "ToList" or "ToArray" or "Select" or "Where" or "Trim" or "Replace" or "Substring" or "ToString";
         }
 
-        private IEnumerable<DataFlowPattern> MatchSymbol(ISymbol symbol, SyntaxNode syntax, IEnumerable<DataFlowPattern> candidatePatterns)
+        private IEnumerable<DataFlowPattern> MatchSymbol(ISymbol symbol, SyntaxNode syntax, IReadOnlyList<DataFlowPattern> candidatePatterns)
         {
             var normalizedSymbol = DescribeSymbol(symbol);
             var name = symbol.Name;
             var containingType = Normalize((symbol.ContainingType ?? symbol as INamedTypeSymbol)?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty);
             var namespaceName = symbol.ContainingNamespace?.ToDisplayString() ?? string.Empty;
-            var code = syntax.ToString();
+            string? code = null;
+            string? attributes = null;
 
             foreach (var pattern in candidatePatterns)
             {
@@ -1636,12 +1660,13 @@ public static partial class DataFlowAnalyzer
                     DataFlowPatternKind.Type => containingType,
                     DataFlowPatternKind.Namespace => namespaceName,
                     DataFlowPatternKind.Name => name,
-                    DataFlowPatternKind.Code => code,
-                    DataFlowPatternKind.Attribute => string.Join(' ', symbol.GetAttributes().Select(a => a.AttributeClass?.Name ?? string.Empty)),
+                    DataFlowPatternKind.Code => code ??= SyntaxText(syntax),
+                    DataFlowPatternKind.Attribute => attributes ??= string.Join(' ', symbol.GetAttributes().Select(a => a.AttributeClass?.Name ?? string.Empty)),
+                    DataFlowPatternKind.Parameter => null,
                     _ => normalizedSymbol
                 };
 
-                if (PatternMatches(value, pattern))
+                if (value is not null && PatternMatches(value, pattern))
                 {
                     yield return pattern;
                 }
@@ -1674,10 +1699,49 @@ public static partial class DataFlowAnalyzer
 
         private static TaintTrace? Combine(IEnumerable<TaintTrace?> traces)
         {
-            var nodeIds = traces.Where(t => t is not null).SelectMany(t => t!.NodeIds).Distinct(StringComparer.Ordinal).ToList();
-            var taintKinds = traces.Where(t => t is not null).SelectMany(t => t!.TaintKinds).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-            var fieldPaths = traces.Where(t => t is not null).SelectMany(t => t!.FieldPaths).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            var nodeIds = new List<string>();
+            var taintKinds = new List<string>();
+            var fieldPaths = new List<string>();
+            var seenNodeIds = new HashSet<string>(StringComparer.Ordinal);
+            var seenTaintKinds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var seenFieldPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var trace in traces)
+            {
+                if (trace is null)
+                {
+                    continue;
+                }
+
+                foreach (var nodeId in trace.NodeIds)
+                {
+                    if (seenNodeIds.Add(nodeId)) nodeIds.Add(nodeId);
+                }
+
+                foreach (var taintKind in trace.TaintKinds)
+                {
+                    if (seenTaintKinds.Add(taintKind)) taintKinds.Add(taintKind);
+                }
+
+                foreach (var fieldPath in trace.FieldPaths)
+                {
+                    if (seenFieldPaths.Add(fieldPath)) fieldPaths.Add(fieldPath);
+                }
+            }
+
             return nodeIds.Count == 0 ? null : new TaintTrace(nodeIds, taintKinds, fieldPaths);
+        }
+
+        private string SyntaxText(SyntaxNode syntax)
+        {
+            if (_syntaxTextCache.TryGetValue(syntax, out var text))
+            {
+                return text;
+            }
+
+            text = syntax.ToString();
+            _syntaxTextCache[syntax] = text;
+            return text;
         }
 
         private static IOperation Strip(IOperation operation)
@@ -1762,10 +1826,52 @@ public static partial class DataFlowAnalyzer
 
     private sealed record TaintTrace(List<string> NodeIds, List<string> TaintKinds, List<string> FieldPaths)
     {
-        public TaintTrace Append(string nodeId) => new(NodeIds.Concat([nodeId]).Distinct(StringComparer.Ordinal).ToList(), TaintKinds, FieldPaths);
+        public TaintTrace Append(string nodeId)
+        {
+            if (NodeIds.Contains(nodeId, StringComparer.Ordinal))
+            {
+                return this;
+            }
+
+            var nodeIds = new List<string>(NodeIds.Count + 1);
+            nodeIds.AddRange(NodeIds);
+            nodeIds.Add(nodeId);
+            return new TaintTrace(nodeIds, TaintKinds, FieldPaths);
+        }
+
         public TaintTrace WithFieldPath(string? fieldPath) => string.IsNullOrWhiteSpace(fieldPath) || FieldPaths.Contains(fieldPath, StringComparer.Ordinal)
             ? this
             : new TaintTrace(NodeIds, TaintKinds, FieldPaths.Concat([fieldPath]).ToList());
+    }
+
+    private sealed class DataFlowPatternIndex
+    {
+        public DataFlowPatternIndex(DataFlowPatternSet patterns)
+        {
+            Sources = patterns.Sources;
+            Sinks = patterns.Sinks;
+            Passthroughs = patterns.Passthroughs;
+            Sanitizers = patterns.Sanitizers;
+            SourceParameters = Sources.Where(pattern => pattern.Kind == DataFlowPatternKind.Parameter).ToArray();
+            SourceAttributes = Sources.Where(pattern => pattern.Kind == DataFlowPatternKind.Attribute).ToArray();
+            SourceTypes = Sources.Where(pattern => pattern.Kind == DataFlowPatternKind.Type).ToArray();
+            SourceCode = Sources.Where(pattern => pattern.Kind == DataFlowPatternKind.Code).ToArray();
+            SinkCodeLike = Sinks.Where(IsCodeLike).ToArray();
+            SanitizerCodeLike = Sanitizers.Where(IsCodeLike).ToArray();
+        }
+
+        public IReadOnlyList<DataFlowPattern> Sources { get; }
+        public IReadOnlyList<DataFlowPattern> Sinks { get; }
+        public IReadOnlyList<DataFlowPattern> Passthroughs { get; }
+        public IReadOnlyList<DataFlowPattern> Sanitizers { get; }
+        public IReadOnlyList<DataFlowPattern> SourceParameters { get; }
+        public IReadOnlyList<DataFlowPattern> SourceAttributes { get; }
+        public IReadOnlyList<DataFlowPattern> SourceTypes { get; }
+        public IReadOnlyList<DataFlowPattern> SourceCode { get; }
+        public IReadOnlyList<DataFlowPattern> SinkCodeLike { get; }
+        public IReadOnlyList<DataFlowPattern> SanitizerCodeLike { get; }
+
+        private static bool IsCodeLike(DataFlowPattern pattern) => pattern.Kind is DataFlowPatternKind.Code or DataFlowPatternKind.Method or DataFlowPatternKind.Symbol or DataFlowPatternKind.Name;
     }
 
     private sealed class DataFlowGraphBuilder(DataFlowResult result, PackageUrlResolver purlResolver)
@@ -1774,6 +1880,8 @@ public static partial class DataFlowAnalyzer
         private int _edgeCounter;
         private int _sliceCounter;
         private readonly HashSet<string> _edgeKeys = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, DataFlowNode> _nodesById = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, List<DataFlowEdge>> _outgoingEdgesBySource = new(StringComparer.Ordinal);
 
         public DataFlowNode AddNode(string kind, string name, IOperation operation, SemanticModel model, string basePath, string sourceFilePath, IMethodSymbol? method, bool isSource, bool isSink, IReadOnlyCollection<DataFlowPattern> matchedPatterns, string? category, string? symbol = null, string? typeName = null, string? code = null)
             => AddNode(kind, name, operation.Syntax, model, basePath, sourceFilePath, method, isSource, isSink, matchedPatterns, category, symbol, typeName, code);
@@ -1808,6 +1916,7 @@ public static partial class DataFlowAnalyzer
                 node.Properties["method"] = Normalize(method.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat));
             }
             result.Nodes.Add(node);
+            _nodesById[node.Id] = node;
             return node;
         }
 
@@ -1821,33 +1930,43 @@ public static partial class DataFlowAnalyzer
                     continue;
                 }
                 var lineSpan = syntax.GetLocation().GetLineSpan();
-                result.Edges.Add(new DataFlowEdge
+                var edge = new DataFlowEdge
                 {
                     Id = $"dfe{++_edgeCounter}",
                     SourceId = sourceId,
                     TargetId = targetId,
                     Kind = kind,
                     Label = label,
-                    SourcePurl = result.Nodes.FirstOrDefault(node => node.Id == sourceId)?.Purl,
-                    TargetPurl = result.Nodes.FirstOrDefault(node => node.Id == targetId)?.Purl,
+                    SourcePurl = _nodesById.TryGetValue(sourceId, out var sourceNode) ? sourceNode.Purl : null,
+                    TargetPurl = _nodesById.TryGetValue(targetId, out var targetNode) ? targetNode.Purl : null,
                     FileName = Path.GetFileName(sourceFilePath),
                     LineNumber = lineSpan.StartLinePosition.Line + 1,
                     ColumnNumber = lineSpan.StartLinePosition.Character + 1
-                });
+                };
+                result.Edges.Add(edge);
+                if (!_outgoingEdgesBySource.TryGetValue(edge.SourceId, out var outgoing))
+                {
+                    outgoing = [];
+                    _outgoingEdgesBySource[edge.SourceId] = outgoing;
+                }
+                outgoing.Add(edge);
             }
         }
 
         public void AddSlice(TaintTrace trace, DataFlowNode sinkNode, DataFlowPattern? sinkPattern, string? sinkArgument, int sinkArgumentIndex)
         {
             var nodeIds = trace.NodeIds.Concat([sinkNode.Id]).Distinct(StringComparer.Ordinal).ToList();
-            var edgeIds = result.Edges
-                .Where(edge => nodeIds.Contains(edge.SourceId, StringComparer.Ordinal) && nodeIds.Contains(edge.TargetId, StringComparer.Ordinal))
+            var nodeIdSet = nodeIds.ToHashSet(StringComparer.Ordinal);
+            var edgeIds = nodeIds
+                .Where(nodeId => _outgoingEdgesBySource.ContainsKey(nodeId))
+                .SelectMany(nodeId => _outgoingEdgesBySource[nodeId])
+                .Where(edge => nodeIdSet.Contains(edge.TargetId))
                 .Select(edge => edge.Id)
                 .Distinct(StringComparer.Ordinal)
                 .ToList();
-            var firstSource = trace.NodeIds.FirstOrDefault(id => result.Nodes.FirstOrDefault(node => node.Id == id)?.IsSource == true) ?? trace.NodeIds.First();
-            var sourceNode = result.Nodes.FirstOrDefault(node => node.Id == firstSource);
-            var sliceNodes = result.Nodes.Where(node => nodeIds.Contains(node.Id, StringComparer.Ordinal)).ToList();
+            var firstSource = trace.NodeIds.FirstOrDefault(id => _nodesById.TryGetValue(id, out var candidateSource) && candidateSource.IsSource) ?? trace.NodeIds.First();
+            _nodesById.TryGetValue(firstSource, out var sourceNode);
+            var sliceNodes = nodeIds.Select(nodeId => _nodesById.TryGetValue(nodeId, out var node) ? node : null).Where(node => node is not null).ToList();
             var patternPurls = new[] { sinkPattern?.Purl, sourceNode?.Purl, sinkNode.Purl }.Where(purl => !string.IsNullOrWhiteSpace(purl));
             result.Slices.Add(new DataFlowSlice
             {
@@ -1860,7 +1979,7 @@ public static partial class DataFlowAnalyzer
                 SinkCategory = sinkPattern?.Category ?? sinkNode.Category,
                 SourcePurl = sourceNode?.Purl,
                 SinkPurl = sinkNode.Purl,
-                Purls = sliceNodes.Select(node => node.Purl).Concat(patternPurls).Where(purl => !string.IsNullOrWhiteSpace(purl)).Distinct(StringComparer.Ordinal).ToList()!,
+                Purls = sliceNodes.Select(node => node!.Purl).Concat(patternPurls).Where(purl => !string.IsNullOrWhiteSpace(purl)).Distinct(StringComparer.Ordinal).ToList()!,
                 SinkArgument = sinkArgument,
                 SinkArgumentIndex = sinkArgumentIndex,
                 TaintKinds = trace.TaintKinds.Distinct(StringComparer.OrdinalIgnoreCase).ToList(),

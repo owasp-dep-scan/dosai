@@ -238,6 +238,42 @@ class FlowSample
     }
 
     [Fact]
+    public void GetDataFlows_NestedInterproceduralExpression_PreservesCommandSlice()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "NestedFlow.cs"), """
+using System.Diagnostics;
+
+class NestedFlow
+{
+    static void Main(string[] args)
+    {
+        var command = Wrap(string.Concat(args[0], ""));
+        Launch(command);
+    }
+
+    static string Wrap(string input) => input.Trim();
+
+    static void Launch(string command)
+    {
+        Process.Start(command);
+    }
+}
+""");
+
+        var result = DataFlowAnalyzer.Analyze(tempDirectory.Path);
+        var nodeIds = result.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
+
+        Assert.Contains(result.Slices, slice => slice.SourceCategory == "cli" && slice.SinkCategory == "command");
+        Assert.Contains(result.MethodSummaries, summary => summary.Method.Contains("NestedFlow.Launch") && summary.SinkParameterIndexes.Contains(0));
+        Assert.All(result.Edges, edge =>
+        {
+            Assert.Contains(edge.SourceId, nodeIds);
+            Assert.Contains(edge.TargetId, nodeIds);
+        });
+    }
+
+    [Fact]
     public void CryptoAnalysis_DetectsWeakCryptoHardcodedMaterialAndCycloneDxExport()
     {
         using var tempDirectory = new TemporaryDirectory();
