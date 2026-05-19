@@ -21,4 +21,5 @@ public class PropertyInfo
     public List<string>? ImplementedInterfaces { get; set; }
     public int MetadataToken { get; set; }
     public string? TypeFullName { get; init; }
+    public string? Purl { get; set; }
 }

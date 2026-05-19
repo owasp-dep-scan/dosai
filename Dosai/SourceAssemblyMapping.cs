@@ -49,6 +49,8 @@ public class SourceAssemblyMapping
     /// </summary>
     public string? AssemblyName { get; set; }
 
+    public string? Purl { get; set; }
+
     /// <summary>
     /// Gets or sets the name of the module within the assembly containing the compiled element.
     /// </summary>

@@ -289,6 +289,95 @@ class CustomFlow
     }
 
     [Fact]
+    public void PackageUrlResolver_ProjectAssets_MapsAssembliesAndNamespacesToNuGetPurls()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        WriteProjectAssets(tempDirectory.Path, "Microsoft.Data.SqlClient", "5.1.1", "Microsoft.Data.SqlClient.dll");
+
+        var resolver = PackageUrlResolver.Create(tempDirectory.Path);
+
+        Assert.Equal("pkg:nuget/Microsoft.Data.SqlClient@5.1.1", resolver.Resolve(module: "Microsoft.Data.SqlClient.dll"));
+        Assert.Equal("pkg:nuget/Microsoft.Data.SqlClient@5.1.1", resolver.Resolve(symbol: "Microsoft.Data.SqlClient.SqlCommand..ctor(string)"));
+    }
+
+    [Fact]
+    public void GetMethods_ProjectAssets_AddsPurlsToDefaultOutputAndCallGraph()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "FlowSample.cs"), """
+using Microsoft.Data.SqlClient;
+
+namespace Microsoft.Data.SqlClient
+{
+    public class SqlCommand
+    {
+        public SqlCommand(string sql) { }
+    }
+}
+
+class FlowSample
+{
+    static void Main(string[] args)
+    {
+        var command = new SqlCommand(args[0]);
+    }
+}
+""");
+        WriteProjectAssets(tempDirectory.Path, "Microsoft.Data.SqlClient", "5.1.1", "Microsoft.Data.SqlClient.dll");
+
+        var resultJson = Depscan.Dosai.GetMethods(tempDirectory.Path);
+        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(resultJson, new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() }
+        });
+
+        Assert.NotNull(methodsSlice);
+        Assert.Contains(methodsSlice.MethodCalls ?? [], call => call.Purl == "pkg:nuget/Microsoft.Data.SqlClient@5.1.1");
+        Assert.Contains(methodsSlice.CallGraph?.Nodes ?? [], node => node.Purl == "pkg:nuget/Microsoft.Data.SqlClient@5.1.1");
+        Assert.Contains(methodsSlice.CallGraph?.Edges ?? [], edge => edge.TargetPurl == "pkg:nuget/Microsoft.Data.SqlClient@5.1.1");
+    }
+
+    [Fact]
+    public void GetDataFlows_ProjectAssets_AddsPurlsToNodesAndSlices()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "SqlFlow.cs"), """
+using Microsoft.Data.SqlClient;
+
+namespace Microsoft.Data.SqlClient
+{
+    public class SqlCommand
+    {
+        public SqlCommand(string sql) { }
+    }
+}
+
+class SqlFlow
+{
+    static void Main(string[] args)
+    {
+        var sql = args[0];
+        var command = new SqlCommand(sql);
+    }
+}
+""");
+        WriteProjectAssets(tempDirectory.Path, "Microsoft.Data.SqlClient", "5.1.1", "Microsoft.Data.SqlClient.dll");
+
+        var resultJson = DataFlowAnalyzer.GetDataFlows(tempDirectory.Path);
+        var dataFlowResult = JsonSerializer.Deserialize<DataFlowResult>(resultJson, new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() }
+        });
+
+        Assert.NotNull(dataFlowResult);
+        Assert.Contains(dataFlowResult.Nodes, node => node.IsSink && node.Purl == "pkg:nuget/Microsoft.Data.SqlClient@5.1.1");
+        Assert.Contains(dataFlowResult.Slices, slice => slice.SinkPurl == "pkg:nuget/Microsoft.Data.SqlClient@5.1.1" && slice.Purls.Contains("pkg:nuget/Microsoft.Data.SqlClient@5.1.1"));
+
+        var graphMl = DataFlowExporter.Export(dataFlowResult, DataFlowExportFormat.GraphMl);
+        Assert.Contains("pkg:nuget/Microsoft.Data.SqlClient@5.1.1", graphMl);
+    }
+
+    [Fact]
     public void GetMethods_VBSource_PathIsFile_ReturnsDetails()
     {
         var sourcePath = GetFilePath(HelloWorldVBSource);
@@ -627,6 +716,36 @@ class CustomFlow
     {
         var currentDirectory = Directory.GetCurrentDirectory();
         return Path.Join(currentDirectory, filePath);
+    }
+
+    private static void WriteProjectAssets(string directory, string packageName, string version, string assemblyFileName)
+    {
+        Directory.CreateDirectory(Path.Combine(directory, "obj"));
+        File.WriteAllText(Path.Combine(directory, "obj", "project.assets.json"), $$"""
+{
+  "version": 3,
+  "targets": {
+    "net10.0": {
+      "{{packageName}}/{{version}}": {
+        "type": "package",
+        "compile": {
+          "lib/netstandard2.0/{{assemblyFileName}}": {}
+        },
+        "runtime": {
+          "lib/netstandard2.0/{{assemblyFileName}}": {}
+        }
+      }
+    }
+  },
+  "libraries": {
+    "{{packageName}}/{{version}}": {
+      "sha512": "",
+      "type": "package",
+      "path": "{{packageName.ToLowerInvariant()}}/{{version}}"
+    }
+  }
+}
+""");
     }
 
     // Expected namespaces in Dosai.TestData.CSharp.dll

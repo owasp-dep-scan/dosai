@@ -123,10 +123,12 @@ public static class Dosai
     /// <returns>JSON list of assembly/source methods</returns>
     public static string GetMethods(string path)
     {
+        var purlResolver = PackageUrlResolver.Create(path);
         var methods = GetAssemblyMethods(path);
         var (sourceMethods, usings, methodCalls, properties, fields, events, constructors, callGraph, sourceAssemblyMapping) = GetSourceMethods(path, methods);
         var assemblyInformation = GetAssemblyInformation(path);
         methods.AddRange(sourceMethods);
+        EnrichPackageUrls(purlResolver, methods, usings, methodCalls, properties, fields, events, constructors, callGraph, assemblyInformation, sourceAssemblyMapping);
 
         return JsonSerializer.Serialize(new MethodsSlice 
         { 
@@ -209,6 +211,78 @@ public static class Dosai
             Constants.CSharpSourceExtension, Constants.VBSourceExtension, Constants.FSharpSourceExtension
         };
         return relevantExtensions.Contains(extension);
+    }
+
+    private static void EnrichPackageUrls(
+        PackageUrlResolver resolver,
+        List<Method> methods,
+        List<Dependency> dependencies,
+        List<MethodCalls> methodCalls,
+        List<PropertyInfo> properties,
+        List<FieldInfo> fields,
+        List<EventInfo> events,
+        List<ConstructorInfo> constructors,
+        CallGraph callGraph,
+        List<AssemblyInformation> assemblyInformation,
+        List<SourceAssemblyMapping> sourceAssemblyMappings)
+    {
+        foreach (var method in methods)
+        {
+            method.Purl = resolver.Resolve(method.Assembly, method.Module, method.SourceSignature ?? method.AssemblySignature, method.Namespace, method.ClassName);
+        }
+
+        foreach (var dependency in dependencies)
+        {
+            dependency.Purl = resolver.Resolve(dependency.Assembly, dependency.Module, dependency.Name, dependency.Namespace, null);
+        }
+
+        foreach (var call in methodCalls)
+        {
+            call.Purl = resolver.Resolve(call.Assembly, call.Module, call.TargetId ?? call.CalledMethod, call.Namespace, call.ClassName);
+        }
+
+        foreach (var property in properties)
+        {
+            property.Purl = resolver.Resolve(property.Assembly, property.Module, property.TypeFullName, property.Namespace, property.ClassName);
+        }
+
+        foreach (var field in fields)
+        {
+            field.Purl = resolver.Resolve(field.Assembly, field.Module, field.TypeFullName, field.Namespace, field.ClassName);
+        }
+
+        foreach (var @event in events)
+        {
+            @event.Purl = resolver.Resolve(@event.Assembly, @event.Module, @event.TypeFullName, @event.Namespace, @event.ClassName);
+        }
+
+        foreach (var constructor in constructors)
+        {
+            constructor.Purl = resolver.Resolve(constructor.Assembly, constructor.Module, constructor.Name, constructor.Namespace, constructor.ClassName);
+        }
+
+        foreach (var assembly in assemblyInformation)
+        {
+            assembly.Purl = resolver.Resolve(assembly.Name, assembly.Name, assembly.Name, assembly.Name, assembly.Name);
+        }
+
+        var nodePurls = new Dictionary<string, string?>(StringComparer.Ordinal);
+        foreach (var node in callGraph.Nodes)
+        {
+            node.Purl = resolver.Resolve(node.Assembly, node.Module, node.Id, node.Namespace, node.ClassName);
+            nodePurls[node.Id] = node.Purl;
+        }
+
+        foreach (var edge in callGraph.Edges)
+        {
+            edge.SourcePurl = nodePurls.GetValueOrDefault(edge.SourceId);
+            edge.TargetPurl = nodePurls.GetValueOrDefault(edge.TargetId) ?? resolver.Resolve(null, null, edge.TargetId, null, edge.TargetName);
+        }
+
+        foreach (var mapping in sourceAssemblyMappings)
+        {
+            mapping.Purl = resolver.Resolve(mapping.AssemblyName, mapping.ModuleName, mapping.AssemblyId ?? mapping.SourceId, mapping.Namespace, mapping.ClassName);
+        }
     }
     
     /// <summary>

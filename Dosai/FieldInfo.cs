@@ -18,4 +18,5 @@ public class FieldInfo
     public List<string>? ImplementedInterfaces { get; set; }
     public int MetadataToken { get; set; }
     public string? TypeFullName { get; set; }
+    public string? Purl { get; set; }
 }

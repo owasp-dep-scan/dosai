@@ -1,0 +1,55 @@
+name: vulnerable repo smoke
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 3 * * 1'
+
+jobs:
+  dataflow-smoke:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: AspGoat
+            repo: https://github.com/Soham7-dev/AspGoat.git
+            min_slices: 1
+          - name: WebGoat.NET
+            repo: https://github.com/jerryhoff/WebGoat.NET.git
+            min_slices: 1
+          - name: VulnerableMVCAppDemo
+            repo: https://github.com/kickmeforpresident/VulnerableMVCAppDemo.git
+            min_slices: 1
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - name: Setup .NET
+        uses: actions/setup-dotnet@c2fa09f4bde5ebb9d1777cf28262a3eb3db3ced7
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build Dosai
+        run: dotnet build ./Dosai
+      - name: Clone vulnerable sample
+        run: git clone --depth 1 "${{ matrix.repo }}" "/tmp/${{ matrix.name }}"
+      - name: Run data-flow smoke test
+        run: |
+          dotnet run --project ./Dosai -- dataflows --path "/tmp/${{ matrix.name }}" --o "/tmp/${{ matrix.name }}-dataflows.json" --graph-format graphml --graph-out "/tmp/${{ matrix.name }}-dataflows.graphml"
+          python - <<'PY'
+          import json, os, xml.etree.ElementTree as ET
+          name = os.environ['REPO_NAME']
+          min_slices = int(os.environ['MIN_SLICES'])
+          path = f'/tmp/{name}-dataflows.json'
+          data = json.load(open(path))
+          stats = data['Statistics']
+          print(name, stats)
+          node_ids = {node['Id'] for node in data['Nodes']}
+          bad_edges = [edge for edge in data['Edges'] if edge['SourceId'] not in node_ids or edge['TargetId'] not in node_ids]
+          assert not bad_edges, f'{len(bad_edges)} data-flow edges reference missing nodes'
+          assert stats['SliceCount'] >= min_slices, f'expected at least {min_slices} slices, got {stats["SliceCount"]}'
+          ET.parse(f'/tmp/{name}-dataflows.graphml')
+          PY
+        env:
+          REPO_NAME: ${{ matrix.name }}
+          MIN_SLICES: ${{ matrix.min_slices }}

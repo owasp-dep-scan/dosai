@@ -36,7 +36,20 @@ jobs:
     - name: Test
       run: |
         dotnet test
-        dotnet run --project ./Dosai/ methods --path ./Dosai
+        dotnet run --project ./Dosai/ methods --path ./Dosai --o /tmp/dosai-methods.json --callgraph-format graphml --callgraph-out /tmp/dosai-callgraph.graphml
+        dotnet run --project ./Dosai/ dataflows --path ./Dosai --o /tmp/dosai-dataflows.json --graph-format gexf --graph-out /tmp/dosai-dataflows.gexf
+        python - <<'PY'
+        import json, xml.etree.ElementTree as ET
+        methods = json.load(open('/tmp/dosai-methods.json'))
+        callgraph = methods['CallGraph']
+        node_ids = {node['Id'] for node in callgraph['Nodes']}
+        assert all(edge['SourceId'] in node_ids and edge['TargetId'] in node_ids for edge in callgraph['Edges'])
+        dataflows = json.load(open('/tmp/dosai-dataflows.json'))
+        df_node_ids = {node['Id'] for node in dataflows['Nodes']}
+        assert all(edge['SourceId'] in df_node_ids and edge['TargetId'] in df_node_ids for edge in dataflows['Edges'])
+        ET.parse('/tmp/dosai-callgraph.graphml')
+        ET.parse('/tmp/dosai-dataflows.gexf')
+        PY
     - name: Publish binaries
       run: |
         dotnet publish ./Dosai/ -r linux-x64 --property:PublishDir=dosai-linux -p:PublishSingleFile=true --no-self-contained /p:UseAppHost=true /p:AssemblyName=Dosai

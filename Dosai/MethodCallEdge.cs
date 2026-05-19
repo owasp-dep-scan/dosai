@@ -20,6 +20,8 @@ public class MethodCallEdge
 
     public string? SourceName { get; set; }
     public string? TargetName { get; set; }
+    public string? SourcePurl { get; set; }
+    public string? TargetPurl { get; set; }
 
     public List<string>? Arguments { get; set; } 
     public List<string>? ArgumentExpressions { get; set; }

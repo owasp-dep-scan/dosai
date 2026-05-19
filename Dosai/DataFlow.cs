@@ -64,6 +64,7 @@ public sealed class DataFlowNode
     public required string Name { get; set; }
     public string? Symbol { get; set; }
     public string? Type { get; set; }
+    public string? Purl { get; set; }
     public string? Code { get; set; }
     public string? Path { get; set; }
     public string? FileName { get; set; }
@@ -86,6 +87,8 @@ public sealed class DataFlowEdge
     public required string TargetId { get; set; }
     public required string Kind { get; set; }
     public string? Label { get; set; }
+    public string? SourcePurl { get; set; }
+    public string? TargetPurl { get; set; }
     public string? FileName { get; set; }
     public int LineNumber { get; set; }
     public int ColumnNumber { get; set; }
@@ -100,6 +103,9 @@ public sealed class DataFlowSlice
     public List<string> EdgeIds { get; set; } = [];
     public string? SourceCategory { get; set; }
     public string? SinkCategory { get; set; }
+    public string? SourcePurl { get; set; }
+    public string? SinkPurl { get; set; }
+    public List<string> Purls { get; set; } = [];
     public string? SinkArgument { get; set; }
     public int? SinkArgumentIndex { get; set; }
     public string? Summary { get; set; }
@@ -150,6 +156,7 @@ public static partial class DataFlowAnalyzer
 
         var patterns = LoadPatterns(patternsPath);
         var result = new DataFlowResult { Patterns = patterns };
+        var purlResolver = PackageUrlResolver.Create(path);
         var sourcesToInspect = GetSourceFiles(path);
         result.Statistics.FilesAnalyzed = sourcesToInspect.Count;
 
@@ -174,7 +181,7 @@ public static partial class DataFlowAnalyzer
             references: references,
             options: new VisualBasicCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
 
-        var graph = new DataFlowGraphBuilder(result);
+        var graph = new DataFlowGraphBuilder(result, purlResolver);
 
         foreach (var tree in csharpTrees)
         {
@@ -262,6 +269,8 @@ public static partial class DataFlowAnalyzer
             new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Parameter, Pattern = "request", Match = DataFlowMatchKind.Exact, Category = "message", Description = "Request/message handler input" },
             new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Parameter, Pattern = "command", Match = DataFlowMatchKind.Exact, Category = "message", Description = "Command handler input" },
             new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Parameter, Pattern = "query", Match = DataFlowMatchKind.Exact, Category = "message", Description = "Query handler input" },
+            new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Parameter, Pattern = "model", Match = DataFlowMatchKind.Exact, Category = "http", Description = "MVC model-bound input" },
+            new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Parameter, Pattern = "input", Match = DataFlowMatchKind.Exact, Category = "input", Description = "Generic input parameter" },
             new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Attribute, Pattern = "HttpGet", Match = DataFlowMatchKind.Prefix, Category = "http", Description = "ASP.NET HTTP endpoint parameter" },
             new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Attribute, Pattern = "HttpPost", Match = DataFlowMatchKind.Prefix, Category = "http", Description = "ASP.NET HTTP endpoint parameter" },
             new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Attribute, Pattern = "HttpPut", Match = DataFlowMatchKind.Prefix, Category = "http", Description = "ASP.NET HTTP endpoint parameter" },
@@ -279,6 +288,10 @@ public static partial class DataFlowAnalyzer
             new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Symbol, Pattern = ".Request.Body", Match = DataFlowMatchKind.Contains, Category = "http", Description = "HTTP request body" },
             new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Symbol, Pattern = ".Request.Headers", Match = DataFlowMatchKind.Contains, Category = "http", Description = "HTTP headers" },
             new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Symbol, Pattern = ".Request.Cookies", Match = DataFlowMatchKind.Contains, Category = "http", Description = "HTTP cookies" },
+            new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Code, Pattern = "Request[", Match = DataFlowMatchKind.Contains, Category = "http", Description = "ASP.NET request collection" },
+            new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Code, Pattern = "Request.QueryString", Match = DataFlowMatchKind.Contains, Category = "http", Description = "ASP.NET query string" },
+            new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Code, Pattern = ".Text", Match = DataFlowMatchKind.Contains, Category = "webforms", Description = "ASP.NET WebForms text control value" },
+            new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Code, Pattern = ".SelectedItem.Value", Match = DataFlowMatchKind.Contains, Category = "webforms", Description = "ASP.NET WebForms selected value" },
             new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Type, Pattern = "Grpc.Core.ServerCallContext", Match = DataFlowMatchKind.Contains, Category = "rpc", Description = "gRPC server call context" }
         ],
         Sinks =
@@ -287,16 +300,30 @@ public static partial class DataFlowAnalyzer
             new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Type, Pattern = "System.Diagnostics.ProcessStartInfo", Match = DataFlowMatchKind.Contains, Category = "command", Description = "Process execution configuration" },
             new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "System.IO.File.", Match = DataFlowMatchKind.Contains, Category = "file", Description = "File system operation" },
             new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "System.IO.Directory.", Match = DataFlowMatchKind.Contains, Category = "file", Description = "Directory operation" },
+            new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "System.IO.FileStream", Match = DataFlowMatchKind.Contains, Category = "file", Description = "File stream operation" },
             new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "System.IO.Path.Combine", Match = DataFlowMatchKind.Contains, Category = "file", Description = "Path construction" },
+            new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Name, Pattern = "SaveAs", Match = DataFlowMatchKind.Exact, Category = "file", Description = "File upload save" },
+            new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Name, Pattern = "CopyTo", Match = DataFlowMatchKind.Exact, Category = "file", Description = "Stream/file copy" },
+            new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Code, Pattern = "SaveAs(", Match = DataFlowMatchKind.Contains, Category = "file", Description = "File upload save" },
+            new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Code, Pattern = "CopyTo(", Match = DataFlowMatchKind.Contains, Category = "file", Description = "Stream/file copy" },
+            new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Code, Pattern = "Server.MapPath", Match = DataFlowMatchKind.Contains, Category = "file", Description = "Server path mapping" },
             new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "System.Net.Http.HttpClient.", Match = DataFlowMatchKind.Contains, Category = "network", Description = "Outbound HTTP request" },
+            new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "Response.Redirect", Match = DataFlowMatchKind.Contains, Category = "redirect", Description = "HTTP redirect" },
+            new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Name, Pattern = "Redirect", Match = DataFlowMatchKind.Exact, Category = "redirect", Description = "HTTP redirect" },
             new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "GetGrain", Match = DataFlowMatchKind.Contains, Category = "rpc", Description = "Orleans grain dispatch" },
             new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Name, Pattern = "GetGrain", Match = DataFlowMatchKind.Exact, Category = "rpc", Description = "Orleans grain dispatch" },
             new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "System.Data.SqlClient.SqlCommand", Match = DataFlowMatchKind.Contains, Category = "sql", Description = "SQL command" },
             new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "Microsoft.Data.SqlClient.SqlCommand", Match = DataFlowMatchKind.Contains, Category = "sql", Description = "SQL command" },
+            new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "MySqlCommand", Match = DataFlowMatchKind.Contains, Category = "sql", Description = "MySQL command" },
+            new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "SqliteCommand", Match = DataFlowMatchKind.Contains, Category = "sql", Description = "SQLite command" },
+            new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Name, Pattern = "ExecuteNonQuery", Match = DataFlowMatchKind.Exact, Category = "sql", Description = "SQL command execution" },
+            new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Name, Pattern = "ExecuteReader", Match = DataFlowMatchKind.Exact, Category = "sql", Description = "SQL query execution" },
             new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "ExecuteSqlRaw", Match = DataFlowMatchKind.Contains, Category = "sql", Description = "Entity Framework raw SQL execution" },
             new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "FromSqlRaw", Match = DataFlowMatchKind.Contains, Category = "sql", Description = "Entity Framework raw SQL query" },
             new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "System.Reflection.Assembly.Load", Match = DataFlowMatchKind.Contains, Category = "reflection", Description = "Dynamic assembly loading" },
-            new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "System.Type.GetType", Match = DataFlowMatchKind.Contains, Category = "reflection", Description = "Dynamic type lookup" }
+            new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "System.Type.GetType", Match = DataFlowMatchKind.Contains, Category = "reflection", Description = "Dynamic type lookup" },
+            new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "BinaryFormatter.Deserialize", Match = DataFlowMatchKind.Contains, Category = "deserialization", Description = "BinaryFormatter deserialization" },
+            new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Name, Pattern = "Deserialize", Match = DataFlowMatchKind.Exact, Category = "deserialization", Description = "Object deserialization" }
         ],
         Passthroughs =
         [
@@ -448,6 +475,12 @@ public static partial class DataFlowAnalyzer
             base.VisitObjectCreation(operation);
         }
 
+        public override void VisitInvalid(IInvalidOperation operation)
+        {
+            ProcessInvalidCodeSink(operation);
+            base.VisitInvalid(operation);
+        }
+
         public override void VisitReturn(IReturnOperation operation)
         {
             if (operation.ReturnedValue is not null && GetTaint(operation.ReturnedValue) is { } taint)
@@ -558,6 +591,20 @@ public static partial class DataFlowAnalyzer
             }
 
             var argumentList = arguments.ToList();
+            if (operation is IInvocationOperation { Instance: not null } invocation && GetTaint(invocation.Instance) is { } receiverTaint)
+            {
+                var sinkNode = graph.AddNode("Sink", targetMethod.Name, operation, model, basePath, sourceFilePath, _currentMethod,
+                    isSource: false,
+                    isSink: true,
+                    matchedPatterns: matchedSinkPatterns,
+                    category: matchedSinkPatterns.FirstOrDefault()?.Category,
+                    symbol: DescribeSymbol(targetMethod),
+                    typeName: Normalize(targetMethod.ReturnType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)),
+                    code: operation.Syntax.ToString());
+                graph.AddEdges(receiverTaint.NodeIds, sinkNode.Id, "SinkReceiver", invocation.Instance.Syntax, sourceFilePath, "receiver");
+                graph.AddSlice(receiverTaint, sinkNode, matchedSinkPatterns.FirstOrDefault(), invocation.Instance.Syntax.ToString(), -1);
+            }
+
             for (var index = 0; index < argumentList.Count; index++)
             {
                 var argument = argumentList[index];
@@ -588,6 +635,20 @@ public static partial class DataFlowAnalyzer
             }
 
             var argumentList = arguments.ToList();
+            if (operation is IInvocationOperation { Instance: not null } invocation && GetTaint(invocation.Instance) is { } receiverTaint)
+            {
+                var sinkNode = graph.AddNode("Sink", GetOperationName(operation), operation, model, basePath, sourceFilePath, _currentMethod,
+                    isSource: false,
+                    isSink: true,
+                    matchedPatterns: matchedSinkPatterns,
+                    category: matchedSinkPatterns.FirstOrDefault()?.Category,
+                    symbol: GetOperationSymbol(operation),
+                    typeName: Normalize(operation.Type?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty),
+                    code: operation.Syntax.ToString());
+                graph.AddEdges(receiverTaint.NodeIds, sinkNode.Id, "SinkReceiver", invocation.Instance.Syntax, sourceFilePath, "receiver");
+                graph.AddSlice(receiverTaint, sinkNode, matchedSinkPatterns.FirstOrDefault(), invocation.Instance.Syntax.ToString(), -1);
+            }
+
             for (var index = 0; index < argumentList.Count; index++)
             {
                 var argument = argumentList[index];
@@ -607,6 +668,32 @@ public static partial class DataFlowAnalyzer
                 graph.AddEdges(taint.NodeIds, sinkNode.Id, "SinkArgument", argument.Syntax, sourceFilePath, argument.Parameter?.Name ?? $"arg{index}");
                 graph.AddSlice(taint, sinkNode, matchedSinkPatterns.FirstOrDefault(), argument.Syntax.ToString(), index);
             }
+        }
+
+        private void ProcessInvalidCodeSink(IInvalidOperation operation)
+        {
+            var matchedSinkPatterns = MatchCode(operation.Syntax.ToString(), patterns.Sinks).ToList();
+            if (matchedSinkPatterns.Count == 0)
+            {
+                return;
+            }
+
+            var taint = Combine(operation.ChildOperations.Select(GetTaint));
+            if (taint is null)
+            {
+                return;
+            }
+
+            var sinkNode = graph.AddNode("Sink", GetOperationName(operation), operation, model, basePath, sourceFilePath, _currentMethod,
+                isSource: false,
+                isSink: true,
+                matchedPatterns: matchedSinkPatterns,
+                category: matchedSinkPatterns.FirstOrDefault()?.Category,
+                symbol: GetOperationSymbol(operation),
+                typeName: Normalize(operation.Type?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty),
+                code: operation.Syntax.ToString());
+            graph.AddEdges(taint.NodeIds, sinkNode.Id, "SinkExpression", operation.Syntax, sourceFilePath, operation.Kind.ToString());
+            graph.AddSlice(taint, sinkNode, matchedSinkPatterns.FirstOrDefault(), operation.Syntax.ToString(), 0);
         }
 
         private TaintTrace? GetTaint(IOperation? operation)
@@ -666,6 +753,11 @@ public static partial class DataFlowAnalyzer
 
         private IEnumerable<DataFlowPattern> MatchOperationSource(IOperation operation)
         {
+            foreach (var pattern in patterns.Sources.Where(p => p.Kind == DataFlowPatternKind.Code && PatternMatches(operation.Syntax.ToString(), p)))
+            {
+                yield return pattern;
+            }
+
             if (operation is IParameterReferenceOperation parameterReference)
             {
                 foreach (var pattern in MatchParameterSource(parameterReference.Parameter, _currentMethod ?? parameterReference.Parameter.ContainingSymbol as IMethodSymbol ?? parameterReference.Parameter.ContainingSymbol as IMethodSymbol ?? throw new InvalidOperationException("Parameter without containing method")))
@@ -824,7 +916,7 @@ public static partial class DataFlowAnalyzer
         public TaintTrace Append(string nodeId) => new(NodeIds.Concat([nodeId]).Distinct(StringComparer.Ordinal).ToList());
     }
 
-    private sealed class DataFlowGraphBuilder(DataFlowResult result)
+    private sealed class DataFlowGraphBuilder(DataFlowResult result, PackageUrlResolver purlResolver)
     {
         private int _nodeCounter;
         private int _edgeCounter;
@@ -844,6 +936,7 @@ public static partial class DataFlowAnalyzer
                 Name = name,
                 Symbol = symbol,
                 Type = typeName,
+                Purl = purlResolver.Resolve(method?.ContainingAssembly?.ToDisplayString(), method?.ContainingModule?.ToDisplayString(), symbol, method?.ContainingNamespace?.ToDisplayString(), typeName),
                 Code = TrimCode(code ?? syntax.ToString()),
                 Path = Path.GetRelativePath(basePath, sourceFilePath),
                 FileName = Path.GetFileName(sourceFilePath),
@@ -882,6 +975,8 @@ public static partial class DataFlowAnalyzer
                     TargetId = targetId,
                     Kind = kind,
                     Label = label,
+                    SourcePurl = result.Nodes.FirstOrDefault(node => node.Id == sourceId)?.Purl,
+                    TargetPurl = result.Nodes.FirstOrDefault(node => node.Id == targetId)?.Purl,
                     FileName = Path.GetFileName(sourceFilePath),
                     LineNumber = lineSpan.StartLinePosition.Line + 1,
                     ColumnNumber = lineSpan.StartLinePosition.Character + 1
@@ -898,6 +993,8 @@ public static partial class DataFlowAnalyzer
                 .Distinct(StringComparer.Ordinal)
                 .ToList();
             var firstSource = trace.NodeIds.FirstOrDefault(id => result.Nodes.FirstOrDefault(node => node.Id == id)?.IsSource == true) ?? trace.NodeIds.First();
+            var sourceNode = result.Nodes.FirstOrDefault(node => node.Id == firstSource);
+            var sliceNodes = result.Nodes.Where(node => nodeIds.Contains(node.Id, StringComparer.Ordinal)).ToList();
             result.Slices.Add(new DataFlowSlice
             {
                 Id = $"dfs{++_sliceCounter}",
@@ -905,8 +1002,11 @@ public static partial class DataFlowAnalyzer
                 SinkId = sinkNode.Id,
                 NodeIds = nodeIds,
                 EdgeIds = edgeIds,
-                SourceCategory = result.Nodes.FirstOrDefault(node => node.Id == firstSource)?.Category,
+                SourceCategory = sourceNode?.Category,
                 SinkCategory = sinkPattern?.Category ?? sinkNode.Category,
+                SourcePurl = sourceNode?.Purl,
+                SinkPurl = sinkNode.Purl,
+                Purls = sliceNodes.Select(node => node.Purl).Where(purl => !string.IsNullOrWhiteSpace(purl)).Distinct(StringComparer.Ordinal).ToList()!,
                 SinkArgument = sinkArgument,
                 SinkArgumentIndex = sinkArgumentIndex,
                 Summary = $"Data flows from {firstSource} to {sinkNode.Name} argument {sinkArgumentIndex}."

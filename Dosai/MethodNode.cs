@@ -9,6 +9,7 @@ public class MethodNode
     public required string Namespace { get; set; }
     public string? Assembly { get; set; }
     public string? Module { get; set; }
+    public string? Purl { get; set; }
     public required string FileName { get; set; }
     public string Kind { get; set; } = "Method";
     public int LineNumber { get; set; }

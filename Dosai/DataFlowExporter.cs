@@ -84,11 +84,11 @@ public static class DataFlowExporter
         var builder = new StringBuilder();
         builder.AppendLine("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
         builder.AppendLine("<graphml xmlns=\"http://graphml.graphdrawing.org/xmlns\">");
-        foreach (var key in new[] { "label", "kind", "symbol", "type", "file", "method", "line", "category", "source", "sink", "code" })
+        foreach (var key in new[] { "label", "kind", "symbol", "type", "purl", "file", "method", "line", "category", "source", "sink", "code" })
         {
             builder.Append("  <key id=\"").Append(Xml(key)).Append("\" for=\"node\" attr.name=\"").Append(Xml(key)).Append("\" attr.type=\"string\" />").AppendLine();
         }
-        foreach (var key in new[] { "kind", "label", "file", "line" })
+        foreach (var key in new[] { "kind", "label", "sourcePurl", "targetPurl", "file", "line" })
         {
             builder.Append("  <key id=\"edge_").Append(Xml(key)).Append("\" for=\"edge\" attr.name=\"").Append(Xml(key)).Append("\" attr.type=\"string\" />").AppendLine();
         }
@@ -101,6 +101,7 @@ public static class DataFlowExporter
             AppendGraphMlData(builder, "kind", node.Kind, 6);
             AppendGraphMlData(builder, "symbol", node.Symbol, 6);
             AppendGraphMlData(builder, "type", node.Type, 6);
+            AppendGraphMlData(builder, "purl", node.Purl, 6);
             AppendGraphMlData(builder, "file", node.FileName, 6);
             AppendGraphMlData(builder, "method", node.MethodName, 6);
             AppendGraphMlData(builder, "line", node.LineNumber.ToString(), 6);
@@ -116,6 +117,8 @@ public static class DataFlowExporter
             builder.Append("    <edge id=\"").Append(Xml(edge.Id)).Append("\" source=\"").Append(Xml(edge.SourceId)).Append("\" target=\"").Append(Xml(edge.TargetId)).AppendLine("\">");
             AppendGraphMlData(builder, "edge_kind", edge.Kind, 6);
             AppendGraphMlData(builder, "edge_label", edge.Label, 6);
+            AppendGraphMlData(builder, "edge_sourcePurl", edge.SourcePurl, 6);
+            AppendGraphMlData(builder, "edge_targetPurl", edge.TargetPurl, 6);
             AppendGraphMlData(builder, "edge_file", edge.FileName, 6);
             AppendGraphMlData(builder, "edge_line", edge.LineNumber.ToString(), 6);
             builder.AppendLine("    </edge>");
@@ -133,7 +136,7 @@ public static class DataFlowExporter
         builder.AppendLine("<gexf xmlns=\"http://www.gexf.net/1.3\" version=\"1.3\">");
         builder.AppendLine("  <graph mode=\"static\" defaultedgetype=\"directed\">");
         builder.AppendLine("    <attributes class=\"node\">");
-        foreach (var key in new[] { "kind", "symbol", "type", "file", "method", "line", "category", "source", "sink", "code" })
+        foreach (var key in new[] { "kind", "symbol", "type", "purl", "file", "method", "line", "category", "source", "sink", "code" })
         {
             builder.Append("      <attribute id=\"").Append(Xml(key)).Append("\" title=\"").Append(Xml(key)).Append("\" type=\"string\" />").AppendLine();
         }
@@ -141,6 +144,8 @@ public static class DataFlowExporter
         builder.AppendLine("    <attributes class=\"edge\">");
         builder.AppendLine("      <attribute id=\"kind\" title=\"kind\" type=\"string\" />");
         builder.AppendLine("      <attribute id=\"label\" title=\"label\" type=\"string\" />");
+        builder.AppendLine("      <attribute id=\"sourcePurl\" title=\"sourcePurl\" type=\"string\" />");
+        builder.AppendLine("      <attribute id=\"targetPurl\" title=\"targetPurl\" type=\"string\" />");
         builder.AppendLine("    </attributes>");
         builder.AppendLine("    <nodes>");
         foreach (var node in result.Nodes.OrderBy(n => n.Id, StringComparer.Ordinal))
@@ -150,6 +155,7 @@ public static class DataFlowExporter
             AppendGexfValue(builder, "kind", node.Kind, 10);
             AppendGexfValue(builder, "symbol", node.Symbol, 10);
             AppendGexfValue(builder, "type", node.Type, 10);
+            AppendGexfValue(builder, "purl", node.Purl, 10);
             AppendGexfValue(builder, "file", node.FileName, 10);
             AppendGexfValue(builder, "method", node.MethodName, 10);
             AppendGexfValue(builder, "line", node.LineNumber.ToString(), 10);
@@ -168,6 +174,8 @@ public static class DataFlowExporter
             builder.AppendLine("        <attvalues>");
             AppendGexfValue(builder, "kind", edge.Kind, 10);
             AppendGexfValue(builder, "label", edge.Label, 10);
+            AppendGexfValue(builder, "sourcePurl", edge.SourcePurl, 10);
+            AppendGexfValue(builder, "targetPurl", edge.TargetPurl, 10);
             builder.AppendLine("        </attvalues>");
             builder.AppendLine("      </edge>");
         }
