@@ -62,6 +62,7 @@ public static class McpServer
                 {
                     Tool("dosai.methods", "Inspect source/assembly methods, call graph, endpoints, and reachability."),
                     Tool("dosai.dataflows", "Run source-to-sink data-flow slicing."),
+                    Tool("dosai.crypto", "Detect cryptographic assets, operations, materials, misuse, and CBOM evidence."),
                     Tool("dosai.agent_context", "Generate compact agent context from data-flow analysis."),
                     Tool("dosai.query", "Filter Dosai JSON with queries like slices[sinkCategory=sql].")
                 }
@@ -88,6 +89,7 @@ public static class McpServer
         {
             "dosai.methods" => JsonSerializer.Deserialize<object>(Dosai.GetMethods(RequirePath(path)), JsonOptions)!,
             "dosai.dataflows" => DataFlowAnalyzer.Analyze(RequirePath(path), localPatterns, localPatternPacks),
+            "dosai.crypto" => JsonSerializer.Deserialize<object>(CryptoAnalyzer.GetCryptoAnalysis(RequirePath(path), GetString(arguments, "format") ?? "dosai"), JsonOptions)!,
             "dosai.agent_context" => TransparencyBuilder.BuildAgentContext(DataFlowAnalyzer.Analyze(RequirePath(path), localPatterns, localPatternPacks), RequirePath(path)),
             "dosai.query" => JsonSerializer.Deserialize<object>(DosaiQueryEngine.QueryJson(LoadQueryInput(arguments, path, localPatterns, localPatternPacks), GetString(arguments, "query") ?? "slices"), JsonOptions)!,
             _ => throw new ArgumentException($"Unsupported tool: {name}")
@@ -126,6 +128,7 @@ public static class McpServer
                 ["path"] = new { type = "string", description = "File or directory to inspect." },
                 ["patterns"] = new { type = "string", description = "Optional data-flow pattern JSON file." },
                 ["patternPacks"] = new { type = "string", description = "Comma-separated built-in pattern packs." },
+                ["format"] = new { type = "string", description = "Output format for dosai.crypto: dosai, cyclonedx, cdxgen-evidence." },
                 ["input"] = new { type = "string", description = "Existing Dosai JSON file for dosai.query." },
                 ["query"] = new { type = "string", description = "Query expression for dosai.query." }
             }

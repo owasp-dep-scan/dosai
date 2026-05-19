@@ -50,6 +50,9 @@ public sealed class DataFlowPattern
     public string? Category { get; set; }
     public string? Purl { get; set; }
     public string? Description { get; set; }
+    public List<string> TaintKinds { get; set; } = [];
+    public List<string> RemovesTaintKinds { get; set; } = [];
+    public string Confidence { get; set; } = "Medium";
 }
 
 public sealed class DataFlowPatternSet
@@ -67,6 +70,10 @@ public sealed class DataFlowMethodSummary
     public List<int> ReturnParameterIndexes { get; set; } = [];
     public List<int> SinkParameterIndexes { get; set; } = [];
     public List<string> SinkCategories { get; set; } = [];
+    public List<string> TaintKinds { get; set; } = [];
+    public List<string> FieldPaths { get; set; } = [];
+    public string SummaryKind { get; set; } = "InferredLocal";
+    public string Confidence { get; set; } = "Medium";
 }
 
 public sealed class DataFlowNode
@@ -121,6 +128,9 @@ public sealed class DataFlowSlice
     public string? SinkArgument { get; set; }
     public int? SinkArgumentIndex { get; set; }
     public string? Summary { get; set; }
+    public List<string> TaintKinds { get; set; } = [];
+    public List<string> FieldPaths { get; set; } = [];
+    public string Confidence { get; set; } = "Medium";
 }
 
 public sealed class DataFlowStatistics
@@ -230,6 +240,8 @@ public static partial class DataFlowAnalyzer
             var root = tree.GetCompilationUnitRoot();
             AnalyzeCompilationUnit(model, root, graph, patterns, summaries, path, tree.FilePath);
         }
+
+        AnalyzeLightweightLanguageDataFlows(path, sourcesToInspect, patterns, result);
 
         result.Nodes = result.Nodes.OrderBy(n => n.FileName, StringComparer.Ordinal).ThenBy(n => n.LineNumber).ThenBy(n => n.ColumnNumber).ThenBy(n => n.Id, StringComparer.Ordinal).ToList();
         result.Edges = result.Edges.OrderBy(e => e.FileName, StringComparer.Ordinal).ThenBy(e => e.LineNumber).ThenBy(e => e.ColumnNumber).ThenBy(e => e.Id, StringComparer.Ordinal).ToList();
@@ -356,7 +368,7 @@ public static partial class DataFlowAnalyzer
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         if (requested.Count == 0 || requested.Contains("all"))
         {
-            requested = ["aspnet", "data", "filesystem", "serialization", "cloud", "rpc", "auth"];
+            requested = ["aspnet", "data", "filesystem", "serialization", "cloud", "rpc", "auth", "crypto"];
         }
         patterns.PatternPacks = requested.OrderBy(pack => pack, StringComparer.OrdinalIgnoreCase).ToList();
 
@@ -428,6 +440,24 @@ public static partial class DataFlowAnalyzer
                 new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Name, Pattern = "CreateToken", Match = DataFlowMatchKind.Exact, Category = "auth", Description = "Token creation" },
                 new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Name, Pattern = "SignInAsync", Match = DataFlowMatchKind.Exact, Category = "auth", Description = "Authentication sign-in" },
                 new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Name, Pattern = "GeneratePasswordResetTokenAsync", Match = DataFlowMatchKind.Exact, Category = "auth", Description = "Password reset token generation" }
+            ]);
+        }
+
+        if (requested.Contains("crypto"))
+        {
+            patterns.Sources.AddRange([
+                new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Code, Pattern = "-----BEGIN", Match = DataFlowMatchKind.Contains, Category = "crypto-material", Description = "PEM encoded crypto material", TaintKinds = ["secret", "crypto-key"] },
+                new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Name, Pattern = "key", Match = DataFlowMatchKind.Contains, Category = "crypto-material", Description = "Key-like value", TaintKinds = ["secret", "crypto-key"] },
+                new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Name, Pattern = "secret", Match = DataFlowMatchKind.Contains, Category = "secret", Description = "Secret-like value", TaintKinds = ["secret"] }
+            ]);
+            patterns.Sinks.AddRange([
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "System.Security.Cryptography", Match = DataFlowMatchKind.Contains, Category = "crypto", Description = "Cryptographic API", TaintKinds = ["crypto-key", "secret"] },
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "Microsoft.IdentityModel.Tokens", Match = DataFlowMatchKind.Contains, Category = "jwt", Description = "JWT signing/validation API", TaintKinds = ["jwt", "secret"] },
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "X509Certificate2", Match = DataFlowMatchKind.Contains, Category = "certificate", Description = "Certificate loading", TaintKinds = ["certificate", "secret"] },
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Code, Pattern = "ServerCertificateCustomValidationCallback", Match = DataFlowMatchKind.Contains, Category = "tls", Description = "TLS certificate validation callback", TaintKinds = ["certificate"] }
+            ]);
+            patterns.Sanitizers.AddRange([
+                new() { Target = DataFlowPatternTarget.Sanitizer, Kind = DataFlowPatternKind.Method, Pattern = "System.Security.Cryptography.RandomNumberGenerator", Match = DataFlowMatchKind.Contains, Category = "secure-random", Description = "Cryptographically secure random source", RemovesTaintKinds = ["insecure-random"] }
             ]);
         }
     }
@@ -531,19 +561,229 @@ public static partial class DataFlowAnalyzer
         {
             var extension = Path.GetExtension(path);
             return extension.Equals(Constants.CSharpSourceExtension, StringComparison.OrdinalIgnoreCase) ||
-                   extension.Equals(Constants.VBSourceExtension, StringComparison.OrdinalIgnoreCase)
+                   extension.Equals(Constants.VBSourceExtension, StringComparison.OrdinalIgnoreCase) ||
+                   IsLightweightLanguageExtension(extension)
                 ? [path]
                 : [];
         }
 
         return new DirectoryInfo(path)
             .EnumerateFiles("*.*", SearchOption.AllDirectories)
-            .Where(file => file.Extension.Equals(Constants.CSharpSourceExtension, StringComparison.OrdinalIgnoreCase) || file.Extension.Equals(Constants.VBSourceExtension, StringComparison.OrdinalIgnoreCase))
+            .Where(file => file.Extension.Equals(Constants.CSharpSourceExtension, StringComparison.OrdinalIgnoreCase) || file.Extension.Equals(Constants.VBSourceExtension, StringComparison.OrdinalIgnoreCase) || IsLightweightLanguageExtension(file.Extension))
             .Where(file => !file.FullName.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase))
             .Where(file => !file.FullName.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase))
             .Where(file => !file.Name.EndsWith($".g{file.Extension}", StringComparison.OrdinalIgnoreCase))
             .Select(file => file.FullName)
             .ToList();
+    }
+
+    private static bool IsLightweightLanguageExtension(string extension) => extension.Equals(Constants.FSharpSourceExtension, StringComparison.OrdinalIgnoreCase) ||
+        extension.Equals(Constants.FSharpSignatureExtension, StringComparison.OrdinalIgnoreCase) ||
+        extension.Equals(Constants.FSharpScriptExtension, StringComparison.OrdinalIgnoreCase) ||
+        extension.Equals(Constants.RSourceExtension, StringComparison.OrdinalIgnoreCase) ||
+        extension.Equals(".rmd", StringComparison.OrdinalIgnoreCase) ||
+        extension.Equals(".qmd", StringComparison.OrdinalIgnoreCase) ||
+        extension.Equals(Constants.CSourceExtension, StringComparison.OrdinalIgnoreCase) ||
+        extension.Equals(Constants.CppSourceExtension, StringComparison.OrdinalIgnoreCase) ||
+        extension.Equals(".cc", StringComparison.OrdinalIgnoreCase) ||
+        extension.Equals(".cxx", StringComparison.OrdinalIgnoreCase) ||
+        extension.Equals(Constants.CppHeaderExtension, StringComparison.OrdinalIgnoreCase) ||
+        extension.Equals(".hpp", StringComparison.OrdinalIgnoreCase) ||
+        extension.Equals(".hh", StringComparison.OrdinalIgnoreCase);
+
+    private static void AnalyzeLightweightLanguageDataFlows(string basePath, IEnumerable<string> files, DataFlowPatternSet patterns, DataFlowResult result)
+    {
+        var nodeCounter = result.Nodes.Count;
+        var edgeCounter = result.Edges.Count;
+        var sliceCounter = result.Slices.Count;
+        foreach (var file in files.Where(file => IsLightweightLanguageExtension(Path.GetExtension(file))))
+        {
+            var language = DetectLightweightLanguage(file);
+            var tainted = new Dictionary<string, DataFlowNode>(StringComparer.OrdinalIgnoreCase);
+            var lines = File.ReadAllLines(file);
+            string? currentMethod = null;
+            string? currentClass = Path.GetFileNameWithoutExtension(file);
+            string? currentNamespace = language;
+            for (var index = 0; index < lines.Length; index++)
+            {
+                var line = lines[index];
+                UpdateLightweightContext(line, language, ref currentNamespace, ref currentClass, ref currentMethod);
+                var sourceMatch = MatchLightweightSource(line, language, patterns);
+                var assignedName = ExtractAssignedName(line, language);
+                if (sourceMatch is not null)
+                {
+                    var sourceNode = CreateLightweightNode(result, ref nodeCounter, "Source", assignedName ?? sourceMatch.Pattern, true, false, sourceMatch, basePath, file, index + 1, Math.Max(1, line.IndexOf(sourceMatch.Pattern, StringComparison.OrdinalIgnoreCase) + 1), currentNamespace, currentClass, currentMethod, line);
+                    sourceNode.Properties["language"] = language;
+                    sourceNode.Properties["analysis"] = "lightweight";
+                    if (!string.IsNullOrWhiteSpace(assignedName)) tainted[assignedName] = sourceNode;
+                }
+
+                var sinkMatch = MatchLightweightSink(line, language, patterns);
+                if (sinkMatch is null) continue;
+                var taintedInputs = tainted.Where(kvp => line.Contains(kvp.Key, StringComparison.OrdinalIgnoreCase)).Select(kvp => kvp.Value).ToList();
+                if (taintedInputs.Count == 0 && sourceMatch is not null)
+                {
+                    taintedInputs.Add(result.Nodes.Last());
+                }
+                if (taintedInputs.Count == 0) continue;
+
+                var sinkNode = CreateLightweightNode(result, ref nodeCounter, "Sink", sinkMatch.Pattern, false, true, sinkMatch, basePath, file, index + 1, Math.Max(1, line.IndexOf(sinkMatch.Pattern, StringComparison.OrdinalIgnoreCase) + 1), currentNamespace, currentClass, currentMethod, line);
+                sinkNode.Properties["language"] = language;
+                sinkNode.Properties["analysis"] = "lightweight";
+                foreach (var source in taintedInputs.DistinctBy(node => node.Id))
+                {
+                    var edge = new DataFlowEdge
+                    {
+                        Id = $"dfl{++edgeCounter}",
+                        SourceId = source.Id,
+                        TargetId = sinkNode.Id,
+                        Kind = "LightweightFlow",
+                        Label = assignedName,
+                        SourcePurl = source.Purl,
+                        TargetPurl = sinkNode.Purl,
+                        FileName = Path.GetFileName(file),
+                        LineNumber = index + 1,
+                        ColumnNumber = 1
+                    };
+                    result.Edges.Add(edge);
+                    result.Slices.Add(new DataFlowSlice
+                    {
+                        Id = $"dfsl{++sliceCounter}",
+                        SourceId = source.Id,
+                        SinkId = sinkNode.Id,
+                        NodeIds = [source.Id, sinkNode.Id],
+                        EdgeIds = [edge.Id],
+                        SourceCategory = source.Category,
+                        SinkCategory = sinkNode.Category,
+                        SinkArgument = line.Trim(),
+                        SinkArgumentIndex = 0,
+                        TaintKinds = sourceMatch?.TaintKinds.Concat(sinkMatch.TaintKinds).Distinct(StringComparer.OrdinalIgnoreCase).ToList() ?? sinkMatch.TaintKinds,
+                        Confidence = "Low",
+                        Summary = $"Lightweight {language} data flow from {source.Name} to {sinkNode.Name}."
+                    });
+                }
+            }
+        }
+    }
+
+    private static DataFlowNode CreateLightweightNode(DataFlowResult result, ref int nodeCounter, string kind, string name, bool isSource, bool isSink, DataFlowPattern pattern, string basePath, string file, int line, int column, string? namespaceName, string? className, string? methodName, string code)
+    {
+        var node = new DataFlowNode
+        {
+            Id = $"dfln{++nodeCounter}",
+            Kind = kind,
+            Name = name,
+            Path = Directory.Exists(basePath) ? Path.GetRelativePath(basePath, file) : Path.GetFileName(file),
+            FileName = Path.GetFileName(file),
+            Namespace = namespaceName,
+            ClassName = className,
+            MethodName = methodName,
+            LineNumber = line,
+            ColumnNumber = column,
+            IsSource = isSource,
+            IsSink = isSink,
+            MatchedPatterns = [pattern.Pattern],
+            Category = pattern.Category,
+            Code = code.Trim().Length <= 240 ? code.Trim() : code.Trim()[..240] + "…"
+        };
+        node.Properties["confidence"] = pattern.Confidence;
+        if (pattern.TaintKinds.Count > 0) node.Properties["taintKinds"] = string.Join(",", pattern.TaintKinds);
+        result.Nodes.Add(node);
+        return node;
+    }
+
+    private static string DetectLightweightLanguage(string file) => Path.GetExtension(file).ToLowerInvariant() switch
+    {
+        ".fs" or ".fsi" or ".fsx" => "fsharp",
+        ".r" or ".rmd" or ".qmd" => "r",
+        _ => "vcpp"
+    };
+
+    private static void UpdateLightweightContext(string line, string language, ref string? namespaceName, ref string? className, ref string? methodName)
+    {
+        var trimmed = line.Trim();
+        if (language == "fsharp")
+        {
+            var module = Regex.Match(trimmed, @"^(?:namespace|module)\s+([\w\.]+)");
+            if (module.Success) namespaceName = module.Groups[1].Value;
+            var type = Regex.Match(trimmed, @"^type\s+(\w+)");
+            if (type.Success) className = type.Groups[1].Value;
+            var fn = Regex.Match(trimmed, @"^(?:let|member)\s+(?:rec\s+)?(?:\w+\.)?(\w+)");
+            if (fn.Success) methodName = fn.Groups[1].Value;
+        }
+        else if (language == "r")
+        {
+            var fn = Regex.Match(trimmed, @"^(\w+)\s*(?:<-|=)\s*function\s*\(");
+            if (fn.Success) methodName = fn.Groups[1].Value;
+        }
+        else
+        {
+            var fn = Regex.Match(trimmed, @"(?:(\w+)::)?(\w+)\s*\([^;]*\)\s*(?:const\s*)?\{");
+            if (fn.Success)
+            {
+                if (fn.Groups[1].Success) className = fn.Groups[1].Value;
+                methodName = fn.Groups[2].Value;
+            }
+        }
+    }
+
+    private static string? ExtractAssignedName(string line, string language)
+    {
+        var match = language switch
+        {
+            "r" => Regex.Match(line, @"\b([A-Za-z_][\w.]*)\s*(?:<-|=)"),
+            "fsharp" => Regex.Match(line, @"\blet\s+(?:mutable\s+)?([A-Za-z_][\w']*)\s*="),
+            _ => Regex.Match(line, @"\b(?:auto|char\*|std::string|string|const\s+char\*)?\s*([A-Za-z_][\w]*)\s*=")
+        };
+        return match.Success ? match.Groups[1].Value : null;
+    }
+
+    private static DataFlowPattern? MatchLightweightSource(string line, string language, DataFlowPatternSet patterns)
+    {
+        var defaults = language switch
+        {
+            "r" => new[] { "input$", "req$", "commandArgs", "Sys.getenv", "fileInput" },
+            "fsharp" => new[] { "Request.Query", "Request.Form", "Request.Body", "HttpContext", "argv", "Console.ReadLine" },
+            _ => new[] { "argv", "getenv", "std::cin", "recv(", "ReadFile", "InternetReadFile" }
+        };
+        var patternMatch = patterns.Sources.FirstOrDefault(pattern => PatternMatches(line, pattern));
+        if (patternMatch is not null) return patternMatch;
+        var token = defaults.FirstOrDefault(candidate => line.Contains(candidate, StringComparison.OrdinalIgnoreCase));
+        return token is null
+            ? null
+            : new DataFlowPattern { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Code, Pattern = token, Category = language == "r" ? "r-input" : language == "fsharp" ? "fsharp-input" : "native-input", Description = "Lightweight language input source", TaintKinds = ["user-input"], Confidence = "Low" };
+    }
+
+    private static DataFlowPattern? MatchLightweightSink(string line, string language, DataFlowPatternSet patterns)
+    {
+        var defaults = language switch
+        {
+            "r" => new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["system("] = "command", ["system2("] = "command", ["shell("] = "command", ["eval("] = "eval", ["parse("] = "eval", ["dbGetQuery"] = "sql", ["dbExecute"] = "sql", ["httr::GET"] = "network", ["download.file"] = "network" },
+            "fsharp" => new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["Process.Start"] = "command", ["SqlCommand"] = "sql", ["File."] = "file", ["HttpClient"] = "network", ["Deserialize"] = "deserialization" },
+            _ => new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["system("] = "command", ["popen("] = "command", ["CreateProcess"] = "command", ["SQLExecDirect"] = "sql", ["strcpy"] = "memory", ["sprintf"] = "memory", ["EVP_DecryptInit"] = "crypto", ["SSL_CTX_set_verify"] = "tls" }
+        };
+        var patternMatch = patterns.Sinks.FirstOrDefault(pattern => PatternMatches(line, pattern));
+        if (patternMatch is not null) return patternMatch;
+        foreach (var (token, category) in defaults)
+        {
+            if (line.Contains(token, StringComparison.OrdinalIgnoreCase))
+            {
+                return new DataFlowPattern { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Code, Pattern = token, Category = category, Description = "Lightweight language sink", TaintKinds = [category], Confidence = "Low" };
+            }
+        }
+        return null;
+    }
+
+    private static bool PatternMatches(string value, DataFlowPattern pattern)
+    {
+        return pattern.Match switch
+        {
+            DataFlowMatchKind.Exact => value.Equals(pattern.Pattern, StringComparison.OrdinalIgnoreCase),
+            DataFlowMatchKind.Prefix => value.StartsWith(pattern.Pattern, StringComparison.OrdinalIgnoreCase),
+            DataFlowMatchKind.Suffix => value.EndsWith(pattern.Pattern, StringComparison.OrdinalIgnoreCase),
+            DataFlowMatchKind.Regex => Regex.IsMatch(value, pattern.Pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant),
+            _ => value.Contains(pattern.Pattern, StringComparison.OrdinalIgnoreCase)
+        };
     }
 
     private static List<PortableExecutableReference> GetMetadataReferences(string path, List<string> diagnostics)
@@ -907,7 +1147,7 @@ public static partial class DataFlowAnalyzer
                     symbol: parameter.ToDisplayString(),
                     typeName: Normalize(parameter.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)),
                     code: parameter.Name);
-                _taintedSymbols[SymbolKey(parameter)] = new TaintTrace([node.Id]);
+                _taintedSymbols[SymbolKey(parameter)] = new TaintTrace([node.Id], matched.SelectMany(pattern => pattern.TaintKinds.Count > 0 ? pattern.TaintKinds : [pattern.Category ?? "user-input"]).Distinct(StringComparer.OrdinalIgnoreCase).ToList(), []);
             }
         }
 
@@ -981,8 +1221,10 @@ public static partial class DataFlowAnalyzer
                 }
 
                 var assignmentNode = graph.AddNode("Assignment", symbol.Name, syntax, model, basePath, sourceFilePath, _currentMethod, isSource: false, isSink: false, matchedPatterns: [], category: null, symbol: symbol.ToDisplayString(), typeName: GetSymbolType(symbol), code: syntax.ToString());
+                if (taint.TaintKinds.Count > 0) assignmentNode.Properties["taintKinds"] = string.Join(',', taint.TaintKinds);
+                if (taint.FieldPaths.Count > 0) assignmentNode.Properties["fieldPaths"] = string.Join(',', taint.FieldPaths);
                 graph.AddEdges(taint.NodeIds, assignmentNode.Id, edgeKind, syntax, sourceFilePath, symbol.Name);
-                _taintedSymbols[taintKey] = taint.Append(assignmentNode.Id);
+                _taintedSymbols[taintKey] = taint.Append(assignmentNode.Id).WithFieldPath(TaintKey(target));
             }
         }
 
@@ -1267,12 +1509,19 @@ public static partial class DataFlowAnalyzer
                     symbol: GetOperationSymbol(operation),
                     typeName: Normalize(operation.Type?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty),
                     code: operation.Syntax.ToString());
-                return new TaintTrace([sourceNode.Id]);
+                return new TaintTrace([sourceNode.Id], matchedSourcePatterns.SelectMany(pattern => pattern.TaintKinds.Count > 0 ? pattern.TaintKinds : [pattern.Category ?? "user-input"]).Distinct(StringComparer.OrdinalIgnoreCase).ToList(), []);
             }
 
             if (operation is IInvocationOperation invocation)
             {
                 var argTaint = Combine(invocation.Arguments.Select(a => GetTaint(a.Value)));
+                var receiverTaint = GetTaint(invocation.Instance);
+                if (receiverTaint is not null && ShouldPropagateReceiverThrough(invocation.TargetMethod))
+                {
+                    var node = graph.AddNode("Call", invocation.TargetMethod.Name, operation, model, basePath, sourceFilePath, _currentMethod, isSource: false, isSink: false, matchedPatterns: [], category: null, symbol: DescribeSymbol(invocation.TargetMethod), typeName: Normalize(invocation.Type?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty), code: operation.Syntax.ToString());
+                    graph.AddEdges(receiverTaint.NodeIds, node.Id, "ReceiverReturn", operation.Syntax, sourceFilePath, invocation.TargetMethod.Name);
+                    return receiverTaint.Append(node.Id);
+                }
                 if (argTaint is not null && TryGetSummary(invocation.TargetMethod, out var invocationSummary))
                 {
                     var argumentList = invocation.Arguments.ToList();
@@ -1359,6 +1608,17 @@ public static partial class DataFlowAnalyzer
             return matchedPassthrough || methodSymbol.ContainingNamespace?.ToDisplayString().StartsWith("System", StringComparison.Ordinal) == true || !methodSymbol.Locations.Any(location => location.IsInMetadata);
         }
 
+        private static bool ShouldPropagateReceiverThrough(IMethodSymbol methodSymbol)
+        {
+            var type = Normalize(methodSymbol.ContainingType?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty);
+            var name = methodSymbol.Name;
+            return type.StartsWith("System.Collections", StringComparison.Ordinal) ||
+                   type.StartsWith("System.Linq", StringComparison.Ordinal) ||
+                   type == "string" ||
+                   type == "System.String" ||
+                   name is "First" or "FirstOrDefault" or "Single" or "SingleOrDefault" or "Last" or "LastOrDefault" or "ElementAt" or "ToList" or "ToArray" or "Select" or "Where" or "Trim" or "Replace" or "Substring" or "ToString";
+        }
+
         private IEnumerable<DataFlowPattern> MatchSymbol(ISymbol symbol, SyntaxNode syntax, IEnumerable<DataFlowPattern> candidatePatterns)
         {
             var normalizedSymbol = DescribeSymbol(symbol);
@@ -1415,7 +1675,9 @@ public static partial class DataFlowAnalyzer
         private static TaintTrace? Combine(IEnumerable<TaintTrace?> traces)
         {
             var nodeIds = traces.Where(t => t is not null).SelectMany(t => t!.NodeIds).Distinct(StringComparer.Ordinal).ToList();
-            return nodeIds.Count == 0 ? null : new TaintTrace(nodeIds);
+            var taintKinds = traces.Where(t => t is not null).SelectMany(t => t!.TaintKinds).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            var fieldPaths = traces.Where(t => t is not null).SelectMany(t => t!.FieldPaths).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            return nodeIds.Count == 0 ? null : new TaintTrace(nodeIds, taintKinds, fieldPaths);
         }
 
         private static IOperation Strip(IOperation operation)
@@ -1498,9 +1760,12 @@ public static partial class DataFlowAnalyzer
         }
     }
 
-    private sealed record TaintTrace(List<string> NodeIds)
+    private sealed record TaintTrace(List<string> NodeIds, List<string> TaintKinds, List<string> FieldPaths)
     {
-        public TaintTrace Append(string nodeId) => new(NodeIds.Concat([nodeId]).Distinct(StringComparer.Ordinal).ToList());
+        public TaintTrace Append(string nodeId) => new(NodeIds.Concat([nodeId]).Distinct(StringComparer.Ordinal).ToList(), TaintKinds, FieldPaths);
+        public TaintTrace WithFieldPath(string? fieldPath) => string.IsNullOrWhiteSpace(fieldPath) || FieldPaths.Contains(fieldPath, StringComparer.Ordinal)
+            ? this
+            : new TaintTrace(NodeIds, TaintKinds, FieldPaths.Concat([fieldPath]).ToList());
     }
 
     private sealed class DataFlowGraphBuilder(DataFlowResult result, PackageUrlResolver purlResolver)
@@ -1598,6 +1863,9 @@ public static partial class DataFlowAnalyzer
                 Purls = sliceNodes.Select(node => node.Purl).Concat(patternPurls).Where(purl => !string.IsNullOrWhiteSpace(purl)).Distinct(StringComparer.Ordinal).ToList()!,
                 SinkArgument = sinkArgument,
                 SinkArgumentIndex = sinkArgumentIndex,
+                TaintKinds = trace.TaintKinds.Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
+                FieldPaths = trace.FieldPaths.Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
+                Confidence = sinkPattern?.Confidence ?? "Medium",
                 Summary = $"Data flows from {firstSource} to {sinkNode.Name} argument {sinkArgumentIndex}."
             });
         }

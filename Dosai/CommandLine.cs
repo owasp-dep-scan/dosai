@@ -54,6 +54,11 @@ public class CommandLine
             Description = "The data-flow graph output file location and name. Defaults to --o with the format extension."
         };
 
+        var cryptoFormatOption = new Option<string?>("--format")
+        {
+            Description = "Crypto output format: dosai, cyclonedx, cdxgen-evidence. Defaults to dosai."
+        };
+
         var printSourcesSinksOption = new Option<bool>("--print-sources-sinks")
         {
             Description = "Print auto-detected data-flow sources and sinks to stdout for pattern diagnostics."
@@ -113,6 +118,13 @@ public class CommandLine
             printSourcesSinksOption
         };
 
+        var cryptoCommand = new Command("crypto", "Detect cryptographic assets, operations, materials, misuse, and CBOM evidence")
+        {
+            pathOption,
+            outputFileOption,
+            cryptoFormatOption
+        };
+
         var agentContextCommand = new Command("agent-context", "Generate compact AI-agent context from data-flow analysis")
         {
             pathOption,
@@ -156,6 +168,7 @@ public class CommandLine
 
         rootCommand.Subcommands.Add(methodsCommand);
         rootCommand.Subcommands.Add(dataFlowsCommand);
+        rootCommand.Subcommands.Add(cryptoCommand);
         rootCommand.Subcommands.Add(agentContextCommand);
         rootCommand.Subcommands.Add(reportCommand);
         rootCommand.Subcommands.Add(diffCommand);
@@ -250,6 +263,15 @@ public class CommandLine
                 File.WriteAllText(graphOutputFile!, DataFlowExporter.Export(dataFlowResult, format));
             }
 
+            return 0;
+        });
+
+        cryptoCommand.SetAction(parseResult =>
+        {
+            var path = parseResult.GetValue(pathOption)!;
+            var outputFile = parseResult.GetValue(outputFileOption)!;
+            var format = parseResult.GetValue(cryptoFormatOption);
+            File.WriteAllText(outputFile, CryptoAnalyzer.GetCryptoAnalysis(path, format));
             return 0;
         });
 

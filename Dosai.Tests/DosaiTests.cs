@@ -238,6 +238,116 @@ class FlowSample
     }
 
     [Fact]
+    public void CryptoAnalysis_DetectsWeakCryptoHardcodedMaterialAndCycloneDxExport()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var samplePath = Path.Combine(tempDirectory.Path, "CryptoSample.cs");
+        File.WriteAllText(samplePath, """
+using System.Net.Http;
+using System.Security.Cryptography;
+using System.Text;
+
+class CryptoSample
+{
+    static string StaticKey = "0123456789abcdef0123456789abcdef";
+
+    public static byte[] Hash(string input)
+    {
+        using var md5 = MD5.Create();
+        return md5.ComputeHash(Encoding.UTF8.GetBytes(input));
+    }
+
+    public static HttpClient UnsafeClient()
+    {
+        var handler = new HttpClientHandler();
+        handler.ServerCertificateCustomValidationCallback = (message, cert, chain, errors) => true;
+        return new HttpClient(handler);
+    }
+}
+""");
+
+        var result = CryptoAnalyzer.Analyze(tempDirectory.Path);
+
+        Assert.Contains(result.Assets, asset => asset.Name == "MD5" && asset.Strength == "weak");
+        Assert.Contains(result.Materials, material => material.Storage == "hardcoded" && material.Fingerprint is not null);
+        Assert.Contains(result.Findings, finding => finding.RuleId == "DOSAI-CRYPTO-WEAK-HASH-MD5");
+        Assert.Contains(result.Findings, finding => finding.RuleId == "DOSAI-CRYPTO-TLS-CERT-VALIDATION-DISABLED");
+
+        var cdx = CryptoAnalyzer.GetCryptoAnalysis(tempDirectory.Path, "cyclonedx");
+        using var document = JsonDocument.Parse(cdx);
+        Assert.Equal("CycloneDX", document.RootElement.GetProperty("bomFormat").GetString());
+        Assert.True(document.RootElement.GetProperty("components").GetArrayLength() >= 1);
+    }
+
+    [Fact]
+    public void GetMethods_RAndVcxxSources_ReturnsLightweightMethodsCallsAndValidCallGraph()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "app.R"), """
+library(DBI)
+run <- function(input) {
+  system(input$cmd)
+  DBI::dbGetQuery(con, input$sql)
+}
+""");
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "native.cpp"), """
+#include <cstdlib>
+int main(int argc, char** argv) {
+  system(argv[1]);
+  return 0;
+}
+""");
+
+        var result = Depscan.Dosai.GetMethods(tempDirectory.Path);
+        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result, new JsonSerializerOptions { Converters = { new JsonStringEnumConverter() } });
+
+        Assert.NotNull(methodsSlice);
+        Assert.Contains(methodsSlice!.Methods ?? [], method => method.Module == "R" && method.Name == "run");
+        Assert.Contains(methodsSlice.Methods ?? [], method => method.Module == "VC++" && method.Name == "main");
+        Assert.Contains(methodsSlice.MethodCalls ?? [], call => call.CalledMethod == "system");
+        Assert.NotNull(methodsSlice.CallGraph);
+        var nodeIds = methodsSlice.CallGraph!.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
+        Assert.All(methodsSlice.CallGraph.Edges, edge =>
+        {
+            Assert.Contains(edge.SourceId, nodeIds);
+            Assert.Contains(edge.TargetId, nodeIds);
+        });
+    }
+
+    [Fact]
+    public void GetDataFlows_RAndVcxxSources_ReturnsLightweightSlicesWithValidEdges()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "app.R"), """
+run <- function(input) {
+  cmd <- input$cmd
+  system(cmd)
+}
+""");
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "native.cpp"), """
+#include <cstdlib>
+int main(int argc, char** argv) {
+  auto cmd = argv[1];
+  system(cmd);
+  return 0;
+}
+""");
+
+        var resultJson = DataFlowAnalyzer.GetDataFlows(tempDirectory.Path);
+        var result = JsonSerializer.Deserialize<DataFlowResult>(resultJson, new JsonSerializerOptions { Converters = { new JsonStringEnumConverter() } });
+
+        Assert.NotNull(result);
+        Assert.Contains(result!.Slices, slice => slice.SinkCategory == "command" && slice.Confidence == "Low");
+        Assert.Contains(result.Nodes, node => node.Properties.TryGetValue("analysis", out var analysis) && analysis == "lightweight");
+        var nodeIds = result.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
+        Assert.All(result.Edges, edge =>
+        {
+            Assert.Contains(edge.SourceId, nodeIds);
+            Assert.Contains(edge.TargetId, nodeIds);
+        });
+    }
+
+    [Fact]
     public void GetDataFlows_CustomPatterns_MergeWithDefaultsAndFindSlice()
     {
         using var tempDirectory = new TemporaryDirectory();

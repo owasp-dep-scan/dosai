@@ -215,7 +215,10 @@ public static class Dosai
         var relevantExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             Constants.AssemblyExtension, Constants.ExeExtension,
-            Constants.CSharpSourceExtension, Constants.VBSourceExtension, Constants.FSharpSourceExtension
+            Constants.CSharpSourceExtension, Constants.VBSourceExtension, Constants.FSharpSourceExtension,
+            Constants.FSharpSignatureExtension, Constants.FSharpScriptExtension,
+            Constants.RSourceExtension, ".rmd", ".qmd",
+            Constants.CSourceExtension, Constants.CppSourceExtension, ".cc", ".cxx", Constants.CppHeaderExtension, ".hpp", ".hh"
         };
         return relevantExtensions.Contains(extension);
     }
@@ -1775,6 +1778,10 @@ public static class Dosai
         sourceMethods.AddRange(fsharpMethods);
         allUsingDirectives.AddRange(fsharpDependencies);
         allMethodCalls.AddRange(fsharpMethodCalls);
+        var (lightweightMethods, lightweightDependencies, lightweightMethodCalls) = LightweightLanguageFrontendAnalyzer.GetMethods(path, includeFSharp: false);
+        sourceMethods.AddRange(lightweightMethods);
+        allUsingDirectives.AddRange(lightweightDependencies);
+        allMethodCalls.AddRange(lightweightMethodCalls);
         var methodNodeLookup = new Dictionary<string, MethodNode>(StringComparer.Ordinal);
         foreach (var method in sourceMethods.Where(m => !string.IsNullOrWhiteSpace(m.Name)))
         {

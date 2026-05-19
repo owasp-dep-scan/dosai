@@ -152,6 +152,11 @@ public static class DosaiQueryEngine
         "package" or "packages" or "packagereachability" => "packageReachability",
         "dangerous" or "dangerousapis" or "dangerousapireachability" => "dangerousApiReachability",
         "summary" or "summaries" or "methodsummaries" => "methodSummaries",
+        "cryptoasset" or "cryptoassets" or "assets" => "assets",
+        "cryptooperation" or "cryptooperations" or "operations" => "operations",
+        "cryptomaterial" or "cryptomaterials" or "materials" => "materials",
+        "cryptoprotocol" or "cryptoprotocols" or "protocols" => "protocols",
+        "cryptofinding" or "cryptofindings" or "findings" => "findings",
         _ => collection
     };
 

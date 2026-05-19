@@ -10,6 +10,7 @@ List details about the namespaces, methods, dependencies, properties, fields, ev
 
 - `methods` Retrieve details about the methods
 - `dataflows` Build source-to-sink data-flow slices with framework pattern packs
+- `crypto` Detect cryptographic assets, operations, materials, misuse, reachability, and CBOM evidence
 - `agent-context` Generate compact agent context for AI/security review
 - `query` Filter Dosai JSON with expressions such as `slices[sinkCategory=sql]`
 - `mcp` Run an MCP-style JSON-RPC server over stdin/stdout
@@ -24,7 +25,7 @@ List details about the namespaces, methods, dependencies, properties, fields, ev
 
 ### Data-flow analysis
 
-`dataflows` includes built-in .NET source/sink packs for ASP.NET, data access, filesystem, serialization, cloud/serverless, RPC, and auth-sensitive APIs. Custom pattern JSON can add `sources`, `sinks`, `passthroughs`, and `sanitizers`; sanitizer matches stop taint propagation and validators such as `Regex.IsMatch` suppress guarded true branches.
+`dataflows` includes built-in .NET source/sink packs for ASP.NET, data access, filesystem, serialization, cloud/serverless, RPC, auth-sensitive APIs, and crypto-sensitive APIs. Custom pattern JSON can add `sources`, `sinks`, `passthroughs`, and `sanitizers`; sanitizer matches stop taint propagation and validators such as `Regex.IsMatch` suppress guarded true branches.
 
 ```bash
 dotnet run --project ./Dosai/Dosai.csproj -- dataflows \
@@ -35,7 +36,50 @@ dotnet run --project ./Dosai/Dosai.csproj -- dataflows \
   --graph-out /tmp/dosai-dataflows.graphml
 ```
 
-The data-flow engine performs field-sensitive property/field taint where receiver identity is available and emits simple interprocedural summaries for parameter-to-return and parameter-to-sink callees.
+The data-flow engine performs field-sensitive property/field taint where receiver identity is available and emits simple interprocedural summaries for parameter-to-return and parameter-to-sink callees. Slices can carry taint kinds, field paths, confidence, and lightweight F#/R/VC++ source-to-sink evidence for common script/native input and sink patterns.
+
+### Cryptography and CBOM evidence
+
+`crypto` detects cryptographic algorithms, operations, key/certificate-like material, TLS settings, weak algorithms, hardcoded material, static IVs/nonces, insecure RNG, disabled certificate validation, legacy TLS references, and low PBKDF2 iteration counts. Findings include source locations and best-effort reachability from CLI/API entry points when callgraph data is available.
+
+Native Dosai JSON:
+
+```bash
+dotnet run --project ./Dosai/Dosai.csproj -- crypto \
+  --path ./Dosai \
+  --o /tmp/dosai-crypto.json \
+  --format dosai
+```
+
+CycloneDX-style CBOM output:
+
+```bash
+dotnet run --project ./Dosai/Dosai.csproj -- crypto \
+  --path ./Dosai \
+  --o /tmp/dosai-cbom.json \
+  --format cyclonedx
+```
+
+cdxgen evidence sidecar:
+
+```bash
+dotnet run --project ./Dosai/Dosai.csproj -- crypto \
+  --path ./Dosai \
+  --o /tmp/dosai-crypto-evidence.json \
+  --format cdxgen-evidence
+```
+
+The CycloneDX and cdxgen-evidence modes preserve Dosai properties such as `dosai:crypto:family`, `dosai:crypto:strength`, `dosai:crypto:reachableFromEntryPoint`, and `dosai:location` so downstream BOM tooling can correlate code-level crypto evidence with package BOMs.
+
+### Lightweight F#, R, and VC++ frontends
+
+Dosai now includes lightweight source frontends for additional ecosystems:
+
+- F#: `.fs`, `.fsi`, `.fsx` function/module extraction, dependencies, calls, and lightweight data-flow sources/sinks.
+- R: `.R`, `.Rmd`, `.qmd` functions, library dependencies, Shiny/plumber-style inputs, SQL/shell/eval/network sinks.
+- VC++/C/C++: `.c`, `.cpp`, `.cc`, `.cxx`, `.h`, `.hpp`, `.hh` functions, includes, calls, native command/SQL/memory/crypto/TLS sinks.
+
+These frontends are intentionally conservative and are marked as lightweight evidence. They provide immediate inventory, callgraph, data-flow, and crypto coverage while leaving room for future full semantic frontends using FSharp.Compiler.Service and libclang/compile_commands.json.
 
 ### Querying JSON
 
@@ -55,7 +99,7 @@ printf '{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n' | \
   dotnet run --project ./Dosai/Dosai.csproj -- mcp --path ./Dosai
 ```
 
-The server exposes `dosai.methods`, `dosai.dataflows`, `dosai.agent_context`, and `dosai.query` tool calls as line-delimited JSON-RPC responses.
+The server exposes `dosai.methods`, `dosai.dataflows`, `dosai.crypto`, `dosai.agent_context`, and `dosai.query` tool calls as line-delimited JSON-RPC responses.
 
 ### API authorization metadata
 
