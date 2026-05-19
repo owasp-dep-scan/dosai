@@ -7,8 +7,8 @@ Dosai's `crypto` command produces code-level cryptographic evidence for security
 Native Dosai JSON:
 
 ```bash
-dotnet run --project /Users/prabhu/work/owasp/dosai/Dosai/Dosai.csproj -- crypto \
-  --path /Users/prabhu/work/owasp/dosai/Dosai \
+dotnet run --project ./Dosai/Dosai.csproj -- crypto \
+  --path ./Dosai \
   --o /tmp/dosai-crypto.json \
   --format dosai
 ```
@@ -16,8 +16,8 @@ dotnet run --project /Users/prabhu/work/owasp/dosai/Dosai/Dosai.csproj -- crypto
 Combined CycloneDX-style CBOM JSON:
 
 ```bash
-dotnet run --project /Users/prabhu/work/owasp/dosai/Dosai/Dosai.csproj -- crypto \
-  --path /Users/prabhu/work/owasp/dosai/Dosai \
+dotnet run --project ./Dosai/Dosai.csproj -- crypto \
+  --path ./Dosai \
   --o /tmp/dosai-cbom.json \
   --format cyclonedx
 ```

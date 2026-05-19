@@ -369,6 +369,7 @@ int main(int argc, char** argv) {
         }
         Assert.Contains(methodsSlice.Methods ?? [], method => method.Module == "VC++" && method.Name == "main");
         Assert.Contains(methodsSlice.MethodCalls ?? [], call => call.CalledMethod == "system");
+        Assert.DoesNotContain(methodsSlice.MethodCalls ?? [], call => call.CalledMethod == "main");
         Assert.NotNull(methodsSlice.CallGraph);
         var nodeIds = methodsSlice.CallGraph!.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
         Assert.All(methodsSlice.CallGraph.Edges, edge =>
@@ -376,6 +377,27 @@ int main(int argc, char** argv) {
             Assert.Contains(edge.SourceId, nodeIds);
             Assert.Contains(edge.TargetId, nodeIds);
         });
+    }
+
+    [Fact]
+    public void GetMethods_CSharpTopLevelStatements_CapturesMethodCallsInCallGraph()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Program.cs"), """
+using System;
+
+Console.WriteLine("hello");
+""");
+
+        var result = Depscan.Dosai.GetMethods(tempDirectory.Path);
+        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result, new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() }
+        });
+
+        Assert.NotNull(methodsSlice);
+        Assert.Contains(methodsSlice.MethodCalls ?? [], call => call.CalledMethod is not null && call.CalledMethod.Contains("System.Console.WriteLine") && call.TargetId is not null && call.TargetId.Contains("System.Console.WriteLine"));
+        Assert.Contains(methodsSlice.CallGraph?.Edges ?? [], edge => edge.TargetId.Contains("System.Console.WriteLine"));
     }
 
     [Fact]
@@ -735,6 +757,18 @@ class QueryFlow { static void Main(string[] args) { Process.Start(args[0]); } }
         var queryResult = JsonSerializer.Deserialize<List<JsonElement>>(DosaiQueryEngine.QueryJson(json, "slices[sinkCategory=command]"));
         Assert.NotNull(queryResult);
         Assert.NotEmpty(queryResult);
+
+        var numericQueryResult = JsonSerializer.Deserialize<List<JsonElement>>(DosaiQueryEngine.QueryJson("""
+{
+  "items": [
+    { "count": 9 },
+    { "count": 10 },
+    { "count": 11 }
+  ]
+}
+""", "items[count>=10 && count<=11]"));
+        Assert.NotNull(numericQueryResult);
+        Assert.Equal(2, numericQueryResult.Count);
 
         using var input = new StringReader("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n");
         using var output = new StringWriter();

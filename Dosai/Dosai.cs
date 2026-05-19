@@ -1760,11 +1760,13 @@ public static class Dosai
             {
                 var walker = new MethodCallOperationWalker(model, allMethodCalls, path, sourceFilePath, fileName);
                 var operationNodes = csRoot is not null
-                    ? csRoot.DescendantNodes().Where(node => node is Microsoft.CodeAnalysis.CSharp.Syntax.BlockSyntax or ArrowExpressionClauseSyntax or EqualsValueClauseSyntax or ConstructorInitializerSyntax)
+                    ? csRoot.DescendantNodes().Where(node => node is Microsoft.CodeAnalysis.CSharp.Syntax.BlockSyntax or ArrowExpressionClauseSyntax or EqualsValueClauseSyntax or ConstructorInitializerSyntax or GlobalStatementSyntax)
                     : vbRoot?.DescendantNodes().Where(node => node is Microsoft.CodeAnalysis.VisualBasic.Syntax.StatementSyntax or Microsoft.CodeAnalysis.VisualBasic.Syntax.EqualsValueSyntax) ?? [];
                 foreach (var operationNode in operationNodes)
                 {
-                    var operation = model.GetOperation(operationNode);
+                    var operation = operationNode is GlobalStatementSyntax globalStatement
+                        ? model.GetOperation(globalStatement.Statement)
+                        : model.GetOperation(operationNode);
                     if (operation is not null)
                     {
                         walker.Visit(operation);

@@ -165,19 +165,28 @@ public static partial class LanguageFrontendAnalyzer
             }
 
             var function = CppFunction().Match(line);
+            var callScanOffset = 0;
             if (function.Success)
             {
                 className = function.Groups[1].Success ? function.Groups[1].Value : className;
                 currentFunction = function.Groups[2].Value;
                 currentSourceId = CreateId("C++", className, currentFunction, file, i + 1);
                 methods.Add(CreateMethod(basePath, file, "C++", className, currentFunction, "VC++", currentSourceId, i + 1, Math.Max(1, line.IndexOf(currentFunction, StringComparison.Ordinal) + 1)));
+
+                var bodyStart = line.IndexOf('{', StringComparison.Ordinal);
+                if (bodyStart < 0)
+                {
+                    continue;
+                }
+
+                callScanOffset = bodyStart + 1;
             }
 
-            foreach (Match call in CppCall().Matches(line))
+            foreach (Match call in CppCall().Matches(line[callScanOffset..]))
             {
                 var name = call.Groups["name"].Value;
                 if (IsKeyword(name)) continue;
-                calls.Add(CreateCall(basePath, file, currentSourceId, "C++", className, name, i + 1, call.Index + 1));
+                calls.Add(CreateCall(basePath, file, currentSourceId, "C++", className, name, i + 1, callScanOffset + call.Index + 1));
             }
         }
     }
