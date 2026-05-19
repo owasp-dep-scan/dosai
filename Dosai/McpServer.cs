@@ -128,7 +128,7 @@ public static class McpServer
                 ["path"] = new { type = "string", description = "File or directory to inspect." },
                 ["patterns"] = new { type = "string", description = "Optional data-flow pattern JSON file." },
                 ["patternPacks"] = new { type = "string", description = "Comma-separated built-in pattern packs." },
-                ["format"] = new { type = "string", description = "Output format for dosai.crypto: dosai, cyclonedx, cdxgen-evidence." },
+                ["format"] = new { type = "string", description = "Output format for dosai.crypto: dosai, cyclonedx." },
                 ["input"] = new { type = "string", description = "Existing Dosai JSON file for dosai.query." },
                 ["query"] = new { type = "string", description = "Query expression for dosai.query." }
             }

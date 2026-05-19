@@ -44,7 +44,6 @@ jobs:
         dotnet run --project ./Dosai/ dataflows --path ./Dosai --o /tmp/dosai-dataflows.json --graph-format gexf --graph-out /tmp/dosai-dataflows.gexf
         dotnet run --project ./Dosai/ crypto --path ./Dosai --o /tmp/dosai-crypto.json --format dosai
         dotnet run --project ./Dosai/ crypto --path ./Dosai --o /tmp/dosai-cbom.json --format cyclonedx
-        dotnet run --project ./Dosai/ crypto --path ./Dosai --o /tmp/dosai-crypto-evidence.json --format cdxgen-evidence
         dotnet run --project ./Dosai/ query --input /tmp/dosai-crypto.json --query 'findings[ruleId~=CRYPTO]' --o /tmp/dosai-crypto-findings.json
         dotnet run --project ./Dosai/ agent-context --path ./Dosai --o /tmp/dosai-agent-context.json
         dotnet run --project ./Dosai/ report --input /tmp/dosai-dataflows.json --o /tmp/dosai-report.md
@@ -78,8 +77,9 @@ jobs:
         cbom = json.load(open('/tmp/dosai-cbom.json'))
         assert cbom['bomFormat'] == 'CycloneDX'
         assert cbom['components']
-        evidence = json.load(open('/tmp/dosai-crypto-evidence.json'))
-        assert evidence['type'] == 'crypto-evidence'
+        evidence_types = {p['value'] for c in cbom['components'] for p in c.get('properties', []) if p.get('name') == 'dosai:crypto:evidenceType'}
+        assert 'asset' in evidence_types
+        assert 'operation' in evidence_types
         json.load(open('/tmp/dosai-crypto-findings.json'))
         r_methods = json.load(open('/tmp/dosai-r-methods.json'))
         assert any(m['Module'] == 'R.NativeParser' and m['Name'] == 'run' for m in r_methods['Methods'])

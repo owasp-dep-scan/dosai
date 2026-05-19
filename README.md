@@ -44,7 +44,7 @@ dotnet run --project ./Dosai/Dosai.csproj -- crypto \
   --format dosai
 ```
 
-CycloneDX-style CBOM output:
+Combined CycloneDX-style CBOM output:
 
 ```bash
 dotnet run --project ./Dosai/Dosai.csproj -- crypto \
@@ -53,16 +53,7 @@ dotnet run --project ./Dosai/Dosai.csproj -- crypto \
   --format cyclonedx
 ```
 
-cdxgen evidence sidecar:
-
-```bash
-dotnet run --project ./Dosai/Dosai.csproj -- crypto \
-  --path ./Dosai \
-  --o /tmp/dosai-crypto-evidence.json \
-  --format cdxgen-evidence
-```
-
-The CycloneDX and cdxgen-evidence modes preserve Dosai properties such as `dosai:crypto:family`, `dosai:crypto:strength`, `dosai:crypto:reachableFromEntryPoint`, and `dosai:location` so downstream BOM tooling can correlate code-level crypto evidence with package BOMs.
+The CycloneDX mode preserves Dosai properties such as `dosai:crypto:family`, `dosai:crypto:strength`, `dosai:crypto:reachableFromEntryPoint`, `dosai:crypto:evidenceType`, and `dosai:location` so downstream BOM tooling can correlate code-level crypto assets, operations, materials, protocols, and findings with package BOMs without a separate evidence sidecar.
 
 ### F#, R, and VC++ frontends
 

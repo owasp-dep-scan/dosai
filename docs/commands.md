@@ -21,8 +21,7 @@ flowchart TD
     Dataflows --> DataflowJson[DataFlowResult JSON]
     Dataflows --> DataflowGraph[Data-flow graph export]
     Crypto --> CryptoJson[Crypto analysis JSON]
-    Crypto --> CBOM[CycloneDX CBOM]
-    Crypto --> Evidence[cdxgen evidence]
+    Crypto --> CBOM[Combined CycloneDX CBOM]
     Agent --> AgentJson[Agent context JSON]
     Report --> Markdown[Markdown report]
     Diff --> DiffJson[Diff JSON]
@@ -165,7 +164,7 @@ This is not a full SSA or path-sensitive theorem prover. Complex aliasing, refle
 
 ## `crypto`
 
-`crypto` detects cryptographic components and emits native Dosai JSON, CycloneDX-style CBOM JSON, or cdxgen evidence.
+`crypto` detects cryptographic components and emits native Dosai JSON or combined CycloneDX-style CBOM JSON.
 
 ```bash
 dotnet run --project ./Dosai/Dosai.csproj -- crypto \
@@ -181,13 +180,6 @@ dotnet run --project ./Dosai/Dosai.csproj -- crypto \
   --format cyclonedx
 ```
 
-```bash
-dotnet run --project ./Dosai/Dosai.csproj -- crypto \
-  --path ./Dosai \
-  --o /tmp/dosai-crypto-evidence.json \
-  --format cdxgen-evidence
-```
-
 ### Implementation flow
 
 ```text
@@ -199,7 +191,7 @@ source discovery
   ├─ detect hardcoded key/cert/IV/secret material with redaction and fingerprinting
   ├─ detect misuse rules such as MD5, SHA1, DES, ECB, TLS bypass, low PBKDF2
   ├─ associate findings with method IDs and entry points where possible
-  └─ export native JSON, CycloneDX, or cdxgen evidence
+  └─ export native JSON or combined CycloneDX CBOM evidence
 ```
 
 ```mermaid
@@ -212,7 +204,7 @@ flowchart LR
     Scan --> Findings[Findings]
     Inventory --> Reach[Reachability correlation]
     Reach --> Findings
-    Assets --> Export[Dosai JSON / CycloneDX / cdxgen evidence]
+    Assets --> Export[Dosai JSON / combined CycloneDX]
     Findings --> Export
 ```
 
@@ -226,7 +218,7 @@ Reachability is best effort. Dosai reuses method extraction, entry point discove
 
 ### Output
 
-Native JSON includes `Assets`, `Operations`, `Materials`, `Protocols`, `Findings`, `Statistics`, and `Diagnostics`. CycloneDX output represents crypto assets as components and findings as vulnerability-like entries with Dosai properties. cdxgen evidence output is a sidecar designed for package BOM correlation.
+Native JSON includes `Assets`, `Operations`, `Materials`, `Protocols`, `Findings`, `Statistics`, and `Diagnostics`. CycloneDX output represents crypto assets, operations, materials, and protocols as components and findings as vulnerability-like entries with Dosai properties, keeping CBOM data and code-level evidence in one artifact.
 
 ### Strengths
 

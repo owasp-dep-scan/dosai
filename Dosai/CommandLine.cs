@@ -15,48 +15,57 @@ public class CommandLine
         var pathOption = new Option<string?>("--path")
         {
             Description = "The file or directory to inspect",
+            Arity = ArgumentArity.ExactlyOne,
             Required = true
         };
 
         var outputFileOption = new Option<string?>("--o")
         {
             Description = $"The output file location and name",
-            DefaultValueFactory = parseResult => DefaultOutputFile
+            Arity = ArgumentArity.ExactlyOne,
+            DefaultValueFactory = _ => DefaultOutputFile
         };
 
         var callGraphFormatOption = new Option<string?>("--callgraph-format")
         {
-            Description = "Export call graph separately in one of: mermaid, graphml, gexf"
+            Description = "Export call graph separately in one of: mermaid, graphml, gexf",
+            Arity = ArgumentArity.ExactlyOne
         };
 
         var callGraphOutputFileOption = new Option<string?>("--callgraph-out")
         {
-            Description = "The call graph output file location and name. Defaults to --o with the format extension."
+            Description = "The call graph output file location and name. Defaults to --o with the format extension.",
+            Arity = ArgumentArity.ExactlyOne
         };
 
         var patternsFileOption = new Option<string?>("--patterns")
         {
-            Description = "Optional JSON file containing source, sink, and passthrough patterns for data-flow slicing. Built-in .NET web/http/rpc/cli defaults are always included."
+            Description = "Optional JSON file containing source, sink, and passthrough patterns for data-flow slicing. Built-in .NET web/http/rpc/cli defaults are always included.",
+            Arity = ArgumentArity.ExactlyOne
         };
 
         var patternPacksOption = new Option<string?>("--pattern-packs")
         {
-            Description = "Comma-separated built-in data-flow pattern packs to enable: all, aspnet, data, filesystem, serialization, cloud, rpc, auth. Defaults to all."
+            Description = "Comma-separated built-in data-flow pattern packs to enable: all, aspnet, data, filesystem, serialization, cloud, rpc, auth. Defaults to all.",
+            Arity = ArgumentArity.ExactlyOne
         };
 
         var dataFlowFormatOption = new Option<string?>("--graph-format")
         {
-            Description = "Export the data-flow graph separately in one of: mermaid, graphml, gexf"
+            Description = "Export the data-flow graph separately in one of: mermaid, graphml, gexf",
+            Arity = ArgumentArity.ExactlyOne
         };
 
         var dataFlowGraphOutputFileOption = new Option<string?>("--graph-out")
         {
-            Description = "The data-flow graph output file location and name. Defaults to --o with the format extension."
+            Description = "The data-flow graph output file location and name. Defaults to --o with the format extension.",
+            Arity = ArgumentArity.ExactlyOne
         };
 
         var cryptoFormatOption = new Option<string?>("--format")
         {
-            Description = "Crypto output format: dosai, cyclonedx, cdxgen-evidence. Defaults to dosai."
+            Description = "Crypto output format: dosai, cyclonedx. Defaults to dosai.",
+            Arity = ArgumentArity.ExactlyOne
         };
 
         var printSourcesSinksOption = new Option<bool>("--print-sources-sinks")
@@ -67,18 +76,21 @@ public class CommandLine
         var inputFileOption = new Option<string?>("--input")
         {
             Description = "Input Dosai JSON file",
+            Arity = ArgumentArity.ExactlyOne,
             Required = true
         };
 
         var oldInputFileOption = new Option<string?>("--old")
         {
             Description = "Previous data-flow JSON file",
+            Arity = ArgumentArity.ExactlyOne,
             Required = true
         };
 
         var newInputFileOption = new Option<string?>("--new")
         {
             Description = "New data-flow JSON file",
+            Arity = ArgumentArity.ExactlyOne,
             Required = true
         };
 
@@ -91,6 +103,7 @@ public class CommandLine
         var queryOption = new Option<string>("--query")
         {
             Description = "Query expression, for example: slices[sinkCategory=sql], nodes[isSource=true], weaknesses[confidence=High]",
+            Arity = ArgumentArity.ExactlyOne,
             Required = true
         };
 
@@ -215,7 +228,7 @@ public class CommandLine
                     }
 
                     callGraphOutputFile ??= Path.ChangeExtension(outputFile!, CallGraphExporter.GetDefaultExtension(format));
-                    File.WriteAllText(callGraphOutputFile!, CallGraphExporter.Export(methodsSlice.CallGraph, format));
+                    File.WriteAllText(callGraphOutputFile, CallGraphExporter.Export(methodsSlice.CallGraph, format));
                 }
 
                 return 0;
@@ -260,7 +273,7 @@ public class CommandLine
                 }
 
                 graphOutputFile ??= Path.ChangeExtension(outputFile!, DataFlowExporter.GetDefaultExtension(format));
-                File.WriteAllText(graphOutputFile!, DataFlowExporter.Export(dataFlowResult, format));
+                File.WriteAllText(graphOutputFile, DataFlowExporter.Export(dataFlowResult, format));
             }
 
             return 0;
@@ -271,8 +284,16 @@ public class CommandLine
             var path = parseResult.GetValue(pathOption)!;
             var outputFile = parseResult.GetValue(outputFileOption)!;
             var format = parseResult.GetValue(cryptoFormatOption);
-            File.WriteAllText(outputFile, CryptoAnalyzer.GetCryptoAnalysis(path, format));
-            return 0;
+            try
+            {
+                File.WriteAllText(outputFile, CryptoAnalyzer.GetCryptoAnalysis(path, format));
+                return 0;
+            }
+            catch (ArgumentException ex)
+            {
+                Console.Error.WriteLine(ex.Message);
+                return 1;
+            }
         });
 
         agentContextCommand.SetAction(parseResult =>

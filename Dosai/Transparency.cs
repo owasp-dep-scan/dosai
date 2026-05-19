@@ -160,19 +160,6 @@ public static class TransparencyBuilder
     public static List<PackageReachability> BuildPackageReachability(CallGraph callGraph, IEnumerable<DataFlowSlice>? slices = null)
     {
         var byPurl = new Dictionary<string, PackageReachability>(StringComparer.Ordinal);
-        void Add(string? purl, string kind, string? nodeId = null, string? edgeId = null, string? sliceId = null, string? category = null)
-        {
-            if (string.IsNullOrWhiteSpace(purl)) return;
-            if (!byPurl.TryGetValue(purl, out var reachability))
-            {
-                reachability = new PackageReachability { Purl = purl, Reachable = true, ReachabilityKind = kind };
-                byPurl[purl] = reachability;
-            }
-            if (nodeId is not null && !reachability.NodeIds.Contains(nodeId)) reachability.NodeIds.Add(nodeId);
-            if (edgeId is not null && !reachability.EdgeIds.Contains(edgeId)) reachability.EdgeIds.Add(edgeId);
-            if (sliceId is not null && !reachability.SliceIds.Contains(sliceId)) reachability.SliceIds.Add(sliceId);
-            if (category is not null && !reachability.Categories.Contains(category)) reachability.Categories.Add(category);
-        }
 
         foreach (var node in callGraph.Nodes)
         {
@@ -194,11 +181,7 @@ public static class TransparencyBuilder
             }
         }
         return byPurl.Values.OrderBy(p => p.Purl, StringComparer.Ordinal).ToList();
-    }
 
-    public static List<PackageReachability> BuildPackageReachability(DataFlowResult result)
-    {
-        var byPurl = new Dictionary<string, PackageReachability>(StringComparer.Ordinal);
         void Add(string? purl, string kind, string? nodeId = null, string? edgeId = null, string? sliceId = null, string? category = null)
         {
             if (string.IsNullOrWhiteSpace(purl)) return;
@@ -212,6 +195,11 @@ public static class TransparencyBuilder
             if (sliceId is not null && !reachability.SliceIds.Contains(sliceId)) reachability.SliceIds.Add(sliceId);
             if (category is not null && !reachability.Categories.Contains(category)) reachability.Categories.Add(category);
         }
+    }
+
+    public static List<PackageReachability> BuildPackageReachability(DataFlowResult result)
+    {
+        var byPurl = new Dictionary<string, PackageReachability>(StringComparer.Ordinal);
         foreach (var node in result.Nodes) Add(node.Purl, "DataFlowNode", node.Id, category: node.Category);
         foreach (var edge in result.Edges)
         {
@@ -223,6 +211,20 @@ public static class TransparencyBuilder
             foreach (var purl in slice.Purls) Add(purl, "DataFlowSlice", sliceId: slice.Id, category: slice.SinkCategory);
         }
         return byPurl.Values.OrderBy(p => p.Purl, StringComparer.Ordinal).ToList();
+
+        void Add(string? purl, string kind, string? nodeId = null, string? edgeId = null, string? sliceId = null, string? category = null)
+        {
+            if (string.IsNullOrWhiteSpace(purl)) return;
+            if (!byPurl.TryGetValue(purl, out var reachability))
+            {
+                reachability = new PackageReachability { Purl = purl, Reachable = true, ReachabilityKind = kind };
+                byPurl[purl] = reachability;
+            }
+            if (nodeId is not null && !reachability.NodeIds.Contains(nodeId)) reachability.NodeIds.Add(nodeId);
+            if (edgeId is not null && !reachability.EdgeIds.Contains(edgeId)) reachability.EdgeIds.Add(edgeId);
+            if (sliceId is not null && !reachability.SliceIds.Contains(sliceId)) reachability.SliceIds.Add(sliceId);
+            if (category is not null && !reachability.Categories.Contains(category)) reachability.Categories.Add(category);
+        }
     }
 
     public static List<WeaknessCandidate> BuildWeaknessCandidates(DataFlowResult result, IEnumerable<EntryPoint>? entryPoints = null)

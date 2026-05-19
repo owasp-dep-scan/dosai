@@ -1,6 +1,6 @@
 # Cryptography and CBOM analysis
 
-Dosai's `crypto` command produces code-level cryptographic evidence for security review, CBOM generation, and cdxgen enrichment workflows.
+Dosai's `crypto` command produces code-level cryptographic evidence for security review and combined CycloneDX-style CBOM generation.
 
 ## Commands
 
@@ -13,22 +13,13 @@ dotnet run --project /Users/prabhu/work/owasp/dosai/Dosai/Dosai.csproj -- crypto
   --format dosai
 ```
 
-CycloneDX-style CBOM JSON:
+Combined CycloneDX-style CBOM JSON:
 
 ```bash
 dotnet run --project /Users/prabhu/work/owasp/dosai/Dosai/Dosai.csproj -- crypto \
   --path /Users/prabhu/work/owasp/dosai/Dosai \
   --o /tmp/dosai-cbom.json \
   --format cyclonedx
-```
-
-cdxgen evidence sidecar:
-
-```bash
-dotnet run --project /Users/prabhu/work/owasp/dosai/Dosai/Dosai.csproj -- crypto \
-  --path /Users/prabhu/work/owasp/dosai/Dosai \
-  --o /tmp/dosai-crypto-evidence.json \
-  --format cdxgen-evidence
 ```
 
 ## Evidence model
@@ -39,11 +30,9 @@ The native result has five main evidence collections. `assets` describe algorith
 
 Dosai performs best-effort reachability by reusing method extraction, entry point discovery, and callgraph data. When a crypto operation or finding can be associated with a reachable method, the result includes `reachableFromEntryPoint`, `entryPointIds`, and `methodId`. Reachability must never fail crypto analysis. If symbol resolution or callgraph construction is incomplete, Dosai records diagnostics and continues with file and method-name correlation.
 
-## CycloneDX/cdxgen mapping
+## CycloneDX mapping
 
-CycloneDX output includes crypto assets as components with Dosai properties such as `dosai:crypto:assetType`, `dosai:crypto:family`, `dosai:crypto:strength`, `dosai:crypto:reachableFromEntryPoint`, and `dosai:location`. Findings are emitted as vulnerability-like entries with rule IDs, severity, recommendation, CWE, affected crypto assets, reachability, and location properties.
-
-The `cdxgen-evidence` format is a sidecar containing normalized Dosai crypto evidence that downstream tooling can correlate with package BOMs.
+CycloneDX output includes crypto assets, operations, materials, and protocols as components with Dosai properties such as `dosai:crypto:evidenceType`, `dosai:crypto:assetType`, `dosai:crypto:family`, `dosai:crypto:strength`, `dosai:crypto:reachableFromEntryPoint`, and `dosai:location`. Findings are emitted as vulnerability-like entries with rule IDs, severity, recommendation, CWE, affected crypto assets, operation/material references, reachability, and location properties. This keeps the CBOM and code-level evidence in one file.
 
 ## Language coverage
 

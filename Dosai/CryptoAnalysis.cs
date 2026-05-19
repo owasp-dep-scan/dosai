@@ -15,8 +15,7 @@ namespace Depscan;
 public enum CryptoOutputFormat
 {
     Dosai,
-    CycloneDx,
-    CdxgenEvidence
+    CycloneDx
 }
 
 public sealed class CryptoAnalysisResult
@@ -184,11 +183,12 @@ public static class CryptoAnalyzer
 
     private static CryptoOutputFormat ParseFormat(string? format)
     {
-        return (format ?? "dosai").Replace("-", string.Empty, StringComparison.Ordinal).ToLowerInvariant() switch
+        var normalized = (format ?? "dosai").Replace("-", string.Empty, StringComparison.Ordinal).ToLowerInvariant();
+        return normalized switch
         {
+            "" or "dosai" => CryptoOutputFormat.Dosai,
             "cyclonedx" or "cdx" => CryptoOutputFormat.CycloneDx,
-            "cdxgenevidence" or "evidence" => CryptoOutputFormat.CdxgenEvidence,
-            _ => CryptoOutputFormat.Dosai
+            _ => throw new ArgumentException($"Unsupported crypto output format: {format}. Supported formats: dosai, cyclonedx.")
         };
     }
 
@@ -445,7 +445,7 @@ public static class CryptoAnalyzer
             });
 
             var rule = materialType == "iv-or-nonce" ? "DOSAI-CRYPTO-STATIC-IV" : "DOSAI-CRYPTO-HARDCODED-MATERIAL";
-            var severity = materialType == "iv-or-nonce" ? "High" : "High";
+            var severity = "High";
             var summary = materialType == "iv-or-nonce" ? "Hardcoded IV/nonce material was detected." : "Hardcoded cryptographic key, token, or certificate-like material was detected.";
             AddFinding(result, rule, severity, "Medium", summary, "Load cryptographic material from a managed secret store or KMS and generate IVs/nonces per operation where required.", location, methodId, entryPointIds.Count > 0, entryPointIds, [], [], [materialId]);
         }
@@ -508,8 +508,6 @@ public static class CryptoAnalyzer
     private static CryptoClassification? ClassifyCryptoSymbol(string symbol, string code, string source)
     {
         var text = $"{symbol} {code}";
-        CryptoClassification? Classify(string algorithm, string family, string strength, string operationType = "use", string? standard = null, string? rule = null, string? severity = null, string? summary = null, string? recommendation = null) =>
-            new(algorithm, family, strength, operationType, standard, rule, severity, "High", summary, recommendation);
 
         if (ContainsAny(text, "MD5", "EVP_md5", "digest::digest") || text.Contains("algo = \"md5\"", StringComparison.OrdinalIgnoreCase))
             return Classify("MD5", "hash", "weak", rule: "DOSAI-CRYPTO-WEAK-HASH-MD5", severity: "High", summary: "MD5 hashing was detected.", recommendation: "Use SHA-256 or stronger for integrity, and password-specific hashing for passwords.");
@@ -533,6 +531,9 @@ public static class CryptoAnalyzer
         if (ContainsAny(text, "SecurityAlgorithms.None")) return Classify("JWT none", "signature", "weak", "sign", rule: "DOSAI-CRYPTO-JWT-NONE", severity: "High", summary: "JWT 'none' algorithm was detected.", recommendation: "Require strong token signing and validation.");
         if (ContainsAny(text, "openssl::", "sodium::", "digest::")) return Classify(symbol, "library", "unknown", "library");
         return null;
+
+        CryptoClassification Classify(string algorithm, string family, string strength, string operationType = "use", string? standard = null, string? rule = null, string? severity = null, string? summary = null, string? recommendation = null) =>
+            new(algorithm, family, strength, operationType, standard, rule, severity, "High", summary, recommendation);
     }
 
     private static bool ContainsAny(string value, params string[] candidates) => candidates.Any(candidate => value.Contains(candidate, StringComparison.OrdinalIgnoreCase));
@@ -838,13 +839,13 @@ public static class CryptoBomExporter
     public static string Export(CryptoAnalysisResult result, CryptoOutputFormat format) => format switch
     {
         CryptoOutputFormat.CycloneDx => ExportCycloneDx(result),
-        CryptoOutputFormat.CdxgenEvidence => ExportCdxgenEvidence(result),
         _ => JsonSerializer.Serialize(result, JsonOptions)
     };
 
     private static string ExportCycloneDx(CryptoAnalysisResult result)
     {
-        var components = result.Assets.Select(asset => new
+        var components = new List<object>();
+        components.AddRange(result.Assets.Select(asset => new
         {
             type = "cryptographic-asset",
             name = asset.Name,
@@ -852,13 +853,75 @@ public static class CryptoBomExporter
             bomRef = $"dosai:crypto:{asset.Id}",
             properties = ToProperties(new Dictionary<string, string?>
             {
+                ["dosai:crypto:evidenceType"] = "asset",
                 ["dosai:crypto:assetType"] = asset.AssetType,
                 ["dosai:crypto:family"] = asset.Family,
                 ["dosai:crypto:strength"] = asset.Strength,
+                ["dosai:crypto:standard"] = asset.Standard,
                 ["dosai:crypto:reachableFromEntryPoint"] = asset.ReachableFromEntryPoint.ToString().ToLowerInvariant(),
+                ["dosai:crypto:entryPointIds"] = string.Join(",", asset.EntryPointIds),
                 ["dosai:location"] = FormatLocation(asset.Location)
             })
-        }).ToList();
+        }));
+        components.AddRange(result.Operations.Select(operation => new
+        {
+            type = "data",
+            name = operation.Algorithm,
+            bomRef = $"dosai:crypto:operation:{operation.Id}",
+            properties = ToProperties(new Dictionary<string, string?>
+            {
+                ["dosai:crypto:evidenceType"] = "operation",
+                ["dosai:crypto:operationType"] = operation.OperationType,
+                ["dosai:crypto:algorithm"] = operation.Algorithm,
+                ["dosai:crypto:symbol"] = operation.Symbol,
+                ["dosai:method:id"] = operation.MethodId,
+                ["dosai:method:name"] = operation.MethodName,
+                ["dosai:class:name"] = operation.ClassName,
+                ["dosai:namespace"] = operation.Namespace,
+                ["dosai:crypto:reachableFromEntryPoint"] = operation.ReachableFromEntryPoint.ToString().ToLowerInvariant(),
+                ["dosai:crypto:entryPointIds"] = string.Join(",", operation.EntryPointIds),
+                ["dosai:location"] = FormatLocation(operation.Location)
+            })
+        }));
+        components.AddRange(result.Materials.Select(material => new
+        {
+            type = "data",
+            name = material.MaterialType,
+            bomRef = $"dosai:crypto:material:{material.Id}",
+            properties = ToProperties(new Dictionary<string, string?>
+            {
+                ["dosai:crypto:evidenceType"] = "material",
+                ["dosai:crypto:materialType"] = material.MaterialType,
+                ["dosai:crypto:storage"] = material.Storage,
+                ["dosai:crypto:algorithm"] = material.Algorithm,
+                ["dosai:crypto:redactedValue"] = material.RedactedValue,
+                ["dosai:crypto:fingerprint"] = material.Fingerprint,
+                ["dosai:crypto:confidence"] = material.Confidence,
+                ["dosai:method:id"] = material.MethodId,
+                ["dosai:crypto:reachableFromEntryPoint"] = material.ReachableFromEntryPoint.ToString().ToLowerInvariant(),
+                ["dosai:crypto:entryPointIds"] = string.Join(",", material.EntryPointIds),
+                ["dosai:location"] = FormatLocation(material.Location)
+            })
+        }));
+        components.AddRange(result.Protocols.Select(protocol => new
+        {
+            type = "cryptographic-asset",
+            name = protocol.Name,
+            version = protocol.Version,
+            bomRef = $"dosai:crypto:protocol:{protocol.Id}",
+            properties = ToProperties(new Dictionary<string, string?>
+            {
+                ["dosai:crypto:evidenceType"] = "protocol",
+                ["dosai:crypto:protocol"] = protocol.Name,
+                ["dosai:crypto:version"] = protocol.Version,
+                ["dosai:crypto:strength"] = protocol.Strength,
+                ["dosai:crypto:symbol"] = protocol.Symbol,
+                ["dosai:method:id"] = protocol.MethodId,
+                ["dosai:crypto:reachableFromEntryPoint"] = protocol.ReachableFromEntryPoint.ToString().ToLowerInvariant(),
+                ["dosai:crypto:entryPointIds"] = string.Join(",", protocol.EntryPointIds),
+                ["dosai:location"] = FormatLocation(protocol.Location)
+            })
+        }));
 
         var vulnerabilities = result.Findings.Select(finding => new
         {
@@ -874,6 +937,10 @@ public static class CryptoBomExporter
             {
                 ["dosai:crypto:reachableFromEntryPoint"] = finding.ReachableFromEntryPoint.ToString().ToLowerInvariant(),
                 ["dosai:crypto:entryPointIds"] = string.Join(",", finding.EntryPointIds),
+                ["dosai:crypto:assetIds"] = string.Join(",", finding.AssetIds),
+                ["dosai:crypto:operationIds"] = string.Join(",", finding.OperationIds),
+                ["dosai:crypto:materialIds"] = string.Join(",", finding.MaterialIds),
+                ["dosai:method:id"] = finding.MethodId,
                 ["dosai:location"] = FormatLocation(finding.Location)
             })
         }).ToList();
@@ -892,6 +959,9 @@ public static class CryptoBomExporter
                 {
                     ["dosai:inputPath"] = result.Metadata.InputPath,
                     ["dosai:crypto:assetCount"] = result.Statistics.AssetCount.ToString(),
+                    ["dosai:crypto:operationCount"] = result.Statistics.OperationCount.ToString(),
+                    ["dosai:crypto:materialCount"] = result.Statistics.MaterialCount.ToString(),
+                    ["dosai:crypto:protocolCount"] = result.Statistics.ProtocolCount.ToString(),
                     ["dosai:crypto:findingCount"] = result.Statistics.FindingCount.ToString()
                 })
             },
@@ -899,33 +969,6 @@ public static class CryptoBomExporter
             vulnerabilities
         };
         return JsonSerializer.Serialize(bom, JsonOptions);
-    }
-
-    private static string ExportCdxgenEvidence(CryptoAnalysisResult result)
-    {
-        var evidence = new
-        {
-            tool = "Dosai",
-            type = "crypto-evidence",
-            schemaVersion = result.Metadata.SchemaVersion,
-            inputPath = result.Metadata.InputPath,
-            generatedAt = result.Metadata.GeneratedAt,
-            assets = result.Assets.Select(asset => new
-            {
-                bomRef = $"dosai:crypto:{asset.Id}",
-                asset.Name,
-                asset.Family,
-                asset.Strength,
-                asset.Standard,
-                asset.ReachableFromEntryPoint,
-                asset.EntryPointIds,
-                location = asset.Location
-            }),
-            operations = result.Operations,
-            materials = result.Materials,
-            findings = result.Findings
-        };
-        return JsonSerializer.Serialize(evidence, JsonOptions);
     }
 
     private static object[] ToProperties(Dictionary<string, string?> values) => values

@@ -282,7 +282,17 @@ class CryptoSample
         var cdx = CryptoAnalyzer.GetCryptoAnalysis(tempDirectory.Path, "cyclonedx");
         using var document = JsonDocument.Parse(cdx);
         Assert.Equal("CycloneDX", document.RootElement.GetProperty("bomFormat").GetString());
-        Assert.True(document.RootElement.GetProperty("components").GetArrayLength() >= 1);
+        var components = document.RootElement.GetProperty("components").EnumerateArray().ToList();
+        Assert.True(components.Count >= 1);
+        Assert.Contains(components, component => HasProperty(component, "dosai:crypto:evidenceType", "asset"));
+        Assert.Contains(components, component => HasProperty(component, "dosai:crypto:evidenceType", "operation"));
+        Assert.Contains(components, component => HasProperty(component, "dosai:crypto:evidenceType", "material"));
+
+        static bool HasProperty(JsonElement component, string name, string value)
+        {
+            return component.TryGetProperty("properties", out var properties)
+                   && properties.EnumerateArray().Any(property => property.GetProperty("name").GetString() == name && property.GetProperty("value").GetString() == value);
+        }
     }
 
     [Fact]
@@ -314,8 +324,8 @@ int main(int argc, char** argv) {
         var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result, new JsonSerializerOptions { Converters = { new JsonStringEnumConverter() } });
 
         Assert.NotNull(methodsSlice);
-        Assert.Contains(methodsSlice!.Methods ?? [], method => method.Module == "LanguageFrontend" && method.Name == "run");
-        Assert.Contains(methodsSlice!.Methods ?? [], method => method.Name == "run" && method.Namespace == "R" && method.Module is "R.NativeParser" or "LanguageFrontend");
+        Assert.Contains(methodsSlice.Methods ?? [], method => method.Module == "LanguageFrontend" && method.Name == "run");
+        Assert.Contains(methodsSlice.Methods ?? [], method => method.Name == "run" && method.Namespace == "R" && method.Module is "R.NativeParser" or "LanguageFrontend");
         if (LanguageFrontendAnalyzer.IsRNativeParserAvailable)
         {
             Assert.Contains(methodsSlice.Methods ?? [], method => method.Name == "run" && method.Module == "R.NativeParser");
@@ -396,7 +406,7 @@ int main(int argc, char** argv) {
         var result = JsonSerializer.Deserialize<DataFlowResult>(resultJson, new JsonSerializerOptions { Converters = { new JsonStringEnumConverter() } });
 
         Assert.NotNull(result);
-        Assert.Contains(result!.Slices, slice => slice.SinkCategory == "command" && slice.Confidence == "Low");
+        Assert.Contains(result.Slices, slice => slice.SinkCategory == "command" && slice.Confidence == "Low");
         Assert.Contains(result.Nodes, node => node.Properties.TryGetValue("analysis", out var analysis) && analysis == "language-frontend");
         var nodeIds = result.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
         Assert.All(result.Edges, edge =>
@@ -717,11 +727,11 @@ class CryptoWorkflow
 
         var nativeOutput = Path.Combine(tempDirectory.Path, "crypto.json");
         var cdxOutput = Path.Combine(tempDirectory.Path, "cbom.json");
-        var evidenceOutput = Path.Combine(tempDirectory.Path, "evidence.json");
+        var unsupportedFormatOutput = Path.Combine(tempDirectory.Path, "unsupported.json");
 
         Assert.Equal(0, CommandLine.Main(["crypto", "--path", tempDirectory.Path, "--o", nativeOutput, "--format", "dosai"]));
         Assert.Equal(0, CommandLine.Main(["crypto", "--path", tempDirectory.Path, "--o", cdxOutput, "--format", "cyclonedx"]));
-        Assert.Equal(0, CommandLine.Main(["crypto", "--path", tempDirectory.Path, "--o", evidenceOutput, "--format", "cdxgen-evidence"]));
+        Assert.Equal(1, CommandLine.Main(["crypto", "--path", tempDirectory.Path, "--o", unsupportedFormatOutput, "--format", "unsupported"]));
 
         using var nativeDocument = JsonDocument.Parse(File.ReadAllText(nativeOutput));
         Assert.True(nativeDocument.RootElement.GetProperty("Statistics").GetProperty("ReachableFindingCount").GetInt32() >= 1);
@@ -738,12 +748,11 @@ class CryptoWorkflow
 
         using var cdxDocument = JsonDocument.Parse(File.ReadAllText(cdxOutput));
         Assert.Equal("CycloneDX", cdxDocument.RootElement.GetProperty("bomFormat").GetString());
-        Assert.True(cdxDocument.RootElement.GetProperty("components").GetArrayLength() >= 1);
+        var combinedComponents = cdxDocument.RootElement.GetProperty("components").EnumerateArray().ToList();
+        Assert.True(combinedComponents.Count >= 1);
+        Assert.Contains(combinedComponents, component => HasProperty(component, "dosai:crypto:evidenceType", "asset"));
+        Assert.Contains(combinedComponents, component => HasProperty(component, "dosai:crypto:evidenceType", "operation"));
         Assert.True(cdxDocument.RootElement.GetProperty("vulnerabilities").GetArrayLength() >= 1);
-
-        using var evidenceDocument = JsonDocument.Parse(File.ReadAllText(evidenceOutput));
-        Assert.Equal("crypto-evidence", evidenceDocument.RootElement.GetProperty("type").GetString());
-        Assert.True(evidenceDocument.RootElement.GetProperty("findings").GetArrayLength() >= 1);
 
         using var input = new StringReader("""
 {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"dosai.crypto","arguments":{"format":"cyclonedx"}}}
@@ -753,6 +762,12 @@ class CryptoWorkflow
         McpServer.Run(tempDirectory.Path, null, null, input, output);
         Assert.Contains("CycloneDX", output.ToString());
         Assert.Contains("dosai:crypto:reachableFromEntryPoint", output.ToString());
+
+        static bool HasProperty(JsonElement component, string name, string value)
+        {
+            return component.TryGetProperty("properties", out var properties)
+                   && properties.EnumerateArray().Any(property => property.GetProperty("name").GetString() == name && property.GetProperty("value").GetString() == value);
+        }
     }
 
     [Fact]
