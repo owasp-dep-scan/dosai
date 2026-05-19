@@ -8,6 +8,8 @@ namespace Dosai.Tests;
 
 public class DosaiTests
 {
+    private static readonly object ConsoleOutputLock = new();
+
     #region GetMethods
     [Fact]
     public void GetMethods_CSharpAssembly_PathIsFile_ReturnsDetails()
@@ -217,6 +219,8 @@ class FlowSample
         Assert.True(dataFlowResult.Statistics.SliceCount >= 1);
         Assert.Contains(dataFlowResult.Nodes, node => node.IsSource && node.Category == "cli" && node.FileName == "FlowSample.cs" && node.LineNumber > 0);
         Assert.Contains(dataFlowResult.Nodes, node => node.IsSink && node.Category == "command" && node.Symbol is not null && node.Symbol.Contains("System.Diagnostics.Process.Start"));
+        Assert.Contains(dataFlowResult.Nodes, node => node.IsSink && node.Purl == "pkg:nuget/System.Diagnostics.Process");
+        Assert.Contains(dataFlowResult.Slices, slice => slice.SinkPurl == "pkg:nuget/System.Diagnostics.Process" && slice.Purls.Contains("pkg:nuget/System.Diagnostics.Process"));
         Assert.All(dataFlowResult.Edges, edge =>
         {
             Assert.Contains(dataFlowResult.Nodes, node => node.Id == edge.SourceId);
@@ -950,6 +954,101 @@ class WeaknessFlow
 
         Assert.Equal("pkg:nuget/Microsoft.Data.SqlClient@5.1.1", resolver.Resolve(module: "Microsoft.Data.SqlClient.dll"));
         Assert.Equal("pkg:nuget/Microsoft.Data.SqlClient@5.1.1", resolver.Resolve(symbol: "Microsoft.Data.SqlClient.SqlCommand..ctor(string)"));
+    }
+
+    [Fact]
+    public void PackageUrlResolver_SystemSymbols_MapsCommonFrameworkSymbolsToBestEffortPurls()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var resolver = PackageUrlResolver.Create(tempDirectory.Path);
+
+        Assert.Equal("pkg:nuget/System.Diagnostics.Process", resolver.Resolve(symbol: "System.Diagnostics.Process.Start(string)"));
+        Assert.Equal("pkg:nuget/System.IO.FileSystem", resolver.Resolve(symbol: "System.IO.File.ReadAllText(string)"));
+        Assert.Equal("pkg:nuget/System.Text.Json", resolver.Resolve(symbol: "System.Text.Json.JsonSerializer.Deserialize(string)"));
+        Assert.Equal("pkg:nuget/System.Runtime", resolver.Resolve(symbol: "System.Type.GetType(string)"));
+    }
+
+    [Fact]
+    public void DataFlows_TreeReport_RendersStackTraceStyleFramesWithCode()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "TreeFlow.cs"), """
+using System.Diagnostics;
+
+class TreeFlow
+{
+    static void Main(string[] args)
+    {
+        var command = args[0];
+        Process.Start(command);
+    }
+}
+""");
+
+        var result = DataFlowAnalyzer.Analyze(tempDirectory.Path);
+        var report = CommandLine.BuildDataFlowTreeReport(result, Path.Combine(tempDirectory.Path, "dataflows.json"));
+
+        Assert.Contains("Dosai Data-flow Analysis", report);
+        Assert.Contains("Summary: 1 flow", report);
+        Assert.Contains("Data-flow stack traces:", report);
+        Assert.Contains("Summary:", report);
+        Assert.Contains("Stack (", report);
+        Assert.Contains("at Source/cli args", report);
+        Assert.Contains("at Assignment command", report);
+        Assert.Contains("at Sink/command Start", report);
+        Assert.Contains("code: args", report);
+        Assert.Contains("code: command", report);
+        Assert.Contains("code: Process.Start(command)", report);
+        Assert.Contains("TreeFlow.cs:", report);
+        Assert.Contains("via VariableAssignment", report);
+        Assert.Contains("via SinkArgument", report);
+        Assert.Contains("cli → command", report);
+        Assert.Contains("pkg:nuget/System.Diagnostics.Process", report);
+    }
+
+    [Fact]
+    public void DataFlows_Command_PrintsStackTraceOnlyWhenPrintOptionIsPassed()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "PrintFlow.cs"), """
+using System.Diagnostics;
+
+class PrintFlow
+{
+    static void Main(string[] args)
+    {
+        Process.Start(args[0]);
+    }
+}
+""");
+
+        var outputPath = Path.Combine(tempDirectory.Path, "dataflows.json");
+        var printedOutputPath = Path.Combine(tempDirectory.Path, "printed-dataflows.json");
+
+        lock (ConsoleOutputLock)
+        {
+            var originalOut = Console.Out;
+            try
+            {
+                using var quietWriter = new StringWriter();
+                Console.SetOut(quietWriter);
+                Assert.Equal(0, CommandLine.Main(["dataflows", "--path", tempDirectory.Path, "--o", outputPath]));
+                Assert.DoesNotContain("Dosai Data-flow Analysis", quietWriter.ToString());
+
+                using var printWriter = new StringWriter();
+                Console.SetOut(printWriter);
+                Assert.Equal(0, CommandLine.Main(["dataflows", "--path", tempDirectory.Path, "--o", printedOutputPath, "--print"]));
+                var consoleOutput = printWriter.ToString();
+                Assert.Contains("Dosai Data-flow Analysis", consoleOutput);
+                Assert.Contains("Data-flow stack traces:", consoleOutput);
+                Assert.Contains("at Sink/command Start", consoleOutput);
+                Assert.Contains("code: Process.Start(args[0])", consoleOutput);
+            }
+            finally
+            {
+                Console.SetOut(originalOut);
+            }
+        }
     }
 
     [Fact]

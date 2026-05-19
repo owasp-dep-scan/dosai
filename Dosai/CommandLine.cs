@@ -73,6 +73,11 @@ public class CommandLine
             Description = "Print auto-detected data-flow sources and sinks to stdout for pattern diagnostics."
         };
 
+        var printDataFlowsOption = new Option<bool>("--print")
+        {
+            Description = "Print stack-trace-style data-flow paths to stdout."
+        };
+
         var inputFileOption = new Option<string?>("--input")
         {
             Description = "Input Dosai JSON file",
@@ -122,6 +127,7 @@ public class CommandLine
             patternPacksOption,
             dataFlowFormatOption,
             dataFlowGraphOutputFileOption,
+            printDataFlowsOption,
             printSourcesSinksOption
         };
 
@@ -229,6 +235,7 @@ public class CommandLine
             var patternPacks = parseResult.GetValue(patternPacksOption);
             var graphFormat = parseResult.GetValue(dataFlowFormatOption);
             var graphOutputFile = parseResult.GetValue(dataFlowGraphOutputFileOption);
+            var printDataFlows = parseResult.GetValue(printDataFlowsOption);
             var printSourcesSinks = parseResult.GetValue(printSourcesSinksOption);
 
             var result = DataFlowAnalyzer.GetDataFlows(path!, patternsFile, patternPacks);
@@ -239,6 +246,11 @@ public class CommandLine
                 Converters = { new JsonStringEnumConverter() }
             };
             var dataFlowResult = JsonSerializer.Deserialize<DataFlowResult>(result, options);
+
+            if (printDataFlows && dataFlowResult is not null)
+            {
+                PrintDataFlowTree(dataFlowResult, outputFile!);
+            }
 
             if (printSourcesSinks && dataFlowResult is not null)
             {
@@ -350,6 +362,176 @@ public class CommandLine
         WriteIndented = true,
         Converters = { new JsonStringEnumConverter() }
     };
+
+    private static void PrintDataFlowTree(DataFlowResult result, string outputFile)
+    {
+        WriteDataFlowTreeReport(Console.Out, result, outputFile);
+    }
+
+    public static string BuildDataFlowTreeReport(DataFlowResult result, string outputFile)
+    {
+        using var writer = new StringWriter();
+        WriteDataFlowTreeReport(writer, result, outputFile);
+        return writer.ToString();
+    }
+
+    public static void WriteDataFlowTreeReport(TextWriter writer, DataFlowResult result, string outputFile)
+    {
+        var nodesById = result.Nodes.ToDictionary(node => node.Id, StringComparer.Ordinal);
+        var edgesById = result.Edges.ToDictionary(edge => edge.Id, StringComparer.Ordinal);
+        var weaknessesBySliceId = result.WeaknessCandidates
+            .Where(weakness => !string.IsNullOrWhiteSpace(weakness.SliceId))
+            .GroupBy(weakness => weakness.SliceId!, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
+
+        writer.WriteLine("Dosai Data-flow Analysis");
+        writer.WriteLine($"Summary: {result.Statistics.SliceCount} {Pluralize(result.Statistics.SliceCount, "flow")}, {result.Statistics.SourceCount} {Pluralize(result.Statistics.SourceCount, "source")}, {result.Statistics.SinkCount} {Pluralize(result.Statistics.SinkCount, "sink")}, {result.Statistics.FilesAnalyzed} {Pluralize(result.Statistics.FilesAnalyzed, "file")} analyzed, {result.WeaknessCandidates.Count} {Pluralize(result.WeaknessCandidates.Count, "weakness candidate")}");
+        writer.WriteLine($"Output: {outputFile}");
+
+        if (result.Slices.Count == 0)
+        {
+            writer.WriteLine("No data-flow slices found.");
+            return;
+        }
+
+        writer.WriteLine("Data-flow stack traces:");
+        for (var index = 0; index < result.Slices.Count; index++)
+        {
+            var slice = result.Slices[index];
+            nodesById.TryGetValue(slice.SourceId, out var source);
+            nodesById.TryGetValue(slice.SinkId, out var sink);
+            weaknessesBySliceId.TryGetValue(slice.Id, out var weakness);
+
+            var isLastSlice = index == result.Slices.Count - 1;
+            var sliceConnector = isLastSlice ? "└─" : "├─";
+            var childPrefix = isLastSlice ? "   " : "│  ";
+            var flowTitle = $"DataFlow {slice.Id}: {slice.SourceCategory ?? source?.Category ?? "source"} → {slice.SinkCategory ?? sink?.Category ?? "sink"} ({slice.Confidence})";
+            writer.WriteLine($"{sliceConnector} {flowTitle}");
+            writer.WriteLine($"{childPrefix}Summary: {weakness?.Summary ?? slice.Summary ?? BuildFlowSummary(source, sink, slice)}");
+            if (!string.IsNullOrWhiteSpace(slice.SinkArgument))
+            {
+                var argumentLabel = slice.SinkArgumentIndex.HasValue ? $"Argument[{slice.SinkArgumentIndex}]" : "Argument";
+                writer.WriteLine($"{childPrefix}{argumentLabel}: {TrimConsoleText(slice.SinkArgument)}");
+            }
+            if (slice.Purls.Count > 0)
+            {
+                writer.WriteLine($"{childPrefix}PURLs: {string.Join(", ", slice.Purls)}");
+            }
+            WriteDataPathLines(writer, childPrefix, slice, nodesById, edgesById);
+        }
+    }
+
+    private static string BuildFlowSummary(DataFlowNode? source, DataFlowNode? sink, DataFlowSlice slice) =>
+        $"{slice.SourceCategory ?? source?.Category ?? "source"} data reaches {slice.SinkCategory ?? sink?.Category ?? "sink"} sink {sink?.Name ?? slice.SinkId}.";
+
+    private static void WriteDataPathLines(TextWriter writer, string childPrefix, DataFlowSlice slice, IReadOnlyDictionary<string, DataFlowNode> nodesById, IReadOnlyDictionary<string, DataFlowEdge> edgesById)
+    {
+        writer.WriteLine($"{childPrefix}Stack ({slice.NodeIds.Count} {Pluralize(slice.NodeIds.Count, "frame")}, {slice.EdgeIds.Count} {Pluralize(slice.EdgeIds.Count, "transition")}):");
+        var wroteEntry = false;
+
+        foreach (var entry in BuildDataPathEntries(slice, nodesById, edgesById))
+        {
+            wroteEntry = true;
+            foreach (var entryLine in entry.Split(Environment.NewLine))
+            {
+                writer.WriteLine($"{childPrefix}  {entryLine}");
+            }
+        }
+
+        if (!wroteEntry)
+        {
+            writer.WriteLine($"{childPrefix}  <no node or edge details available for this slice>");
+        }
+    }
+
+    private static IEnumerable<string> BuildDataPathEntries(DataFlowSlice slice, IReadOnlyDictionary<string, DataFlowNode> nodesById, IReadOnlyDictionary<string, DataFlowEdge> edgesById)
+    {
+        var sliceEdges = slice.EdgeIds
+            .Select(edgeId => edgesById.TryGetValue(edgeId, out var edge) ? edge : null)
+            .Where(edge => edge is not null)
+            .Cast<DataFlowEdge>()
+            .ToList();
+        var edgesByPair = new Dictionary<(string SourceId, string TargetId), List<DataFlowEdge>>();
+        foreach (var edge in sliceEdges)
+        {
+            var key = (edge.SourceId, edge.TargetId);
+            if (!edgesByPair.TryGetValue(key, out var edgesForPair))
+            {
+                edgesForPair = [];
+                edgesByPair[key] = edgesForPair;
+            }
+            edgesForPair.Add(edge);
+        }
+        var emittedEdges = new HashSet<string>(StringComparer.Ordinal);
+
+        for (var nodeIndex = 0; nodeIndex < slice.NodeIds.Count; nodeIndex++)
+        {
+            var nodeId = slice.NodeIds[nodeIndex];
+            yield return FormatNodeFrame(nodesById.TryGetValue(nodeId, out var node) ? node : null, nodeId);
+
+            if (nodeIndex + 1 >= slice.NodeIds.Count)
+            {
+                continue;
+            }
+
+            var nextNodeId = slice.NodeIds[nodeIndex + 1];
+            if (!edgesByPair.TryGetValue((nodeId, nextNodeId), out var pathEdges))
+            {
+                continue;
+            }
+
+            foreach (var edge in pathEdges)
+            {
+                emittedEdges.Add(edge.Id);
+                yield return FormatEdgeTransition(edge);
+            }
+        }
+
+        foreach (var edge in sliceEdges.Where(edge => !emittedEdges.Contains(edge.Id)).OrderBy(edge => edge.Id, StringComparer.Ordinal))
+        {
+            yield return FormatEdgeTransition(edge);
+        }
+    }
+
+    private static string FormatNodeFrame(DataFlowNode? node, string fallbackId)
+    {
+        if (node is null)
+        {
+            return $"at <missing node> [{fallbackId}]";
+        }
+
+        var category = string.IsNullOrWhiteSpace(node.Category) ? string.Empty : $"/{node.Category}";
+        var location = string.IsNullOrWhiteSpace(node.FileName) ? "<unknown>" : $"{node.FileName}:{node.LineNumber}:{node.ColumnNumber}";
+        var symbol = string.IsNullOrWhiteSpace(node.Symbol) ? node.Name : node.Symbol;
+        var purl = string.IsNullOrWhiteSpace(node.Purl) ? string.Empty : $" [{node.Purl}]";
+        var lines = new List<string>
+        {
+            $"at {node.Kind}{category} {node.Name} [{node.Id}] in {location}{purl}",
+            $"   code: {TrimConsoleText(node.Code ?? node.Name)}"
+        };
+        if (!string.IsNullOrWhiteSpace(symbol) && !string.Equals(symbol, node.Name, StringComparison.Ordinal))
+        {
+            lines.Add($"   symbol: {TrimConsoleText(symbol, 120)}");
+        }
+        return string.Join(Environment.NewLine, lines);
+    }
+
+    private static string FormatEdgeTransition(DataFlowEdge edge)
+    {
+        var label = string.IsNullOrWhiteSpace(edge.Label) ? string.Empty : $" label={TrimConsoleText(edge.Label, 64)}";
+        var location = string.IsNullOrWhiteSpace(edge.FileName) ? "<unknown>" : $"{edge.FileName}:{edge.LineNumber}:{edge.ColumnNumber}";
+        var sourcePurl = string.IsNullOrWhiteSpace(edge.SourcePurl) ? string.Empty : $" sourcePurl={edge.SourcePurl}";
+        var targetPurl = string.IsNullOrWhiteSpace(edge.TargetPurl) ? string.Empty : $" targetPurl={edge.TargetPurl}";
+        return $"via {edge.Kind} [{edge.Id}] from {edge.SourceId} to {edge.TargetId} in {location}{label}{sourcePurl}{targetPurl}";
+    }
+
+    private static string Pluralize(int count, string singular) => count == 1 ? singular : singular + "s";
+
+    private static string TrimConsoleText(string value, int maxLength = 160)
+    {
+        value = value.Replace("\r", " ", StringComparison.Ordinal).Replace("\n", " ", StringComparison.Ordinal).Trim();
+        return value.Length <= maxLength ? value : value[..maxLength] + "…";
+    }
 
     private static void PrintSourcesAndSinks(DataFlowResult result)
     {

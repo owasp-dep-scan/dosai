@@ -48,6 +48,16 @@ dotnet run --project ./Dosai/Dosai.csproj -- dataflows \
   --graph-out /tmp/dosai-dataflows.gexf
 ```
 
+For local human triage, add `--print` to the same command to include stack-trace-style flow paths on stdout. The printed paths show frames with code, file/line/column, symbols, PURLs, and `via ...` edge transitions. Keep `--print` out of most CI jobs unless the console log is intended as a review artifact; the JSON remains easier for agents and scripts to query.
+
+```bash
+dotnet run --project ./Dosai/Dosai.csproj -- dataflows \
+  --path ./src \
+  --patterns ./dataflow-patterns.json \
+  --o /tmp/dosai-dataflows.json \
+  --print
+```
+
 Query high-risk findings for a smaller prompt payload:
 
 ```bash
@@ -132,7 +142,7 @@ Prefer this ordering when working with large repositories:
 1. `agent-context` for summary, relevant files, entry points, high-risk weaknesses, and suggested commands.
 2. `query` for exact slices, weaknesses, reachable packages, or crypto findings.
 3. `report` for human-readable handoff.
-4. `dataflows` full JSON only when paths, graph edges, method summaries, or custom pattern debugging are needed.
+4. `dataflows` full JSON only when paths, graph edges, method summaries, or custom pattern debugging are needed. Add `--print` only for human-readable path review; prefer `query` for prompt payloads.
 5. `methods` only when endpoint inventory, call graph, or package reachability detail is needed.
 
 Avoid pasting full `dataflows` or `methods` JSON into an LLM prompt unless the repository is tiny. Query down to the specific collection first.

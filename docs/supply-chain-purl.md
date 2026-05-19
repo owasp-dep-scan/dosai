@@ -44,8 +44,22 @@ Given an assembly/module/symbol/type, Dosai tries:
 2. module/DLL name, e.g. `Microsoft.Data.SqlClient.dll`
 3. package name and last package segment
 4. namespace/type/symbol prefix matching
+5. best-effort framework symbol fallback for common `System.*` APIs
 
 Resolution is best-effort. Missing PURLs do not fail analysis.
+
+The `System.*` fallback is intentionally versionless because framework APIs often come from the target framework or shared framework rather than a restored NuGet package. Examples include:
+
+| Symbol prefix                         | Emitted PURL                                        |
+| ------------------------------------- | --------------------------------------------------- |
+| `System.Diagnostics.Process`          | `pkg:nuget/System.Diagnostics.Process`              |
+| `System.IO.File`, `Directory`, `Path` | `pkg:nuget/System.IO.FileSystem`                    |
+| `System.Net.Http`                     | `pkg:nuget/System.Net.Http`                         |
+| `System.Text.Json`                    | `pkg:nuget/System.Text.Json`                        |
+| `System.Security.Cryptography`        | `pkg:nuget/System.Security.Cryptography.Algorithms` |
+| `System.Type`, `System.String`        | `pkg:nuget/System.Runtime`                          |
+
+Package metadata from `project.assets.json` or `*.deps.json` still takes precedence when a concrete restored package is known.
 
 ## Where PURLs appear
 
@@ -79,6 +93,15 @@ Resolution is best-effort. Missing PURLs do not fail analysis.
 ### Graph exports
 
 GraphML/GEXF exports include PURL node/edge attributes for both call graphs and data-flow graphs.
+
+### Printed data-flow traces
+
+When `dataflows --print` is used, PURLs are included inline on stack-trace-style frames and transitions, for example:
+
+```text
+via SinkArgument [dfe3] from dfn2 to dfn3 in Program.cs:7:23 label=fileName targetPurl=pkg:nuget/System.Diagnostics.Process
+at Sink/command Start [dfn3] in Program.cs:7:9 [pkg:nuget/System.Diagnostics.Process]
+```
 
 ## Pattern-provided PURLs
 

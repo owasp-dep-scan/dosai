@@ -5,6 +5,31 @@ namespace Depscan;
 
 public sealed partial class PackageUrlResolver
 {
+    private static readonly (string Prefix, string PackageName)[] SystemPackagePrefixes =
+    [
+        ("System.Diagnostics.Process", "System.Diagnostics.Process"),
+        ("System.IO.FileStream", "System.IO.FileSystem"),
+        ("System.IO.File", "System.IO.FileSystem"),
+        ("System.IO.Directory", "System.IO.FileSystem"),
+        ("System.IO.Path", "System.IO.FileSystem"),
+        ("System.Net.Http", "System.Net.Http"),
+        ("System.Net.WebUtility", "System.Net.WebUtility"),
+        ("System.Reflection.Assembly", "System.Reflection"),
+        ("System.Security.Cryptography.X509Certificates", "System.Security.Cryptography.X509Certificates"),
+        ("System.Security.Cryptography", "System.Security.Cryptography.Algorithms"),
+        ("System.Text.Json", "System.Text.Json"),
+        ("System.Text.RegularExpressions", "System.Text.RegularExpressions"),
+        ("System.Console", "System.Console"),
+        ("System.Uri", "System.Runtime"),
+        ("System.Type", "System.Runtime"),
+        ("System.String", "System.Runtime"),
+        ("System.Collections", "System.Collections"),
+        ("System.Linq", "System.Linq"),
+        ("System.Threading.Tasks", "System.Threading.Tasks"),
+        ("System.Threading", "System.Threading"),
+        ("System", "System.Runtime")
+    ];
+
     private readonly Dictionary<string, string> _assemblyToPurl = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _packageToPurl = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<(string Prefix, string Purl)> _namespacePrefixes = [];
@@ -89,9 +114,29 @@ public sealed partial class PackageUrlResolver
                     return purl;
                 }
             }
+
+            if (TryResolveSystemPurl(qualifiedName, out var systemPurl))
+            {
+                return systemPurl;
+            }
         }
 
         return null;
+    }
+
+    private static bool TryResolveSystemPurl(string qualifiedName, out string purl)
+    {
+        foreach (var (prefix, packageName) in SystemPackagePrefixes)
+        {
+            if (qualifiedName.Equals(prefix, StringComparison.OrdinalIgnoreCase) || qualifiedName.StartsWith(prefix + ".", StringComparison.OrdinalIgnoreCase))
+            {
+                purl = $"pkg:nuget/{EscapePurl(packageName)}";
+                return true;
+            }
+        }
+
+        purl = string.Empty;
+        return false;
     }
 
     private void ReadProjectAssets(string filePath)
