@@ -42,7 +42,7 @@ public static class DosaiQueryEngine
 
     private static (string Property, string Operator, string Value) ParseFilter(string filter)
     {
-        foreach (var op in new[] { "~=", "!=", "=", ">=", "<=", ">", "<" })
+        foreach (var op in new[] { "~=", "!=", ">=", "<=", "=", ">", "<" })
         {
             var index = filter.IndexOf(op, StringComparison.Ordinal);
             if (index > 0)

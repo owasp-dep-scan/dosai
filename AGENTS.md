@@ -9,9 +9,9 @@ Dosai is a .NET source and assembly inspection tool. The main project is `Dosai/
 Primary commands:
 
 ```bash
-dotnet build /Users/prabhu/work/owasp/dosai/Dosai.sln
+dotnet build ./Dosai.sln
 
-dotnet test /Users/prabhu/work/owasp/dosai/Dosai.sln
+dotnet test ./Dosai.sln
 ```
 
 ## Important source files
@@ -48,26 +48,26 @@ dotnet test /Users/prabhu/work/owasp/dosai/Dosai.sln
 Run before finishing changes:
 
 ```bash
-dotnet test /Users/prabhu/work/owasp/dosai/Dosai.sln
+dotnet test ./Dosai.sln
 ```
 
 For CLI smoke tests:
 
 ```bash
-dotnet run --project /Users/prabhu/work/owasp/dosai/Dosai/Dosai.csproj -- methods \
-  --path /Users/prabhu/work/owasp/dosai/Dosai \
+dotnet run --project ./Dosai/Dosai.csproj -- methods \
+  --path ./Dosai \
   --o /tmp/dosai-methods.json \
   --callgraph-format graphml \
   --callgraph-out /tmp/dosai-callgraph.graphml
 
-dotnet run --project /Users/prabhu/work/owasp/dosai/Dosai/Dosai.csproj -- dataflows \
-  --path /Users/prabhu/work/owasp/dosai/Dosai \
+dotnet run --project ./Dosai/Dosai.csproj -- dataflows \
+  --path ./Dosai \
   --o /tmp/dosai-dataflows.json \
   --graph-format gexf \
   --graph-out /tmp/dosai-dataflows.gexf
 
-dotnet run --project /Users/prabhu/work/owasp/dosai/Dosai/Dosai.csproj -- agent-context \
-  --path /Users/prabhu/work/owasp/dosai/Dosai \
+dotnet run --project ./Dosai/Dosai.csproj -- agent-context \
+  --path ./Dosai \
   --o /tmp/dosai-agent-context.json
 ```
 

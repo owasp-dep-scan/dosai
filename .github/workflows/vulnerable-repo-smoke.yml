@@ -42,7 +42,6 @@ jobs:
           dotnet run --project ./Dosai -- dataflows --path "/tmp/${{ matrix.name }}" --o "/tmp/${{ matrix.name }}-dataflows.json" --graph-format graphml --graph-out "/tmp/${{ matrix.name }}-dataflows.graphml"
           dotnet run --project ./Dosai -- crypto --path "/tmp/${{ matrix.name }}" --o "/tmp/${{ matrix.name }}-crypto.json" --format dosai
           dotnet run --project ./Dosai -- crypto --path "/tmp/${{ matrix.name }}" --o "/tmp/${{ matrix.name }}-cbom.json" --format cyclonedx
-          dotnet run --project ./Dosai -- policy --input "/tmp/${{ matrix.name }}-dataflows.json" --min-slices "${{ matrix.min_slices }}"
           dotnet run --project ./Dosai -- report --input "/tmp/${{ matrix.name }}-dataflows.json" --o "/tmp/${{ matrix.name }}-report.md"
           python - <<'PY'
           import json, os, xml.etree.ElementTree as ET

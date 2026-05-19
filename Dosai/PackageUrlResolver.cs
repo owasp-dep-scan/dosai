@@ -22,12 +22,12 @@ public sealed partial class PackageUrlResolver
             return resolver;
         }
 
-        foreach (var assetsFile in Directory.EnumerateFiles(root, "project.assets.json", SearchOption.AllDirectories))
+        foreach (var assetsFile in SafeEnumerateFiles(root, "project.assets.json"))
         {
             resolver.ReadProjectAssets(assetsFile);
         }
 
-        foreach (var depsFile in Directory.EnumerateFiles(root, "*.deps.json", SearchOption.AllDirectories))
+        foreach (var depsFile in SafeEnumerateFiles(root, "*.deps.json"))
         {
             resolver.ReadDepsJson(depsFile);
         }
@@ -37,6 +37,35 @@ public sealed partial class PackageUrlResolver
             .OrderByDescending(name => name.Length)
             .Select(name => (Prefix: name, Purl: resolver._packageToPurl[name])));
         return resolver;
+    }
+
+    private static IEnumerable<string> SafeEnumerateFiles(string root, string searchPattern)
+    {
+        try
+        {
+            return Directory.EnumerateFiles(root, searchPattern, new EnumerationOptions
+            {
+                RecurseSubdirectories = true,
+                IgnoreInaccessible = true,
+                AttributesToSkip = FileAttributes.ReparsePoint
+            }).ToList();
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return [];
+        }
+        catch (IOException)
+        {
+            return [];
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return [];
+        }
+        catch (ArgumentException)
+        {
+            return [];
+        }
     }
 
     public string? Resolve(string? assembly = null, string? module = null, string? symbol = null, string? namespaceName = null, string? typeName = null)
