@@ -113,6 +113,19 @@ dotnet run --project ./Dosai/Dosai.csproj -- dataflows \
 
 Common options are `--patterns`, `--pattern-packs`, `--graph-format`, `--graph-out`, and `--print-sources-sinks`. Supported graph formats are `mermaid`, `graphml`, and `gexf`.
 
+Use `--patterns` to merge project-specific source, sink, passthrough, and sanitizer patterns with Dosai's built-in patterns:
+
+```bash
+dotnet run --project ./Dosai/Dosai.csproj -- dataflows \
+  --path ./src \
+  --patterns ./dataflow-patterns.json \
+  --pattern-packs all \
+  --o /tmp/dosai-dataflows.json \
+  --print-sources-sinks
+```
+
+For the JSON schema and examples, see [Data-flow custom patterns](./dataflow-patterns.md).
+
 ### Implementation flow
 
 ```text
@@ -142,7 +155,7 @@ flowchart TD
 
 ### Algorithm and logic
 
-The analyzer uses pattern objects with target, kind, match mode, category, description, taint kinds, sanitizer effects, and confidence. Pattern kinds include symbol, method, type, namespace, name, parameter, attribute, and code. Match modes include contains, exact, prefix, suffix, and regex.
+The analyzer uses pattern objects with target, kind, match mode, category, description, taint kinds, sanitizer effects, and confidence. Pattern kinds include symbol, method, type, namespace, name, parameter, attribute, and code. Match modes include contains, exact, prefix, suffix, and regex. User pattern files are deserialized as `DataFlowPatternSet` and merged into the selected built-in pattern packs.
 
 The C# and VB path is operation based. `DataFlowOperationWalker` seeds taint from matched parameters, attributes, request objects, CLI arguments, and source expressions. It propagates taint through local variables, field and property assignments, receiver-sensitive member keys, common expressions, passthrough calls, object creation, return values, and simple interprocedural summaries. Sanitizer patterns stop or suppress taint, and validator guards can suppress taint in guarded true branches. Slices contain node IDs, edge IDs, source and sink categories, PURLs, taint kinds, field paths, confidence, and sink argument metadata.
 

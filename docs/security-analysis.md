@@ -60,6 +60,20 @@ dotnet run --project ./Dosai -- dataflows \
 
 The `dataflows.json` output includes `Metadata`, `EntryPoints`, `PackageReachability`, `DangerousApiReachability`, and `WeaknessCandidates` in addition to nodes, edges, and slices.
 
+### Custom source, sink, passthrough, and sanitizer patterns
+
+Use `--patterns` when application-specific wrappers or framework conventions are not covered by the built-in packs.
+
+```bash
+dotnet run --project ./Dosai -- dataflows \
+  --path /path/to/repo \
+  --patterns ./dataflow-patterns.json \
+  --o dataflows.json \
+  --print-sources-sinks
+```
+
+Pattern files contain `sources`, `sinks`, `passthroughs`, and `sanitizers` arrays. See [Data-flow custom patterns](./dataflow-patterns.md) for the full schema and examples.
+
 ### Agent context, reports, and diff
 
 ```bash

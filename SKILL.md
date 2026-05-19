@@ -62,9 +62,17 @@ dotnet run --project ./Dosai -- diff \
 
 ### Custom patterns
 
+Pass project-specific data-flow patterns with `--patterns`. Pattern files are merged with built-in defaults and can define `sources`, `sinks`, `passthroughs`, and `sanitizers`. See `docs/dataflow-patterns.md` for the full schema and examples.
+
 ```json
 {
   "sources": [
+    {
+      "kind": "Parameter",
+      "match": "Regex",
+      "pattern": "^(request|command|query|input)$",
+      "category": "message"
+    },
     {
       "kind": "Method",
       "match": "Contains",
@@ -87,6 +95,7 @@ dotnet run --project ./Dosai -- diff \
 dotnet run --project ./Dosai -- dataflows \
   --path ./path/to/repo \
   --patterns patterns.json \
+  --print-sources-sinks \
   --o dataflows.json
 ```
 

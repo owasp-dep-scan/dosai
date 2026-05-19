@@ -84,6 +84,7 @@ When adding a new source/sink:
 
 - Compiler internals: `docs/compiler-engineering.md`
 - Security analyst guide: `docs/security-analysis.md`
+- Data-flow custom patterns: `docs/dataflow-patterns.md`
 - PURL/supply-chain details: `docs/supply-chain-purl.md`
 - Graph exports: `docs/graph-formats.md`
 - Threat model: `THREAT_MODEL.md`
