@@ -60,6 +60,8 @@ dotnet run --project ./Dosai -- diff \
   --o dataflow-diff.json
 ```
 
+For prompt-sized triage loops, MCP tool calls, and query-first workflows, see `docs/agent-workflows.md`. For query operators, collection aliases, nested-property filters, and examples, see `docs/query-language.md`.
+
 ### Custom patterns
 
 Pass project-specific data-flow patterns with `--patterns`. Pattern files are merged with built-in defaults and can define `sources`, `sinks`, `passthroughs`, and `sanitizers`. See `docs/dataflow-patterns.md` for the full schema and examples.

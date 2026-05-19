@@ -370,6 +370,8 @@ collection[a=b && c~=d]
 
 Collection aliases include `nodes`, `edges`, `slices`, `weaknesses`, `entrypoints`, `packages`, `dangerous`, `summaries`, `assets`, `operations`, `materials`, `protocols`, and `findings`.
 
+For a complete operator, alias, and example reference, see [Dosai query language](./query-language.md).
+
 ### Algorithm and logic
 
 `DosaiQueryEngine` parses the collection name and optional bracketed filters. It resolves case-insensitive JSON property paths, supports nested paths with dot notation, compares arrays by checking whether any element matches, and supports string and numeric comparisons. The result is a JSON array of matching elements.
@@ -426,6 +428,8 @@ dosai.query         -> DosaiQueryEngine.QueryJson
 ### Algorithm and logic
 
 The server reads one JSON-RPC request per line. It supports `initialize`, `tools/list`, and `tools/call`. Tool arguments can override the default `--path`, pattern file, pattern packs, query input, query expression, and crypto format. Results are serialized as MCP-style text content containing JSON.
+
+For recommended agent loops, MCP tool examples, and prompt-size guidance, see [AI-agent and automation workflows](./agent-workflows.md).
 
 ### Strengths
 

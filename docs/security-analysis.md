@@ -74,6 +74,8 @@ dotnet run --project ./Dosai -- dataflows \
 
 Pattern files contain `sources`, `sinks`, `passthroughs`, and `sanitizers` arrays. See [Data-flow custom patterns](./dataflow-patterns.md) for the full schema and examples.
 
+Use [Dosai query language](./query-language.md) to filter large JSON outputs down to the slices, weakness candidates, packages, or crypto findings relevant to a review. Use [AI-agent and automation workflows](./agent-workflows.md) for recommended `agent-context`, MCP, query, report, and diff loops.
+
 ### Agent context, reports, and diff
 
 ```bash

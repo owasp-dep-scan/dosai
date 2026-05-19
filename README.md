@@ -76,12 +76,16 @@ dotnet run --project ./Dosai/Dosai.csproj -- query \
 
 Supported collection aliases include `nodes`, `edges`, `slices`, `weaknesses`, `entrypoints`, `packages`, `dangerous`, `summaries`, `assets`, `operations`, `materials`, `protocols`, and `findings`. Filters support `=`, `!=`, `~=`, `>`, `<`, `>=`, and `<=`.
 
+For operators, aliases, nested-property filters, and MCP query examples, see [Dosai query language](./docs/query-language.md).
+
 ### MCP-style stdio server
 
 ```bash
 printf '{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n' | \
   dotnet run --project ./Dosai/Dosai.csproj -- mcp --path ./Dosai
 ```
+
+For local-agent loops, MCP tool calls, prompt-size strategy, and CI automation recipes, see [AI-agent and automation workflows](./docs/agent-workflows.md).
 
 The server exposes `dosai.methods`, `dosai.dataflows`, `dosai.crypto`, `dosai.agent_context`, and `dosai.query` tool calls as line-delimited JSON-RPC responses.
 
