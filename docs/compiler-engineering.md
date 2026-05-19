@@ -1,0 +1,177 @@
+# Dosai Compiler Engineering Notes
+
+This document describes the Roslyn-based implementation details added in the call graph, data-flow, endpoint, and PURL work on this branch. It is written for compiler engineers and maintainers who need to evolve Dosai's analysis pipeline.
+
+## Architecture overview
+
+```mermaid
+flowchart TD
+    CLI[System.CommandLine CLI] --> Methods[methods command]
+    CLI --> Dataflows[dataflows command]
+    Methods --> Reflection[Assembly reflection]
+    Methods --> Source[Roslyn source extraction]
+    Methods --> Endpoints[API endpoint extraction]
+    Source --> Calls[Operation-based call capture]
+    Calls --> CallGraph[Stable call graph]
+    Dataflows --> Patterns[Default + user patterns]
+    Dataflows --> DFRoslyn[Roslyn operation walker]
+    DFRoslyn --> DFGraph[Data-flow graph]
+    PURL[PackageUrlResolver] --> Methods
+    PURL --> CallGraph
+    PURL --> DFGraph
+    CallGraph --> Exporters[Mermaid / GraphML / GEXF]
+    DFGraph --> Exporters
+```
+
+## Source compilation model
+
+Dosai now creates per-language compilations from all source files in the inspected tree:
+
+- C#: `CSharpCompilation.Create("Dosai.SourceAnalysis.CSharp", ...)`
+- VB.NET: `VisualBasicCompilation.Create("Dosai.SourceAnalysis.VisualBasic", ...)`
+
+References are populated from:
+
+1. `typeof(object).Assembly.Location`
+2. `TRUSTED_PLATFORM_ASSEMBLIES`
+3. managed assemblies under the inspected tree
+
+This improves cross-file symbol resolution compared with one-file compilations. It also lets the data-flow walker observe method calls, constructor calls, property references, field references, and invalid operations with better context.
+
+## Stable method identities
+
+Call graph node IDs are stable signatures rather than lossy `Namespace.Class.Method` strings:
+
+```text
+Namespace.Type.Method(ParameterType1,ParameterType2):ReturnType
+Namespace.Type<T>..ctor(T)
+```
+
+Reasons:
+
+- overload-safe
+- generic-aware enough for source and callgraph use
+- can map Roslyn calls to declared methods
+- can be used as graph node IDs in GraphML/GEXF
+
+## Call graph operation walker
+
+Call graph capture uses Roslyn `IOperation` APIs rather than raw invocation syntax.
+
+Supported operation kinds include:
+
+- `IInvocationOperation`
+- `IObjectCreationOperation`
+- `IPropertyReferenceOperation`
+- assignment context for property set/get detection
+
+The graph builder guarantees that every edge endpoint exists as a node. External targets become external nodes when no source declaration exists.
+
+```text
+Invocation Operation
+        │
+        ├── caller symbol ──► SourceId
+        ├── target symbol ──► TargetId
+        ├── arguments ─────► edge argument metadata
+        └── source span ───► CallLocation
+```
+
+## Data-flow operation walker
+
+`DataFlowAnalyzer` builds a lightweight taint graph. It is not a full interprocedural SSA engine; it is a pragmatic, symbol-aware slicer designed for security triage.
+
+### Taint state
+
+The walker maintains:
+
+```csharp
+Dictionary<string, TaintTrace> _taintedSymbols
+```
+
+Keys are normalized Roslyn symbol display strings. Values are ordered node traces.
+
+### Supported propagation
+
+- parameter sources
+- local variable initializers
+- simple assignments
+- compound assignments
+- invocation return propagation for passthrough/system/source methods
+- object creation argument propagation
+- binary/interpolated/coalesce/array expression propagation
+- return edges
+- sink argument flows
+- sink receiver flows, e.g. `model.File.CopyTo(stream)`
+- fallback invalid-operation sink matching for projects with unresolved legacy frameworks
+
+### Why invalid-operation support exists
+
+Older ASP.NET/WebForms projects often do not compile cleanly in isolated analysis because framework assemblies are unavailable or target older TFMs. Roslyn still creates `IInvalidOperation` trees. Dosai uses syntax-based sink matching on those invalid operations so high-value flows are not missed.
+
+```mermaid
+flowchart LR
+    Source[HTTP/model source] --> Assign[assignment]
+    Assign --> Invalid[unresolved invocation]
+    Invalid -->|syntax matches CopyTo/SaveAs/etc| Sink[file sink]
+```
+
+## Endpoint extraction
+
+`ApiEndpointAnalyzer` is syntax-oriented by design. It extracts endpoints without requiring successful semantic binding.
+
+Captured forms:
+
+- C# MVC/Web API attributes: `Route`, `HttpGet`, `HttpPost`, `HttpPut`, `HttpDelete`, `HttpPatch`, `HttpHead`, `HttpOptions`
+- C# minimal API calls: `MapGet`, `MapPost`, `MapPut`, `MapDelete`, `MapPatch`, `MapMethods`
+- VB.NET route/http attributes
+- absolute URLs in source files
+
+Endpoint entries are emitted in the default `methods` JSON under `ApiEndpoints`.
+
+## Graph exporters
+
+Call graph and data-flow graph exporters produce:
+
+- Mermaid: human-readable quick diagrams
+- GraphML: yEd/Gephi/NetworkX-friendly XML
+- GEXF: Gephi-friendly XML
+
+GraphML/GEXF include PURL metadata where available.
+
+## PURL enrichment
+
+`PackageUrlResolver` reads:
+
+- `project.assets.json`
+- `*.deps.json`
+
+It maps package libraries and compile/runtime assets to NuGet PURLs such as:
+
+```text
+pkg:nuget/Microsoft.Data.SqlClient@5.1.1
+```
+
+Resolution uses:
+
+1. assembly/module name
+2. compile/runtime DLL asset name
+3. package name
+4. namespace/type/symbol prefix matching
+
+PURLs are best-effort and never fail analysis.
+
+## Current limitations
+
+- Data-flow is intraprocedural except for simple call-return passthrough modeling.
+- Generic type flow is normalized for signatures but not fully substituted.
+- Sanitizers are represented as passthrough patterns today; a future `Sanitizer` target could stop propagation.
+- Endpoint extraction is intentionally syntax-based and may capture routes from non-runtime code.
+- PURL attribution is package-asset based; source-only projects without assets/deps cannot always be attributed.
+
+## Recommended engineering next steps
+
+1. Add explicit sanitizer patterns.
+2. Add interprocedural summaries for internal methods.
+3. Add field-sensitive object property flow.
+4. Cache Roslyn compilations and PURL resolver indexes for large monorepos.
+5. Add SARIF or CycloneDX properties for PURL-linked slices.

@@ -289,6 +289,142 @@ class CustomFlow
     }
 
     [Fact]
+    public void GetDataFlows_CustomPatterns_CanAttachPurlsToSourcesAndSinks()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "PurlFlow.cs"), """
+class Input { public static string Get() => "tainted"; }
+class Dangerous { public static void Exec(string value) { } }
+class PurlFlow
+{
+    static void Run()
+    {
+        var value = Input.Get();
+        Dangerous.Exec(value);
+    }
+}
+""");
+        var patternsPath = Path.Combine(tempDirectory.Path, "patterns.json");
+        File.WriteAllText(patternsPath, """
+{
+  "sources": [ { "kind": "Method", "pattern": "Input.Get", "category": "custom-source", "purl": "pkg:nuget/Input.Package@1.0.0" } ],
+  "sinks": [ { "kind": "Method", "pattern": "Dangerous.Exec", "category": "custom-sink", "purl": "pkg:nuget/Dangerous.Package@2.0.0" } ]
+}
+""");
+
+        var result = JsonSerializer.Deserialize<DataFlowResult>(DataFlowAnalyzer.GetDataFlows(tempDirectory.Path, patternsPath), new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() }
+        });
+
+        Assert.NotNull(result);
+        Assert.Contains(result.Nodes, node => node.IsSource && node.Purl == "pkg:nuget/Input.Package@1.0.0");
+        Assert.Contains(result.Nodes, node => node.IsSink && node.Purl == "pkg:nuget/Dangerous.Package@2.0.0");
+        Assert.Contains(result.Slices, slice => slice.Purls.Contains("pkg:nuget/Input.Package@1.0.0") && slice.Purls.Contains("pkg:nuget/Dangerous.Package@2.0.0"));
+    }
+
+    [Fact]
+    public void GetDataFlows_CSharpAdvancedEdges_TracksReceiverAndProcessStartInfoFlows()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "AdvancedFlow.cs"), """
+using System.Diagnostics;
+
+class Upload { public FileLike File { get; set; } = new(); }
+class FileLike { public void CopyTo(object stream) { } }
+
+class AdvancedFlow
+{
+    static void Main(string[] args)
+    {
+        var psi = new ProcessStartInfo($"/bin/{args[0]}");
+        var upload = new Upload();
+        upload.File.CopyTo(new object());
+    }
+
+    static void Save(Upload model)
+    {
+        model.File.CopyTo(new object());
+    }
+}
+""");
+
+        var result = JsonSerializer.Deserialize<DataFlowResult>(DataFlowAnalyzer.GetDataFlows(tempDirectory.Path), new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() }
+        });
+
+        Assert.NotNull(result);
+        Assert.Contains(result.Slices, slice => slice.SinkCategory == "command");
+        Assert.Contains(result.Slices, slice => slice.SinkCategory == "file" && slice.SinkArgumentIndex == -1);
+    }
+
+    [Fact]
+    public void GetDataFlows_VisualBasic_CliSourceToProcessStart_ReturnsSlice()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "VbFlow.vb"), """
+Imports System.Diagnostics
+
+Module VbFlow
+    Sub Main(args As String())
+        Dim command = args(0)
+        Process.Start(command)
+    End Sub
+End Module
+""");
+
+        var result = JsonSerializer.Deserialize<DataFlowResult>(DataFlowAnalyzer.GetDataFlows(tempDirectory.Path), new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() }
+        });
+
+        Assert.NotNull(result);
+        Assert.Contains(result.Nodes, node => node.IsSource && node.Category == "cli" && node.FileName == "VbFlow.vb");
+        Assert.Contains(result.Nodes, node => node.IsSink && node.Category == "command" && node.FileName == "VbFlow.vb");
+        Assert.Contains(result.Slices, slice => slice.SourceCategory == "cli" && slice.SinkCategory == "command");
+    }
+
+    [Fact]
+    public void GetMethods_CSharpSource_CapturesApiEndpointsAndUrls()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Endpoints.cs"), """
+using Microsoft.AspNetCore.Mvc;
+
+namespace Microsoft.AspNetCore.Mvc
+{
+    public class RouteAttribute : System.Attribute { public RouteAttribute(string value) { } }
+    public class HttpGetAttribute : System.Attribute { public HttpGetAttribute(string value) { } }
+}
+
+[Route("api/[controller]")]
+class OrdersController
+{
+    [HttpGet("{id}")]
+    public string Get(string id) => "https://api.example.test/orders/" + id;
+}
+
+class Program
+{
+    void Map(dynamic app)
+    {
+        app.MapPost("/upload", () => "ok");
+    }
+}
+""");
+
+        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(tempDirectory.Path), new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() }
+        });
+
+        Assert.NotNull(methodsSlice);
+        Assert.Contains(methodsSlice.ApiEndpoints ?? [], endpoint => endpoint.HttpMethod == "GET" && endpoint.Route == "api/[controller]/{id}" && endpoint.Urls.Contains("https://api.example.test/orders/"));
+        Assert.Contains(methodsSlice.ApiEndpoints ?? [], endpoint => endpoint.HttpMethod == "POST" && endpoint.Route == "/upload" && endpoint.EndpointKind == "MinimalApi");
+    }
+
+    [Fact]
     public void PackageUrlResolver_ProjectAssets_MapsAssembliesAndNamespacesToNuGetPurls()
     {
         using var tempDirectory = new TemporaryDirectory();

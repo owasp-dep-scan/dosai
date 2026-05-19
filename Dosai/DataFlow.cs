@@ -47,6 +47,7 @@ public sealed class DataFlowPattern
     public DataFlowMatchKind Match { get; set; } = DataFlowMatchKind.Contains;
     public required string Pattern { get; set; }
     public string? Category { get; set; }
+    public string? Purl { get; set; }
     public string? Description { get; set; }
 }
 
@@ -936,7 +937,8 @@ public static partial class DataFlowAnalyzer
                 Name = name,
                 Symbol = symbol,
                 Type = typeName,
-                Purl = purlResolver.Resolve(method?.ContainingAssembly?.ToDisplayString(), method?.ContainingModule?.ToDisplayString(), symbol, method?.ContainingNamespace?.ToDisplayString(), typeName),
+                Purl = matchedPatterns.Select(pattern => pattern.Purl).FirstOrDefault(purl => !string.IsNullOrWhiteSpace(purl)) ??
+                       purlResolver.Resolve(method?.ContainingAssembly?.ToDisplayString(), method?.ContainingModule?.ToDisplayString(), symbol, method?.ContainingNamespace?.ToDisplayString(), typeName),
                 Code = TrimCode(code ?? syntax.ToString()),
                 Path = Path.GetRelativePath(basePath, sourceFilePath),
                 FileName = Path.GetFileName(sourceFilePath),
@@ -995,6 +997,7 @@ public static partial class DataFlowAnalyzer
             var firstSource = trace.NodeIds.FirstOrDefault(id => result.Nodes.FirstOrDefault(node => node.Id == id)?.IsSource == true) ?? trace.NodeIds.First();
             var sourceNode = result.Nodes.FirstOrDefault(node => node.Id == firstSource);
             var sliceNodes = result.Nodes.Where(node => nodeIds.Contains(node.Id, StringComparer.Ordinal)).ToList();
+            var patternPurls = new[] { sinkPattern?.Purl, sourceNode?.Purl, sinkNode.Purl }.Where(purl => !string.IsNullOrWhiteSpace(purl));
             result.Slices.Add(new DataFlowSlice
             {
                 Id = $"dfs{++_sliceCounter}",
@@ -1006,7 +1009,7 @@ public static partial class DataFlowAnalyzer
                 SinkCategory = sinkPattern?.Category ?? sinkNode.Category,
                 SourcePurl = sourceNode?.Purl,
                 SinkPurl = sinkNode.Purl,
-                Purls = sliceNodes.Select(node => node.Purl).Where(purl => !string.IsNullOrWhiteSpace(purl)).Distinct(StringComparer.Ordinal).ToList()!,
+                Purls = sliceNodes.Select(node => node.Purl).Concat(patternPurls).Where(purl => !string.IsNullOrWhiteSpace(purl)).Distinct(StringComparer.Ordinal).ToList()!,
                 SinkArgument = sinkArgument,
                 SinkArgumentIndex = sinkArgumentIndex,
                 Summary = $"Data flows from {firstSource} to {sinkNode.Name} argument {sinkArgumentIndex}."

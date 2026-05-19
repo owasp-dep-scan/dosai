@@ -49,6 +49,11 @@ public class CommandLine
             Description = "The data-flow graph output file location and name. Defaults to --o with the format extension."
         };
 
+        var printSourcesSinksOption = new Option<bool>("--print-sources-sinks")
+        {
+            Description = "Print auto-detected data-flow sources and sinks to stdout for pattern diagnostics."
+        };
+
         rootCommand.Options.Add(pathOption);
         rootCommand.Options.Add(outputFileOption);
         rootCommand.Options.Add(callGraphFormatOption);
@@ -68,7 +73,8 @@ public class CommandLine
             outputFileOption,
             patternsFileOption,
             dataFlowFormatOption,
-            dataFlowGraphOutputFileOption
+            dataFlowGraphOutputFileOption,
+            printSourcesSinksOption
         };
 
         rootCommand.Subcommands.Add(methodsCommand);
@@ -126,9 +132,21 @@ public class CommandLine
             var patternsFile = parseResult.GetValue(patternsFileOption);
             var graphFormat = parseResult.GetValue(dataFlowFormatOption);
             var graphOutputFile = parseResult.GetValue(dataFlowGraphOutputFileOption);
+            var printSourcesSinks = parseResult.GetValue(printSourcesSinksOption);
 
             var result = DataFlowAnalyzer.GetDataFlows(path!, patternsFile);
             File.WriteAllText(outputFile!, result);
+
+            var options = new JsonSerializerOptions
+            {
+                Converters = { new JsonStringEnumConverter() }
+            };
+            var dataFlowResult = JsonSerializer.Deserialize<DataFlowResult>(result, options);
+
+            if (printSourcesSinks && dataFlowResult is not null)
+            {
+                PrintSourcesAndSinks(dataFlowResult);
+            }
 
             if (!string.IsNullOrWhiteSpace(graphFormat))
             {
@@ -138,11 +156,6 @@ public class CommandLine
                     return 1;
                 }
 
-                var options = new JsonSerializerOptions
-                {
-                    Converters = { new JsonStringEnumConverter() }
-                };
-                var dataFlowResult = JsonSerializer.Deserialize<DataFlowResult>(result, options);
                 if (dataFlowResult is null)
                 {
                     Console.Error.WriteLine("Data-flow result was not generated.");
@@ -157,5 +170,20 @@ public class CommandLine
         });
 
         return rootCommand.Parse(args).Invoke();
+    }
+
+    private static void PrintSourcesAndSinks(DataFlowResult result)
+    {
+        Console.WriteLine($"Data-flow sources: {result.Statistics.SourceCount}");
+        foreach (var node in result.Nodes.Where(node => node.IsSource).OrderBy(node => node.FileName, StringComparer.Ordinal).ThenBy(node => node.LineNumber))
+        {
+            Console.WriteLine($"SOURCE\t{node.Category}\t{node.FileName}:{node.LineNumber}:{node.ColumnNumber}\t{node.Name}\t{node.Purl ?? string.Empty}\t{node.Code}");
+        }
+
+        Console.WriteLine($"Data-flow sinks: {result.Statistics.SinkCount}");
+        foreach (var node in result.Nodes.Where(node => node.IsSink).OrderBy(node => node.FileName, StringComparer.Ordinal).ThenBy(node => node.LineNumber))
+        {
+            Console.WriteLine($"SINK\t{node.Category}\t{node.FileName}:{node.LineNumber}:{node.ColumnNumber}\t{node.Name}\t{node.Purl ?? string.Empty}\t{node.Code}");
+        }
     }
 }

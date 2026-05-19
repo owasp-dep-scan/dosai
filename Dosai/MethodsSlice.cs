@@ -19,5 +19,6 @@ public class MethodsSlice
     public List<ConstructorInfo>? Constructors { get; init; }
     
     public CallGraph? CallGraph { get; init; }
+    public List<ApiEndpoint>? ApiEndpoints { get; init; }
     public List<SourceAssemblyMapping>? SourceAssemblyMapping { get; init; }
 }

@@ -127,6 +127,7 @@ public static class Dosai
         var methods = GetAssemblyMethods(path);
         var (sourceMethods, usings, methodCalls, properties, fields, events, constructors, callGraph, sourceAssemblyMapping) = GetSourceMethods(path, methods);
         var assemblyInformation = GetAssemblyInformation(path);
+        var apiEndpoints = ApiEndpointAnalyzer.GetApiEndpoints(path);
         methods.AddRange(sourceMethods);
         EnrichPackageUrls(purlResolver, methods, usings, methodCalls, properties, fields, events, constructors, callGraph, assemblyInformation, sourceAssemblyMapping);
 
@@ -140,6 +141,7 @@ public static class Dosai
             Events = events,
             Constructors = constructors,
             CallGraph = callGraph,
+            ApiEndpoints = apiEndpoints,
             AssemblyInformation = assemblyInformation,
             SourceAssemblyMapping = sourceAssemblyMapping
         }, Options);
