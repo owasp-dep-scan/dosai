@@ -29,9 +29,24 @@ public class CommandLine
             Description = "Export call graph separately in one of: mermaid, graphml, gexf"
         };
 
-        var callGraphOutputFileOption = new Option<string?>("--callgraph-o")
+        var callGraphOutputFileOption = new Option<string?>("--callgraph-out")
         {
             Description = "The call graph output file location and name. Defaults to --o with the format extension."
+        };
+
+        var patternsFileOption = new Option<string?>("--patterns")
+        {
+            Description = "Optional JSON file containing source, sink, and passthrough patterns for data-flow slicing. Built-in .NET web/http/rpc/cli defaults are always included."
+        };
+
+        var dataFlowFormatOption = new Option<string?>("--graph-format")
+        {
+            Description = "Export the data-flow graph separately in one of: mermaid, graphml, gexf"
+        };
+
+        var dataFlowGraphOutputFileOption = new Option<string?>("--graph-out")
+        {
+            Description = "The data-flow graph output file location and name. Defaults to --o with the format extension."
         };
 
         rootCommand.Options.Add(pathOption);
@@ -47,7 +62,17 @@ public class CommandLine
             callGraphOutputFileOption
         };
 
+        var dataFlowsCommand = new Command("dataflows", "Create data-flow slices from source patterns to sink patterns")
+        {
+            pathOption,
+            outputFileOption,
+            patternsFileOption,
+            dataFlowFormatOption,
+            dataFlowGraphOutputFileOption
+        };
+
         rootCommand.Subcommands.Add(methodsCommand);
+        rootCommand.Subcommands.Add(dataFlowsCommand);
 
         methodsCommand.SetAction(parseResult =>
             {
@@ -93,6 +118,43 @@ public class CommandLine
 
                 return 0;
             });
+
+        dataFlowsCommand.SetAction(parseResult =>
+        {
+            var path = parseResult.GetValue(pathOption);
+            var outputFile = parseResult.GetValue(outputFileOption);
+            var patternsFile = parseResult.GetValue(patternsFileOption);
+            var graphFormat = parseResult.GetValue(dataFlowFormatOption);
+            var graphOutputFile = parseResult.GetValue(dataFlowGraphOutputFileOption);
+
+            var result = DataFlowAnalyzer.GetDataFlows(path!, patternsFile);
+            File.WriteAllText(outputFile!, result);
+
+            if (!string.IsNullOrWhiteSpace(graphFormat))
+            {
+                if (!DataFlowExporter.TryParseFormat(graphFormat, out var format))
+                {
+                    Console.Error.WriteLine($"Unsupported data-flow graph format: {graphFormat}. Supported formats: mermaid, graphml, gexf.");
+                    return 1;
+                }
+
+                var options = new JsonSerializerOptions
+                {
+                    Converters = { new JsonStringEnumConverter() }
+                };
+                var dataFlowResult = JsonSerializer.Deserialize<DataFlowResult>(result, options);
+                if (dataFlowResult is null)
+                {
+                    Console.Error.WriteLine("Data-flow result was not generated.");
+                    return 1;
+                }
+
+                graphOutputFile ??= Path.ChangeExtension(outputFile!, DataFlowExporter.GetDefaultExtension(format));
+                File.WriteAllText(graphOutputFile!, DataFlowExporter.Export(dataFlowResult, format));
+            }
+
+            return 0;
+        });
 
         return rootCommand.Parse(args).Invoke();
     }

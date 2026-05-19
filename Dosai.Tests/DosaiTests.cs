@@ -186,6 +186,109 @@ public class DosaiTests
     }
 
     [Fact]
+    public void GetDataFlows_CliSourceToProcessStart_ReturnsDetailedSliceAndExportsGraphs()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var samplePath = Path.Combine(tempDirectory.Path, "FlowSample.cs");
+        File.WriteAllText(samplePath, """
+using System;
+using System.Diagnostics;
+
+class FlowSample
+{
+    static void Main(string[] args)
+    {
+        var cmd = args[0];
+        var copy = string.Concat(cmd, "");
+        Process.Start(copy);
+    }
+}
+""");
+
+        var resultJson = DataFlowAnalyzer.GetDataFlows(tempDirectory.Path);
+        var dataFlowResult = JsonSerializer.Deserialize<DataFlowResult>(resultJson, new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() }
+        });
+
+        Assert.NotNull(dataFlowResult);
+        Assert.True(dataFlowResult.Statistics.SourceCount >= 1);
+        Assert.True(dataFlowResult.Statistics.SinkCount >= 1);
+        Assert.True(dataFlowResult.Statistics.SliceCount >= 1);
+        Assert.Contains(dataFlowResult.Nodes, node => node.IsSource && node.Category == "cli" && node.FileName == "FlowSample.cs" && node.LineNumber > 0);
+        Assert.Contains(dataFlowResult.Nodes, node => node.IsSink && node.Category == "command" && node.Symbol is not null && node.Symbol.Contains("System.Diagnostics.Process.Start"));
+        Assert.All(dataFlowResult.Edges, edge =>
+        {
+            Assert.Contains(dataFlowResult.Nodes, node => node.Id == edge.SourceId);
+            Assert.Contains(dataFlowResult.Nodes, node => node.Id == edge.TargetId);
+        });
+
+        var graphMl = DataFlowExporter.Export(dataFlowResult, DataFlowExportFormat.GraphMl);
+        var graphMlDocument = XDocument.Parse(graphMl);
+        Assert.Equal("graphml", graphMlDocument.Root?.Name.LocalName);
+        Assert.Contains(graphMlDocument.Descendants(), element => element.Name.LocalName == "node");
+        Assert.Contains(graphMlDocument.Descendants(), element => element.Name.LocalName == "edge");
+
+        var gexf = DataFlowExporter.Export(dataFlowResult, DataFlowExportFormat.Gexf);
+        var gexfDocument = XDocument.Parse(gexf);
+        Assert.Equal("gexf", gexfDocument.Root?.Name.LocalName);
+
+        var mermaid = DataFlowExporter.Export(dataFlowResult, DataFlowExportFormat.Mermaid);
+        Assert.StartsWith("flowchart LR", mermaid);
+    }
+
+    [Fact]
+    public void GetDataFlows_CustomPatterns_MergeWithDefaultsAndFindSlice()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var samplePath = Path.Combine(tempDirectory.Path, "CustomFlow.cs");
+        File.WriteAllText(samplePath, """
+class Input
+{
+    public static string Get() => "tainted";
+}
+
+class Dangerous
+{
+    public static void Exec(string value) { }
+}
+
+class CustomFlow
+{
+    static void Run()
+    {
+        var value = Input.Get();
+        Dangerous.Exec(value);
+    }
+}
+""");
+        var patternsPath = Path.Combine(tempDirectory.Path, "patterns.json");
+        File.WriteAllText(patternsPath, """
+{
+  "sources": [
+    { "kind": "Method", "match": "Contains", "pattern": "Input.Get", "category": "custom-source" }
+  ],
+  "sinks": [
+    { "kind": "Method", "match": "Contains", "pattern": "Dangerous.Exec", "category": "custom-sink" }
+  ]
+}
+""");
+
+        var resultJson = DataFlowAnalyzer.GetDataFlows(tempDirectory.Path, patternsPath);
+        var dataFlowResult = JsonSerializer.Deserialize<DataFlowResult>(resultJson, new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() }
+        });
+
+        Assert.NotNull(dataFlowResult);
+        Assert.Contains(dataFlowResult.Patterns.Sources, pattern => pattern.Pattern == "Input.Get");
+        Assert.Contains(dataFlowResult.Patterns.Sinks, pattern => pattern.Pattern == "Dangerous.Exec");
+        Assert.Contains(dataFlowResult.Nodes, node => node.IsSource && node.Category == "custom-source");
+        Assert.Contains(dataFlowResult.Nodes, node => node.IsSink && node.Category == "custom-sink");
+        Assert.Contains(dataFlowResult.Slices, slice => slice.SourceCategory == "custom-source" && slice.SinkCategory == "custom-sink");
+    }
+
+    [Fact]
     public void GetMethods_VBSource_PathIsFile_ReturnsDetails()
     {
         var sourcePath = GetFilePath(HelloWorldVBSource);
@@ -951,4 +1054,22 @@ public class DosaiTests
     private const string emptyDirectory = "empty";
     private const string combinedDirectory = "combined";
     private const string allLanguagesDirectory = "all-languages";
+
+    private sealed class TemporaryDirectory : IDisposable
+    {
+        public string Path { get; } = System.IO.Path.Combine(System.IO.Path.GetTempPath(), System.IO.Path.GetRandomFileName());
+
+        public TemporaryDirectory()
+        {
+            Directory.CreateDirectory(Path);
+        }
+
+        public void Dispose()
+        {
+            if (Directory.Exists(Path))
+            {
+                Directory.Delete(Path, recursive: true);
+            }
+        }
+    }
 }
