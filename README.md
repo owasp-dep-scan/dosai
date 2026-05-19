@@ -10,6 +10,8 @@ Dosai inspects source code, assemblies, and NuGet packages. It extracts methods,
 
 Use `methods` for method inventory, endpoints, call graph, and dependency evidence. Use `dataflows` for source-to-sink slicing. Use `crypto` for cryptographic assets, materials, misuse findings, reachability, and CBOM evidence. `agent-context`, `query`, `mcp`, `report`, `diff`, and `policy` support review automation and CI workflows.
 
+For detailed command usage, implementation notes, algorithms, strengths, and limitations, see [the Dosai command reference](./docs/commands.md).
+
 ### Common options
 
 `--path` is the file or directory to inspect. `--o` sets the output path and defaults to `dosai.json`. Use `--help` for command-specific options.
@@ -151,10 +153,12 @@ Dosai uses the Microsoft.CodeAnalysis (Roslyn) API and .NET Reflection to extrac
                         └─────────────────┘
 ```
 
-- **`GetSourceMethods`**: Uses Roslyn's `SyntaxTree`, `SemanticModel`, and symbol analysis (`IMethodSymbol`, `INamespaceSymbol`, etc.) to parse source files (.cs, .vb, .fs) and extract method signatures, dependencies (`using` directives), property/field/event declarations, and call graph information.
+- **`GetSourceMethods`**: Uses Roslyn's `SyntaxTree`, `SemanticModel`, and symbol analysis (`IMethodSymbol`, `INamespaceSymbol`, etc.) for C# and VB source. F#, R, and VC++/C/C++ use dedicated language frontends. The method pipeline extracts signatures, dependencies, property/field/event declarations, endpoint metadata, and call graph information.
 - **`GetAssemblyMethods`**: Uses .NET Reflection (`Assembly.LoadFrom`, `Type.GetMethods`, etc.) to load compiled assemblies (.dll, .exe) and extract method metadata, including signatures, attributes, and inheritance details.
 - **`GetAssemblyInformation`**: Uses Reflection and `FileVersionInfo` to gather metadata about assemblies such as version, location, dependencies, and target framework.
-- **`GetMethodsFromNupkg`**: Extracts the .nupkg archive (ZIP format) to a temporary directory, filtering for relevant .NET assemblies and source files, then delegates analysis to the existing `GetMethods` logic.
+- **`GetMethodsFromNupkg`**: Extracts the .nupkg archive (ZIP format) to a temporary directory, filters relevant assemblies and source files, then delegates analysis to the existing `GetMethods` logic.
+- **`DataFlowAnalyzer`**: Builds source-to-sink slices with pattern packs, sanitizer handling, validator guard suppression, method summaries, field-sensitive taint keys, graph exports, package reachability, and weakness candidates.
+- **`CryptoAnalyzer`**: Detects cryptographic assets, operations, materials, weak crypto, TLS validation bypasses, low PBKDF2 iterations, and CBOM evidence with best-effort reachability.
 
 ### Output Schema
 

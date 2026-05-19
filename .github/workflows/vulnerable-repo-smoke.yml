@@ -29,6 +29,10 @@ jobs:
         uses: actions/setup-dotnet@c2fa09f4bde5ebb9d1777cf28262a3eb3db3ced7
         with:
           dotnet-version: '10.0.x'
+      - name: Install R toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y r-base
       - name: Build Dosai
         run: dotnet build ./Dosai
       - name: Clone vulnerable sample
@@ -36,6 +40,8 @@ jobs:
       - name: Run data-flow smoke test
         run: |
           dotnet run --project ./Dosai -- dataflows --path "/tmp/${{ matrix.name }}" --o "/tmp/${{ matrix.name }}-dataflows.json" --graph-format graphml --graph-out "/tmp/${{ matrix.name }}-dataflows.graphml"
+          dotnet run --project ./Dosai -- crypto --path "/tmp/${{ matrix.name }}" --o "/tmp/${{ matrix.name }}-crypto.json" --format dosai
+          dotnet run --project ./Dosai -- crypto --path "/tmp/${{ matrix.name }}" --o "/tmp/${{ matrix.name }}-cbom.json" --format cyclonedx
           dotnet run --project ./Dosai -- policy --input "/tmp/${{ matrix.name }}-dataflows.json" --min-slices "${{ matrix.min_slices }}"
           dotnet run --project ./Dosai -- report --input "/tmp/${{ matrix.name }}-dataflows.json" --o "/tmp/${{ matrix.name }}-report.md"
           python - <<'PY'
@@ -51,6 +57,12 @@ jobs:
           assert not bad_edges, f'{len(bad_edges)} data-flow edges reference missing nodes'
           assert stats['SliceCount'] >= min_slices, f'expected at least {min_slices} slices, got {stats["SliceCount"]}'
           assert data['WeaknessCandidates'], 'expected weakness candidates for vulnerable repo smoke test'
+          crypto = json.load(open(f'/tmp/{name}-crypto.json'))
+          assert 'Statistics' in crypto
+          assert 'Findings' in crypto
+          cbom = json.load(open(f'/tmp/{name}-cbom.json'))
+          assert cbom['bomFormat'] == 'CycloneDX'
+          assert 'components' in cbom
           ET.parse(f'/tmp/{name}-dataflows.graphml')
           assert open(f'/tmp/{name}-report.md').read().startswith('# Dosai Analysis Report')
           PY
