@@ -347,6 +347,39 @@ public static class Dosai
 
     private static string BuildCallGraphEdgeKey(MethodCallEdge edge) => $"{edge.SourceId}\u001f{edge.TargetId}\u001f{edge.CallLocation.FileName}\u001f{edge.CallLocation.LineNumber}\u001f{edge.CallLocation.ColumnNumber}\u001f{edge.CallType}\u001f{edge.EvidenceKind}";
 
+    private static AnalysisEvidenceKind ResolveCallEvidenceKind(MethodCalls call)
+    {
+        if (call.EvidenceKind != AnalysisEvidenceKind.Unknown)
+        {
+            return call.EvidenceKind;
+        }
+
+        return string.Equals(call.Module, "LanguageFrontend", StringComparison.Ordinal)
+               || (string.Equals(call.Assembly, "Source", StringComparison.Ordinal) && call.TargetId?.StartsWith("external.", StringComparison.Ordinal) == true)
+            ? AnalysisEvidenceKind.LanguageFrontend
+            : AnalysisEvidenceKind.Unknown;
+    }
+
+    private static AnalysisEvidence CreateDefaultCallEvidence(MethodCalls call, AnalysisEvidenceKind evidenceKind) => new()
+    {
+        Kind = evidenceKind,
+        Source = evidenceKind switch
+        {
+            AnalysisEvidenceKind.SourceRoslynDirect => "roslyn-source",
+            AnalysisEvidenceKind.LanguageFrontend => "language-frontend",
+            _ => "unknown"
+        },
+        Description = evidenceKind switch
+        {
+            AnalysisEvidenceKind.SourceRoslynDirect => "Call edge discovered from source semantic operations.",
+            AnalysisEvidenceKind.LanguageFrontend => "Call edge discovered from language frontend source scanning.",
+            _ => "Call edge discovered without producer-specific evidence metadata."
+        },
+        FileName = call.FileName,
+        LineNumber = call.LineNumber,
+        ColumnNumber = call.ColumnNumber
+    };
+
     private static void MergeNodeEvidence(MethodNode target, MethodNode source)
     {
         foreach (var evidence in source.Evidence)
@@ -2085,32 +2118,25 @@ public static class Dosai
         var methodNodes = methodNodeLookup.Values.OrderBy(n => n.Id, StringComparer.Ordinal).ToList();
         var callEdges = allMethodCalls
             .Where(call => !string.IsNullOrWhiteSpace(call.SourceId) && !string.IsNullOrWhiteSpace(call.TargetId))
-            .Select(call => new MethodCallEdge
+            .Select(call =>
             {
-                SourceId = call.SourceId!,
-                TargetId = call.TargetId!,
-                CallLocation = new CallLocation { FileName = call.FileName, LineNumber = call.LineNumber, ColumnNumber = call.ColumnNumber },
-                FileName = call.FileName,
-                IsInternal = call.IsInternal,
-                CalledMethodName = call.CalledMethod,
-                SourceName = call.CallerMethod,
-                TargetName = call.CalledMethod,
-                Arguments = call.Arguments ?? [],
-                ArgumentExpressions = call.ArgumentExpressions ?? [],
-                CallType = call.CallType,
-                EvidenceKind = call.EvidenceKind == AnalysisEvidenceKind.Unknown ? AnalysisEvidenceKind.SourceRoslynDirect : call.EvidenceKind,
-                Evidence = call.Evidence.Count > 0 ? call.Evidence :
-                [
-                    new AnalysisEvidence
-                    {
-                        Kind = AnalysisEvidenceKind.SourceRoslynDirect,
-                        Source = "roslyn-source",
-                        Description = "Call edge discovered from source semantic operations.",
-                        FileName = call.FileName,
-                        LineNumber = call.LineNumber,
-                        ColumnNumber = call.ColumnNumber
-                    }
-                ]
+                var evidenceKind = ResolveCallEvidenceKind(call);
+                return new MethodCallEdge
+                {
+                    SourceId = call.SourceId!,
+                    TargetId = call.TargetId!,
+                    CallLocation = new CallLocation { FileName = call.FileName, LineNumber = call.LineNumber, ColumnNumber = call.ColumnNumber },
+                    FileName = call.FileName,
+                    IsInternal = call.IsInternal,
+                    CalledMethodName = call.CalledMethod,
+                    SourceName = call.CallerMethod,
+                    TargetName = call.CalledMethod,
+                    Arguments = call.Arguments ?? [],
+                    ArgumentExpressions = call.ArgumentExpressions ?? [],
+                    CallType = call.CallType,
+                    EvidenceKind = evidenceKind,
+                    Evidence = call.Evidence.Count > 0 ? call.Evidence : [CreateDefaultCallEvidence(call, evidenceKind)]
+                };
             })
             .GroupBy(edge => $"{edge.SourceId}\u001f{edge.TargetId}\u001f{edge.CallLocation.FileName}\u001f{edge.CallLocation.LineNumber}\u001f{edge.CallLocation.ColumnNumber}\u001f{edge.CallType}\u001f{edge.EvidenceKind}", StringComparer.Ordinal)
             .Select(group => group.First())

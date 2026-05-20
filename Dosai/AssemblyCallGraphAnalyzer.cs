@@ -35,7 +35,7 @@ internal static class AssemblyCallGraphAnalyzer
 
         foreach (var method in knownMethods.Where(method => !string.IsNullOrWhiteSpace(method.AssemblySignature)))
         {
-            AddNode(nodes, method.AssemblySignature!, method.Name ?? method.AssemblySignature!, method.ClassName, method.Namespace, method.FileName, method.Assembly, method.Module, method.Name == ".ctor" ? "Constructor" : "Method", method.LineNumber, method.ColumnNumber, isExternal: false);
+            AddNode(nodes, method.AssemblySignature!, method.Name ?? method.AssemblySignature!, method.ClassName, method.Namespace, method.FileName, method.Assembly, method.Module, method.Name == ".ctor" ? "Constructor" : "Method", method.LineNumber, method.ColumnNumber, isExternal: false, AnalysisEvidenceKind.AssemblyReflection);
         }
 
         foreach (var assemblyPath in assemblyPaths.Where(IsManagedAssembly))
@@ -410,11 +410,18 @@ internal static class AssemblyCallGraphAnalyzer
     private static AnalysisEvidence CreateEvidence(AnalysisEvidenceKind kind, AssemblyCallSourceLocation location, string description) => new()
     {
         Kind = kind,
-        Source = "assembly-il",
+        Source = GetEvidenceSource(kind),
         Description = description,
         FileName = Path.GetFileName(location.FilePath),
         LineNumber = location.LineNumber,
         ColumnNumber = location.ColumnNumber
+    };
+
+    private static string GetEvidenceSource(AnalysisEvidenceKind kind) => kind switch
+    {
+        AnalysisEvidenceKind.AssemblyReflection => "assembly-metadata",
+        AnalysisEvidenceKind.ExternalSummary => "external-metadata",
+        _ => "assembly-il"
     };
 
     private static Dictionary<int, AssemblyStateMachineOwner> BuildStateMachineMethodMap(MetadataReader reader, string assemblyPath, AssemblyCallSourceMap sourceMap)
@@ -592,8 +599,12 @@ internal static class AssemblyCallGraphAnalyzer
         var evidence = new AnalysisEvidence
         {
             Kind = evidenceKind,
-            Source = isExternal ? "external-metadata" : "assembly-il",
-            Description = evidenceKind == AnalysisEvidenceKind.AssemblyIlGeneratedState ? "Application call graph node collapsed from generated async/iterator state-machine IL." : isExternal ? "External call graph node referenced from assembly IL." : "Application call graph node discovered from assembly IL.",
+            Source = GetEvidenceSource(evidenceKind),
+            Description = evidenceKind == AnalysisEvidenceKind.AssemblyIlGeneratedState
+                ? "Application call graph node collapsed from generated async/iterator state-machine IL."
+                : evidenceKind == AnalysisEvidenceKind.AssemblyReflection
+                    ? "Application call graph node discovered from assembly metadata."
+                    : isExternal ? "External call graph node referenced from assembly IL." : "Application call graph node discovered from assembly IL.",
             FileName = fileName,
             LineNumber = lineNumber,
             ColumnNumber = columnNumber

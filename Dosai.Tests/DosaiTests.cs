@@ -80,6 +80,38 @@ public static class Program
     }
 
     [Fact]
+    public void GetMethods_AssemblyOnly_MetadataOnlyNodesUseReflectionEvidence()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "AssemblyMetadataEvidence", """
+public interface IPlugin
+{
+    void Run();
+}
+
+public abstract class BasePlugin
+{
+    public abstract void Execute();
+}
+
+public static class Program
+{
+    public static void Main() { }
+}
+""");
+
+        var methodsSlice = ReadMethods(Path.Combine(outputDirectory, "AssemblyMetadataEvidence.dll"));
+        var interfaceNode = Assert.Single(methodsSlice.CallGraph!.Nodes, node =>
+            node.Id.Contains("IPlugin.Run", StringComparison.Ordinal));
+
+        Assert.Contains(AnalysisEvidenceKind.AssemblyReflection, interfaceNode.Identity!.Evidence);
+        Assert.DoesNotContain(AnalysisEvidenceKind.AssemblyIlDirect, interfaceNode.Identity.Evidence);
+        Assert.Contains(interfaceNode.Evidence, evidence =>
+            evidence is { Kind: AnalysisEvidenceKind.AssemblyReflection, Source: "assembly-metadata" });
+        Assert.DoesNotContain(interfaceNode.Evidence, evidence => evidence.Source == "assembly-il");
+    }
+
+    [Fact]
     public void GetMethods_AssemblyOnlyAsyncStateMachine_CollapsesMoveNextToUserMethod()
     {
         using var tempDirectory = new TemporaryDirectory();
@@ -461,6 +493,26 @@ public static class Program
             edge is { SourceId: "HelloWorld.Hello.Appreciate():System.Threading.Tasks.Task", TargetId: "System.Threading.Tasks.Task.Delay(int):System.Threading.Tasks.Task", CallType: CallType.MethodCall });
         Assert.Contains(callGraph.Edges, edge =>
             edge is { SourceId: "HelloWorld.GenericProcessor<T>..ctor(T)", TargetId: "HelloWorld.GenericProcessor<T>.set_Value(T):void", CallType: CallType.PropertySet });
+    }
+
+    [Fact]
+    public void GetMethods_LanguageFrontend_CallGraphUsesLanguageFrontendEvidence()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Script.fs"), """
+module Sample
+
+let run value =
+    printfn "%s" value
+""");
+
+        var methodsSlice = ReadMethods(tempDirectory.Path);
+        var edge = Assert.Single(methodsSlice.CallGraph!.Edges, edge => edge.TargetId == "external.printfn(*)");
+
+        Assert.Equal(AnalysisEvidenceKind.LanguageFrontend, edge.EvidenceKind);
+        Assert.Contains(edge.Evidence, evidence =>
+            evidence is { Kind: AnalysisEvidenceKind.LanguageFrontend, Source: "language-frontend" });
+        Assert.DoesNotContain(edge.Evidence, evidence => evidence.Kind == AnalysisEvidenceKind.SourceRoslynDirect);
     }
 
     [Fact]
