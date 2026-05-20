@@ -106,7 +106,10 @@ public static class Program
             edge.EvidenceKind == AnalysisEvidenceKind.AssemblyIlGeneratedState &&
             edge.SourceId.Contains("Program.Main", StringComparison.Ordinal) &&
             edge.TargetId.Contains("System.Diagnostics.Process.Start", StringComparison.Ordinal));
-        Assert.Contains(callGraph.Nodes, node => node.Id.Contains("Program.Main", StringComparison.Ordinal) && node.Identity?.Evidence.Contains(AnalysisEvidenceKind.AssemblyIlGeneratedState) == true);
+        Assert.Contains(callGraph.Nodes, node =>
+            node.Id.Contains("Program.Main", StringComparison.Ordinal) &&
+            node.Identity?.Evidence.Contains(AnalysisEvidenceKind.AssemblyIlGeneratedState) == true &&
+            node.Evidence.Any(evidence => evidence.Kind == AnalysisEvidenceKind.AssemblyIlGeneratedState));
         Assert.Contains(methodsSlice.PackageReachability!, package =>
             package is { Purl: "pkg:nuget/System.Diagnostics.Process", Confidence: "High" } &&
             package.EvidenceKinds.Contains(AnalysisEvidenceKind.AssemblyIlGeneratedState));

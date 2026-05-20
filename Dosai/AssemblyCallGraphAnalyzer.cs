@@ -589,7 +589,22 @@ internal static class AssemblyCallGraphAnalyzer
     private static void AddNode(Dictionary<string, MethodNode> nodes, string id, string name, string? className, string? namespaceName, string? fileName, string? assembly, string? module, string kind, int lineNumber, int columnNumber, bool isExternal, AnalysisEvidenceKind? evidenceKindOverride = null)
     {
         var evidenceKind = evidenceKindOverride ?? (isExternal ? AnalysisEvidenceKind.ExternalSummary : AnalysisEvidenceKind.AssemblyIlDirect);
-        nodes.TryAdd(id, new MethodNode
+        var evidence = new AnalysisEvidence
+        {
+            Kind = evidenceKind,
+            Source = isExternal ? "external-metadata" : "assembly-il",
+            Description = evidenceKind == AnalysisEvidenceKind.AssemblyIlGeneratedState ? "Application call graph node collapsed from generated async/iterator state-machine IL." : isExternal ? "External call graph node referenced from assembly IL." : "Application call graph node discovered from assembly IL.",
+            FileName = fileName,
+            LineNumber = lineNumber,
+            ColumnNumber = columnNumber
+        };
+        if (nodes.TryGetValue(id, out var existingNode))
+        {
+            MergeNode(existingNode, className, namespaceName, fileName, assembly, module, lineNumber, columnNumber, isExternal, evidenceKind, evidence);
+            return;
+        }
+
+        nodes.Add(id, new MethodNode
         {
             Id = id,
             Name = name,
@@ -604,19 +619,32 @@ internal static class AssemblyCallGraphAnalyzer
             ColumnNumber = columnNumber,
             IsExternal = isExternal,
             Identity = MethodIdentityFactory.FromParts(id, null, id, id, assembly, module, namespaceName, className, name, 0, null, evidenceKind),
-            Evidence =
-            [
-                new AnalysisEvidence
-                {
-                    Kind = evidenceKind,
-                    Source = isExternal ? "external-metadata" : "assembly-il",
-                    Description = evidenceKind == AnalysisEvidenceKind.AssemblyIlGeneratedState ? "Application call graph node collapsed from generated async/iterator state-machine IL." : isExternal ? "External call graph node referenced from assembly IL." : "Application call graph node discovered from assembly IL.",
-                    FileName = fileName,
-                    LineNumber = lineNumber,
-                    ColumnNumber = columnNumber
-                }
-            ]
+            Evidence = [evidence]
         });
+    }
+
+    private static void MergeNode(MethodNode target, string? className, string? namespaceName, string? fileName, string? assembly, string? module, int lineNumber, int columnNumber, bool isExternal, AnalysisEvidenceKind evidenceKind, AnalysisEvidence evidence)
+    {
+        if (string.IsNullOrWhiteSpace(target.ClassName) && !string.IsNullOrWhiteSpace(className)) target.ClassName = className;
+        if (string.IsNullOrWhiteSpace(target.Namespace) && !string.IsNullOrWhiteSpace(namespaceName)) target.Namespace = namespaceName;
+        if (string.IsNullOrWhiteSpace(target.FileName) && !string.IsNullOrWhiteSpace(fileName)) target.FileName = fileName;
+        target.Assembly ??= assembly;
+        target.Module ??= module;
+        if (target.LineNumber <= 0 && lineNumber > 0) target.LineNumber = lineNumber;
+        if (target.ColumnNumber <= 0 && columnNumber > 0) target.ColumnNumber = columnNumber;
+        target.IsExternal &= isExternal;
+
+        if (!target.Evidence.Any(item => item.Kind == evidence.Kind && item.Source == evidence.Source && item.FileName == evidence.FileName && item.LineNumber == evidence.LineNumber && item.ColumnNumber == evidence.ColumnNumber))
+        {
+            target.Evidence.Add(evidence);
+        }
+
+        target.Identity ??= MethodIdentityFactory.FromParts(target.Id, null, target.Id, target.Id, assembly, module, namespaceName, className, target.Name, 0, target.Purl, evidenceKind);
+        if (!target.Identity.Evidence.Contains(evidenceKind)) target.Identity.Evidence.Add(evidenceKind);
+        target.Identity.AssemblyName ??= assembly;
+        target.Identity.ModuleName ??= module;
+        target.Identity.Namespace ??= namespaceName;
+        target.Identity.ClassName ??= className;
     }
 
     private static AssemblyCallMember? ResolveMember(MetadataReader reader, int metadataToken, string assemblyPath, AssemblyCallSourceMap sourceMap)
@@ -868,30 +896,48 @@ internal static class AssemblyCallGraphAnalyzer
             OpCode opCode;
             if (first == 0xfe)
             {
+                if (ilReader.RemainingBytes == 0)
+                {
+                    yield break;
+                }
                 var second = ilReader.ReadByte();
-                MultiByteOpCodes.TryGetValue(unchecked((short)(0xfe00 | second)), out opCode);
+                if (!MultiByteOpCodes.TryGetValue(unchecked((short)(0xfe00 | second)), out opCode))
+                {
+                    yield break;
+                }
             }
             else
             {
-                SingleByteOpCodes.TryGetValue(first, out opCode);
+                if (!SingleByteOpCodes.TryGetValue(first, out opCode))
+                {
+                    yield break;
+                }
             }
 
-            object? operand = opCode.OperandType switch
+            object? operand;
+            try
             {
-                OperandType.InlineNone => null,
-                OperandType.ShortInlineI => opCode == OpCodes.Ldc_I4_S ? ilReader.ReadSByte() : ilReader.ReadByte(),
-                OperandType.InlineI => ilReader.ReadInt32(),
-                OperandType.InlineI8 => ilReader.ReadInt64(),
-                OperandType.ShortInlineR => ilReader.ReadSingle(),
-                OperandType.InlineR => ilReader.ReadDouble(),
-                OperandType.ShortInlineBrTarget => ilReader.ReadSByte(),
-                OperandType.InlineBrTarget => ilReader.ReadInt32(),
-                OperandType.ShortInlineVar => ilReader.ReadByte(),
-                OperandType.InlineVar => (int)ilReader.ReadUInt16(),
-                OperandType.InlineSwitch => ReadSwitchOperand(ref ilReader),
-                OperandType.InlineString or OperandType.InlineSig or OperandType.InlineMethod or OperandType.InlineField or OperandType.InlineType or OperandType.InlineTok => ilReader.ReadInt32(),
-                _ => null
-            };
+                operand = opCode.OperandType switch
+                {
+                    OperandType.InlineNone => null,
+                    OperandType.ShortInlineI => opCode == OpCodes.Ldc_I4_S ? ilReader.ReadSByte() : ilReader.ReadByte(),
+                    OperandType.InlineI => ilReader.ReadInt32(),
+                    OperandType.InlineI8 => ilReader.ReadInt64(),
+                    OperandType.ShortInlineR => ilReader.ReadSingle(),
+                    OperandType.InlineR => ilReader.ReadDouble(),
+                    OperandType.ShortInlineBrTarget => ilReader.ReadSByte(),
+                    OperandType.InlineBrTarget => ilReader.ReadInt32(),
+                    OperandType.ShortInlineVar => ilReader.ReadByte(),
+                    OperandType.InlineVar => (int)ilReader.ReadUInt16(),
+                    OperandType.InlineSwitch => ReadSwitchOperand(ref ilReader),
+                    OperandType.InlineString or OperandType.InlineSig or OperandType.InlineMethod or OperandType.InlineField or OperandType.InlineType or OperandType.InlineTok => ilReader.ReadInt32(),
+                    _ => null
+                };
+            }
+            catch (BadImageFormatException)
+            {
+                yield break;
+            }
             yield return new AssemblyCallInstruction(offset, opCode, operand);
         }
     }
