@@ -2,7 +2,7 @@ namespace Depscan;
 
 public class MethodNode
 {
-    public required string Id { get; init; } // Stable symbol signature, including overload parameters when available.
+    public required string Id { get; set; } // Stable symbol signature, including overload parameters when available.
     public required string Name { get; set; }
     public string? Label { get; set; }
     public required string ClassName { get; set; }

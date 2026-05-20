@@ -127,6 +127,7 @@ public static class Dosai
         var methods = GetAssemblyMethods(path);
         var (sourceMethods, usings, methodCalls, properties, fields, events, constructors, callGraph, sourceAssemblyMapping) = GetSourceMethods(path, methods);
         var (assemblyMethodCalls, assemblyCallGraph) = AssemblyCallGraphAnalyzer.Analyze(path, methods);
+        NormalizeAssemblyGraphToSourceIds(assemblyMethodCalls, assemblyCallGraph, sourceAssemblyMapping);
         methodCalls.AddRange(assemblyMethodCalls);
         MergeCallGraph(callGraph, assemblyCallGraph);
         var assemblyInformation = GetAssemblyInformation(path);
@@ -308,14 +309,18 @@ public static class Dosai
             {
                 target.Nodes.Add(node);
             }
+            else if (target.Nodes.FirstOrDefault(existing => existing.Id == node.Id) is { } existingNode)
+            {
+                MergeNodeEvidence(existingNode, node);
+            }
         }
 
         var edgeKeys = target.Edges
-            .Select(edge => $"{edge.SourceId}\u001f{edge.TargetId}\u001f{edge.CallLocation.FileName}\u001f{edge.CallLocation.LineNumber}\u001f{edge.CallLocation.ColumnNumber}\u001f{edge.CallType}")
+            .Select(BuildCallGraphEdgeKey)
             .ToHashSet(StringComparer.Ordinal);
         foreach (var edge in source.Edges)
         {
-            var key = $"{edge.SourceId}\u001f{edge.TargetId}\u001f{edge.CallLocation.FileName}\u001f{edge.CallLocation.LineNumber}\u001f{edge.CallLocation.ColumnNumber}\u001f{edge.CallType}";
+            var key = BuildCallGraphEdgeKey(edge);
             if (edgeKeys.Add(key))
             {
                 target.Edges.Add(edge);
@@ -335,6 +340,109 @@ public static class Dosai
                 return edge;
             })
             .ToList();
+    }
+
+    private static string BuildCallGraphEdgeKey(MethodCallEdge edge) => $"{edge.SourceId}\u001f{edge.TargetId}\u001f{edge.CallLocation.FileName}\u001f{edge.CallLocation.LineNumber}\u001f{edge.CallLocation.ColumnNumber}\u001f{edge.CallType}\u001f{edge.EvidenceKind}";
+
+    private static void MergeNodeEvidence(MethodNode target, MethodNode source)
+    {
+        foreach (var evidence in source.Evidence)
+        {
+            if (!target.Evidence.Any(item => item.Kind == evidence.Kind && item.Source == evidence.Source && item.FileName == evidence.FileName && item.LineNumber == evidence.LineNumber && item.ColumnNumber == evidence.ColumnNumber))
+            {
+                target.Evidence.Add(evidence);
+            }
+        }
+
+        if (target.Identity is null || source.Identity is null)
+        {
+            return;
+        }
+
+        foreach (var evidenceKind in source.Identity.Evidence.Where(kind => !target.Identity.Evidence.Contains(kind)))
+        {
+            target.Identity.Evidence.Add(evidenceKind);
+        }
+        target.Identity.SourceSignature ??= source.Identity.SourceSignature;
+        target.Identity.AssemblySignature ??= source.Identity.AssemblySignature;
+        target.Identity.Purl ??= source.Identity.Purl;
+    }
+
+    private static void NormalizeAssemblyGraphToSourceIds(List<MethodCalls> assemblyMethodCalls, CallGraph assemblyCallGraph, List<SourceAssemblyMapping> sourceAssemblyMappings)
+    {
+        var sourceIdByAssemblyId = sourceAssemblyMappings
+            .Where(mapping => mapping.IsMapped && !string.IsNullOrWhiteSpace(mapping.SourceId) && !string.IsNullOrWhiteSpace(mapping.AssemblyId))
+            .GroupBy(mapping => mapping.AssemblyId!, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.First().SourceId!, StringComparer.Ordinal);
+        if (sourceIdByAssemblyId.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var call in assemblyMethodCalls)
+        {
+            if (call.SourceId is not null && sourceIdByAssemblyId.TryGetValue(call.SourceId, out var sourceId))
+            {
+                call.SourceId = sourceId;
+            }
+            if (call.TargetId is not null && sourceIdByAssemblyId.TryGetValue(call.TargetId, out var targetId))
+            {
+                call.TargetId = targetId;
+            }
+        }
+
+        foreach (var edge in assemblyCallGraph.Edges)
+        {
+            if (sourceIdByAssemblyId.TryGetValue(edge.SourceId, out var sourceId))
+            {
+                edge.SourceId = sourceId;
+            }
+            if (sourceIdByAssemblyId.TryGetValue(edge.TargetId, out var targetId))
+            {
+                edge.TargetId = targetId;
+            }
+        }
+
+        var normalizedNodes = new Dictionary<string, MethodNode>(StringComparer.Ordinal);
+        foreach (var node in assemblyCallGraph.Nodes)
+        {
+            var wasMapped = sourceIdByAssemblyId.TryGetValue(node.Id, out var mappedSourceId);
+            var normalizedId = mappedSourceId ?? node.Id;
+            if (!normalizedNodes.TryGetValue(normalizedId, out var existing))
+            {
+                node.Id = normalizedId;
+                if (node.Identity is not null)
+                {
+                    node.Identity.Id = normalizedId;
+                    if (wasMapped)
+                    {
+                        node.Identity.SourceSignature ??= normalizedId;
+                        node.Identity.Symbol = normalizedId;
+                    }
+                }
+                normalizedNodes[normalizedId] = node;
+                continue;
+            }
+
+            foreach (var evidence in node.Evidence)
+            {
+                if (!existing.Evidence.Any(item => item.Kind == evidence.Kind && item.Source == evidence.Source && item.FileName == evidence.FileName && item.LineNumber == evidence.LineNumber && item.ColumnNumber == evidence.ColumnNumber))
+                {
+                    existing.Evidence.Add(evidence);
+                }
+            }
+            if (existing.Identity is not null && node.Identity is not null)
+            {
+                foreach (var evidenceKind in node.Identity.Evidence.Where(kind => !existing.Identity.Evidence.Contains(kind)))
+                {
+                    existing.Identity.Evidence.Add(evidenceKind);
+                }
+                existing.Identity.AssemblySignature ??= node.Identity.AssemblySignature;
+                existing.Identity.Purl ??= node.Identity.Purl;
+            }
+        }
+
+        assemblyCallGraph.Nodes = normalizedNodes.Values.OrderBy(node => node.Id, StringComparer.Ordinal).ToList();
     }
 
     private static void EnrichMethodIdentities(List<Method> methods, CallGraph callGraph, string analysisPath)
@@ -368,10 +476,16 @@ public static class Dosai
 
         foreach (var node in callGraph.Nodes)
         {
+            var existingEvidenceKinds = node.Identity?.Evidence.ToList() ?? [];
+            existingEvidenceKinds.AddRange(node.Evidence.Select(evidence => evidence.Kind));
             if (!methodIdentityById.TryGetValue(node.Id, out var identity))
             {
                 var evidenceKind = node.IsExternal ? AnalysisEvidenceKind.ExternalSummary : AnalysisEvidenceKind.Unknown;
                 identity = MethodIdentityFactory.FromParts(node.Id, null, node.Id, node.Id, node.Assembly, node.Module, node.Namespace, node.ClassName, node.Name, 0, node.Purl, evidenceKind);
+            }
+            foreach (var evidenceKind in existingEvidenceKinds.Where(kind => !identity.Evidence.Contains(kind)))
+            {
+                identity.Evidence.Add(evidenceKind);
             }
             node.Identity = identity;
             node.Identity.Purl ??= node.Purl;
@@ -2035,11 +2149,13 @@ public static class Dosai
                         SourcePath = sourceMethod.Path,
                         SourceLineNumber = sourceMethod.LineNumber,
                         SourceColumnNumber = sourceMethod.ColumnNumber,
+                        SourceSignature = sourceMethod.SourceSignature,
                         SourceMetadataToken = sourceMethod.MetadataToken,
                         AssemblyMetadataToken = isMapped ? (asmMemberObj is Method m ? m.MetadataToken : 0) : 0,
                         AssemblyName = sourceMethod.Assembly,
                         ModuleName = sourceMethod.Module,
                         AssemblyId = asmId,
+                        AssemblySignature = asmId,
                         MemberType = memberType,
                         MemberName = sourceMethod.Name,
                         ClassName = sourceMethod.ClassName,

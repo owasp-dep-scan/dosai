@@ -44,6 +44,9 @@ public sealed class PackageReachability
     public required string Purl { get; set; }
     public bool Reachable { get; set; }
     public string ReachabilityKind { get; set; } = "Unknown";
+    public string Confidence { get; set; } = "Medium";
+    public List<string> ConfidenceReasons { get; set; } = [];
+    public List<AnalysisEvidenceKind> EvidenceKinds { get; set; } = [];
     public List<string> NodeIds { get; set; } = [];
     public List<string> EdgeIds { get; set; } = [];
     public List<string> SliceIds { get; set; } = [];
@@ -163,12 +166,13 @@ public static class TransparencyBuilder
 
         foreach (var node in callGraph.Nodes)
         {
-            Add(node.Purl, node.IsExternal ? "ExternalCallGraphNode" : "InternalCallGraphNode", node.Id);
+            Add(node.Purl, node.IsExternal ? "ExternalCallGraphNode" : "InternalCallGraphNode", node.Id, evidenceKinds: NodeEvidenceKinds(node));
         }
         foreach (var edge in callGraph.Edges)
         {
-            Add(edge.SourcePurl, "CallGraphEdge", edge.SourceId, edge.Id);
-            Add(edge.TargetPurl, "CallGraphEdge", edge.TargetId, edge.Id, category: edge.CallType.ToString());
+            var evidenceKinds = EdgeEvidenceKinds(edge);
+            Add(edge.SourcePurl, "CallGraphEdge", edge.SourceId, edge.Id, evidenceKinds: evidenceKinds);
+            Add(edge.TargetPurl, "CallGraphEdge", edge.TargetId, edge.Id, category: edge.CallType.ToString(), evidenceKinds: evidenceKinds);
         }
         if (slices is not null)
         {
@@ -176,13 +180,14 @@ public static class TransparencyBuilder
             {
                 foreach (var purl in slice.Purls)
                 {
-                    Add(purl, "DataFlowSlice", sliceId: slice.Id, category: slice.SinkCategory);
+                    Add(purl, "DataFlowSlice", sliceId: slice.Id, category: slice.SinkCategory, confidence: slice.Confidence);
                 }
             }
         }
+        FinalizeConfidence(byPurl.Values);
         return byPurl.Values.OrderBy(p => p.Purl, StringComparer.Ordinal).ToList();
 
-        void Add(string? purl, string kind, string? nodeId = null, string? edgeId = null, string? sliceId = null, string? category = null)
+        void Add(string? purl, string kind, string? nodeId = null, string? edgeId = null, string? sliceId = null, string? category = null, IEnumerable<AnalysisEvidenceKind>? evidenceKinds = null, string? confidence = null)
         {
             if (string.IsNullOrWhiteSpace(purl)) return;
             if (!byPurl.TryGetValue(purl, out var reachability))
@@ -194,13 +199,18 @@ public static class TransparencyBuilder
             if (edgeId is not null && !reachability.EdgeIds.Contains(edgeId)) reachability.EdgeIds.Add(edgeId);
             if (sliceId is not null && !reachability.SliceIds.Contains(sliceId)) reachability.SliceIds.Add(sliceId);
             if (category is not null && !reachability.Categories.Contains(category)) reachability.Categories.Add(category);
+            foreach (var evidenceKind in evidenceKinds ?? [])
+            {
+                if (!reachability.EvidenceKinds.Contains(evidenceKind)) reachability.EvidenceKinds.Add(evidenceKind);
+            }
+            if (!string.IsNullOrWhiteSpace(confidence)) AddConfidenceReason(reachability, $"Data-flow slice confidence is {confidence}.");
         }
     }
 
     public static List<PackageReachability> BuildPackageReachability(DataFlowResult result)
     {
         var byPurl = new Dictionary<string, PackageReachability>(StringComparer.Ordinal);
-        foreach (var node in result.Nodes) Add(node.Purl, "DataFlowNode", node.Id, category: node.Category);
+        foreach (var node in result.Nodes) Add(node.Purl, "DataFlowNode", node.Id, category: node.Category, evidenceKinds: node.Evidence.Select(evidence => evidence.Kind));
         foreach (var edge in result.Edges)
         {
             Add(edge.SourcePurl, "DataFlowEdge", edge.SourceId, edge.Id);
@@ -208,11 +218,12 @@ public static class TransparencyBuilder
         }
         foreach (var slice in result.Slices)
         {
-            foreach (var purl in slice.Purls) Add(purl, "DataFlowSlice", sliceId: slice.Id, category: slice.SinkCategory);
+            foreach (var purl in slice.Purls) Add(purl, "DataFlowSlice", sliceId: slice.Id, category: slice.SinkCategory, confidence: slice.Confidence);
         }
+        FinalizeConfidence(byPurl.Values);
         return byPurl.Values.OrderBy(p => p.Purl, StringComparer.Ordinal).ToList();
 
-        void Add(string? purl, string kind, string? nodeId = null, string? edgeId = null, string? sliceId = null, string? category = null)
+        void Add(string? purl, string kind, string? nodeId = null, string? edgeId = null, string? sliceId = null, string? category = null, IEnumerable<AnalysisEvidenceKind>? evidenceKinds = null, string? confidence = null)
         {
             if (string.IsNullOrWhiteSpace(purl)) return;
             if (!byPurl.TryGetValue(purl, out var reachability))
@@ -224,7 +235,61 @@ public static class TransparencyBuilder
             if (edgeId is not null && !reachability.EdgeIds.Contains(edgeId)) reachability.EdgeIds.Add(edgeId);
             if (sliceId is not null && !reachability.SliceIds.Contains(sliceId)) reachability.SliceIds.Add(sliceId);
             if (category is not null && !reachability.Categories.Contains(category)) reachability.Categories.Add(category);
+            foreach (var evidenceKind in evidenceKinds ?? [])
+            {
+                if (!reachability.EvidenceKinds.Contains(evidenceKind)) reachability.EvidenceKinds.Add(evidenceKind);
+            }
+            if (!string.IsNullOrWhiteSpace(confidence)) AddConfidenceReason(reachability, $"Data-flow slice confidence is {confidence}.");
         }
+    }
+
+    private static IEnumerable<AnalysisEvidenceKind> NodeEvidenceKinds(MethodNode node)
+    {
+        foreach (var evidenceKind in node.Identity?.Evidence ?? []) yield return evidenceKind;
+        foreach (var evidenceKind in node.Evidence.Select(evidence => evidence.Kind)) yield return evidenceKind;
+    }
+
+    private static IEnumerable<AnalysisEvidenceKind> EdgeEvidenceKinds(MethodCallEdge edge)
+    {
+        if (edge.EvidenceKind != AnalysisEvidenceKind.Unknown) yield return edge.EvidenceKind;
+        foreach (var evidenceKind in edge.Evidence.Select(evidence => evidence.Kind)) yield return evidenceKind;
+    }
+
+    private static void FinalizeConfidence(IEnumerable<PackageReachability> reachabilityFacts)
+    {
+        foreach (var reachability in reachabilityFacts)
+        {
+            if (reachability.EvidenceKinds.Any(kind => EvidenceScore(kind) >= 3))
+            {
+                reachability.Confidence = "High";
+                AddConfidenceReason(reachability, "Reachability is supported by direct source or IL call evidence.");
+            }
+            else if (reachability.EvidenceKinds.Any(kind => EvidenceScore(kind) >= 2) || reachability.SliceIds.Count > 0)
+            {
+                reachability.Confidence = "Medium";
+                AddConfidenceReason(reachability, "Reachability is supported by summaries, metadata, or data-flow slices.");
+            }
+            else
+            {
+                reachability.Confidence = "Low";
+                AddConfidenceReason(reachability, "Reachability is inferred from heuristic or unresolved evidence.");
+            }
+            reachability.EvidenceKinds = reachability.EvidenceKinds.Distinct().OrderBy(kind => kind.ToString(), StringComparer.Ordinal).ToList();
+            reachability.ConfidenceReasons = reachability.ConfidenceReasons.Distinct(StringComparer.Ordinal).ToList();
+        }
+    }
+
+    private static int EvidenceScore(AnalysisEvidenceKind kind) => kind switch
+    {
+        AnalysisEvidenceKind.SourceRoslynDirect or AnalysisEvidenceKind.AssemblyIlDirect => 3,
+        AnalysisEvidenceKind.SourceRoslynSummary or AnalysisEvidenceKind.AssemblyIlSummary or AnalysisEvidenceKind.AssemblyReflection or AnalysisEvidenceKind.ExternalSummary or AnalysisEvidenceKind.FrameworkModel => 2,
+        AnalysisEvidenceKind.AssemblyIlVirtualCandidate or AnalysisEvidenceKind.AssemblyIlDelegateTarget or AnalysisEvidenceKind.AssemblyIlGeneratedState or AnalysisEvidenceKind.ReflectionHeuristic or AnalysisEvidenceKind.LanguageFrontend => 1,
+        _ => 0
+    };
+
+    private static void AddConfidenceReason(PackageReachability reachability, string reason)
+    {
+        if (!reachability.ConfidenceReasons.Contains(reason, StringComparer.Ordinal)) reachability.ConfidenceReasons.Add(reason);
     }
 
     public static List<WeaknessCandidate> BuildWeaknessCandidates(DataFlowResult result, IEnumerable<EntryPoint>? entryPoints = null)

@@ -103,7 +103,13 @@ public static class Program
         Assert.NotNull(methodsSlice);
         Assert.Contains(methodsSlice.CallGraph!.Edges, edge => edge.EvidenceKind == AnalysisEvidenceKind.SourceRoslynDirect);
         Assert.Contains(methodsSlice.CallGraph.Edges, edge => edge.EvidenceKind == AnalysisEvidenceKind.AssemblyIlDirect);
-        Assert.Contains(methodsSlice.SourceAssemblyMapping!, mapping => mapping.IsMapped && mapping.AssemblyMetadataToken != 0);
+        var mainMapping = Assert.Single(methodsSlice.SourceAssemblyMapping!, mapping => mapping.IsMapped && mapping.MemberName == "Main" && mapping.AssemblyMetadataToken != 0);
+        Assert.Equal(mainMapping.SourceId, mainMapping.SourceSignature);
+        Assert.Equal(mainMapping.AssemblyId, mainMapping.AssemblySignature);
+        Assert.Contains(methodsSlice.CallGraph.Edges, edge => edge.EvidenceKind == AnalysisEvidenceKind.AssemblyIlDirect && edge.SourceId == mainMapping.SourceId);
+        Assert.DoesNotContain(methodsSlice.CallGraph.Nodes, node => node.Id == mainMapping.AssemblyId);
+        Assert.Contains(methodsSlice.CallGraph.Nodes, node => node.Id == mainMapping.SourceId && node.Identity?.Evidence.Contains(AnalysisEvidenceKind.SourceRoslynDirect) == true && node.Identity.Evidence.Contains(AnalysisEvidenceKind.AssemblyIlDirect));
+        Assert.Contains(methodsSlice.PackageReachability!, package => package.Purl == "pkg:nuget/System.Diagnostics.Process" && package.Confidence == "High" && package.EvidenceKinds.Contains(AnalysisEvidenceKind.AssemblyIlDirect));
     }
 
     [Fact]
