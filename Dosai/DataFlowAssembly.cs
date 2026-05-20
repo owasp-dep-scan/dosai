@@ -198,6 +198,7 @@ public static partial class DataFlowAnalyzer
         }
 
         var instructionIndexByOffset = instructions.Select((instruction, index) => (instruction.Offset, index)).ToDictionary(item => item.Offset, item => item.index);
+        var exceptionRegions = body.ExceptionRegions.ToList();
         var isStatic = (method.Attributes & MethodAttributes.Static) != 0;
         var initialState = new AssemblyMethodState([], [], SeedAssemblyParameters(reader, method, methodInfo, isStatic, context));
         var worklist = new Queue<(int Index, AssemblyMethodState State)>();
@@ -225,28 +226,35 @@ public static partial class DataFlowAnalyzer
             var opCode = instruction.OpCode;
             if (opCode == OpCodes.Nop)
             {
-                EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, state, worklist);
+                EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
+                continue;
+            }
+
+            if (opCode == OpCodes.Throw || opCode == OpCodes.Rethrow)
+            {
+                var thrownTaint = opCode == OpCodes.Throw ? state.Pop() : null;
+                EnqueueExceptionSuccessors(instruction, instructionIndexByOffset, exceptionRegions, state, worklist, thrownTaint);
                 continue;
             }
 
             if (TryGetLdargIndex(opCode, instruction.Operand, out var ldargIndex))
             {
                 state.Push(state.Arguments.TryGetValue(ldargIndex, out var taint) ? taint : null);
-                EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, state, worklist);
+                EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
                 continue;
             }
 
             if (TryGetStargIndex(opCode, instruction.Operand, out var stargIndex))
             {
                 state.Arguments[stargIndex] = state.Pop();
-                EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, state, worklist);
+                EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
                 continue;
             }
 
             if (TryGetLdlocIndex(opCode, instruction.Operand, out var ldlocIndex))
             {
                 state.Push(state.Locals.TryGetValue(ldlocIndex, out var taint) ? taint : null);
-                EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, state, worklist);
+                EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
                 continue;
             }
 
@@ -261,7 +269,7 @@ public static partial class DataFlowAnalyzer
                     localTaint = localTaint.Append(assignmentNode.Id);
                 }
                 state.Locals[stlocIndex] = localTaint;
-                EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, state, worklist);
+                EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
                 continue;
             }
 
@@ -278,7 +286,7 @@ public static partial class DataFlowAnalyzer
                 {
                     state.Push(null);
                 }
-                EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, state, worklist);
+                EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
                 continue;
             }
 
@@ -292,7 +300,7 @@ public static partial class DataFlowAnalyzer
                         ? storedTaint
                         : instanceTaint;
                 state.Push(fieldTaint);
-                EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, state, worklist);
+                EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
                 continue;
             }
 
@@ -311,7 +319,7 @@ public static partial class DataFlowAnalyzer
                         context.RecordFieldTaint(member.Symbol, valueTaint);
                     }
                 }
-                EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, state, worklist);
+                EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
                 continue;
             }
 
@@ -319,7 +327,7 @@ public static partial class DataFlowAnalyzer
             {
                 _ = state.Pop(); // index
                 state.Push(state.Pop()); // array/reference
-                EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, state, worklist);
+                EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
                 continue;
             }
 
@@ -328,28 +336,28 @@ public static partial class DataFlowAnalyzer
                 _ = state.Pop(); // value
                 _ = state.Pop(); // index
                 _ = state.Pop(); // array
-                EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, state, worklist);
+                EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
                 continue;
             }
 
             if (opCode == OpCodes.Call || opCode == OpCodes.Callvirt || opCode == OpCodes.Newobj)
             {
                 ProcessAssemblyCall(reader, instruction, opCode, methodInfo, assemblyPath, context, state, summaries);
-                EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, state, worklist);
+                EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
                 continue;
             }
 
             if (opCode == OpCodes.Dup)
             {
                 state.Push(state.Stack.Count > 0 ? state.Stack[^1] : null);
-                EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, state, worklist);
+                EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
                 continue;
             }
 
             if (opCode == OpCodes.Pop)
             {
                 _ = state.Pop();
-                EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, state, worklist);
+                EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
                 continue;
             }
 
@@ -364,7 +372,7 @@ public static partial class DataFlowAnalyzer
             }
 
             ApplyDefaultStackBehaviour(opCode, state);
-            EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, state, worklist);
+            EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
         }
     }
 
@@ -509,6 +517,7 @@ public static partial class DataFlowAnalyzer
         }
 
         var instructionIndexByOffset = instructions.Select((instruction, index) => (instruction.Offset, index)).ToDictionary(item => item.Offset, item => item.index);
+        var exceptionRegions = body.ExceptionRegions.ToList();
         var isStatic = (method.Attributes & MethodAttributes.Static) != 0;
         var argumentTaints = new Dictionary<int, AssemblySummaryTaint?>();
         foreach (var parameterHandle in method.GetParameters())
@@ -535,31 +544,38 @@ public static partial class DataFlowAnalyzer
             var instruction = instructions[instructionIndex];
             var opCode = instruction.OpCode;
 
+            if (opCode == OpCodes.Throw || opCode == OpCodes.Rethrow)
+            {
+                var thrownTaint = opCode == OpCodes.Throw ? state.Pop() : null;
+                EnqueueSummaryExceptionSuccessors(instruction, instructionIndexByOffset, exceptionRegions, state, worklist, thrownTaint);
+                continue;
+            }
+
             if (TryGetLdargIndex(opCode, instruction.Operand, out var ldargIndex))
             {
                 state.Push(state.Arguments.TryGetValue(ldargIndex, out var taint) ? taint : null);
-                EnqueueSummarySuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, state, worklist);
+                EnqueueSummarySuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
                 continue;
             }
 
             if (TryGetStargIndex(opCode, instruction.Operand, out var stargIndex))
             {
                 state.Arguments[stargIndex] = state.Pop();
-                EnqueueSummarySuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, state, worklist);
+                EnqueueSummarySuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
                 continue;
             }
 
             if (TryGetLdlocIndex(opCode, instruction.Operand, out var ldlocIndex))
             {
                 state.Push(state.Locals.TryGetValue(ldlocIndex, out var taint) ? taint : null);
-                EnqueueSummarySuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, state, worklist);
+                EnqueueSummarySuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
                 continue;
             }
 
             if (TryGetStlocIndex(opCode, instruction.Operand, out var stlocIndex))
             {
                 state.Locals[stlocIndex] = state.Pop();
-                EnqueueSummarySuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, state, worklist);
+                EnqueueSummarySuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
                 continue;
             }
 
@@ -567,28 +583,28 @@ public static partial class DataFlowAnalyzer
             {
                 _ = state.Pop();
                 state.Push(state.Pop());
-                EnqueueSummarySuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, state, worklist);
+                EnqueueSummarySuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
                 continue;
             }
 
             if (opCode == OpCodes.Call || opCode == OpCodes.Callvirt || opCode == OpCodes.Newobj)
             {
                 ProcessAssemblySummaryCall(reader, instruction, opCode, context, state, summaries, summary);
-                EnqueueSummarySuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, state, worklist);
+                EnqueueSummarySuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
                 continue;
             }
 
             if (opCode == OpCodes.Dup)
             {
                 state.Push(state.Stack.Count > 0 ? state.Stack[^1] : null);
-                EnqueueSummarySuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, state, worklist);
+                EnqueueSummarySuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
                 continue;
             }
 
             if (opCode == OpCodes.Pop)
             {
                 _ = state.Pop();
-                EnqueueSummarySuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, state, worklist);
+                EnqueueSummarySuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
                 continue;
             }
 
@@ -605,7 +621,7 @@ public static partial class DataFlowAnalyzer
             }
 
             ApplyDefaultSummaryStackBehaviour(opCode, state);
-            EnqueueSummarySuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, state, worklist);
+            EnqueueSummarySuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
         }
 
         return summary;
@@ -750,7 +766,19 @@ public static partial class DataFlowAnalyzer
         var specification = reader.GetMethodSpecification(handle);
         if (specification.Method.Kind is HandleKind.MemberReference or HandleKind.MethodDefinition)
         {
-            return ResolveMember(reader, MetadataTokens.GetToken(specification.Method));
+            if (ResolveMember(reader, MetadataTokens.GetToken(specification.Method)) is not { } member)
+            {
+                return null;
+            }
+
+            var genericArguments = ReadMethodSpecificationArguments(reader, specification.Signature);
+            if (genericArguments.Count == 0)
+            {
+                return member;
+            }
+
+            var genericName = member.Name.Contains('<', StringComparison.Ordinal) ? member.Name : $"{member.Name}<{string.Join(',', genericArguments)}>";
+            return member with { Symbol = member.Symbol.Replace($".{member.Name}(", $".{genericName}(", StringComparison.Ordinal), Name = genericName };
         }
         return null;
     }
@@ -768,10 +796,23 @@ public static partial class DataFlowAnalyzer
     {
         HandleKind.TypeReference => GetFullTypeName(reader, reader.GetTypeReference((TypeReferenceHandle)parent)),
         HandleKind.TypeDefinition => GetFullTypeName(reader, reader.GetTypeDefinition((TypeDefinitionHandle)parent)),
-        HandleKind.TypeSpecification => "<type-spec>",
+        HandleKind.TypeSpecification => DecodeTypeSpecification(reader, (TypeSpecificationHandle)parent),
         HandleKind.MethodDefinition => BuildMethodInfo(reader, (MethodDefinitionHandle)parent, reader.GetMethodDefinition((MethodDefinitionHandle)parent), string.Empty).ContainingType,
         _ => string.Empty
     };
+
+    private static string DecodeTypeSpecification(MetadataReader reader, TypeSpecificationHandle handle)
+    {
+        try
+        {
+            var blob = reader.GetBlobReader(reader.GetTypeSpecification(handle).Signature);
+            return ReadSignatureType(reader, ref blob);
+        }
+        catch
+        {
+            return "<type-spec>";
+        }
+    }
 
     private static string GetFullTypeName(MetadataReader reader, TypeReference type)
     {
@@ -804,7 +845,7 @@ public static partial class DataFlowAnalyzer
             }
 
             var parameterCount = blob.RemainingBytes > 0 ? blob.ReadCompressedInteger() : 0;
-            var returnType = blob.RemainingBytes > 0 ? ReadPrimitiveSignatureType(ref blob) : "void";
+            var returnType = blob.RemainingBytes > 0 ? ReadSignatureType(reader, ref blob) : "void";
             var returnsVoid = string.Equals(returnType, "void", StringComparison.OrdinalIgnoreCase);
             var hasThis = attributes.HasValue ? (attributes.Value & MethodAttributes.Static) == 0 : (header & 0x20) != 0;
             return new AssemblySignatureInfo(parameterCount, hasThis, returnsVoid, returnType);
@@ -815,7 +856,7 @@ public static partial class DataFlowAnalyzer
         }
     }
 
-    private static string ReadPrimitiveSignatureType(ref BlobReader blob)
+    private static string ReadSignatureType(MetadataReader reader, ref BlobReader blob)
     {
         if (blob.RemainingBytes <= 0)
         {
@@ -823,24 +864,40 @@ public static partial class DataFlowAnalyzer
         }
 
         var rawElement = blob.ReadByte();
+        if (rawElement == 0x15)
+        {
+            var genericType = ReadSignatureType(reader, ref blob);
+            var argumentCount = blob.RemainingBytes > 0 ? blob.ReadCompressedInteger() : 0;
+            var arguments = new List<string>();
+            for (var i = 0; i < argumentCount && blob.RemainingBytes > 0; i++) arguments.Add(ReadSignatureType(reader, ref blob));
+            return $"{genericType}<{string.Join(',', arguments)}>";
+        }
         if (rawElement is 0x11 or 0x12) // valuetype/class followed by a TypeDefOrRef coded token
         {
-            if (blob.RemainingBytes > 0)
-            {
-                _ = blob.ReadCompressedInteger();
-            }
-            return "object";
+            return blob.RemainingBytes > 0 ? ResolveTypeDefOrRef(reader, blob.ReadCompressedInteger()) : "object";
         }
+
+        if (rawElement == 0x14) return ReadArraySignatureType(reader, ref blob);
 
         if (rawElement == 0x1d) // SZARRAY
         {
-            return ReadPrimitiveSignatureType(ref blob) + "[]";
+            return ReadSignatureType(reader, ref blob) + "[]";
         }
 
         if (rawElement == 0x10 && blob.RemainingBytes > 0) // BYREF
         {
-            return ReadPrimitiveSignatureType(ref blob) + "&";
+            return ReadSignatureType(reader, ref blob) + "&";
         }
+
+        if (rawElement == 0x0f) return ReadSignatureType(reader, ref blob) + "*";
+        if (rawElement == 0x13) return $"!{(blob.RemainingBytes > 0 ? blob.ReadCompressedInteger() : 0)}";
+        if (rawElement == 0x1e) return $"!!{(blob.RemainingBytes > 0 ? blob.ReadCompressedInteger() : 0)}";
+        if (rawElement is 0x1f or 0x20)
+        {
+            if (blob.RemainingBytes > 0) _ = blob.ReadCompressedInteger();
+            return ReadSignatureType(reader, ref blob);
+        }
+        if (rawElement is 0x45 or 0x41) return ReadSignatureType(reader, ref blob);
 
         var element = (SignatureTypeCode)rawElement;
         return element switch
@@ -862,6 +919,55 @@ public static partial class DataFlowAnalyzer
             SignatureTypeCode.Object => "object",
             _ => element.ToString()
         };
+    }
+
+    private static string ReadArraySignatureType(MetadataReader reader, ref BlobReader blob)
+    {
+        var elementType = ReadSignatureType(reader, ref blob);
+        if (blob.RemainingBytes <= 0) return elementType + "[]";
+        var rank = blob.ReadCompressedInteger();
+        var sizes = blob.RemainingBytes > 0 ? blob.ReadCompressedInteger() : 0;
+        for (var i = 0; i < sizes && blob.RemainingBytes > 0; i++) _ = blob.ReadCompressedInteger();
+        var lowerBounds = blob.RemainingBytes > 0 ? blob.ReadCompressedInteger() : 0;
+        for (var i = 0; i < lowerBounds && blob.RemainingBytes > 0; i++) _ = blob.ReadCompressedSignedInteger();
+        return rank <= 1 ? elementType + "[]" : elementType + "[" + new string(',', rank - 1) + "]";
+    }
+
+    private static string ResolveTypeDefOrRef(MetadataReader reader, int codedIndex)
+    {
+        var tag = codedIndex & 0x3;
+        var row = codedIndex >> 2;
+        try
+        {
+            return tag switch
+            {
+                0 => GetFullTypeName(reader, reader.GetTypeDefinition(MetadataTokens.TypeDefinitionHandle(row))),
+                1 => GetFullTypeName(reader, reader.GetTypeReference(MetadataTokens.TypeReferenceHandle(row))),
+                _ => "object"
+            };
+        }
+        catch
+        {
+            return "object";
+        }
+    }
+
+    private static List<string> ReadMethodSpecificationArguments(MetadataReader reader, BlobHandle signatureHandle)
+    {
+        try
+        {
+            var blob = reader.GetBlobReader(signatureHandle);
+            if (blob.RemainingBytes == 0) return [];
+            _ = blob.ReadByte();
+            var count = blob.RemainingBytes > 0 ? blob.ReadCompressedInteger() : 0;
+            var arguments = new List<string>();
+            for (var i = 0; i < count && blob.RemainingBytes > 0; i++) arguments.Add(ReadSignatureType(reader, ref blob));
+            return arguments;
+        }
+        catch
+        {
+            return [];
+        }
     }
 
     private static IEnumerable<AssemblyInstruction> DecodeInstructions(BlobReader ilReader)
@@ -913,24 +1019,59 @@ public static partial class DataFlowAnalyzer
         return targets;
     }
 
-    private static void EnqueueSuccessors(int instructionIndex, AssemblyInstruction instruction, IReadOnlyList<AssemblyInstruction> instructions, IReadOnlyDictionary<int, int> instructionIndexByOffset, AssemblyMethodState state, Queue<(int Index, AssemblyMethodState State)> worklist)
+    private static void EnqueueSuccessors(int instructionIndex, AssemblyInstruction instruction, IReadOnlyList<AssemblyInstruction> instructions, IReadOnlyDictionary<int, int> instructionIndexByOffset, IReadOnlyList<ExceptionRegion> exceptionRegions, AssemblyMethodState state, Queue<(int Index, AssemblyMethodState State)> worklist)
     {
-        foreach (var successor in GetSuccessorIndexes(instructionIndex, instruction, instructions, instructionIndexByOffset))
+        foreach (var successor in GetSuccessorIndexes(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions))
         {
-            worklist.Enqueue((successor, state.Clone()));
+            var successorState = state.Clone();
+            if (successor.IsExceptionHandler)
+            {
+                PrepareExceptionHandlerState(successorState, successor.RegionKind, CombineAssemblyTaints(state.Stack.Where(taint => taint is not null).Cast<AssemblyTaint>()));
+            }
+            worklist.Enqueue((successor.Index, successorState));
         }
     }
 
-    private static void EnqueueSummarySuccessors(int instructionIndex, AssemblyInstruction instruction, IReadOnlyList<AssemblyInstruction> instructions, IReadOnlyDictionary<int, int> instructionIndexByOffset, AssemblySummaryState state, Queue<(int Index, AssemblySummaryState State)> worklist)
+    private static void EnqueueExceptionSuccessors(AssemblyInstruction instruction, IReadOnlyDictionary<int, int> instructionIndexByOffset, IReadOnlyList<ExceptionRegion> exceptionRegions, AssemblyMethodState state, Queue<(int Index, AssemblyMethodState State)> worklist, AssemblyTaint? thrownTaint)
     {
-        foreach (var successor in GetSuccessorIndexes(instructionIndex, instruction, instructions, instructionIndexByOffset))
+        foreach (var successor in GetExceptionSuccessorIndexes(instruction, instructionIndexByOffset, exceptionRegions))
         {
-            worklist.Enqueue((successor, state.Clone()));
+            var successorState = state.Clone();
+            PrepareExceptionHandlerState(successorState, successor.RegionKind, thrownTaint);
+            worklist.Enqueue((successor.Index, successorState));
         }
     }
 
-    private static IEnumerable<int> GetSuccessorIndexes(int instructionIndex, AssemblyInstruction instruction, IReadOnlyList<AssemblyInstruction> instructions, IReadOnlyDictionary<int, int> instructionIndexByOffset)
+    private static void EnqueueSummarySuccessors(int instructionIndex, AssemblyInstruction instruction, IReadOnlyList<AssemblyInstruction> instructions, IReadOnlyDictionary<int, int> instructionIndexByOffset, IReadOnlyList<ExceptionRegion> exceptionRegions, AssemblySummaryState state, Queue<(int Index, AssemblySummaryState State)> worklist)
     {
+        foreach (var successor in GetSuccessorIndexes(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions))
+        {
+            var successorState = state.Clone();
+            if (successor.IsExceptionHandler)
+            {
+                PrepareSummaryExceptionHandlerState(successorState, successor.RegionKind, CombineSummaryTaints(state.Stack.Where(taint => taint is not null).Cast<AssemblySummaryTaint>()));
+            }
+            worklist.Enqueue((successor.Index, successorState));
+        }
+    }
+
+    private static void EnqueueSummaryExceptionSuccessors(AssemblyInstruction instruction, IReadOnlyDictionary<int, int> instructionIndexByOffset, IReadOnlyList<ExceptionRegion> exceptionRegions, AssemblySummaryState state, Queue<(int Index, AssemblySummaryState State)> worklist, AssemblySummaryTaint? thrownTaint)
+    {
+        foreach (var successor in GetExceptionSuccessorIndexes(instruction, instructionIndexByOffset, exceptionRegions))
+        {
+            var successorState = state.Clone();
+            PrepareSummaryExceptionHandlerState(successorState, successor.RegionKind, thrownTaint);
+            worklist.Enqueue((successor.Index, successorState));
+        }
+    }
+
+    private static IEnumerable<AssemblySuccessor> GetSuccessorIndexes(int instructionIndex, AssemblyInstruction instruction, IReadOnlyList<AssemblyInstruction> instructions, IReadOnlyDictionary<int, int> instructionIndexByOffset, IReadOnlyList<ExceptionRegion> exceptionRegions)
+    {
+        foreach (var exceptionSuccessor in GetExceptionSuccessorIndexes(instruction, instructionIndexByOffset, exceptionRegions))
+        {
+            yield return exceptionSuccessor;
+        }
+
         if (instruction.OpCode.FlowControl == FlowControl.Return || instruction.OpCode.FlowControl == FlowControl.Throw)
         {
             yield break;
@@ -938,7 +1079,7 @@ public static partial class DataFlowAnalyzer
 
         if (instruction.OpCode.FlowControl == FlowControl.Branch)
         {
-            if (TryGetBranchTargetIndex(instruction, instructionIndexByOffset, out var branchIndex)) yield return branchIndex;
+            if (TryGetBranchTargetIndex(instruction, instructionIndexByOffset, out var branchIndex)) yield return new AssemblySuccessor(branchIndex, false, default);
             yield break;
         }
 
@@ -948,18 +1089,56 @@ public static partial class DataFlowAnalyzer
             {
                 foreach (var target in switchTargets)
                 {
-                    if (instructionIndexByOffset.TryGetValue(instruction.NextOffset + target, out var switchIndex)) yield return switchIndex;
+                    if (instructionIndexByOffset.TryGetValue(instruction.NextOffset + target, out var switchIndex)) yield return new AssemblySuccessor(switchIndex, false, default);
                 }
             }
             else if (TryGetBranchTargetIndex(instruction, instructionIndexByOffset, out var branchIndex))
             {
-                yield return branchIndex;
+                yield return new AssemblySuccessor(branchIndex, false, default);
             }
         }
 
         if (instructionIndex + 1 < instructions.Count)
         {
-            yield return instructionIndex + 1;
+            yield return new AssemblySuccessor(instructionIndex + 1, false, default);
+        }
+    }
+
+    private static IEnumerable<AssemblySuccessor> GetExceptionSuccessorIndexes(AssemblyInstruction instruction, IReadOnlyDictionary<int, int> instructionIndexByOffset, IReadOnlyList<ExceptionRegion> exceptionRegions)
+    {
+        foreach (var region in exceptionRegions)
+        {
+            if (instruction.Offset < region.TryOffset || instruction.Offset >= region.TryOffset + region.TryLength)
+            {
+                continue;
+            }
+
+            if (region.Kind == ExceptionRegionKind.Filter && instructionIndexByOffset.TryGetValue(region.FilterOffset, out var filterIndex))
+            {
+                yield return new AssemblySuccessor(filterIndex, true, region.Kind);
+            }
+            else if (instructionIndexByOffset.TryGetValue(region.HandlerOffset, out var handlerIndex))
+            {
+                yield return new AssemblySuccessor(handlerIndex, true, region.Kind);
+            }
+        }
+    }
+
+    private static void PrepareExceptionHandlerState(AssemblyMethodState state, ExceptionRegionKind kind, AssemblyTaint? exceptionTaint)
+    {
+        state.Stack.Clear();
+        if (kind is ExceptionRegionKind.Catch or ExceptionRegionKind.Filter)
+        {
+            state.Push(exceptionTaint);
+        }
+    }
+
+    private static void PrepareSummaryExceptionHandlerState(AssemblySummaryState state, ExceptionRegionKind kind, AssemblySummaryTaint? exceptionTaint)
+    {
+        state.Stack.Clear();
+        if (kind is ExceptionRegionKind.Catch or ExceptionRegionKind.Filter)
+        {
+            state.Push(exceptionTaint);
         }
     }
 
@@ -1467,6 +1646,7 @@ public static partial class DataFlowAnalyzer
     }
 
     private sealed record AssemblyInstruction(int Offset, int NextOffset, OpCode OpCode, object? Operand);
+    private sealed record AssemblySuccessor(int Index, bool IsExceptionHandler, ExceptionRegionKind RegionKind);
     private sealed record AssemblySignatureInfo(int ParameterCount, bool HasThis, bool ReturnsVoid, string ReturnType);
     private sealed record AssemblyMemberInfo(string Symbol, string Name, string ContainingType, int ParameterCount, bool HasThis, bool ReturnsVoid, string ReturnType);
     private sealed record AssemblySourceLocation(string FilePath, int LineNumber, int ColumnNumber);

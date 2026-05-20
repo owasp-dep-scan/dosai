@@ -1125,17 +1125,26 @@ public static partial class DataFlowAnalyzer
 
         public override void VisitConditional(IConditionalOperation operation)
         {
-            var guardedKeys = GetSanitizedGuardKeys(operation.Condition).ToList();
+            var trueGuardedKeys = GetSanitizedGuardKeys(operation.Condition, whenConditionIsTrue: true).ToList();
+            var falseGuardedKeys = GetSanitizedGuardKeys(operation.Condition, whenConditionIsTrue: false).ToList();
             Visit(operation.Condition);
-            if (guardedKeys.Count == 0 || operation.WhenTrue is null)
+            if (trueGuardedKeys.Count == 0 || operation.WhenTrue is null)
             {
                 Visit(operation.WhenTrue);
             }
             else
             {
-                VisitWithSuppressedTaint(guardedKeys, operation.WhenTrue);
+                VisitWithSuppressedTaint(trueGuardedKeys, operation.WhenTrue);
             }
-            Visit(operation.WhenFalse);
+
+            if (falseGuardedKeys.Count == 0 || operation.WhenFalse is null)
+            {
+                Visit(operation.WhenFalse);
+            }
+            else
+            {
+                VisitWithSuppressedTaint(falseGuardedKeys, operation.WhenFalse);
+            }
         }
 
         public override void VisitInvocation(IInvocationOperation operation)
@@ -1391,15 +1400,42 @@ public static partial class DataFlowAnalyzer
             return _patternIndex.SanitizerCodeLike.Count > 0 && MatchCode(SyntaxText(operation.Syntax), _patternIndex.SanitizerCodeLike).Any();
         }
 
-        private IEnumerable<string> GetSanitizedGuardKeys(IOperation condition)
+        private IEnumerable<string> GetSanitizedGuardKeys(IOperation condition, bool whenConditionIsTrue)
         {
             condition = Strip(condition);
             if (condition is IUnaryOperation { OperatorKind: UnaryOperatorKind.Not } negated)
             {
-                condition = Strip(negated.Operand);
+                foreach (var key in GetSanitizedGuardKeys(negated.Operand, !whenConditionIsTrue))
+                {
+                    yield return key;
+                }
+                yield break;
             }
 
-            if (condition is IInvocationOperation invocation && MatchSymbol(invocation.TargetMethod, invocation.Syntax, _patternIndex.Sanitizers).Any())
+            if (condition is IBinaryOperation { OperatorKind: BinaryOperatorKind.ConditionalAnd } andOperation)
+            {
+                if (whenConditionIsTrue)
+                {
+                    foreach (var key in GetSanitizedGuardKeys(andOperation.LeftOperand, true).Concat(GetSanitizedGuardKeys(andOperation.RightOperand, true))) yield return key;
+                }
+                yield break;
+            }
+
+            if (condition is IBinaryOperation { OperatorKind: BinaryOperatorKind.ConditionalOr } orOperation)
+            {
+                if (!whenConditionIsTrue)
+                {
+                    foreach (var key in GetSanitizedGuardKeys(orOperation.LeftOperand, false).Concat(GetSanitizedGuardKeys(orOperation.RightOperand, false))) yield return key;
+                }
+                else
+                {
+                    var left = GetSanitizedGuardKeys(orOperation.LeftOperand, true).ToHashSet(StringComparer.Ordinal);
+                    foreach (var key in GetSanitizedGuardKeys(orOperation.RightOperand, true).Where(left.Contains)) yield return key;
+                }
+                yield break;
+            }
+
+            if (whenConditionIsTrue && condition is IInvocationOperation invocation && MatchSymbol(invocation.TargetMethod, invocation.Syntax, _patternIndex.Sanitizers).Any())
             {
                 foreach (var argument in invocation.Arguments)
                 {
@@ -1416,7 +1452,7 @@ public static partial class DataFlowAnalyzer
 
             foreach (var child in condition.ChildOperations)
             {
-                foreach (var key in GetSanitizedGuardKeys(child))
+                foreach (var key in GetSanitizedGuardKeys(child, whenConditionIsTrue))
                 {
                     yield return key;
                 }

@@ -2244,18 +2244,20 @@ public static class Dosai
 
     private sealed class MethodCallOperationWalker(SemanticModel model, List<MethodCalls> methodCalls, string basePath, string sourceFilePath, string fileName) : OperationWalker
     {
-        private SourceDispatchIndex? dispatchIndex;
+        private DispatchResolver.SourceIndex? dispatchIndex;
 
         public override void VisitInvocation(IInvocationOperation operation)
         {
             AddMethodCall(operation, operation.TargetMethod, CallType.MethodCall, operation.Arguments);
             AddSourceDispatchCandidates(operation);
+            AddFrameworkAndReflectionCandidates(operation);
             base.VisitInvocation(operation);
         }
 
         public override void VisitObjectCreation(IObjectCreationOperation operation)
         {
             AddMethodCall(operation, operation.Constructor, CallType.ConstructorCall, operation.Arguments);
+            AddReflectionConstructorCandidate(operation);
             base.VisitObjectCreation(operation);
         }
 
@@ -2353,7 +2355,7 @@ public static class Dosai
                 return;
             }
 
-            foreach (var candidate in DispatchIndex.FindDispatchCandidates(operation.TargetMethod).Take(16))
+            foreach (var candidate in DispatchIndex.FindDispatchCandidates(operation.TargetMethod, operation.Instance?.Type).Take(16))
             {
                 AddInferredMethodCall(
                     operation,
@@ -2365,6 +2367,171 @@ public static class Dosai
                     "Virtual/interface dispatch candidate inferred from source type hierarchy.",
                     "Low");
             }
+        }
+
+        private void AddFrameworkAndReflectionCandidates(IInvocationOperation operation)
+        {
+            AddDelegateArgumentCallbackCandidates(operation);
+            AddDiFrameworkCandidates(operation);
+            AddReflectionCandidates(operation);
+        }
+
+        private void AddDelegateArgumentCallbackCandidates(IInvocationOperation operation)
+        {
+            if (!IsFrameworkCallbackRegistration(operation.TargetMethod))
+            {
+                return;
+            }
+
+            foreach (var argument in operation.Arguments)
+            {
+                if (argument.Value.Type?.TypeKind == TypeKind.Delegate)
+                {
+                    AddCallbackTarget(operation, argument.Value, CallType.DelegateInvoke, AnalysisEvidenceKind.FrameworkModel, "Framework callback target inferred from delegate argument registration.");
+                }
+            }
+        }
+
+        private void AddDiFrameworkCandidates(IInvocationOperation operation)
+        {
+            var methodName = operation.TargetMethod.Name;
+            if (methodName is "AddSingleton" or "AddScoped" or "AddTransient" or "AddHostedService")
+            {
+                foreach (var implementationType in ResolveRegistrationImplementationTypes(operation))
+                {
+                    AddTypeConstructorCandidate(operation, implementationType, AnalysisEvidenceKind.FrameworkModel, $"DI registration {methodName} inferred service implementation constructor.");
+                }
+            }
+
+            if (methodName is "GetService" or "GetRequiredService")
+            {
+                foreach (var serviceType in ResolveServiceProviderTypes(operation))
+                {
+                    AddTypeConstructorCandidate(operation, serviceType, AnalysisEvidenceKind.FrameworkModel, $"DI service resolution {methodName} inferred service constructor.");
+                }
+            }
+        }
+
+        private void AddReflectionCandidates(IInvocationOperation operation)
+        {
+            var method = operation.TargetMethod;
+            var containingType = NormalizeSymbolName(method.ContainingType?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty);
+            if (containingType == "System.Activator" && method.Name == "CreateInstance")
+            {
+                foreach (var createdType in ResolveActivatorTypes(operation))
+                {
+                    AddTypeConstructorCandidate(operation, createdType, AnalysisEvidenceKind.ReflectionHeuristic, "Activator.CreateInstance target inferred from generic type or typeof argument.");
+                }
+            }
+
+            if (method.Name == "GetMethod" && operation.Instance is ITypeOfOperation typeOf && operation.Arguments.FirstOrDefault()?.Value is { } methodNameOperation && TryGetStringConstant(methodNameOperation, out var reflectedMethodName))
+            {
+                foreach (var reflectedMethod in ResolveMethodsByName(typeOf.TypeOperand, reflectedMethodName))
+                {
+                    AddInferredMethodCall(operation, reflectedMethod, CallType.MethodCall, [], ["reflection-getmethod"], AnalysisEvidenceKind.ReflectionHeuristic, "Reflection GetMethod target inferred from typeof(...) and literal method name.", "Low");
+                }
+            }
+        }
+
+        private void AddReflectionConstructorCandidate(IObjectCreationOperation operation)
+        {
+            if (operation.Type is INamedTypeSymbol createdType && IsFrameworkType(operation.Constructor?.ContainingType))
+            {
+                AddTypeConstructorCandidate(operation, createdType, AnalysisEvidenceKind.FrameworkModel, "Framework-created type constructor inferred from object creation.");
+            }
+        }
+
+        private IEnumerable<INamedTypeSymbol> ResolveRegistrationImplementationTypes(IInvocationOperation operation)
+        {
+            foreach (var typeArgument in operation.TargetMethod.TypeArguments.OfType<INamedTypeSymbol>().Reverse().Take(1))
+            {
+                yield return typeArgument;
+            }
+
+            foreach (var argument in operation.Arguments)
+            {
+                if (argument.Value is ITypeOfOperation typeOf && typeOf.TypeOperand is INamedTypeSymbol namedType)
+                {
+                    yield return namedType;
+                }
+            }
+        }
+
+        private IEnumerable<INamedTypeSymbol> ResolveServiceProviderTypes(IInvocationOperation operation)
+        {
+            foreach (var typeArgument in operation.TargetMethod.TypeArguments.OfType<INamedTypeSymbol>())
+            {
+                yield return typeArgument;
+            }
+            foreach (var argument in operation.Arguments)
+            {
+                if (argument.Value is ITypeOfOperation typeOf && typeOf.TypeOperand is INamedTypeSymbol namedType)
+                {
+                    yield return namedType;
+                }
+            }
+        }
+
+        private IEnumerable<INamedTypeSymbol> ResolveActivatorTypes(IInvocationOperation operation)
+        {
+            foreach (var typeArgument in operation.TargetMethod.TypeArguments.OfType<INamedTypeSymbol>())
+            {
+                yield return typeArgument;
+            }
+            foreach (var argument in operation.Arguments)
+            {
+                if (argument.Value is ITypeOfOperation typeOf && typeOf.TypeOperand is INamedTypeSymbol namedType)
+                {
+                    yield return namedType;
+                }
+            }
+        }
+
+        private IEnumerable<IMethodSymbol> ResolveMethodsByName(ITypeSymbol type, string methodName)
+        {
+            if (type is not INamedTypeSymbol namedType)
+            {
+                yield break;
+            }
+
+            foreach (var method in namedType.GetMembers(methodName).OfType<IMethodSymbol>().Where(method => method.MethodKind == MethodKind.Ordinary))
+            {
+                yield return method;
+            }
+        }
+
+        private void AddTypeConstructorCandidate(IOperation operation, INamedTypeSymbol type, AnalysisEvidenceKind evidenceKind, string description)
+        {
+            var constructor = type.InstanceConstructors
+                .Where(ctor => !ctor.IsStatic)
+                .OrderBy(ctor => ctor.Parameters.Length)
+                .FirstOrDefault();
+            if (constructor is null || constructor.IsImplicitlyDeclared)
+            {
+                return;
+            }
+
+            AddInferredMethodCall(operation, constructor, CallType.ConstructorCall, [], [evidenceKind == AnalysisEvidenceKind.ReflectionHeuristic ? "reflection-constructor" : "framework-constructor"], evidenceKind, description, evidenceKind == AnalysisEvidenceKind.ReflectionHeuristic ? "Low" : "Medium");
+        }
+
+        private bool TryGetStringConstant(IOperation operation, out string value)
+        {
+            var constant = model.GetConstantValue(operation.Syntax);
+            value = constant.HasValue ? constant.Value as string ?? string.Empty : string.Empty;
+            return !string.IsNullOrWhiteSpace(value);
+        }
+
+        private static bool IsFrameworkCallbackRegistration(IMethodSymbol method)
+        {
+            var name = method.Name;
+            var ns = method.ContainingNamespace?.ToDisplayString() ?? string.Empty;
+            return ns.StartsWith("Microsoft.AspNetCore", StringComparison.Ordinal) || name.StartsWith("Map", StringComparison.Ordinal) || name.StartsWith("Use", StringComparison.Ordinal) || name is "Run" or "On" or "Subscribe";
+        }
+
+        private static bool IsFrameworkType(INamedTypeSymbol? type)
+        {
+            var ns = type?.ContainingNamespace?.ToDisplayString() ?? string.Empty;
+            return ns.StartsWith("Microsoft.AspNetCore", StringComparison.Ordinal) || ns.StartsWith("Microsoft.Extensions", StringComparison.Ordinal);
         }
 
         private void AddCallbackTarget(IOperation operation, IOperation? callbackOperation, CallType callType, AnalysisEvidenceKind evidenceKind, string description)
@@ -2435,7 +2602,7 @@ public static class Dosai
             });
         }
 
-        private SourceDispatchIndex DispatchIndex => dispatchIndex ??= SourceDispatchIndex.Create(model.Compilation);
+        private DispatchResolver.SourceIndex DispatchIndex => dispatchIndex ??= DispatchResolver.SourceIndex.Create(model.Compilation);
 
         private bool ShouldInferDispatchCandidates(IMethodSymbol targetMethod)
         {
@@ -2484,96 +2651,6 @@ public static class Dosai
             };
         }
 
-        private sealed class SourceDispatchIndex
-        {
-            private readonly List<INamedTypeSymbol> concreteSourceTypes;
-
-            private SourceDispatchIndex(List<INamedTypeSymbol> concreteSourceTypes)
-            {
-                this.concreteSourceTypes = concreteSourceTypes;
-            }
-
-            public static SourceDispatchIndex Create(Compilation compilation)
-            {
-                var types = new List<INamedTypeSymbol>();
-                CollectTypes(compilation.Assembly.GlobalNamespace, types);
-                return new SourceDispatchIndex(types
-                    .Where(type => type.Locations.Any(location => location.IsInSource))
-                    .Where(type => type.TypeKind is TypeKind.Class or TypeKind.Struct)
-                    .Where(type => !type.IsAbstract)
-                    .ToList());
-            }
-
-            public IEnumerable<IMethodSymbol> FindDispatchCandidates(IMethodSymbol targetMethod)
-            {
-                var normalizedTarget = targetMethod.OriginalDefinition;
-                foreach (var type in concreteSourceTypes)
-                {
-                    IMethodSymbol? candidate = null;
-                    if (normalizedTarget.ContainingType?.TypeKind == TypeKind.Interface)
-                    {
-                        candidate = type.FindImplementationForInterfaceMember(normalizedTarget) as IMethodSymbol
-                            ?? type.FindImplementationForInterfaceMember(targetMethod) as IMethodSymbol;
-                    }
-                    else if (InheritsFrom(type, normalizedTarget.ContainingType))
-                    {
-                        candidate = type.GetMembers(normalizedTarget.Name)
-                            .OfType<IMethodSymbol>()
-                            .FirstOrDefault(method => method.IsOverride && Overrides(method, normalizedTarget));
-                    }
-
-                    if (candidate is not null && candidate.Locations.Any(location => location.IsInSource) && !SymbolEqualityComparer.Default.Equals(candidate.OriginalDefinition, normalizedTarget))
-                    {
-                        yield return candidate;
-                    }
-                }
-            }
-
-            private static void CollectTypes(INamespaceSymbol namespaceSymbol, List<INamedTypeSymbol> types)
-            {
-                foreach (var type in namespaceSymbol.GetTypeMembers())
-                {
-                    CollectTypes(type, types);
-                }
-                foreach (var childNamespace in namespaceSymbol.GetNamespaceMembers())
-                {
-                    CollectTypes(childNamespace, types);
-                }
-            }
-
-            private static void CollectTypes(INamedTypeSymbol type, List<INamedTypeSymbol> types)
-            {
-                types.Add(type);
-                foreach (var nestedType in type.GetTypeMembers())
-                {
-                    CollectTypes(nestedType, types);
-                }
-            }
-
-            private static bool InheritsFrom(INamedTypeSymbol? candidate, INamedTypeSymbol? baseType)
-            {
-                for (var current = candidate?.BaseType; current is not null; current = current.BaseType)
-                {
-                    if (SymbolEqualityComparer.Default.Equals(current.OriginalDefinition, baseType?.OriginalDefinition))
-                    {
-                        return true;
-                    }
-                }
-                return false;
-            }
-
-            private static bool Overrides(IMethodSymbol method, IMethodSymbol targetMethod)
-            {
-                for (var current = method.OverriddenMethod; current is not null; current = current.OverriddenMethod)
-                {
-                    if (SymbolEqualityComparer.Default.Equals(current.OriginalDefinition, targetMethod))
-                    {
-                        return true;
-                    }
-                }
-                return false;
-            }
-        }
     }
 
     private static void TrackCsMethodCall(InvocationExpressionSyntax methodCall, SemanticModel model, List<MethodCalls> allMethodCalls, string path, string sourceFilePath, string fileName)
@@ -2755,10 +2832,15 @@ public static class Dosai
         }
         if (fileAttributes.HasFlag(FileAttributes.Directory))
         {
+            var sourceExtensions = new HashSet<string>([Constants.CSharpSourceExtension, Constants.VBSourceExtension, Constants.FSharpSourceExtension], StringComparer.OrdinalIgnoreCase);
             filesToInspect.AddRange(
                 from extension in fileExtensions 
-                from inputFile in new DirectoryInfo(path).EnumerateFiles($"*{extension}", SearchOption.AllDirectories) 
-                where !inputFile.FullName.Contains("/obj/") && !inputFile.FullName.EndsWith($".g{extension}") 
+                from inputFile in new DirectoryInfo(path).EnumerateFiles($"*{extension}", SearchOption.AllDirectories)
+                let isSourceExtension = sourceExtensions.Contains(extension)
+                let relativePath = Path.GetRelativePath(path, inputFile.FullName)
+                where !HasDirectorySegment(relativePath, "obj")
+                      && (!isSourceExtension || !HasDirectorySegment(relativePath, "bin"))
+                      && !inputFile.FullName.EndsWith($".g{extension}", StringComparison.OrdinalIgnoreCase) 
                 select inputFile.FullName);
         }
         else
@@ -2771,5 +2853,11 @@ public static class Dosai
             }
         }
         return filesToInspect;
+    }
+
+    private static bool HasDirectorySegment(string relativePath, string segment)
+    {
+        var parts = relativePath.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        return parts.Take(Math.Max(0, parts.Length - 1)).Any(part => part.Equals(segment, StringComparison.OrdinalIgnoreCase));
     }
 }

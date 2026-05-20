@@ -472,6 +472,73 @@ class CallbackEntry
     }
 
     [Fact]
+    public void GetMethods_SourceDirectory_IgnoresBinAndObjSourceFilesButKeepsAssemblyOutputs()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Root.cs"), "class RootOnly { static void Main() { } }");
+        Directory.CreateDirectory(Path.Combine(tempDirectory.Path, "bin"));
+        Directory.CreateDirectory(Path.Combine(tempDirectory.Path, "obj"));
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "bin", "Generated.cs"), "class BinShouldBeIgnored { void Hidden() { } }");
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "obj", "Generated.cs"), "class ObjShouldBeIgnored { void Hidden() { } }");
+
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "ScopedAssemblyOutput", "public static class Program { public static void Main() { } }");
+        File.Copy(Path.Combine(outputDirectory, "ScopedAssemblyOutput.dll"), Path.Combine(tempDirectory.Path, "bin", "ScopedAssemblyOutput.dll"), overwrite: true);
+        File.Copy(Path.Combine(outputDirectory, "ScopedAssemblyOutput.deps.json"), Path.Combine(tempDirectory.Path, "bin", "ScopedAssemblyOutput.deps.json"), overwrite: true);
+
+        var methodsSlice = ReadMethods(tempDirectory.Path);
+
+        Assert.Contains(methodsSlice.Methods!, method => method.ClassName == "RootOnly");
+        Assert.DoesNotContain(methodsSlice.Methods!, method => method.ClassName is "BinShouldBeIgnored" or "ObjShouldBeIgnored");
+        Assert.Contains(methodsSlice.Methods!, method => method.FileName == "ScopedAssemblyOutput.dll");
+    }
+
+    [Fact]
+    public void GetMethods_CSharpSource_AddsFrameworkDiAndReflectionHeuristicEdges()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "FrameworkReflection.cs"), """
+using System;
+using System.Reflection;
+
+static class ServiceCollectionExtensions
+{
+    public static object AddSingleton<TService, TImplementation>(this object services) => services;
+}
+
+interface IService { }
+
+class Worker : IService
+{
+    public Worker() { }
+    public void Run() { }
+}
+
+class ReflectionTarget
+{
+    public ReflectionTarget() { }
+    public void Run() { }
+}
+
+class Entry
+{
+    static void Main()
+    {
+        new object().AddSingleton<IService, Worker>();
+        Activator.CreateInstance<ReflectionTarget>();
+        typeof(ReflectionTarget).GetMethod("Run");
+    }
+}
+""");
+
+        var methodsSlice = ReadMethods(tempDirectory.Path);
+        var edges = methodsSlice.CallGraph!.Edges;
+
+        Assert.Contains(edges, edge => edge.EvidenceKind == AnalysisEvidenceKind.FrameworkModel && edge.SourceId == "Entry.Main():void" && edge.TargetId == "Worker..ctor()");
+        Assert.Contains(edges, edge => edge.EvidenceKind == AnalysisEvidenceKind.ReflectionHeuristic && edge.SourceId == "Entry.Main():void" && edge.TargetId == "ReflectionTarget..ctor()");
+        Assert.Contains(edges, edge => edge.EvidenceKind == AnalysisEvidenceKind.ReflectionHeuristic && edge.SourceId == "Entry.Main():void" && edge.TargetId == "ReflectionTarget.Run():void");
+    }
+
+    [Fact]
     public void CallGraphExporter_ExportsMermaidGraphMlAndGexf()
     {
         var sourcePath = GetFilePath(HelloWorldCSharpSource);
@@ -680,6 +747,91 @@ public static class Program
 
         Assert.Contains(dataFlowResult.Slices, slice => slice.SourceCategory == "cli" && slice.SinkCategory == "command");
         Assert.Contains(dataFlowResult.Edges, edge => edge.Kind == "AssemblySinkCall");
+    }
+
+    [Fact]
+    public void GetDataFlows_SourceRegexGuard_SuppressesValidatedTrueBranchOnly()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "GuardedFlow.cs"), """
+using System.Diagnostics;
+using System.Text.RegularExpressions;
+
+class GuardedFlow
+{
+    static void Main(string[] args)
+    {
+        var command = args[0];
+        if (Regex.IsMatch(command, "^[a-z]+$"))
+        {
+            Process.Start(command);
+        }
+        else
+        {
+            Process.Start(args[0]);
+        }
+    }
+}
+""");
+
+        var result = DataFlowAnalyzer.Analyze(tempDirectory.Path);
+
+        Assert.Contains(result.Slices, slice => slice.SourceCategory == "cli" && slice.SinkCategory == "command" && slice.SinkArgument == "args[0]");
+        Assert.DoesNotContain(result.Slices, slice => slice.SinkCategory == "command" && slice.SinkArgument == "command");
+    }
+
+    [Fact]
+    public void GetDataFlows_AssemblyOnlyExceptionRegion_PropagatesThrownTaintToCatchHandler()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "AssemblyExceptionFlow", """
+using System;
+using System.Diagnostics;
+
+public static class Program
+{
+    public static void Main(string[] args)
+    {
+        try
+        {
+            throw new Exception(args[0]);
+        }
+        catch (Exception ex)
+        {
+            Process.Start(ex.Message);
+        }
+    }
+}
+""");
+
+        var dataFlowResult = ReadDataFlows(Path.Combine(outputDirectory, "AssemblyExceptionFlow.dll"));
+
+        Assert.Contains(dataFlowResult.Slices, slice => slice.SourceCategory == "cli" && slice.SinkCategory == "command");
+        Assert.Contains(dataFlowResult.Edges, edge => edge.Kind == "AssemblySinkCall");
+    }
+
+    [Fact]
+    public void GetMethods_AssemblyOnlyGenericSignatures_DecodeConstructedTypes()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "AssemblyGenericSignatures", """
+using System.Collections.Generic;
+
+public static class Program
+{
+    public static void Main()
+    {
+        var values = Echo(new List<string> { "a" });
+    }
+
+    private static List<T> Echo<T>(List<T> values) => values;
+}
+""");
+
+        var methodsSlice = ReadMethods(Path.Combine(outputDirectory, "AssemblyGenericSignatures.dll"));
+
+        Assert.Contains(methodsSlice.CallGraph!.Nodes, node => node.Id.Contains("System.Collections.Generic.List", StringComparison.Ordinal) && node.Id.Contains("string", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(methodsSlice.CallGraph.Edges, edge => edge.TargetId.Contains("Program.Echo", StringComparison.Ordinal));
     }
 
     [Fact]

@@ -50,9 +50,7 @@ internal static class AssemblyCallGraphAnalyzer
                 var assemblyFullPath = Path.GetFullPath(assemblyPath);
                 var stateMachineMethods = BuildStateMachineMethodMap(reader, assemblyPath, sourceMap);
                 var instantiatedTypes = CollectInstantiatedTypes(peReader, reader, assemblyPath, sourceMap);
-                var candidateMethods = knownMethods
-                    .Where(method => string.Equals(Path.GetFullPath(method.Path ?? string.Empty), assemblyFullPath, StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(method.AssemblySignature))
-                    .ToList();
+                var dispatchIndex = DispatchResolver.AssemblyIndex.Create(knownMethods.Where(method => string.Equals(Path.GetFullPath(method.Path ?? string.Empty), assemblyFullPath, StringComparison.OrdinalIgnoreCase)), instantiatedTypes);
                 foreach (var methodHandle in reader.MethodDefinitions)
                 {
                     var methodDefinition = reader.GetMethodDefinition(methodHandle);
@@ -144,7 +142,7 @@ internal static class AssemblyCallGraphAnalyzer
 
                         if (instruction.OpCode == OpCodes.Callvirt)
                         {
-                            foreach (var candidate in candidateMethods.Where(method => method.Name == target.Name && instantiatedTypes.Contains(method.ClassName ?? string.Empty)))
+                            foreach (var candidate in dispatchIndex.FindDispatchCandidates(target.Name, target.ClassName, target.ParameterCount))
                             {
                                 var candidateId = candidate.AssemblySignature!;
                                 AddNode(nodes, candidateId, candidate.Name ?? candidateId, candidate.ClassName, candidate.Namespace, candidate.FileName, candidate.Assembly, candidate.Module, "Method", candidate.LineNumber, candidate.ColumnNumber, isExternal: false);
@@ -172,7 +170,7 @@ internal static class AssemblyCallGraphAnalyzer
                                         CallerClass = sourceMethod.ClassName,
                                         IsInternal = true,
                                         EvidenceKind = AnalysisEvidenceKind.AssemblyIlVirtualCandidate,
-                                        Evidence = [CreateEvidence(AnalysisEvidenceKind.AssemblyIlVirtualCandidate, location, "Virtual candidate inferred by lightweight assembly RTA.")]
+                                        Evidence = [CreateEvidence(AnalysisEvidenceKind.AssemblyIlVirtualCandidate, location, "Virtual candidate inferred by shared assembly CHA/RTA resolver.")]
                                     });
                                     edges.Add(new MethodCallEdge
                                     {
@@ -188,7 +186,7 @@ internal static class AssemblyCallGraphAnalyzer
                                         ArgumentExpressions = ["virtual-candidate"],
                                         CallType = CallType.MethodCall,
                                         EvidenceKind = AnalysisEvidenceKind.AssemblyIlVirtualCandidate,
-                                        Evidence = [CreateEvidence(AnalysisEvidenceKind.AssemblyIlVirtualCandidate, location, "Virtual candidate inferred by lightweight assembly RTA.")]
+                                        Evidence = [CreateEvidence(AnalysisEvidenceKind.AssemblyIlVirtualCandidate, location, "Virtual candidate inferred by shared assembly CHA/RTA resolver.")]
                                     });
                                 }
                             }
@@ -640,9 +638,20 @@ internal static class AssemblyCallGraphAnalyzer
     private static AssemblyCallMember? ResolveMethodSpecification(MetadataReader reader, MethodSpecificationHandle handle, string assemblyPath, AssemblyCallSourceMap sourceMap)
     {
         var specification = reader.GetMethodSpecification(handle);
-        return specification.Method.Kind is HandleKind.MemberReference or HandleKind.MethodDefinition
-            ? ResolveMember(reader, MetadataTokens.GetToken(specification.Method), assemblyPath, sourceMap)
-            : null;
+        if (specification.Method.Kind is not (HandleKind.MemberReference or HandleKind.MethodDefinition) || ResolveMember(reader, MetadataTokens.GetToken(specification.Method), assemblyPath, sourceMap) is not { } member)
+        {
+            return null;
+        }
+
+        var genericArguments = ReadMethodSpecificationArguments(reader, specification.Signature);
+        if (genericArguments.Count == 0)
+        {
+            return member;
+        }
+
+        var genericName = member.Name.Contains('<', StringComparison.Ordinal) ? member.Name : $"{member.Name}<{string.Join(',', genericArguments)}>";
+        var symbol = member.Symbol.Replace($".{member.Name}(", $".{genericName}(", StringComparison.Ordinal);
+        return member with { Symbol = symbol, Name = genericName };
     }
 
     private static AssemblyCallSymbol BuildMethodSymbol(MetadataReader reader, MethodDefinitionHandle handle, MethodDefinition method, string assemblyPath)
@@ -666,9 +675,23 @@ internal static class AssemblyCallGraphAnalyzer
     {
         HandleKind.TypeReference => GetFullTypeName(reader, reader.GetTypeReference((TypeReferenceHandle)parent)),
         HandleKind.TypeDefinition => GetFullTypeName(reader, reader.GetTypeDefinition((TypeDefinitionHandle)parent)),
-        HandleKind.TypeSpecification => new AssemblyCallType("<type-spec>", string.Empty, "<type-spec>", string.Empty),
+        HandleKind.TypeSpecification => DecodeTypeSpecification(reader, (TypeSpecificationHandle)parent),
         _ => new AssemblyCallType(string.Empty, string.Empty, string.Empty, string.Empty)
     };
+
+    private static AssemblyCallType DecodeTypeSpecification(MetadataReader reader, TypeSpecificationHandle handle)
+    {
+        try
+        {
+            var blob = reader.GetBlobReader(reader.GetTypeSpecification(handle).Signature);
+            var typeName = ReadSignatureType(reader, ref blob);
+            return new AssemblyCallType(typeName, typeName.Split('.').LastOrDefault() ?? typeName, GetNamespace(typeName), string.Empty);
+        }
+        catch
+        {
+            return new AssemblyCallType("<type-spec>", "<type-spec>", string.Empty, string.Empty);
+        }
+    }
 
     private static AssemblyCallType GetFullTypeName(MetadataReader reader, TypeReference type)
     {
@@ -692,6 +715,14 @@ internal static class AssemblyCallGraphAnalyzer
         HandleKind.TypeReference => ResolveTypeReferenceAssemblyName(reader, reader.GetTypeReference((TypeReferenceHandle)scope).ResolutionScope),
         _ => string.Empty
     };
+
+    private static string GetNamespace(string typeName)
+    {
+        var genericIndex = typeName.IndexOf('<', StringComparison.Ordinal);
+        var plainType = genericIndex >= 0 ? typeName[..genericIndex] : typeName;
+        var index = plainType.LastIndexOf('.');
+        return index <= 0 ? string.Empty : plainType[..index];
+    }
 
     private static AssemblyCallSignature ReadSignatureInfo(MetadataReader reader, BlobHandle signatureHandle, System.Reflection.MethodAttributes? attributes)
     {
@@ -718,16 +749,31 @@ internal static class AssemblyCallGraphAnalyzer
     {
         if (blob.RemainingBytes <= 0) return string.Empty;
         var raw = blob.ReadByte();
+        if (raw == 0x15) // GENERICINST
+        {
+            var genericType = ReadSignatureType(reader, ref blob);
+            var argumentCount = blob.RemainingBytes > 0 ? blob.ReadCompressedInteger() : 0;
+            var arguments = new List<string>();
+            for (var i = 0; i < argumentCount && blob.RemainingBytes > 0; i++) arguments.Add(ReadSignatureType(reader, ref blob));
+            return $"{genericType}<{string.Join(',', arguments)}>";
+        }
         if (raw is 0x11 or 0x12)
         {
             var coded = blob.ReadCompressedInteger();
             return ResolveTypeDefOrRef(reader, coded);
         }
+        if (raw == 0x14) return ReadArraySignatureType(reader, ref blob);
         if (raw == 0x1d) return ReadSignatureType(reader, ref blob) + "[]";
         if (raw == 0x10) return ReadSignatureType(reader, ref blob) + "&";
         if (raw == 0x0f) return ReadSignatureType(reader, ref blob) + "*";
-        if (raw == 0x13) return "GenericMethodParameter";
-        if (raw == 0x12) return "GenericTypeParameter";
+        if (raw == 0x13) return $"!{(blob.RemainingBytes > 0 ? blob.ReadCompressedInteger() : 0)}";
+        if (raw == 0x1e) return $"!!{(blob.RemainingBytes > 0 ? blob.ReadCompressedInteger() : 0)}";
+        if (raw is 0x1f or 0x20)
+        {
+            if (blob.RemainingBytes > 0) _ = blob.ReadCompressedInteger();
+            return ReadSignatureType(reader, ref blob);
+        }
+        if (raw is 0x45 or 0x41) return ReadSignatureType(reader, ref blob);
         return ((SignatureTypeCode)raw) switch
         {
             SignatureTypeCode.Void => "void",
@@ -747,6 +793,36 @@ internal static class AssemblyCallGraphAnalyzer
             SignatureTypeCode.Object => "object",
             _ => "?"
         };
+    }
+
+    private static string ReadArraySignatureType(MetadataReader reader, ref BlobReader blob)
+    {
+        var elementType = ReadSignatureType(reader, ref blob);
+        if (blob.RemainingBytes <= 0) return elementType + "[]";
+        var rank = blob.ReadCompressedInteger();
+        var sizes = blob.RemainingBytes > 0 ? blob.ReadCompressedInteger() : 0;
+        for (var i = 0; i < sizes && blob.RemainingBytes > 0; i++) _ = blob.ReadCompressedInteger();
+        var lowerBounds = blob.RemainingBytes > 0 ? blob.ReadCompressedInteger() : 0;
+        for (var i = 0; i < lowerBounds && blob.RemainingBytes > 0; i++) _ = blob.ReadCompressedSignedInteger();
+        return rank <= 1 ? elementType + "[]" : elementType + "[" + new string(',', rank - 1) + "]";
+    }
+
+    private static List<string> ReadMethodSpecificationArguments(MetadataReader reader, BlobHandle signatureHandle)
+    {
+        try
+        {
+            var blob = reader.GetBlobReader(signatureHandle);
+            if (blob.RemainingBytes == 0) return [];
+            _ = blob.ReadByte();
+            var count = blob.RemainingBytes > 0 ? blob.ReadCompressedInteger() : 0;
+            var arguments = new List<string>();
+            for (var i = 0; i < count && blob.RemainingBytes > 0; i++) arguments.Add(ReadSignatureType(reader, ref blob));
+            return arguments;
+        }
+        catch
+        {
+            return [];
+        }
     }
 
     private static string ResolveTypeDefOrRef(MetadataReader reader, int codedIndex)
