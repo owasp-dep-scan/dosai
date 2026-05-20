@@ -306,7 +306,11 @@ public static class Program
         Assert.Equal("CombinedEvidenceFlow.dll", mainMapping.ModuleName);
         Assert.Contains(methodsSlice.CallGraph.Edges, edge => edge.EvidenceKind == AnalysisEvidenceKind.AssemblyIlDirect && edge.SourceId == mainMapping.SourceId);
         Assert.DoesNotContain(methodsSlice.CallGraph.Nodes, node => node.Id == mainMapping.AssemblyId);
-        Assert.Contains(methodsSlice.CallGraph.Nodes, node => node.Id == mainMapping.SourceId && node.Identity?.Evidence.Contains(AnalysisEvidenceKind.SourceRoslynDirect) == true && node.Identity.Evidence.Contains(AnalysisEvidenceKind.AssemblyIlDirect));
+        var mainNode = Assert.Single(methodsSlice.CallGraph.Nodes, node => node.Id == mainMapping.SourceId);
+        Assert.Equal(mainMapping.SourceSignature, mainNode.Identity?.SourceSignature);
+        Assert.Equal(mainMapping.AssemblySignature, mainNode.Identity?.AssemblySignature);
+        Assert.Contains(AnalysisEvidenceKind.SourceRoslynDirect, mainNode.Identity!.Evidence);
+        Assert.Contains(AnalysisEvidenceKind.AssemblyIlDirect, mainNode.Identity.Evidence);
         Assert.Contains(methodsSlice.PackageReachability!, package => package is { Purl: "pkg:nuget/System.Diagnostics.Process", Confidence: "High" } && package.EvidenceKinds.Contains(AnalysisEvidenceKind.AssemblyIlDirect));
     }
 

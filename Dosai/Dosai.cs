@@ -390,19 +390,56 @@ public static class Dosai
             }
         }
 
-        if (target.Identity is null || source.Identity is null)
+        if (source.Identity is null)
         {
             return;
         }
 
-        foreach (var evidenceKind in source.Identity.Evidence.Where(kind => !target.Identity.Evidence.Contains(kind)))
+        if (target.Identity is null)
         {
-            target.Identity.Evidence.Add(evidenceKind);
+            target.Identity = CloneMethodIdentity(source.Identity);
+            return;
         }
-        target.Identity.SourceSignature ??= source.Identity.SourceSignature;
-        target.Identity.AssemblySignature ??= source.Identity.AssemblySignature;
-        target.Identity.Purl ??= source.Identity.Purl;
+
+        MergeMethodIdentity(target.Identity, source.Identity);
     }
+
+    private static MethodIdentity CloneMethodIdentity(MethodIdentity identity) => new()
+    {
+        Id = identity.Id,
+        SourceSignature = identity.SourceSignature,
+        AssemblySignature = identity.AssemblySignature,
+        Symbol = identity.Symbol,
+        AssemblyName = identity.AssemblyName,
+        ModuleName = identity.ModuleName,
+        Namespace = identity.Namespace,
+        ClassName = identity.ClassName,
+        MethodName = identity.MethodName,
+        MetadataToken = identity.MetadataToken,
+        Purl = identity.Purl,
+        Evidence = identity.Evidence.Distinct().ToList()
+    };
+
+    private static void MergeMethodIdentity(MethodIdentity target, MethodIdentity source)
+    {
+        target.Id = FirstNonBlank(target.Id, source.Id);
+        target.SourceSignature = FirstNonBlank(target.SourceSignature, source.SourceSignature);
+        target.AssemblySignature = FirstNonBlank(target.AssemblySignature, source.AssemblySignature);
+        target.Symbol = FirstNonBlank(target.Symbol, source.Symbol);
+        target.AssemblyName = FirstNonBlank(target.AssemblyName, source.AssemblyName);
+        target.ModuleName = FirstNonBlank(target.ModuleName, source.ModuleName);
+        target.Namespace = FirstNonBlank(target.Namespace, source.Namespace);
+        target.ClassName = FirstNonBlank(target.ClassName, source.ClassName);
+        target.MethodName = FirstNonBlank(target.MethodName, source.MethodName);
+        if (target.MetadataToken == 0) target.MetadataToken = source.MetadataToken;
+        target.Purl = FirstNonBlank(target.Purl, source.Purl);
+        foreach (var evidenceKind in source.Evidence.Where(kind => !target.Evidence.Contains(kind)))
+        {
+            target.Evidence.Add(evidenceKind);
+        }
+    }
+
+    private static string? FirstNonBlank(string? preferred, string? fallback) => string.IsNullOrWhiteSpace(preferred) ? fallback : preferred;
 
     private static void NormalizeAssemblyGraphToSourceIds(List<MethodCalls> assemblyMethodCalls, CallGraph assemblyCallGraph, List<SourceAssemblyMapping> sourceAssemblyMappings)
     {
@@ -512,6 +549,7 @@ public static class Dosai
 
         foreach (var node in callGraph.Nodes)
         {
+            var existingIdentity = node.Identity;
             var existingEvidenceKinds = node.Identity?.Evidence.ToList() ?? [];
             existingEvidenceKinds.AddRange(node.Evidence.Select(evidence => evidence.Kind));
             if (!methodIdentityById.TryGetValue(node.Id, out var identity))
@@ -519,11 +557,16 @@ public static class Dosai
                 var evidenceKind = node.IsExternal ? AnalysisEvidenceKind.ExternalSummary : AnalysisEvidenceKind.Unknown;
                 identity = MethodIdentityFactory.FromParts(node.Id, null, node.Id, node.Id, node.Assembly, node.Module, node.Namespace, node.ClassName, node.Name, 0, node.Purl, evidenceKind);
             }
-            foreach (var evidenceKind in existingEvidenceKinds.Where(kind => !identity.Evidence.Contains(kind)))
+            var mergedIdentity = CloneMethodIdentity(identity);
+            if (existingIdentity is not null)
             {
-                identity.Evidence.Add(evidenceKind);
+                MergeMethodIdentity(mergedIdentity, existingIdentity);
             }
-            node.Identity = identity;
+            foreach (var evidenceKind in existingEvidenceKinds.Where(kind => !mergedIdentity.Evidence.Contains(kind)))
+            {
+                mergedIdentity.Evidence.Add(evidenceKind);
+            }
+            node.Identity = mergedIdentity;
             node.Identity.Purl ??= node.Purl;
             if (node.Evidence.Count == 0)
             {
