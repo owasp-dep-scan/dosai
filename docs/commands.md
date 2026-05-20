@@ -100,7 +100,7 @@ Reflection-based assembly inspection cannot recover local variable flow or sourc
 
 ## `dataflows`
 
-`dataflows` builds source-to-sink slices for security triage.
+`dataflows` builds source-to-sink slices for security triage from source trees, managed assemblies, or combined source/assembly directories.
 
 ```bash
 dotnet run --project ./Dosai/Dosai.csproj -- dataflows \
@@ -170,6 +170,7 @@ load default patterns
   ├─ build C# and VB compilations
   ├─ collect method summaries
   ├─ walk operations for sources, assignments, calls, sinks, returns
+  ├─ reconstruct managed assembly IL data flow and summaries
   ├─ add frontend data-flow evidence for F#, R, and VC++
   ├─ derive slices from source traces to sink nodes
   ├─ validate graph-style edge endpoint consistency by construction
@@ -194,7 +195,7 @@ The analyzer uses pattern objects with target, kind, match mode, category, descr
 
 The C# and VB path is operation based. `DataFlowOperationWalker` seeds taint from matched parameters, attributes, request objects, CLI arguments, and source expressions. It propagates taint through local variables, field and property assignments, receiver-sensitive member keys, common expressions, passthrough calls, object creation, return values, and simple interprocedural summaries. Sanitizer patterns stop or suppress taint, and validator guards can suppress taint in guarded true branches. Slices contain node IDs, edge IDs, source and sink categories, PURLs, taint kinds, field paths, confidence, and sink argument metadata.
 
-The method summary pass records parameter-to-return and parameter-to-sink relationships. These summaries allow calls to local helper methods to preserve taint without inlining the callee body every time. Frontend analysis for F#, R, and VC++ adds conservative source-to-sink evidence for common script and native patterns.
+The method summary pass records parameter-to-return and parameter-to-sink relationships. These summaries allow calls to local helper methods to preserve taint without inlining the callee body every time. Assembly-only analysis performs a parallel IL pass over managed method bodies: it decodes opcodes, follows branch/switch successors with a bounded worklist, summarizes callees, replays parameter-to-return and parameter-to-sink summaries at call sites, resolves metadata symbols for pattern matching, scopes application assemblies with `.deps.json`, and maps IL offsets to source lines through portable PDB sequence points when available. Frontend analysis for F#, R, and VC++ adds conservative source-to-sink evidence for common script and native patterns.
 
 The hot path is optimized for full source-tree CI runs. Pattern lists are pre-indexed by commonly queried kind, syntax text is cached and only materialized for code-like matches, duplicate edges are suppressed, and slice edge collection uses an outgoing-edge index instead of scanning every graph edge for every slice. The repository CI smoke test runs `dataflows --path ./Dosai` to catch regressions in this path.
 
@@ -204,11 +205,11 @@ The primary output is `DataFlowResult`. It contains `Nodes`, `Edges`, `Slices`, 
 
 ### Strengths
 
-`dataflows` is practical for CI and security triage. It handles missing references, legacy frameworks, route and CLI entry points, PURL enrichment, graph exports, sanitizer stop-flow, field-sensitive taint where receiver identity is available, and basic interprocedural flow.
+`dataflows` is practical for CI and security triage. It handles missing references, legacy frameworks, route and CLI entry points, PURL enrichment, graph exports, sanitizer stop-flow, field-sensitive taint where receiver identity is available, assembly-only IL slicing, portable PDB locations, and basic interprocedural flow.
 
 ### Weaknesses and edge cases
 
-This is not a full SSA or path-sensitive theorem prover. Complex aliasing, reflection, dynamic dispatch, deep collection modeling, and framework-specific lifecycle edges may require conservative approximations. Sanitizers are pattern-driven, so custom validation logic may need project-specific patterns.
+This is not a full SSA or path-sensitive theorem prover. Complex aliasing, reflection, dynamic dispatch, deep collection modeling, async state-machine reconstruction, and framework-specific lifecycle edges may require conservative approximations. Assembly-only analysis cannot recover source syntax that was not emitted to IL/PDB and therefore prefers semantic metadata patterns over source `Code` patterns. Sanitizers are pattern-driven, so custom validation logic may need project-specific patterns.
 
 ## `crypto`
 

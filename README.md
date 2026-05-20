@@ -29,7 +29,7 @@ dotnet run --project ./Dosai/Dosai.csproj -- dataflows \
   --graph-out /tmp/dosai-dataflows.graphml
 ```
 
-The data-flow engine performs field-sensitive property/field taint where receiver identity is available and emits simple interprocedural summaries for parameter-to-return and parameter-to-sink callees. Slices can carry taint kinds, field paths, confidence, and F#/R/VC++ frontend evidence for common script and native input and sink patterns.
+The data-flow engine performs field-sensitive property/field taint where receiver identity is available and emits simple interprocedural summaries for parameter-to-return and parameter-to-sink callees. For C# and VB source it uses Roslyn `IOperation`; for assembly-only inputs it reconstructs method-body flow from IL metadata, control-flow branches, portable PDB sequence points, and package dependency scope. Slices can carry taint kinds, field paths, confidence, source/assembly evidence, and F#/R/VC++ frontend evidence for common script and native input and sink patterns.
 
 `dataflows` is quiet by default and writes the JSON/graph artifacts. Add `--print` during local triage to render each slice as a stack-trace-style path with frames such as `at Source/cli args [dfn1] in Program.cs:5:5`, code snippets, symbols, PURLs, and `via ...` edge transitions:
 
@@ -42,7 +42,7 @@ dotnet run --project ./Dosai/Dosai.csproj -- dataflows \
 
 Pass custom patterns with `--patterns ./dataflow-patterns.json`; the file is merged with built-in patterns. See [Data-flow custom patterns](./docs/dataflow-patterns.md) for the JSON schema, pattern kinds, and examples, and [Built-in data-flow pattern pack catalog](./docs/pattern-packs.md) for the contents of `--pattern-packs`.
 
-The analyzer is optimized for full source-tree CI runs: pattern matching is indexed by hot lookup kind, syntax text is cached for code-like matches, and slice construction uses indexed graph edges. Dosai's CI smoke test runs `dataflows --path ./Dosai` to guard this path.
+The analyzer is optimized for full source-tree CI runs: pattern matching is indexed by hot lookup kind, syntax text is cached for code-like matches, assembly dependency directories are scoped with `.deps.json` when available, and slice construction uses indexed graph edges. Dosai's CI smoke test runs `dataflows --path ./Dosai` and assembly-only fixtures to guard both source and binary paths.
 
 ### Cryptography and CBOM evidence
 

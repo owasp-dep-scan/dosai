@@ -303,6 +303,116 @@ public static class Program
     }
 
     [Fact]
+    public void GetDataFlows_AssemblyOnlyInterproceduralSummary_ReplaysCalleeSinkAtCallSite()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "AssemblyInterproceduralFlow", """
+using System.Diagnostics;
+
+public static class Program
+{
+    public static void Main(string[] args)
+    {
+        Launch(Wrap(args[0]));
+    }
+
+    private static string Wrap(string input) => string.Concat(input, "");
+
+    private static void Launch(string command)
+    {
+        Process.Start(command);
+    }
+}
+""");
+
+        var dataFlowResult = ReadDataFlows(Path.Combine(outputDirectory, "AssemblyInterproceduralFlow.dll"));
+
+        Assert.Contains(dataFlowResult.Nodes, node => node.Kind == "CallSummary" && node.Symbol is not null && node.Symbol.Contains("Wrap", StringComparison.Ordinal));
+        Assert.Contains(dataFlowResult.Edges, edge => edge.Kind == "AssemblyInterproceduralReturn");
+        Assert.Contains(dataFlowResult.Edges, edge => edge.Kind == "AssemblyInterproceduralSink");
+        Assert.Contains(dataFlowResult.Slices, slice => slice.SourceCategory == "cli" && slice.SinkCategory == "command");
+    }
+
+    [Fact]
+    public void GetDataFlows_AssemblyOnlyCfgBranch_PreservesTaintedBranchToSink()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "AssemblyCfgFlow", """
+using System;
+using System.Diagnostics;
+
+public static class Program
+{
+    public static void Main(string[] args)
+    {
+        string command;
+        if (DateTime.Now.Ticks > 0)
+        {
+            command = args[0];
+        }
+        else
+        {
+            command = "safe";
+        }
+
+        Process.Start(command);
+    }
+}
+""");
+
+        var dataFlowResult = ReadDataFlows(Path.Combine(outputDirectory, "AssemblyCfgFlow.dll"));
+
+        Assert.Contains(dataFlowResult.Slices, slice => slice.SourceCategory == "cli" && slice.SinkCategory == "command");
+        Assert.Contains(dataFlowResult.Edges, edge => edge.Kind == "AssemblySinkCall");
+    }
+
+    [Fact]
+    public void GetDataFlows_AssemblyOnlyWithPortablePdb_UsesSourceLocations()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "AssemblyPdbFlow", """
+using System.Diagnostics;
+
+public static class Program
+{
+    public static void Main(string[] args)
+    {
+        Process.Start(args[0]);
+    }
+}
+""");
+
+        var dataFlowResult = ReadDataFlows(Path.Combine(outputDirectory, "AssemblyPdbFlow.dll"));
+
+        Assert.Contains(dataFlowResult.Nodes, node => node.Properties.TryGetValue("analysis", out var analysis) && analysis == "assembly-il" && node.FileName == "Program.cs" && node.LineNumber > 1);
+        Assert.Contains(dataFlowResult.Edges, edge => edge.FileName == "Program.cs" && edge.LineNumber > 1);
+    }
+
+    [Fact]
+    public void GetDataFlows_AssemblyDirectoryWithDepsJson_ScopesToProjectAssemblies()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "AssemblyScopedFlow", """
+using System.Diagnostics;
+
+public static class Program
+{
+    public static void Main(string[] args)
+    {
+        Process.Start(args[0]);
+    }
+}
+""");
+        var runtimeAssembly = typeof(object).Assembly.Location;
+        File.Copy(runtimeAssembly, Path.Combine(outputDirectory, Path.GetFileName(runtimeAssembly)), overwrite: true);
+
+        var dataFlowResult = ReadDataFlows(outputDirectory);
+
+        Assert.Contains(dataFlowResult.Slices, slice => slice.SourceCategory == "cli" && slice.SinkCategory == "command");
+        Assert.DoesNotContain(dataFlowResult.Nodes, node => node.Properties.TryGetValue("assembly", out var assembly) && assembly == Path.GetFileName(runtimeAssembly));
+    }
+
+    [Fact]
     public void GetDataFlows_NestedInterproceduralExpression_PreservesCommandSlice()
     {
         using var tempDirectory = new TemporaryDirectory();
@@ -1528,6 +1638,49 @@ class SqlFlow
     {
         var currentDirectory = Directory.GetCurrentDirectory();
         return Path.Join(currentDirectory, filePath);
+    }
+
+    private static DataFlowResult ReadDataFlows(string path)
+    {
+        var resultJson = DataFlowAnalyzer.GetDataFlows(path);
+        var dataFlowResult = JsonSerializer.Deserialize<DataFlowResult>(resultJson, new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() }
+        });
+        Assert.NotNull(dataFlowResult);
+        return dataFlowResult;
+    }
+
+    private static string BuildTemporaryProject(string tempRoot, string projectName, string programSource)
+    {
+        var projectDirectory = Path.Combine(tempRoot, projectName, "src");
+        var outputDirectory = Path.Combine(tempRoot, projectName, "bin");
+        Directory.CreateDirectory(projectDirectory);
+        Directory.CreateDirectory(outputDirectory);
+        File.WriteAllText(Path.Combine(projectDirectory, $"{projectName}.csproj"), """
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <DebugType>portable</DebugType>
+  </PropertyGroup>
+</Project>
+""");
+        File.WriteAllText(Path.Combine(projectDirectory, "Program.cs"), programSource);
+
+        var build = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = "dotnet",
+            Arguments = $"build \"{Path.Combine(projectDirectory, $"{projectName}.csproj")}\" -o \"{outputDirectory}\" -v:quiet",
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        });
+        Assert.NotNull(build);
+        build.WaitForExit();
+        var buildOutput = build.StandardOutput.ReadToEnd() + build.StandardError.ReadToEnd();
+        Assert.True(build.ExitCode == 0, buildOutput);
+        return outputDirectory;
     }
 
     private static void WriteProjectAssets(string directory, string packageName, string version, string assemblyFileName)

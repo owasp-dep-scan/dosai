@@ -69,6 +69,12 @@ Prefer semantic kinds over `Code` when possible. Semantic matching is more accur
 
 `Parameter` patterns intentionally seed method parameters only; they do not match arbitrary local variables with the same name.
 
+## Source and assembly matching behavior
+
+For source inputs, `Code` patterns match syntax text and are useful as a fallback for unresolved references or legacy source shapes. For assembly-only inputs, Dosai has metadata symbols and IL literals rather than original syntax. To keep binary analysis precise, assembly matching applies semantic `Method`, `Symbol`, `Type`, `Namespace`, and `Name` patterns to resolved metadata members; `Code` source patterns are applied only to literal IL evidence such as `ldstr` strings, not to arbitrary metadata names. `Parameter` source patterns still seed method parameters, including `Main(string[] args)` as `cli`, and portable PDBs are used for source locations when available.
+
+Short broad `Name`/`Contains` source patterns are intentionally filtered in assembly metadata mode to avoid noisy matches against compiler-generated members such as `get_Key`. Prefer `Method`, `Type`, or exact/regex `Parameter` patterns for binary-friendly custom rules.
+
 ## Example: custom legacy source and sink wrappers
 
 This example marks `LegacyInput.ReadUntrusted()` as a source and `LegacyShell.Exec(...)` as a command sink. It also marks `NormalizeCommand(...)` as a passthrough so taint survives a local normalization wrapper, and `AllowListedCommand(...)` as a validator/sanitizer.
