@@ -872,7 +872,7 @@ internal static class AssemblyCallGraphAnalyzer
                 OperandType.ShortInlineBrTarget => ilReader.ReadSByte(),
                 OperandType.InlineBrTarget => ilReader.ReadInt32(),
                 OperandType.ShortInlineVar => ilReader.ReadByte(),
-                OperandType.InlineVar => ilReader.ReadUInt16(),
+                OperandType.InlineVar => (int)ilReader.ReadUInt16(),
                 OperandType.InlineSwitch => ReadSwitchOperand(ref ilReader),
                 OperandType.InlineString or OperandType.InlineSig or OperandType.InlineMethod or OperandType.InlineField or OperandType.InlineType or OperandType.InlineTok => ilReader.ReadInt32(),
                 _ => null
@@ -925,15 +925,22 @@ internal static class AssemblyCallGraphAnalyzer
         if (!File.Exists(path) && !Directory.Exists(path)) return [];
         if (!File.GetAttributes(path).HasFlag(FileAttributes.Directory)) return Path.GetExtension(path) is ".dll" or ".exe" ? [path] : [];
         var applicationAssemblyNames = GetApplicationAssemblyNames(path);
+        var hasSourceFiles = Directory.EnumerateFiles(path, "*.*", SearchOption.AllDirectories)
+            .Any(file => IsSupportedSourceExtension(Path.GetExtension(file)));
         return new DirectoryInfo(path)
             .EnumerateFiles("*.*", SearchOption.AllDirectories)
             .Where(file => file.Extension.Equals(".dll", StringComparison.OrdinalIgnoreCase) || file.Extension.Equals(".exe", StringComparison.OrdinalIgnoreCase))
             .Where(file => !file.FullName.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase))
-            .Where(file => !file.FullName.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase) || !Directory.EnumerateFiles(path, "*.cs", SearchOption.AllDirectories).Any())
+            .Where(file => !file.FullName.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase) || !hasSourceFiles)
             .Where(file => applicationAssemblyNames.Count == 0 ? IsLikelyApplicationAssembly(file.Name) : applicationAssemblyNames.Contains(Path.GetFileNameWithoutExtension(file.Name)))
             .Select(file => file.FullName)
             .ToList();
     }
+
+    private static bool IsSupportedSourceExtension(string extension) =>
+        extension.Equals(".cs", StringComparison.OrdinalIgnoreCase) ||
+        extension.Equals(".vb", StringComparison.OrdinalIgnoreCase) ||
+        extension.Equals(".fs", StringComparison.OrdinalIgnoreCase);
 
     private static HashSet<string> GetApplicationAssemblyNames(string directory)
     {

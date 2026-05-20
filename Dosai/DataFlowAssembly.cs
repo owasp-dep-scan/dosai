@@ -998,7 +998,7 @@ public static partial class DataFlowAnalyzer
                 OperandType.ShortInlineBrTarget => ilReader.ReadSByte(),
                 OperandType.InlineBrTarget => ilReader.ReadInt32(),
                 OperandType.ShortInlineVar => ilReader.ReadByte(),
-                OperandType.InlineVar => ilReader.ReadUInt16(),
+                OperandType.InlineVar => (int)ilReader.ReadUInt16(),
                 OperandType.InlineSwitch => ReadSwitchOperand(ref ilReader),
                 OperandType.InlineString or OperandType.InlineSig or OperandType.InlineMethod or OperandType.InlineField or OperandType.InlineType or OperandType.InlineTok => ilReader.ReadInt32(),
                 _ => null

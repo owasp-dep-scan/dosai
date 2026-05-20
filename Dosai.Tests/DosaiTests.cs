@@ -197,6 +197,35 @@ public static class Program
     }
 
     [Fact]
+    public void GetMethods_AssemblyOnlyDelegateTracking_HandlesInlineVarLocalOperands()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "AssemblyInlineVarDelegate", $$"""
+using System;
+
+public static class Program
+{
+    public static void Main()
+    {
+{{GenerateManyLocalDeclarations(270)}}
+        Action callback = Handle;
+        callback();
+{{GenerateManyLocalUses(270)}}
+    }
+
+    private static void Handle() { }
+}
+""");
+
+        var methodsSlice = ReadMethods(Path.Combine(outputDirectory, "AssemblyInlineVarDelegate.dll"));
+
+        Assert.Contains(methodsSlice.CallGraph!.Edges, edge =>
+            edge.EvidenceKind == AnalysisEvidenceKind.AssemblyIlDelegateTarget &&
+            edge.SourceId.Contains("Program.Main", StringComparison.Ordinal) &&
+            edge.TargetId.Contains("Program.Handle", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void GetMethods_CombinedSourceAndAssembly_EmitsSharedEvidenceAndSourceAssemblyMapping()
     {
         using var tempDirectory = new TemporaryDirectory();
@@ -915,6 +944,31 @@ public static class Program
         Assert.Contains(dataFlowResult.Nodes, node => node.MethodIdentity?.Evidence.Contains(AnalysisEvidenceKind.AssemblyIlDirect) == true && node.Evidence.Any(evidence => evidence.Kind == AnalysisEvidenceKind.AssemblyIlDirect));
         Assert.Contains(dataFlowResult.Nodes, node => node.Kind == "Assignment" && node.Name == "command" && node.Properties.TryGetValue("analysis", out var analysis) && analysis == "assembly-il");
         Assert.Contains(dataFlowResult.Edges, edge => edge.FileName == "Program.cs" && edge.LineNumber > 1);
+    }
+
+    [Fact]
+    public void GetDataFlows_AssemblyOnly_HandlesInlineVarLocalOperands()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "AssemblyInlineVarDataFlow", $$"""
+using System.Diagnostics;
+
+public static class Program
+{
+    public static void Main(string[] args)
+    {
+{{GenerateManyLocalDeclarations(270)}}
+        var command = args[0];
+        Process.Start(command);
+{{GenerateManyLocalUses(270)}}
+    }
+}
+""");
+
+        var dataFlowResult = ReadDataFlows(Path.Combine(outputDirectory, "AssemblyInlineVarDataFlow.dll"));
+
+        Assert.Contains(dataFlowResult.Slices, slice => slice.SourceCategory == "cli" && slice.SinkCategory == "command");
+        Assert.Contains(dataFlowResult.Nodes, node => node.Kind == "Assignment" && node.Name == "command");
     }
 
     [Fact]
@@ -2273,6 +2327,10 @@ class SqlFlow
         Assert.NotNull(methodsSlice.CallGraph);
         return methodsSlice;
     }
+
+    private static string GenerateManyLocalDeclarations(int count) => string.Join(Environment.NewLine, Enumerable.Range(0, count).Select(index => $"        var filler{index} = {index};"));
+
+    private static string GenerateManyLocalUses(int count) => string.Join(Environment.NewLine, Enumerable.Range(0, count).Select(index => $"        global::System.GC.KeepAlive(filler{index});"));
 
     private static string BuildTemporaryProject(string tempRoot, string projectName, string programSource)
     {

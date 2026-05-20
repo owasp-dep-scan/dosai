@@ -135,8 +135,8 @@ public static class Dosai
         methods.AddRange(sourceMethods);
         EnrichPackageUrls(purlResolver, methods, usings, methodCalls, properties, fields, events, constructors, callGraph, assemblyInformation, sourceAssemblyMapping);
         var entryPoints = TransparencyBuilder.BuildEntryPoints(apiEndpoints, methods);
-        var packageReachability = TransparencyBuilder.BuildPackageReachability(callGraph);
         EnrichMethodIdentities(methods, callGraph, path);
+        var packageReachability = TransparencyBuilder.BuildPackageReachability(callGraph);
 
         return JsonSerializer.Serialize(new MethodsSlice 
         { 
