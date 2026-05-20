@@ -880,6 +880,38 @@ public static class Program
     }
 
     [Fact]
+    public void GetDataFlows_SourceDirectory_KeepsBinAssemblyOutputs()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "SourceDirectoryBinFlow", """
+using System.Diagnostics;
+
+public static class Program
+{
+    public static void Main(string[] args)
+    {
+        Process.Start(args[0]);
+    }
+}
+""");
+        var analysisDirectory = Path.Combine(tempDirectory.Path, "analysis-root");
+        var binDirectory = Path.Combine(analysisDirectory, "bin");
+        Directory.CreateDirectory(binDirectory);
+        File.WriteAllText(Path.Combine(analysisDirectory, "Root.cs"), "public static class Root { public static void Main() { } }");
+        File.Copy(Path.Combine(outputDirectory, "SourceDirectoryBinFlow.dll"), Path.Combine(binDirectory, "SourceDirectoryBinFlow.dll"));
+        File.Copy(Path.Combine(outputDirectory, "SourceDirectoryBinFlow.pdb"), Path.Combine(binDirectory, "SourceDirectoryBinFlow.pdb"));
+
+        var dataFlowResult = ReadDataFlows(analysisDirectory);
+
+        Assert.Contains(dataFlowResult.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" });
+        Assert.Contains(dataFlowResult.Nodes, node =>
+            node.Properties.TryGetValue("analysis", out var analysis) &&
+            analysis == "assembly-il" &&
+            node.Properties.TryGetValue("assembly", out var assembly) &&
+            assembly == "SourceDirectoryBinFlow.dll");
+    }
+
+    [Fact]
     public void GetDataFlows_AssemblyOnlyCfgBranch_PreservesTaintedBranchToSink()
     {
         using var tempDirectory = new TemporaryDirectory();

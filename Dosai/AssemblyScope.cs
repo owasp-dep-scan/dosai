@@ -62,11 +62,6 @@ internal static class AssemblyScope
                 continue;
             }
 
-            if (!includeBuildArtifacts && !excludeBinWhenSourceFilesPresent && HasDirectorySegment(relativePath, BinSegment))
-            {
-                continue;
-            }
-
             candidates.Add(file);
         }
 
