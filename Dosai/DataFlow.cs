@@ -113,6 +113,7 @@ public sealed class DataFlowEdge
     public string? Label { get; set; }
     public string? SourcePurl { get; set; }
     public string? TargetPurl { get; set; }
+    public string? Path { get; set; }
     public string? FileName { get; set; }
     public int LineNumber { get; set; }
     public int ColumnNumber { get; set; }
@@ -652,6 +653,7 @@ public static partial class DataFlowAnalyzer
                         Label = assignedName,
                         SourcePurl = source.Purl,
                         TargetPurl = sinkNode.Purl,
+                        Path = Directory.Exists(basePath) ? Path.GetRelativePath(basePath, file) : Path.GetFileName(file),
                         FileName = Path.GetFileName(file),
                         LineNumber = index + 1,
                         ColumnNumber = 1
@@ -2025,6 +2027,7 @@ public static partial class DataFlowAnalyzer
                     Label = label,
                     SourcePurl = _nodesById.TryGetValue(sourceId, out var sourceNode) ? sourceNode.Purl : null,
                     TargetPurl = _nodesById.TryGetValue(targetId, out var targetNode) ? targetNode.Purl : null,
+                    Path = sourceFilePath,
                     FileName = Path.GetFileName(sourceFilePath),
                     LineNumber = lineSpan.StartLinePosition.Line + 1,
                     ColumnNumber = lineSpan.StartLinePosition.Character + 1

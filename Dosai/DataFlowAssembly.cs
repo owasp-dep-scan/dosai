@@ -1636,6 +1636,7 @@ public static partial class DataFlowAnalyzer
                     Label = label,
                     SourcePurl = _nodesById.TryGetValue(sourceId, out var sourceNode) ? sourceNode.Purl : null,
                     TargetPurl = _nodesById.TryGetValue(targetId, out var targetNode) ? targetNode.Purl : null,
+                    Path = Directory.Exists(basePath) ? Path.GetRelativePath(basePath, location.FilePath) : location.FilePath,
                     FileName = Path.GetFileName(location.FilePath),
                     LineNumber = location.LineNumber,
                     ColumnNumber = location.ColumnNumber

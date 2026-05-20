@@ -2111,6 +2111,7 @@ public static class Dosai
                     SourceId = call.SourceId!,
                     TargetId = call.TargetId!,
                     CallLocation = new CallLocation { FileName = call.FileName, LineNumber = call.LineNumber, ColumnNumber = call.ColumnNumber },
+                    Path = call.Path,
                     FileName = call.FileName,
                     IsInternal = call.IsInternal,
                     CalledMethodName = call.CalledMethod,
