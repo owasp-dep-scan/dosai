@@ -68,7 +68,7 @@ internal static class AssemblyCallGraphAnalyzer
                     var delegateState = new AssemblyDelegateState();
                     foreach (var instruction in DecodeInstructions(body.GetILReader()))
                     {
-                        var location = sourceMap.Resolve(methodToken, instruction.Offset + 1, assemblyPath);
+                        var location = sourceMap.Resolve(methodToken, instruction.Offset, assemblyPath);
                         foreach (var resolvedDelegate in TrackDelegateInstruction(reader, instruction, delegateState, assemblyPath, sourceMap, assemblyFullPath, methodLookup))
                         {
                             AddResolvedDelegateEdge(calls, nodes, edges, edgeKeys, sourceMethod, sourceId, resolvedDelegate, location);

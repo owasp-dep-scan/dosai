@@ -264,8 +264,8 @@ public static partial class DataFlowAnalyzer
                 if (localTaint is not null)
                 {
                     var localName = sourceMap.GetLocalName(methodInfo.MetadataToken, stlocIndex, instruction.Offset) ?? $"local_{stlocIndex}";
-                    var assignmentNode = context.AddNode("Assignment", localName, methodInfo, assemblyPath, isSource: false, isSink: false, [], null, $"{methodInfo.Symbol}.{localName}", null, localName, instruction.Offset + 1);
-                    context.AddEdges(localTaint.NodeIds, assignmentNode.Id, "AssemblyLocalAssignment", methodInfo, assemblyPath, instruction.Offset + 1, localName);
+                    var assignmentNode = context.AddNode("Assignment", localName, methodInfo, assemblyPath, isSource: false, isSink: false, [], null, $"{methodInfo.Symbol}.{localName}", null, localName, instruction.Offset);
+                    context.AddEdges(localTaint.NodeIds, assignmentNode.Id, "AssemblyLocalAssignment", methodInfo, assemblyPath, instruction.Offset, localName);
                     localTaint = localTaint.Append(assignmentNode.Id);
                 }
                 state.Locals[stlocIndex] = localTaint;
@@ -279,7 +279,7 @@ public static partial class DataFlowAnalyzer
                 var matched = context.MatchSourceCode(value).ToList();
                 if (matched.Count > 0)
                 {
-                    var node = context.AddNode("Source", "string", methodInfo, assemblyPath, isSource: true, isSink: false, matched, matched.FirstOrDefault()?.Category, "System.String", "System.String", value, instruction.Offset + 1);
+                    var node = context.AddNode("Source", "string", methodInfo, assemblyPath, isSource: true, isSink: false, matched, matched.FirstOrDefault()?.Category, "System.String", "System.String", value, instruction.Offset);
                     state.Push(new AssemblyTaint([node.Id], ToTaintKinds(matched), []));
                 }
                 else
@@ -365,8 +365,8 @@ public static partial class DataFlowAnalyzer
             {
                 if (state.Stack.Count > 0 && state.Pop() is { } returnTaint)
                 {
-                    var node = context.AddNode("Return", "return", methodInfo, assemblyPath, isSource: false, isSink: false, [], null, methodInfo.Symbol, methodInfo.ReturnType, "ret", instruction.Offset + 1);
-                    context.AddEdges(returnTaint.NodeIds, node.Id, "AssemblyReturn", methodInfo, assemblyPath, instruction.Offset + 1, "returned value");
+                    var node = context.AddNode("Return", "return", methodInfo, assemblyPath, isSource: false, isSink: false, [], null, methodInfo.Symbol, methodInfo.ReturnType, "ret", instruction.Offset);
+                    context.AddEdges(returnTaint.NodeIds, node.Id, "AssemblyReturn", methodInfo, assemblyPath, instruction.Offset, "returned value");
                 }
                 continue;
             }
@@ -396,7 +396,7 @@ public static partial class DataFlowAnalyzer
         var sourcePatterns = context.MatchSource(member).ToList();
         if (sourcePatterns.Count > 0)
         {
-            var node = context.AddNode("Source", member.Name, currentMethod, assemblyPath, isSource: true, isSink: false, sourcePatterns, sourcePatterns.FirstOrDefault()?.Category, member.Symbol, member.ContainingType, member.Symbol, instruction.Offset + 1);
+            var node = context.AddNode("Source", member.Name, currentMethod, assemblyPath, isSource: true, isSink: false, sourcePatterns, sourcePatterns.FirstOrDefault()?.Category, member.Symbol, member.ContainingType, member.Symbol, instruction.Offset);
             var sourceTaint = new AssemblyTaint([node.Id], ToTaintKinds(sourcePatterns), []);
             if (!member.ReturnsVoid || opCode == OpCodes.Newobj)
             {
@@ -410,8 +410,8 @@ public static partial class DataFlowAnalyzer
         var sinkPatterns = context.MatchSink(member).ToList();
         if (sinkPatterns.Count > 0 && combined is not null)
         {
-            var sinkNode = context.AddNode("Sink", member.Name, currentMethod, assemblyPath, isSource: false, isSink: true, sinkPatterns, sinkPatterns.FirstOrDefault()?.Category, member.Symbol, member.ContainingType, member.Symbol, instruction.Offset + 1);
-            context.AddEdges(combined.NodeIds, sinkNode.Id, opCode == OpCodes.Newobj ? "AssemblySinkObjectCreation" : "AssemblySinkCall", currentMethod, assemblyPath, instruction.Offset + 1, member.Name);
+            var sinkNode = context.AddNode("Sink", member.Name, currentMethod, assemblyPath, isSource: false, isSink: true, sinkPatterns, sinkPatterns.FirstOrDefault()?.Category, member.Symbol, member.ContainingType, member.Symbol, instruction.Offset);
+            context.AddEdges(combined.NodeIds, sinkNode.Id, opCode == OpCodes.Newobj ? "AssemblySinkObjectCreation" : "AssemblySinkCall", currentMethod, assemblyPath, instruction.Offset, member.Name);
             var sinkArgumentIndex = argumentTaints.FindIndex(taint => taint is not null);
             context.AddSlice(combined, sinkNode, sinkPatterns.FirstOrDefault(), member.Symbol, sinkArgumentIndex >= 0 ? sinkArgumentIndex : -1);
         }
@@ -429,9 +429,9 @@ public static partial class DataFlowAnalyzer
                     Category = summary.SinkCategories.FirstOrDefault() ?? "interprocedural",
                     Description = "Assembly IL sink reached through a summarized callee"
                 };
-                var sinkNode = context.AddNode("Sink", member.Name, currentMethod, assemblyPath, isSource: false, isSink: true, [summaryPattern], summaryPattern.Category, member.Symbol, member.ContainingType, member.Symbol, instruction.Offset + 1);
+                var sinkNode = context.AddNode("Sink", member.Name, currentMethod, assemblyPath, isSource: false, isSink: true, [summaryPattern], summaryPattern.Category, member.Symbol, member.ContainingType, member.Symbol, instruction.Offset);
                 sinkNode.Properties["summaryMethod"] = summary.Method;
-                context.AddEdges(taint.NodeIds, sinkNode.Id, "AssemblyInterproceduralSink", currentMethod, assemblyPath, instruction.Offset + 1, member.Name);
+                context.AddEdges(taint.NodeIds, sinkNode.Id, "AssemblyInterproceduralSink", currentMethod, assemblyPath, instruction.Offset, member.Name);
                 context.AddSlice(taint, sinkNode, summaryPattern, member.Symbol, sinkParameterIndex);
             }
         }
@@ -451,8 +451,8 @@ public static partial class DataFlowAnalyzer
                 .ToList();
             if (returnTaints.Count > 0 && CombineAssemblyTaints(returnTaints) is { } returnCombined)
             {
-                var callNode = context.AddNode("CallSummary", member.Name, currentMethod, assemblyPath, isSource: false, isSink: false, [], null, member.Symbol, member.ContainingType, member.Symbol, instruction.Offset + 1);
-                context.AddEdges(returnCombined.NodeIds, callNode.Id, "AssemblyInterproceduralReturn", currentMethod, assemblyPath, instruction.Offset + 1, member.Name);
+                var callNode = context.AddNode("CallSummary", member.Name, currentMethod, assemblyPath, isSource: false, isSink: false, [], null, member.Symbol, member.ContainingType, member.Symbol, instruction.Offset);
+                context.AddEdges(returnCombined.NodeIds, callNode.Id, "AssemblyInterproceduralReturn", currentMethod, assemblyPath, instruction.Offset, member.Name);
                 state.Push(returnCombined.Append(callNode.Id));
                 return;
             }
@@ -467,8 +467,8 @@ public static partial class DataFlowAnalyzer
         var passthroughPatterns = context.MatchPassthrough(member).ToList();
         if (passthroughPatterns.Count > 0 || member.Symbol.StartsWith("System.", StringComparison.Ordinal))
         {
-            var callNode = context.AddNode("Call", member.Name, currentMethod, assemblyPath, isSource: false, isSink: false, [], null, member.Symbol, member.ContainingType, member.Symbol, instruction.Offset + 1);
-            context.AddEdges(combined.NodeIds, callNode.Id, "AssemblyCallReturn", currentMethod, assemblyPath, instruction.Offset + 1, member.Name);
+            var callNode = context.AddNode("Call", member.Name, currentMethod, assemblyPath, isSource: false, isSink: false, [], null, member.Symbol, member.ContainingType, member.Symbol, instruction.Offset);
+            context.AddEdges(combined.NodeIds, callNode.Id, "AssemblyCallReturn", currentMethod, assemblyPath, instruction.Offset, member.Name);
             state.Push(combined.Append(callNode.Id));
         }
         else
@@ -1653,7 +1653,7 @@ public static partial class DataFlowAnalyzer
     private sealed record AssemblySequencePoint(int Offset, string FilePath, int LineNumber, int ColumnNumber);
     private sealed record AssemblyLocalScope(int Index, string Name, int StartOffset, int Length)
     {
-        public bool Contains(int offset) => offset >= StartOffset && offset <= StartOffset + Length;
+        public bool Contains(int offset) => offset >= StartOffset && offset < StartOffset + Length;
     }
     private sealed record AssemblyMethodInfo(string Symbol, string Name, string ContainingType, string Namespace, string AssemblyName, string ReturnType, string AssemblyPath, int MetadataToken, IReadOnlyList<AssemblySequencePoint> SourceLocations)
     {

@@ -30,8 +30,13 @@ internal static class DispatchResolver
             {
                 var semanticModel = compilation.GetSemanticModel(syntaxTree);
                 var root = syntaxTree.GetRoot();
-                foreach (var objectCreation in root.DescendantNodes().Select(node => semanticModel.GetOperation(node)).OfType<IObjectCreationOperation>())
+                foreach (var objectCreationNode in root.DescendantNodes().Where(IsObjectCreationSyntax))
                 {
+                    if (semanticModel.GetOperation(objectCreationNode) is not IObjectCreationOperation objectCreation)
+                    {
+                        continue;
+                    }
+
                     if (objectCreation.Type is INamedTypeSymbol type)
                     {
                         AddTypeKeys(instantiated, type);
@@ -122,6 +127,11 @@ internal static class DispatchResolver
             types.Add(type);
             foreach (var nestedType in type.GetTypeMembers()) CollectTypes(nestedType, types);
         }
+
+        private static bool IsObjectCreationSyntax(SyntaxNode node) =>
+            node is Microsoft.CodeAnalysis.CSharp.Syntax.ObjectCreationExpressionSyntax
+                or Microsoft.CodeAnalysis.CSharp.Syntax.ImplicitObjectCreationExpressionSyntax
+                or Microsoft.CodeAnalysis.VisualBasic.Syntax.ObjectCreationExpressionSyntax;
 
         private static bool InheritsFrom(INamedTypeSymbol? candidate, INamedTypeSymbol? baseType)
         {

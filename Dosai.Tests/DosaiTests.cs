@@ -237,6 +237,64 @@ public static class Program
     }
 
     [Fact]
+    public void GetMethods_VBSourceMode_DoesNotAddAssemblyReflectionEvidenceToAssemblyMethods()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "VbSourceModeAssembly", "public static class Program { public static void Main() { } }");
+        var inputDirectory = Path.Combine(tempDirectory.Path, "combined-vb-input");
+        Directory.CreateDirectory(inputDirectory);
+        File.WriteAllText(Path.Combine(inputDirectory, "OnlySource.vb"), "Public Class OnlySource\n    Public Sub Run()\n    End Sub\nEnd Class\n");
+        File.Copy(Path.Combine(outputDirectory, "VbSourceModeAssembly.dll"), Path.Combine(inputDirectory, "VbSourceModeAssembly.dll"));
+        File.Copy(Path.Combine(outputDirectory, "VbSourceModeAssembly.pdb"), Path.Combine(inputDirectory, "VbSourceModeAssembly.pdb"));
+
+        var methodsSlice = ReadMethods(inputDirectory);
+
+        Assert.Contains(methodsSlice.Methods!, method => method.FileName == "OnlySource.vb" && method.ClassName == "OnlySource");
+        var assemblyMethods = methodsSlice.Methods!.Where(method => method.FileName == "VbSourceModeAssembly.dll").ToList();
+        Assert.NotEmpty(assemblyMethods);
+        Assert.DoesNotContain(assemblyMethods, method => method.Evidence.Any(evidence => evidence.Kind == AnalysisEvidenceKind.AssemblyReflection));
+        Assert.DoesNotContain(assemblyMethods, method => method.Identity?.Evidence.Contains(AnalysisEvidenceKind.AssemblyReflection) == true);
+    }
+
+    [Fact]
+    public void GetMethods_CombinedSourceAndAssembly_MapsOverloadsBySignature()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "OverloadMappingFlow", """
+public static class Program
+{
+    public static void Main()
+    {
+        Run("safe");
+        Run(42);
+    }
+
+    public static void Run(string value) { }
+
+    public static void Run(int value) { }
+}
+""");
+        var inputDirectory = Path.Combine(tempDirectory.Path, "combined-overload-input");
+        Directory.CreateDirectory(inputDirectory);
+        File.Copy(Path.Combine(tempDirectory.Path, "OverloadMappingFlow", "src", "Program.cs"), Path.Combine(inputDirectory, "Program.cs"));
+        File.Copy(Path.Combine(outputDirectory, "OverloadMappingFlow.dll"), Path.Combine(inputDirectory, "OverloadMappingFlow.dll"));
+        File.Copy(Path.Combine(outputDirectory, "OverloadMappingFlow.pdb"), Path.Combine(inputDirectory, "OverloadMappingFlow.pdb"));
+
+        var methodsSlice = ReadMethods(inputDirectory);
+
+        var runMappings = methodsSlice.SourceAssemblyMapping!
+            .Where(mapping => mapping.IsMapped && mapping.MemberName == "Run")
+            .ToList();
+        Assert.Equal(2, runMappings.Count);
+        var stringRun = Assert.Single(runMappings, mapping => mapping.AssemblySignature?.Contains("String", StringComparison.Ordinal) == true);
+        var intRun = Assert.Single(runMappings, mapping => mapping.AssemblySignature?.Contains("Int32", StringComparison.Ordinal) == true);
+        Assert.Contains("String", stringRun.AssemblySignature, StringComparison.Ordinal);
+        Assert.DoesNotContain("Int32", stringRun.AssemblySignature, StringComparison.Ordinal);
+        Assert.Contains("Int32", intRun.AssemblySignature, StringComparison.Ordinal);
+        Assert.DoesNotContain("String", intRun.AssemblySignature, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void GetMethods_VBAssembly_PathIsFile_ReturnsDetails()
     {
         var assemblyPath = GetFilePath(DosaiTestDataVBDLL);
@@ -857,6 +915,39 @@ public static class Program
         Assert.Contains(dataFlowResult.Nodes, node => node.MethodIdentity?.Evidence.Contains(AnalysisEvidenceKind.AssemblyIlDirect) == true && node.Evidence.Any(evidence => evidence.Kind == AnalysisEvidenceKind.AssemblyIlDirect));
         Assert.Contains(dataFlowResult.Nodes, node => node.Kind == "Assignment" && node.Name == "command" && node.Properties.TryGetValue("analysis", out var analysis) && analysis == "assembly-il");
         Assert.Contains(dataFlowResult.Edges, edge => edge.FileName == "Program.cs" && edge.LineNumber > 1);
+    }
+
+    [Fact]
+    public void AssemblyAnalysis_PortablePdbLocations_UseCallInstructionOffset()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "AssemblyPdbOffsetFlow", """
+using System.Diagnostics;
+
+public static class Program
+{
+    public static void Main(string[] args)
+    {
+        var command = args[0];
+        Process.Start(command);
+    }
+}
+""");
+
+        var assemblyPath = Path.Combine(outputDirectory, "AssemblyPdbOffsetFlow.dll");
+        var methodsSlice = ReadMethods(assemblyPath);
+        var dataFlowResult = ReadDataFlows(assemblyPath);
+
+        Assert.Contains(methodsSlice.MethodCalls!, call =>
+            call.EvidenceKind == AnalysisEvidenceKind.AssemblyIlDirect &&
+            call.CalledMethod == "Start" &&
+            call.FileName == "Program.cs" &&
+            call.LineNumber == 8);
+        Assert.Contains(dataFlowResult.Nodes, node =>
+            node.Kind == "Sink" &&
+            node.Name == "Start" &&
+            node.FileName == "Program.cs" &&
+            node.LineNumber == 8);
     }
 
     [Fact]

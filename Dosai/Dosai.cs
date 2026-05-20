@@ -447,7 +447,7 @@ public static class Dosai
 
     private static void EnrichMethodIdentities(List<Method> methods, CallGraph callGraph, string analysisPath)
     {
-        var sourceMode = Directory.Exists(analysisPath) && Directory.EnumerateFiles(analysisPath, "*.cs", SearchOption.AllDirectories).Any(file => !file.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase) && !file.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase));
+        var sourceMode = HasInspectableSourceFiles(analysisPath);
         var methodIdentityById = new Dictionary<string, MethodIdentity>(StringComparer.Ordinal);
         foreach (var method in methods)
         {
@@ -2128,7 +2128,7 @@ public static class Dosai
         };
         // Source-to-Assembly Mapping Logic
         var assemblyMemberLookup = new Dictionary<string, object>();
-        var assemblyNameLookup = new Dictionary<string, object>();
+        var assemblyNameLookup = new Dictionary<string, List<Method>>(StringComparer.Ordinal);
         foreach (var asmMethod in assemblyMethods)
         {
             var asmSignature = asmMethod.AssemblySignature;
@@ -2136,7 +2136,13 @@ public static class Dosai
             {
                 assemblyMemberLookup.TryAdd(asmSignature, asmMethod);
             }
-            assemblyNameLookup.TryAdd(MemberNameLookupKey(asmMethod.Namespace, asmMethod.ClassName, asmMethod.Name), asmMethod);
+            var nameKey = MemberNameLookupKey(asmMethod.Namespace, asmMethod.ClassName, asmMethod.Name);
+            if (!assemblyNameLookup.TryGetValue(nameKey, out var candidates))
+            {
+                candidates = [];
+                assemblyNameLookup[nameKey] = candidates;
+            }
+            candidates.Add(asmMethod);
         }
 
         foreach (var method in sourceMethods)
@@ -2175,20 +2181,10 @@ public static class Dosai
                     var isMapped = !string.IsNullOrWhiteSpace(sourceMethod.SourceSignature) && assemblyMemberLookup.TryGetValue(sourceMethod.SourceSignature, out asmMemberObj);
                     if (!isMapped)
                     {
-                        isMapped = assemblyNameLookup.TryGetValue(MemberNameLookupKey(sourceMethod.Namespace, sourceMethod.ClassName, sourceMethod.Name), out var asmMember);
-                        if (isMapped)
+                        var nameKey = MemberNameLookupKey(sourceMethod.Namespace, sourceMethod.ClassName, sourceMethod.Name);
+                        if (assemblyNameLookup.TryGetValue(nameKey, out var candidates) && TryFindAssemblyMethodMatch(sourceMethod, candidates, out var asmMember))
                         {
                             asmMemberObj = asmMember;
-                        }
-                    }
-                    if (!isMapped)
-                    {
-                        var fallbackMatch = assemblyMethods.FirstOrDefault(asmMethod =>
-                            string.Equals(asmMethod.ClassName, sourceMethod.ClassName, StringComparison.Ordinal) &&
-                            string.Equals(asmMethod.Name, sourceMethod.Name, StringComparison.Ordinal));
-                        if (fallbackMatch is not null)
-                        {
-                            asmMemberObj = fallbackMatch;
                             isMapped = true;
                         }
                     }
@@ -2226,6 +2222,133 @@ public static class Dosai
         }
 
         static string MemberNameLookupKey(string? namespaceName, string? className, string? memberName) => string.Join('.', new[] { namespaceName is "<global namespace>" ? null : namespaceName, className, memberName }.Where(part => !string.IsNullOrWhiteSpace(part)));
+
+        static bool TryFindAssemblyMethodMatch(Method sourceMethod, IReadOnlyList<Method> candidates, out Method? match)
+        {
+            match = null;
+            if (candidates.Count == 0)
+            {
+                return false;
+            }
+
+            var sourceParameters = sourceMethod.Parameters ?? [];
+            var parameterCountMatches = candidates
+                .Where(candidate => candidate.Parameters is null || candidate.Parameters.Count == sourceParameters.Count)
+                .ToList();
+            var typedMatches = parameterCountMatches
+                .Where(candidate => ParametersMatch(sourceMethod.Parameters, candidate.Parameters))
+                .ToList();
+            var returnMatches = typedMatches
+                .Where(candidate => ReturnTypesMatch(sourceMethod.ReturnType, candidate.ReturnType, sourceMethod.Name))
+                .ToList();
+
+            var candidateSets = new List<List<Method>> { returnMatches };
+            if (returnMatches.Count == typedMatches.Count)
+            {
+                candidateSets.Add(typedMatches);
+            }
+            if (typedMatches.Count == parameterCountMatches.Count)
+            {
+                candidateSets.Add(parameterCountMatches);
+            }
+
+            foreach (var candidateSet in candidateSets)
+            {
+                if (candidateSet.Count == 1)
+                {
+                    match = candidateSet[0];
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        static bool ParametersMatch(IReadOnlyList<Parameter>? sourceParameters, IReadOnlyList<Parameter>? assemblyParameters)
+        {
+            if (sourceParameters is null || assemblyParameters is null)
+            {
+                return true;
+            }
+
+            if (sourceParameters.Count != assemblyParameters.Count)
+            {
+                return false;
+            }
+
+            for (var index = 0; index < sourceParameters.Count; index++)
+            {
+                var sourceType = sourceParameters[index].TypeFullName ?? sourceParameters[index].Type;
+                var assemblyType = assemblyParameters[index].TypeFullName ?? assemblyParameters[index].Type;
+                if (!string.IsNullOrWhiteSpace(sourceType) && !string.IsNullOrWhiteSpace(assemblyType) && !MemberTypeNamesMatch(sourceType, assemblyType))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        static bool ReturnTypesMatch(string? sourceReturnType, string? assemblyReturnType, string? memberName) =>
+            memberName == ".ctor" || string.IsNullOrWhiteSpace(sourceReturnType) || string.IsNullOrWhiteSpace(assemblyReturnType) || MemberTypeNamesMatch(sourceReturnType, assemblyReturnType);
+
+        static bool MemberTypeNamesMatch(string sourceType, string assemblyType)
+        {
+            var sourceAliases = MemberTypeAliases(sourceType).ToHashSet(StringComparer.Ordinal);
+            return MemberTypeAliases(assemblyType).Any(sourceAliases.Contains);
+        }
+
+        static IEnumerable<string> MemberTypeAliases(string typeName)
+        {
+            var normalized = NormalizeSymbolName(typeName)
+                .Replace('+', '.')
+                .Trim();
+            if (string.IsNullOrWhiteSpace(normalized))
+            {
+                yield break;
+            }
+
+            yield return normalized;
+            if (normalized.EndsWith("[]", StringComparison.Ordinal))
+            {
+                foreach (var elementAlias in MemberTypeAliases(normalized[..^2]))
+                {
+                    yield return elementAlias + "[]";
+                }
+            }
+            var dotIndex = normalized.LastIndexOf('.');
+            if (dotIndex >= 0 && dotIndex < normalized.Length - 1)
+            {
+                yield return normalized[(dotIndex + 1)..];
+            }
+
+            foreach (var alias in PrimitiveTypeAliases(normalized))
+            {
+                yield return alias;
+            }
+        }
+
+        static IEnumerable<string> PrimitiveTypeAliases(string typeName)
+        {
+            return typeName switch
+            {
+                "bool" or "Boolean" or "System.Boolean" => ["bool", "Boolean", "System.Boolean"],
+                "byte" or "Byte" or "System.Byte" => ["byte", "Byte", "System.Byte"],
+                "char" or "Char" or "System.Char" => ["char", "Char", "System.Char"],
+                "decimal" or "Decimal" or "System.Decimal" => ["decimal", "Decimal", "System.Decimal"],
+                "double" or "Double" or "System.Double" => ["double", "Double", "System.Double"],
+                "float" or "Single" or "System.Single" => ["float", "Single", "System.Single"],
+                "int" or "Integer" or "Int32" or "System.Int32" => ["int", "Integer", "Int32", "System.Int32"],
+                "long" or "Long" or "Int64" or "System.Int64" => ["long", "Long", "Int64", "System.Int64"],
+                "object" or "Object" or "System.Object" => ["object", "Object", "System.Object"],
+                "short" or "Short" or "Int16" or "System.Int16" => ["short", "Short", "Int16", "System.Int16"],
+                "string" or "String" or "System.String" => ["string", "String", "System.String"],
+                "uint" or "UInt32" or "System.UInt32" => ["uint", "UInt32", "System.UInt32"],
+                "ulong" or "UInt64" or "System.UInt64" => ["ulong", "UInt64", "System.UInt64"],
+                "ushort" or "UInt16" or "System.UInt16" => ["ushort", "UInt16", "System.UInt16"],
+                "void" or "Void" or "System.Void" => ["void", "Void", "System.Void"],
+                _ => []
+            };
+        }
     }
 
     private static string GetContainingTypeName(MemberDeclarationSyntax member)
@@ -2853,6 +2976,16 @@ public static class Dosai
             }
         }
         return filesToInspect;
+    }
+
+    private static bool HasInspectableSourceFiles(string path)
+    {
+        if (!File.Exists(path) && !Directory.Exists(path))
+        {
+            return false;
+        }
+
+        return GetFilesToInspect(path, Constants.CSharpSourceExtension, Constants.VBSourceExtension, Constants.FSharpSourceExtension).Count > 0;
     }
 
     private static bool HasDirectorySegment(string relativePath, string segment)
