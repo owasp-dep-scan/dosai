@@ -74,6 +74,9 @@ public sealed class DataFlowMethodSummary
     public List<string> FieldPaths { get; set; } = [];
     public string SummaryKind { get; set; } = "InferredLocal";
     public string Confidence { get; set; } = "Medium";
+    public MethodIdentity? Identity { get; set; }
+    public AnalysisEvidenceKind EvidenceKind { get; set; } = AnalysisEvidenceKind.Unknown;
+    public List<AnalysisEvidence> Evidence { get; set; } = [];
 }
 
 public sealed class DataFlowNode
@@ -96,6 +99,8 @@ public sealed class DataFlowNode
     public bool IsSink { get; set; }
     public List<string> MatchedPatterns { get; set; } = [];
     public string? Category { get; set; }
+    public MethodIdentity? MethodIdentity { get; set; }
+    public List<AnalysisEvidence> Evidence { get; set; } = [];
     public Dictionary<string, string> Properties { get; set; } = [];
 }
 
@@ -247,7 +252,12 @@ public static partial class DataFlowAnalyzer
         result.Nodes = result.Nodes.OrderBy(n => n.FileName, StringComparer.Ordinal).ThenBy(n => n.LineNumber).ThenBy(n => n.ColumnNumber).ThenBy(n => n.Id, StringComparer.Ordinal).ToList();
         result.Edges = result.Edges.OrderBy(e => e.FileName, StringComparer.Ordinal).ThenBy(e => e.LineNumber).ThenBy(e => e.ColumnNumber).ThenBy(e => e.Id, StringComparer.Ordinal).ToList();
         result.Slices = result.Slices.OrderBy(s => s.Id, StringComparer.Ordinal).ToList();
-        result.MethodSummaries = summaries.Values.OrderBy(summary => summary.Method, StringComparer.Ordinal).ToList();
+        result.MethodSummaries = summaries.Values
+            .Concat(result.MethodSummaries)
+            .GroupBy(summary => $"{summary.Method}\u001f{summary.SummaryKind}\u001f{summary.EvidenceKind}", StringComparer.Ordinal)
+            .Select(group => group.First())
+            .OrderBy(summary => summary.Method, StringComparer.Ordinal)
+            .ToList();
         result.Statistics.NodeCount = result.Nodes.Count;
         result.Statistics.EdgeCount = result.Edges.Count;
         result.Statistics.SourceCount = result.Nodes.Count(n => n.IsSource);
@@ -685,7 +695,19 @@ public static partial class DataFlowAnalyzer
             IsSink = isSink,
             MatchedPatterns = [pattern.Pattern],
             Category = pattern.Category,
-            Code = code.Trim().Length <= 240 ? code.Trim() : code.Trim()[..240] + "…"
+            Code = code.Trim().Length <= 240 ? code.Trim() : code.Trim()[..240] + "…",
+            Evidence =
+            [
+                new AnalysisEvidence
+                {
+                    Kind = AnalysisEvidenceKind.LanguageFrontend,
+                    Source = "language-frontend",
+                    Description = "Data-flow node discovered by non-Roslyn language frontend.",
+                    FileName = Path.GetFileName(file),
+                    LineNumber = line,
+                    ColumnNumber = column
+                }
+            ]
         };
         node.Properties["confidence"] = pattern.Confidence;
         if (pattern.TaintKinds.Count > 0) node.Properties["taintKinds"] = string.Join(",", pattern.TaintKinds);
@@ -925,7 +947,21 @@ public static partial class DataFlowAnalyzer
             var key = DescribeSymbol(method);
             if (!summaries.TryGetValue(key, out var summary))
             {
-                summary = new DataFlowMethodSummary { Method = key };
+                summary = new DataFlowMethodSummary
+                {
+                    Method = key,
+                    EvidenceKind = AnalysisEvidenceKind.SourceRoslynSummary,
+                    Identity = MethodIdentityFactory.FromParts(key, key, null, key, method.ContainingAssembly?.ToDisplayString(), method.ContainingModule?.ToDisplayString(), method.ContainingNamespace?.ToDisplayString(), method.ContainingType?.Name, method.Name, 0, null, AnalysisEvidenceKind.SourceRoslynSummary),
+                    Evidence =
+                    [
+                        new AnalysisEvidence
+                        {
+                            Kind = AnalysisEvidenceKind.SourceRoslynSummary,
+                            Source = "roslyn-source",
+                            Description = "Method summary inferred from Roslyn operation analysis."
+                        }
+                    ]
+                };
                 summaries[key] = summary;
             }
             return summary;
@@ -1910,7 +1946,20 @@ public static partial class DataFlowAnalyzer
                 IsSource = isSource,
                 IsSink = isSink,
                 MatchedPatterns = matchedPatterns.Select(p => p.Pattern).Distinct(StringComparer.Ordinal).ToList(),
-                Category = category
+                Category = category,
+                MethodIdentity = method is null ? null : MethodIdentityFactory.FromParts(null, Normalize(method.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)), null, Normalize(method.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)), method.ContainingAssembly?.ToDisplayString(), method.ContainingModule?.ToDisplayString(), method.ContainingNamespace?.ToDisplayString(), method.ContainingType?.Name, method.Name, 0, null, AnalysisEvidenceKind.SourceRoslynDirect),
+                Evidence =
+                [
+                    new AnalysisEvidence
+                    {
+                        Kind = AnalysisEvidenceKind.SourceRoslynDirect,
+                        Source = "roslyn-source",
+                        Description = "Data-flow node discovered from Roslyn operation analysis.",
+                        FileName = Path.GetFileName(sourceFilePath),
+                        LineNumber = lineSpan.StartLinePosition.Line + 1,
+                        ColumnNumber = lineSpan.StartLinePosition.Character + 1
+                    }
+                ]
             };
             if (method is not null)
             {

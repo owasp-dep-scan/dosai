@@ -77,6 +77,7 @@ internal static class AssemblyCallGraphAnalyzer
                             : instruction.OpCode == OpCodes.Ldftn || instruction.OpCode == OpCodes.Ldvirtftn
                                 ? CallType.DelegateInvoke
                                 : CallType.MethodCall;
+                        var evidenceKind = callType == CallType.DelegateInvoke ? AnalysisEvidenceKind.AssemblyIlDelegateTarget : AnalysisEvidenceKind.AssemblyIlDirect;
                         var targetId = ResolveInternalTargetId(assemblyFullPath, target.MetadataToken, target.Symbol, methodLookup);
                         AddNode(nodes, targetId, target.Name, target.ClassName, target.Namespace, Path.GetFileName(target.FilePath), target.AssemblyName, Path.GetFileName(target.FilePath), callType == CallType.ConstructorCall ? "Constructor" : "Method", target.LineNumber, target.ColumnNumber, isExternal: !target.IsInternal);
                         var location = sourceMap.Resolve(MetadataTokens.GetToken(methodHandle), instruction.Offset + 1, assemblyPath);
@@ -99,7 +100,9 @@ internal static class AssemblyCallGraphAnalyzer
                             CallerMethod = sourceMethod.Name,
                             CallerNamespace = sourceMethod.Namespace,
                             CallerClass = sourceMethod.ClassName,
-                            IsInternal = target.IsInternal
+                            IsInternal = target.IsInternal,
+                            EvidenceKind = evidenceKind,
+                            Evidence = [CreateEvidence(evidenceKind, location, "Call edge discovered from assembly IL method body.")]
                         };
                         calls.Add(call);
                         var edgeKey = $"{sourceId}\u001f{targetId}\u001f{location.FilePath}\u001f{location.LineNumber}\u001f{location.ColumnNumber}\u001f{callType}";
@@ -117,7 +120,9 @@ internal static class AssemblyCallGraphAnalyzer
                                 TargetName = target.Name,
                                 Arguments = call.Arguments,
                                 ArgumentExpressions = call.ArgumentExpressions,
-                                CallType = callType
+                                CallType = callType,
+                                EvidenceKind = evidenceKind,
+                                Evidence = [CreateEvidence(evidenceKind, location, "Call edge discovered from assembly IL method body.")]
                             });
                         }
 
@@ -149,7 +154,9 @@ internal static class AssemblyCallGraphAnalyzer
                                         CallerMethod = sourceMethod.Name,
                                         CallerNamespace = sourceMethod.Namespace,
                                         CallerClass = sourceMethod.ClassName,
-                                        IsInternal = true
+                                        IsInternal = true,
+                                        EvidenceKind = AnalysisEvidenceKind.AssemblyIlVirtualCandidate,
+                                        Evidence = [CreateEvidence(AnalysisEvidenceKind.AssemblyIlVirtualCandidate, location, "Virtual candidate inferred by lightweight assembly RTA.")]
                                     });
                                     edges.Add(new MethodCallEdge
                                     {
@@ -163,7 +170,9 @@ internal static class AssemblyCallGraphAnalyzer
                                         TargetName = candidate.Name,
                                         Arguments = call.Arguments,
                                         ArgumentExpressions = ["virtual-candidate"],
-                                        CallType = CallType.MethodCall
+                                        CallType = CallType.MethodCall,
+                                        EvidenceKind = AnalysisEvidenceKind.AssemblyIlVirtualCandidate,
+                                        Evidence = [CreateEvidence(AnalysisEvidenceKind.AssemblyIlVirtualCandidate, location, "Virtual candidate inferred by lightweight assembly RTA.")]
                                     });
                                 }
                             }
@@ -196,6 +205,16 @@ internal static class AssemblyCallGraphAnalyzer
         metadataToken != 0 && methodLookup.TryGetValue((assemblyPath, metadataToken), out var method) && !string.IsNullOrWhiteSpace(method.AssemblySignature)
             ? method.AssemblySignature!
             : fallbackSymbol;
+
+    private static AnalysisEvidence CreateEvidence(AnalysisEvidenceKind kind, AssemblyCallSourceLocation location, string description) => new()
+    {
+        Kind = kind,
+        Source = "assembly-il",
+        Description = description,
+        FileName = Path.GetFileName(location.FilePath),
+        LineNumber = location.LineNumber,
+        ColumnNumber = location.ColumnNumber
+    };
 
     private static HashSet<string> CollectInstantiatedTypes(PEReader peReader, MetadataReader reader, string assemblyPath, AssemblyCallSourceMap sourceMap)
     {
@@ -239,7 +258,9 @@ internal static class AssemblyCallGraphAnalyzer
             LineNumber = location.LineNumber,
             ColumnNumber = location.ColumnNumber,
             AssemblySignature = symbol.Symbol,
-            MetadataToken = MetadataTokens.GetToken(methodHandle)
+            MetadataToken = MetadataTokens.GetToken(methodHandle),
+            Identity = MethodIdentityFactory.FromParts(symbol.Symbol, null, symbol.Symbol, symbol.Symbol, Path.GetFileNameWithoutExtension(assemblyPath), Path.GetFileName(assemblyPath), symbol.Namespace, symbol.ClassName, symbol.Name, MetadataTokens.GetToken(methodHandle), null, AnalysisEvidenceKind.AssemblyReflection),
+            Evidence = [CreateEvidence(AnalysisEvidenceKind.AssemblyReflection, location, "Method discovered from assembly metadata while extracting IL call graph.")]
         };
     }
 
@@ -258,7 +279,20 @@ internal static class AssemblyCallGraphAnalyzer
             Kind = kind,
             LineNumber = lineNumber,
             ColumnNumber = columnNumber,
-            IsExternal = isExternal
+            IsExternal = isExternal,
+            Identity = MethodIdentityFactory.FromParts(id, null, id, id, assembly, module, namespaceName, className, name, 0, null, isExternal ? AnalysisEvidenceKind.ExternalSummary : AnalysisEvidenceKind.AssemblyIlDirect),
+            Evidence =
+            [
+                new AnalysisEvidence
+                {
+                    Kind = isExternal ? AnalysisEvidenceKind.ExternalSummary : AnalysisEvidenceKind.AssemblyIlDirect,
+                    Source = isExternal ? "external-metadata" : "assembly-il",
+                    Description = isExternal ? "External call graph node referenced from assembly IL." : "Application call graph node discovered from assembly IL.",
+                    FileName = fileName,
+                    LineNumber = lineNumber,
+                    ColumnNumber = columnNumber
+                }
+            ]
         });
     }
 

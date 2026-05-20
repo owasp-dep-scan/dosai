@@ -44,6 +44,8 @@ Pass custom patterns with `--patterns ./dataflow-patterns.json`; the file is mer
 
 The analyzer is optimized for full source-tree CI runs: pattern matching is indexed by hot lookup kind, syntax text is cached for code-like matches, assembly dependency directories are scoped with `.deps.json` when available, and slice construction uses indexed graph edges. Dosai's CI smoke test runs `dataflows --path ./Dosai` and assembly-only fixtures to guard both source and binary paths.
 
+Source, binary, and combined analysis share a method identity and evidence model. Method inventory records, call graph nodes/edges, method calls, data-flow nodes, and method summaries can identify whether evidence came from Roslyn source, assembly metadata, IL call/data-flow reconstruction, delegate targets, virtual candidates, external summaries, framework models, or language frontends.
+
 ### Cryptography and CBOM evidence
 
 `crypto` detects algorithms, operations, key and certificate material, TLS settings, weak algorithms, hardcoded material, static IVs and nonces, insecure RNG, disabled certificate validation, legacy TLS references, and low PBKDF2 iteration counts. Findings include source locations and best-effort reachability from CLI and API entry points when callgraph data is available.

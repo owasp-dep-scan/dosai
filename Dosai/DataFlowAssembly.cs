@@ -78,6 +78,34 @@ public static partial class DataFlowAnalyzer
             }
         }
 
+        foreach (var summary in summaries.Values.Where(summary => summary.ReturnParameterIndexes.Count > 0 || summary.SinkParameterIndexes.Count > 0))
+        {
+            if (result.MethodSummaries.Any(existing => string.Equals(existing.Method, summary.Method, StringComparison.Ordinal)))
+            {
+                continue;
+            }
+
+            result.MethodSummaries.Add(new DataFlowMethodSummary
+            {
+                Method = summary.Method,
+                ReturnParameterIndexes = [.. summary.ReturnParameterIndexes],
+                SinkParameterIndexes = [.. summary.SinkParameterIndexes],
+                SinkCategories = [.. summary.SinkCategories],
+                SummaryKind = "AssemblyIL",
+                EvidenceKind = AnalysisEvidenceKind.AssemblyIlSummary,
+                Identity = MethodIdentityFactory.FromParts(summary.Method, null, summary.Method, summary.Method, null, null, GetNamespace(summary.Method), null, summary.Method.Split('.').LastOrDefault(), 0, null, AnalysisEvidenceKind.AssemblyIlSummary),
+                Evidence =
+                [
+                    new AnalysisEvidence
+                    {
+                        Kind = AnalysisEvidenceKind.AssemblyIlSummary,
+                        Source = "assembly-il",
+                        Description = "Method summary inferred from assembly IL body."
+                    }
+                ]
+            });
+        }
+
         return analyzedAssemblies;
     }
 
@@ -1327,6 +1355,19 @@ public static partial class DataFlowAnalyzer
                 IsSink = isSink,
                 MatchedPatterns = matchedPatterns.Select(pattern => pattern.Pattern).Distinct(StringComparer.Ordinal).ToList(),
                 Category = category,
+                MethodIdentity = MethodIdentityFactory.FromParts(method.Symbol, null, method.Symbol, method.Symbol, method.AssemblyName, Path.GetFileName(assemblyPath), method.Namespace, method.ContainingType.Split('.').LastOrDefault() ?? method.ContainingType, method.Name, method.MetadataToken, purl, AnalysisEvidenceKind.AssemblyIlDirect),
+                Evidence =
+                [
+                    new AnalysisEvidence
+                    {
+                        Kind = AnalysisEvidenceKind.AssemblyIlDirect,
+                        Source = "assembly-il",
+                        Description = "Data-flow node discovered from assembly IL analysis.",
+                        FileName = Path.GetFileName(location.FilePath),
+                        LineNumber = location.LineNumber,
+                        ColumnNumber = location.ColumnNumber
+                    }
+                ],
                 Properties =
                 {
                     ["analysis"] = "assembly-il",

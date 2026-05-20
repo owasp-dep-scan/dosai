@@ -58,6 +58,8 @@ public static class Program
         Assert.NotNull(methodsSlice.MethodCalls);
         var callGraph = methodsSlice.CallGraph;
         Assert.NotEmpty(callGraph.Edges);
+        Assert.Contains(callGraph.Nodes, node => node.Identity?.Evidence.Contains(AnalysisEvidenceKind.AssemblyIlDirect) == true || node.Identity?.Evidence.Contains(AnalysisEvidenceKind.AssemblyReflection) == true);
+        Assert.Contains(callGraph.Edges, edge => edge.EvidenceKind == AnalysisEvidenceKind.AssemblyIlDirect && edge.Evidence.Any(evidence => evidence.Kind == AnalysisEvidenceKind.AssemblyIlDirect));
         Assert.Contains(callGraph.Edges, edge => edge.SourceId.Contains("Program.Main", StringComparison.Ordinal) && edge.TargetId.Contains("Program.Launch", StringComparison.Ordinal));
         Assert.Contains(callGraph.Edges, edge => edge.SourceId.Contains("Program.Launch", StringComparison.Ordinal) && edge.TargetId.Contains("System.Diagnostics.Process.Start", StringComparison.Ordinal));
         var nodeIds = callGraph.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
@@ -67,7 +69,41 @@ public static class Program
             Assert.Contains(edge.TargetId, nodeIds);
             Assert.True(edge.CallLocation.LineNumber > 0);
         });
-        Assert.Contains(methodsSlice.MethodCalls!, call => call.SourceId is not null && call.SourceId.Contains("Program.Launch", StringComparison.Ordinal) && call.TargetId is not null && call.TargetId.Contains("System.Diagnostics.Process.Start", StringComparison.Ordinal));
+        Assert.Contains(methodsSlice.MethodCalls!, call => call.SourceId is not null && call.SourceId.Contains("Program.Launch", StringComparison.Ordinal) && call.TargetId is not null && call.TargetId.Contains("System.Diagnostics.Process.Start", StringComparison.Ordinal) && call.EvidenceKind == AnalysisEvidenceKind.AssemblyIlDirect);
+    }
+
+    [Fact]
+    public void GetMethods_CombinedSourceAndAssembly_EmitsSharedEvidenceAndSourceAssemblyMapping()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "CombinedEvidenceFlow", """
+using System.Diagnostics;
+
+public static class Program
+{
+    public static void Main(string[] args)
+    {
+        var command = args[0];
+        Process.Start(command);
+    }
+}
+""");
+        var inputDirectory = Path.Combine(tempDirectory.Path, "combined-input");
+        Directory.CreateDirectory(inputDirectory);
+        File.Copy(Path.Combine(tempDirectory.Path, "CombinedEvidenceFlow", "src", "Program.cs"), Path.Combine(inputDirectory, "Program.cs"));
+        File.Copy(Path.Combine(outputDirectory, "CombinedEvidenceFlow.dll"), Path.Combine(inputDirectory, "CombinedEvidenceFlow.dll"));
+        File.Copy(Path.Combine(outputDirectory, "CombinedEvidenceFlow.pdb"), Path.Combine(inputDirectory, "CombinedEvidenceFlow.pdb"));
+
+        var result = Depscan.Dosai.GetMethods(inputDirectory);
+        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result, new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() }
+        });
+
+        Assert.NotNull(methodsSlice);
+        Assert.Contains(methodsSlice.CallGraph!.Edges, edge => edge.EvidenceKind == AnalysisEvidenceKind.SourceRoslynDirect);
+        Assert.Contains(methodsSlice.CallGraph.Edges, edge => edge.EvidenceKind == AnalysisEvidenceKind.AssemblyIlDirect);
+        Assert.Contains(methodsSlice.SourceAssemblyMapping!, mapping => mapping.IsMapped && mapping.AssemblyMetadataToken != 0);
     }
 
     [Fact]
@@ -173,6 +209,8 @@ public static class Program
         Assert.NotNull(callGraph);
         Assert.NotEmpty(callGraph.Nodes);
         Assert.NotEmpty(callGraph.Edges);
+        Assert.Contains(callGraph.Nodes, node => node.Identity?.Evidence.Contains(AnalysisEvidenceKind.SourceRoslynDirect) == true);
+        Assert.Contains(callGraph.Edges, edge => edge.EvidenceKind == AnalysisEvidenceKind.SourceRoslynDirect && edge.Evidence.Any(evidence => evidence.Kind == AnalysisEvidenceKind.SourceRoslynDirect));
 
         var nodeIds = callGraph.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
         Assert.Contains("HelloWorld.Hello.Appreciate():System.Threading.Tasks.Task", nodeIds);
@@ -373,6 +411,7 @@ public static class Program
         Assert.Contains(dataFlowResult.Nodes, node => node.Kind == "CallSummary" && node.Symbol is not null && node.Symbol.Contains("Wrap", StringComparison.Ordinal));
         Assert.Contains(dataFlowResult.Edges, edge => edge.Kind == "AssemblyInterproceduralReturn");
         Assert.Contains(dataFlowResult.Edges, edge => edge.Kind == "AssemblyInterproceduralSink");
+        Assert.Contains(dataFlowResult.MethodSummaries, summary => summary.EvidenceKind == AnalysisEvidenceKind.AssemblyIlSummary && summary.Identity is not null);
         Assert.Contains(dataFlowResult.Slices, slice => slice.SourceCategory == "cli" && slice.SinkCategory == "command");
     }
 
@@ -429,6 +468,7 @@ public static class Program
         var dataFlowResult = ReadDataFlows(Path.Combine(outputDirectory, "AssemblyPdbFlow.dll"));
 
         Assert.Contains(dataFlowResult.Nodes, node => node.Properties.TryGetValue("analysis", out var analysis) && analysis == "assembly-il" && node.FileName == "Program.cs" && node.LineNumber > 1);
+        Assert.Contains(dataFlowResult.Nodes, node => node.MethodIdentity?.Evidence.Contains(AnalysisEvidenceKind.AssemblyIlDirect) == true && node.Evidence.Any(evidence => evidence.Kind == AnalysisEvidenceKind.AssemblyIlDirect));
         Assert.Contains(dataFlowResult.Nodes, node => node.Kind == "Assignment" && node.Name == "command" && node.Properties.TryGetValue("analysis", out var analysis) && analysis == "assembly-il");
         Assert.Contains(dataFlowResult.Edges, edge => edge.FileName == "Program.cs" && edge.LineNumber > 1);
     }
@@ -534,6 +574,7 @@ class NestedFlow
 
         Assert.Contains(result.Slices, slice => slice.SourceCategory == "cli" && slice.SinkCategory == "command");
         Assert.Contains(result.MethodSummaries, summary => summary.Method.Contains("NestedFlow.Launch") && summary.SinkParameterIndexes.Contains(0));
+        Assert.Contains(result.MethodSummaries, summary => summary.Method.Contains("NestedFlow.Launch") && summary.EvidenceKind == AnalysisEvidenceKind.SourceRoslynSummary && summary.Identity is not null);
         Assert.All(result.Edges, edge =>
         {
             Assert.Contains(edge.SourceId, nodeIds);

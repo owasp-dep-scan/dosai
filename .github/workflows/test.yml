@@ -146,6 +146,7 @@ jobs:
         callgraph = methods['CallGraph']
         assert any(edge['SourceId'].find('Program.Main') >= 0 and edge['TargetId'].find('Program.Launch') >= 0 for edge in callgraph['Edges'])
         assert any(edge['TargetId'].find('System.Diagnostics.Process.Start') >= 0 for edge in callgraph['Edges'])
+        assert any(edge.get('EvidenceKind') == 'AssemblyIlDirect' for edge in callgraph['Edges'])
         dataflows = json.load(open('/tmp/dosai-assembly-dataflows.json'))
         stats = dataflows['Statistics']
         assert stats['FilesAnalyzed'] == 1, stats
@@ -153,6 +154,8 @@ jobs:
         assert stats['SinkCount'] >= 1, stats
         assert stats['SliceCount'] >= 1, stats
         assert any(node.get('Properties', {}).get('analysis') == 'assembly-il' for node in dataflows['Nodes'])
+        assert any(node.get('MethodIdentity', {}).get('Evidence') for node in dataflows['Nodes'])
+        assert any(summary.get('EvidenceKind') == 'AssemblyIlSummary' for summary in dataflows.get('MethodSummaries', []))
         assert any(edge['Kind'] == 'AssemblyInterproceduralSink' for edge in dataflows['Edges'])
         node_ids = {node['Id'] for node in dataflows['Nodes']}
         assert all(edge['SourceId'] in node_ids and edge['TargetId'] in node_ids for edge in dataflows['Edges'])

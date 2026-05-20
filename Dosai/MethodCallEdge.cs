@@ -26,4 +26,6 @@ public class MethodCallEdge
     public List<string>? Arguments { get; set; } 
     public List<string>? ArgumentExpressions { get; set; }
     public CallType CallType { get; set; } = CallType.Unknown;
+    public AnalysisEvidenceKind EvidenceKind { get; set; } = AnalysisEvidenceKind.Unknown;
+    public List<AnalysisEvidence> Evidence { get; set; } = [];
 }

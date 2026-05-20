@@ -15,4 +15,6 @@ public class MethodNode
     public int LineNumber { get; set; }
     public int ColumnNumber { get; set; }
     public bool IsExternal { get; set; }
+    public MethodIdentity? Identity { get; set; }
+    public List<AnalysisEvidence> Evidence { get; set; } = [];
 }

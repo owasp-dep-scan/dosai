@@ -21,6 +21,8 @@ public class MethodCalls
     public string? CallerNamespace { get; init; }
     public string? CallerClass { get; init; }
     public bool IsInternal { get; set; }
+    public AnalysisEvidenceKind EvidenceKind { get; init; } = AnalysisEvidenceKind.Unknown;
+    public List<AnalysisEvidence> Evidence { get; init; } = [];
 }
 
 public enum CallType

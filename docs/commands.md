@@ -203,6 +203,8 @@ The hot path is optimized for full source-tree CI runs. Pattern lists are pre-in
 
 The primary output is `DataFlowResult`. It contains `Nodes`, `Edges`, `Slices`, `EntryPoints`, `PackageReachability`, `DangerousApiReachability`, `WeaknessCandidates`, `Patterns`, `MethodSummaries`, `Statistics`, and `Diagnostics`.
 
+Method inventory, call graph, and data-flow records carry shared source/binary evidence metadata. `MethodIdentity` links source signatures, assembly signatures, metadata tokens, package identity, and symbol names where known. `AnalysisEvidenceKind` distinguishes `SourceRoslynDirect`, `SourceRoslynSummary`, `AssemblyReflection`, `AssemblyIlDirect`, `AssemblyIlSummary`, `AssemblyIlVirtualCandidate`, `AssemblyIlDelegateTarget`, `AssemblyIlGeneratedState`, `ExternalSummary`, `FrameworkModel`, `ReflectionHeuristic`, and `LanguageFrontend` facts so combined analysis can merge and prioritize evidence instead of treating source and binary outputs as unrelated modes.
+
 ### Strengths
 
 `dataflows` is practical for CI and security triage. It handles missing references, legacy frameworks, route and CLI entry points, PURL enrichment, graph exports, sanitizer stop-flow, field-sensitive taint where receiver identity is available, assembly-only IL slicing, PDB local/source locations, async and closure captured fields, and basic interprocedural flow.
