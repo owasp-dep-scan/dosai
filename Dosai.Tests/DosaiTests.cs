@@ -64,9 +64,7 @@ public static class Program
         Assert.Contains(callGraph.Edges, edge => edge.SourceId.Contains("Program.Launch", StringComparison.Ordinal) && edge.TargetId.Contains("System.Diagnostics.Process.Start", StringComparison.Ordinal));
         Assert.Contains(callGraph.Nodes, node =>
             node.Id.Contains("System.Diagnostics.Process.Start", StringComparison.Ordinal) &&
-            node.IsExternal &&
-            node.Module == "System.Diagnostics.Process.dll" &&
-            node.FileName == "System.Diagnostics.Process.dll");
+            node is { IsExternal: true, Module: "System.Diagnostics.Process.dll", FileName: "System.Diagnostics.Process.dll" });
         Assert.Contains(methodsSlice.MethodCalls!, call =>
             call.TargetId is not null &&
             call.TargetId.Contains("System.Diagnostics.Process.Start", StringComparison.Ordinal) &&
@@ -110,8 +108,7 @@ public static class Program
             edge.TargetId.Contains("System.Diagnostics.Process.Start", StringComparison.Ordinal));
         Assert.Contains(callGraph.Nodes, node => node.Id.Contains("Program.Main", StringComparison.Ordinal) && node.Identity?.Evidence.Contains(AnalysisEvidenceKind.AssemblyIlGeneratedState) == true);
         Assert.Contains(methodsSlice.PackageReachability!, package =>
-            package.Purl == "pkg:nuget/System.Diagnostics.Process" &&
-            package.Confidence == "High" &&
+            package is { Purl: "pkg:nuget/System.Diagnostics.Process", Confidence: "High" } &&
             package.EvidenceKinds.Contains(AnalysisEvidenceKind.AssemblyIlGeneratedState));
         Assert.All(callGraph.Edges, edge =>
         {
@@ -191,14 +188,12 @@ public static class Program
         var nodeIds = callGraph.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
 
         Assert.Contains(callGraph.Edges, edge =>
-            edge.EvidenceKind == AnalysisEvidenceKind.AssemblyIlDelegateTarget &&
-            edge.CallType == CallType.DelegateInvoke &&
+            edge is { EvidenceKind: AnalysisEvidenceKind.AssemblyIlDelegateTarget, CallType: CallType.DelegateInvoke } &&
             edge.SourceId.Contains("Program.Main", StringComparison.Ordinal) &&
             edge.TargetId.Contains("Program.Handle", StringComparison.Ordinal) &&
             edge.ArgumentExpressions?.Contains("delegate-invoke") == true);
         Assert.Contains(callGraph.Edges, edge =>
-            edge.EvidenceKind == AnalysisEvidenceKind.AssemblyIlDelegateTarget &&
-            edge.CallType == CallType.EventSubscribe &&
+            edge is { EvidenceKind: AnalysisEvidenceKind.AssemblyIlDelegateTarget, CallType: CallType.EventSubscribe } &&
             edge.SourceId.Contains("Program.Main", StringComparison.Ordinal) &&
             edge.TargetId.Contains("Program.Handle", StringComparison.Ordinal) &&
             edge.ArgumentExpressions?.Contains("event-callback-target") == true);
@@ -269,7 +264,7 @@ public static class Program
         Assert.NotNull(methodsSlice);
         Assert.Contains(methodsSlice.CallGraph!.Edges, edge => edge.EvidenceKind == AnalysisEvidenceKind.SourceRoslynDirect);
         Assert.Contains(methodsSlice.CallGraph.Edges, edge => edge.EvidenceKind == AnalysisEvidenceKind.AssemblyIlDirect);
-        var mainMapping = Assert.Single(methodsSlice.SourceAssemblyMapping!, mapping => mapping.IsMapped && mapping.MemberName == "Main" && mapping.AssemblyMetadataToken != 0);
+        var mainMapping = Assert.Single(methodsSlice.SourceAssemblyMapping!, mapping => mapping is { IsMapped: true, MemberName: "Main" } && mapping.AssemblyMetadataToken != 0);
         Assert.Equal(mainMapping.SourceId, mainMapping.SourceSignature);
         Assert.Equal(mainMapping.AssemblyId, mainMapping.AssemblySignature);
         Assert.StartsWith("CombinedEvidenceFlow", mainMapping.AssemblyName, StringComparison.Ordinal);
@@ -277,7 +272,7 @@ public static class Program
         Assert.Contains(methodsSlice.CallGraph.Edges, edge => edge.EvidenceKind == AnalysisEvidenceKind.AssemblyIlDirect && edge.SourceId == mainMapping.SourceId);
         Assert.DoesNotContain(methodsSlice.CallGraph.Nodes, node => node.Id == mainMapping.AssemblyId);
         Assert.Contains(methodsSlice.CallGraph.Nodes, node => node.Id == mainMapping.SourceId && node.Identity?.Evidence.Contains(AnalysisEvidenceKind.SourceRoslynDirect) == true && node.Identity.Evidence.Contains(AnalysisEvidenceKind.AssemblyIlDirect));
-        Assert.Contains(methodsSlice.PackageReachability!, package => package.Purl == "pkg:nuget/System.Diagnostics.Process" && package.Confidence == "High" && package.EvidenceKinds.Contains(AnalysisEvidenceKind.AssemblyIlDirect));
+        Assert.Contains(methodsSlice.PackageReachability!, package => package is { Purl: "pkg:nuget/System.Diagnostics.Process", Confidence: "High" } && package.EvidenceKinds.Contains(AnalysisEvidenceKind.AssemblyIlDirect));
     }
 
     [Fact]
@@ -293,7 +288,7 @@ public static class Program
 
         var methodsSlice = ReadMethods(inputDirectory);
 
-        Assert.Contains(methodsSlice.Methods!, method => method.FileName == "OnlySource.vb" && method.ClassName == "OnlySource");
+        Assert.Contains(methodsSlice.Methods!, method => method is { FileName: "OnlySource.vb", ClassName: "OnlySource" });
         var assemblyMethods = methodsSlice.Methods!.Where(method => method.FileName == "VbSourceModeAssembly.dll").ToList();
         Assert.NotEmpty(assemblyMethods);
         Assert.DoesNotContain(assemblyMethods, method => method.Evidence.Any(evidence => evidence.Kind == AnalysisEvidenceKind.AssemblyReflection));
@@ -327,7 +322,7 @@ public static class Program
         var methodsSlice = ReadMethods(inputDirectory);
 
         var runMappings = methodsSlice.SourceAssemblyMapping!
-            .Where(mapping => mapping.IsMapped && mapping.MemberName == "Run")
+            .Where(mapping => mapping is { IsMapped: true, MemberName: "Run" })
             .ToList();
         Assert.Equal(2, runMappings.Count);
         var stringRun = Assert.Single(runMappings, mapping => mapping.AssemblySignature?.Contains("String", StringComparison.Ordinal) == true);
@@ -460,13 +455,9 @@ public static class Program
         });
 
         Assert.Contains(callGraph.Edges, edge =>
-            edge.SourceId == "HelloWorld.Hello.Appreciate():System.Threading.Tasks.Task" &&
-            edge.TargetId == "System.Threading.Tasks.Task.Delay(int):System.Threading.Tasks.Task" &&
-            edge.CallType == CallType.MethodCall);
+            edge is { SourceId: "HelloWorld.Hello.Appreciate():System.Threading.Tasks.Task", TargetId: "System.Threading.Tasks.Task.Delay(int):System.Threading.Tasks.Task", CallType: CallType.MethodCall });
         Assert.Contains(callGraph.Edges, edge =>
-            edge.SourceId == "HelloWorld.GenericProcessor<T>..ctor(T)" &&
-            edge.TargetId == "HelloWorld.GenericProcessor<T>.set_Value(T):void" &&
-            edge.CallType == CallType.PropertySet);
+            edge is { SourceId: "HelloWorld.GenericProcessor<T>..ctor(T)", TargetId: "HelloWorld.GenericProcessor<T>.set_Value(T):void", CallType: CallType.PropertySet });
     }
 
     [Fact]
@@ -507,11 +498,9 @@ class DispatchEntry
             Assert.Contains(edge.TargetId, nodeIds);
         });
         Assert.Contains(methodsSlice.CallGraph.Edges, edge =>
-            edge.EvidenceKind == AnalysisEvidenceKind.SourceRoslynVirtualCandidate &&
-            edge.SourceId == "DispatchEntry.Main():void" &&
-            edge.TargetId == "DefaultRunner.Run(string):void" &&
-            edge.Evidence.Any(evidence => evidence.Kind == AnalysisEvidenceKind.SourceRoslynVirtualCandidate && evidence.Source == "roslyn-source-inferred"));
-        Assert.Contains(methodsSlice.MethodCalls!, call => call.EvidenceKind == AnalysisEvidenceKind.SourceRoslynVirtualCandidate && call.TargetId == "DefaultRunner.Run(string):void");
+            edge is { EvidenceKind: AnalysisEvidenceKind.SourceRoslynVirtualCandidate, SourceId: "DispatchEntry.Main():void", TargetId: "DefaultRunner.Run(string):void" } &&
+            edge.Evidence.Any(evidence => evidence is { Kind: AnalysisEvidenceKind.SourceRoslynVirtualCandidate, Source: "roslyn-source-inferred" }));
+        Assert.Contains(methodsSlice.MethodCalls!, call => call is { EvidenceKind: AnalysisEvidenceKind.SourceRoslynVirtualCandidate, TargetId: "DefaultRunner.Run(string):void" });
     }
 
     [Fact]
@@ -556,19 +545,11 @@ class CallbackEntry
             Assert.Contains(edge.TargetId, nodeIds);
         });
         Assert.Contains(methodsSlice.CallGraph.Edges, edge =>
-            edge.EvidenceKind == AnalysisEvidenceKind.SourceRoslynDelegateTarget &&
-            edge.CallType == CallType.EventSubscribe &&
-            edge.SourceId == "CallbackEntry.Main():void" &&
-            edge.TargetId == "CallbackEntry.Handle():void");
+            edge is { EvidenceKind: AnalysisEvidenceKind.SourceRoslynDelegateTarget, CallType: CallType.EventSubscribe, SourceId: "CallbackEntry.Main():void", TargetId: "CallbackEntry.Handle():void" });
         Assert.Contains(methodsSlice.CallGraph.Edges, edge =>
-            edge.EvidenceKind == AnalysisEvidenceKind.SourceRoslynDelegateTarget &&
-            edge.CallType == CallType.DelegateInvoke &&
-            edge.SourceId == "CallbackEntry.Main():void" &&
-            edge.TargetId == "CallbackEntry.Handle():void");
+            edge is { EvidenceKind: AnalysisEvidenceKind.SourceRoslynDelegateTarget, CallType: CallType.DelegateInvoke, SourceId: "CallbackEntry.Main():void", TargetId: "CallbackEntry.Handle():void" });
         Assert.Contains(methodsSlice.CallGraph.Edges, edge =>
-            edge.EvidenceKind == AnalysisEvidenceKind.SourceRoslynDelegateTarget &&
-            edge.CallType == CallType.DelegateInvoke &&
-            edge.SourceId == "CallbackEntry.Main():void" &&
+            edge is { EvidenceKind: AnalysisEvidenceKind.SourceRoslynDelegateTarget, CallType: CallType.DelegateInvoke, SourceId: "CallbackEntry.Main():void" } &&
             edge.TargetId.StartsWith("CallbackEntry.", StringComparison.Ordinal) &&
             edge.TargetId != "CallbackEntry.Handle():void");
     }
@@ -635,9 +616,9 @@ class Entry
         var methodsSlice = ReadMethods(tempDirectory.Path);
         var edges = methodsSlice.CallGraph!.Edges;
 
-        Assert.Contains(edges, edge => edge.EvidenceKind == AnalysisEvidenceKind.FrameworkModel && edge.SourceId == "Entry.Main():void" && edge.TargetId == "Worker..ctor()");
-        Assert.Contains(edges, edge => edge.EvidenceKind == AnalysisEvidenceKind.ReflectionHeuristic && edge.SourceId == "Entry.Main():void" && edge.TargetId == "ReflectionTarget..ctor()");
-        Assert.Contains(edges, edge => edge.EvidenceKind == AnalysisEvidenceKind.ReflectionHeuristic && edge.SourceId == "Entry.Main():void" && edge.TargetId == "ReflectionTarget.Run():void");
+        Assert.Contains(edges, edge => edge is { EvidenceKind: AnalysisEvidenceKind.FrameworkModel, SourceId: "Entry.Main():void", TargetId: "Worker..ctor()" });
+        Assert.Contains(edges, edge => edge is { EvidenceKind: AnalysisEvidenceKind.ReflectionHeuristic, SourceId: "Entry.Main():void", TargetId: "ReflectionTarget..ctor()" });
+        Assert.Contains(edges, edge => edge is { EvidenceKind: AnalysisEvidenceKind.ReflectionHeuristic, SourceId: "Entry.Main():void", TargetId: "ReflectionTarget.Run():void" });
     }
 
     [Fact]
@@ -701,9 +682,9 @@ class FlowSample
         Assert.True(dataFlowResult.Statistics.SourceCount >= 1);
         Assert.True(dataFlowResult.Statistics.SinkCount >= 1);
         Assert.True(dataFlowResult.Statistics.SliceCount >= 1);
-        Assert.Contains(dataFlowResult.Nodes, node => node.IsSource && node.Category == "cli" && node.FileName == "FlowSample.cs" && node.LineNumber > 0);
-        Assert.Contains(dataFlowResult.Nodes, node => node.IsSink && node.Category == "command" && node.Symbol is not null && node.Symbol.Contains("System.Diagnostics.Process.Start"));
-        Assert.Contains(dataFlowResult.Nodes, node => node.IsSink && node.Purl == "pkg:nuget/System.Diagnostics.Process");
+        Assert.Contains(dataFlowResult.Nodes, node => node is { IsSource: true, Category: "cli", FileName: "FlowSample.cs", LineNumber: > 0 });
+        Assert.Contains(dataFlowResult.Nodes, node => node is { IsSink: true, Category: "command", Symbol: not null } && node.Symbol.Contains("System.Diagnostics.Process.Start"));
+        Assert.Contains(dataFlowResult.Nodes, node => node is { IsSink: true, Purl: "pkg:nuget/System.Diagnostics.Process" });
         Assert.Contains(dataFlowResult.Slices, slice => slice.SinkPurl == "pkg:nuget/System.Diagnostics.Process" && slice.Purls.Contains("pkg:nuget/System.Diagnostics.Process"));
         Assert.All(dataFlowResult.Edges, edge =>
         {
@@ -775,9 +756,9 @@ public static class Program
 
         Assert.NotNull(dataFlowResult);
         Assert.Equal(1, dataFlowResult.Statistics.FilesAnalyzed);
-        Assert.Contains(dataFlowResult.Nodes, node => node.IsSource && node.Category == "cli" && node.Properties.TryGetValue("analysis", out var analysis) && analysis == "assembly-il");
-        Assert.Contains(dataFlowResult.Nodes, node => node.IsSink && node.Category == "command" && node.Symbol is not null && node.Symbol.Contains("System.Diagnostics.Process.Start", StringComparison.Ordinal));
-        Assert.Contains(dataFlowResult.Slices, slice => slice.SourceCategory == "cli" && slice.SinkCategory == "command");
+        Assert.Contains(dataFlowResult.Nodes, node => node is { IsSource: true, Category: "cli" } && node.Properties.TryGetValue("analysis", out var analysis) && analysis == "assembly-il");
+        Assert.Contains(dataFlowResult.Nodes, node => node is { IsSink: true, Category: "command", Symbol: not null } && node.Symbol.Contains("System.Diagnostics.Process.Start", StringComparison.Ordinal));
+        Assert.Contains(dataFlowResult.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" });
         var nodeIds = dataFlowResult.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
         Assert.All(dataFlowResult.Edges, edge =>
         {
@@ -811,11 +792,11 @@ public static class Program
 
         var dataFlowResult = ReadDataFlows(Path.Combine(outputDirectory, "AssemblyInterproceduralFlow.dll"));
 
-        Assert.Contains(dataFlowResult.Nodes, node => node.Kind == "CallSummary" && node.Symbol is not null && node.Symbol.Contains("Wrap", StringComparison.Ordinal));
+        Assert.Contains(dataFlowResult.Nodes, node => node is { Kind: "CallSummary", Symbol: not null } && node.Symbol.Contains("Wrap", StringComparison.Ordinal));
         Assert.Contains(dataFlowResult.Edges, edge => edge.Kind == "AssemblyInterproceduralReturn");
         Assert.Contains(dataFlowResult.Edges, edge => edge.Kind == "AssemblyInterproceduralSink");
-        Assert.Contains(dataFlowResult.MethodSummaries, summary => summary.EvidenceKind == AnalysisEvidenceKind.AssemblyIlSummary && summary.Identity is not null);
-        Assert.Contains(dataFlowResult.Slices, slice => slice.SourceCategory == "cli" && slice.SinkCategory == "command");
+        Assert.Contains(dataFlowResult.MethodSummaries, summary => summary is { EvidenceKind: AnalysisEvidenceKind.AssemblyIlSummary, Identity: not null });
+        Assert.Contains(dataFlowResult.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" });
     }
 
     [Fact]
@@ -847,7 +828,7 @@ public static class Program
 
         var dataFlowResult = ReadDataFlows(Path.Combine(outputDirectory, "AssemblyCfgFlow.dll"));
 
-        Assert.Contains(dataFlowResult.Slices, slice => slice.SourceCategory == "cli" && slice.SinkCategory == "command");
+        Assert.Contains(dataFlowResult.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" });
         Assert.Contains(dataFlowResult.Edges, edge => edge.Kind == "AssemblySinkCall");
     }
 
@@ -878,8 +859,8 @@ class GuardedFlow
 
         var result = DataFlowAnalyzer.Analyze(tempDirectory.Path);
 
-        Assert.Contains(result.Slices, slice => slice.SourceCategory == "cli" && slice.SinkCategory == "command" && slice.SinkArgument == "args[0]");
-        Assert.DoesNotContain(result.Slices, slice => slice.SinkCategory == "command" && slice.SinkArgument == "command");
+        Assert.Contains(result.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command", SinkArgument: "args[0]" });
+        Assert.DoesNotContain(result.Slices, slice => slice is { SinkCategory: "command", SinkArgument: "command" });
     }
 
     [Fact]
@@ -908,7 +889,7 @@ public static class Program
 
         var dataFlowResult = ReadDataFlows(Path.Combine(outputDirectory, "AssemblyExceptionFlow.dll"));
 
-        Assert.Contains(dataFlowResult.Slices, slice => slice.SourceCategory == "cli" && slice.SinkCategory == "command");
+        Assert.Contains(dataFlowResult.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" });
         Assert.Contains(dataFlowResult.Edges, edge => edge.Kind == "AssemblySinkCall");
     }
 
@@ -955,10 +936,10 @@ public static class Program
 
         var dataFlowResult = ReadDataFlows(Path.Combine(outputDirectory, "AssemblyPdbFlow.dll"));
 
-        Assert.Contains(dataFlowResult.Nodes, node => node.Properties.TryGetValue("analysis", out var analysis) && analysis == "assembly-il" && node.FileName == "Program.cs" && node.LineNumber > 1);
+        Assert.Contains(dataFlowResult.Nodes, node => node.Properties.TryGetValue("analysis", out var analysis) && analysis == "assembly-il" && node is { FileName: "Program.cs", LineNumber: > 1 });
         Assert.Contains(dataFlowResult.Nodes, node => node.MethodIdentity?.Evidence.Contains(AnalysisEvidenceKind.AssemblyIlDirect) == true && node.Evidence.Any(evidence => evidence.Kind == AnalysisEvidenceKind.AssemblyIlDirect));
-        Assert.Contains(dataFlowResult.Nodes, node => node.Kind == "Assignment" && node.Name == "command" && node.Properties.TryGetValue("analysis", out var analysis) && analysis == "assembly-il");
-        Assert.Contains(dataFlowResult.Edges, edge => edge.FileName == "Program.cs" && edge.LineNumber > 1);
+        Assert.Contains(dataFlowResult.Nodes, node => node is { Kind: "Assignment", Name: "command" } && node.Properties.TryGetValue("analysis", out var analysis) && analysis == "assembly-il");
+        Assert.Contains(dataFlowResult.Edges, edge => edge is { FileName: "Program.cs", LineNumber: > 1 });
     }
 
     [Fact]
@@ -982,9 +963,9 @@ public static class Program
 
         var dataFlowResult = ReadDataFlows(Path.Combine(outputDirectory, "AssemblyInlineVarDataFlow.dll"));
 
-        Assert.Contains(dataFlowResult.Slices, slice => slice.SourceCategory == "cli" && slice.SinkCategory == "command");
-        Assert.Contains(dataFlowResult.Nodes, node => node.Kind == "Assignment" && node.Name == "command");
-        Assert.Contains(dataFlowResult.Slices, slice => slice.SinkCategory == "command" && slice.SinkArgument == "arg0");
+        Assert.Contains(dataFlowResult.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" });
+        Assert.Contains(dataFlowResult.Nodes, node => node is { Kind: "Assignment", Name: "command" });
+        Assert.Contains(dataFlowResult.Slices, slice => slice is { SinkCategory: "command", SinkArgument: "arg0" });
     }
 
     [Fact]
@@ -1025,7 +1006,7 @@ public static class Program
         var dataFlowResult = ReadDataFlows(inputDirectory);
 
         var sinkAssemblies = dataFlowResult.Nodes
-            .Where(node => node.Kind == "Sink" && node.Name == "Start")
+            .Where(node => node is { Kind: "Sink", Name: "Start" })
             .Select(node => node.Properties.GetValueOrDefault("assembly"))
             .Where(assembly => !string.IsNullOrWhiteSpace(assembly))
             .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -1059,7 +1040,11 @@ public static class Program
 
         Assert.Contains(dataFlowResult.MethodSummaries, summary => summary.Method.Contains("Program.Choose(string):string", StringComparison.Ordinal));
         Assert.Contains(dataFlowResult.MethodSummaries, summary => summary.Method.Contains("Program.Choose(int):int", StringComparison.Ordinal));
-        Assert.Contains(dataFlowResult.Slices, slice => slice.SourceCategory == "cli" && slice.SinkCategory == "command" && slice.SinkArgument == "arg0");
+        var chooseStringSummary = Assert.Single(dataFlowResult.MethodSummaries, summary => summary.Method == "Program.Choose(string):string");
+        Assert.Equal(string.Empty, chooseStringSummary.Identity?.Namespace);
+        Assert.Equal("Program", chooseStringSummary.Identity?.ClassName);
+        Assert.Equal("Choose", chooseStringSummary.Identity?.MethodName);
+        Assert.Contains(dataFlowResult.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command", SinkArgument: "arg0" });
     }
 
     [Fact]
@@ -1084,15 +1069,9 @@ public static class Program
         var dataFlowResult = ReadDataFlows(assemblyPath);
 
         Assert.Contains(methodsSlice.MethodCalls!, call =>
-            call.EvidenceKind == AnalysisEvidenceKind.AssemblyIlDirect &&
-            call.CalledMethod == "Start" &&
-            call.FileName == "Program.cs" &&
-            call.LineNumber == 8);
+            call is { EvidenceKind: AnalysisEvidenceKind.AssemblyIlDirect, CalledMethod: "Start", FileName: "Program.cs", LineNumber: 8 });
         Assert.Contains(dataFlowResult.Nodes, node =>
-            node.Kind == "Sink" &&
-            node.Name == "Start" &&
-            node.FileName == "Program.cs" &&
-            node.LineNumber == 8);
+            node is { Kind: "Sink", Name: "Start", FileName: "Program.cs", LineNumber: 8 });
     }
 
     [Fact]
@@ -1115,7 +1094,7 @@ public static class Program
 
         var dataFlowResult = ReadDataFlows(outputDirectory);
 
-        Assert.Contains(dataFlowResult.Slices, slice => slice.SourceCategory == "cli" && slice.SinkCategory == "command");
+        Assert.Contains(dataFlowResult.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" });
         Assert.DoesNotContain(dataFlowResult.Nodes, node => node.Properties.TryGetValue("assembly", out var assembly) && assembly == Path.GetFileName(runtimeAssembly));
     }
 
@@ -1146,7 +1125,7 @@ public static class Program
 
         var dataFlowResult = ReadDataFlows(outputDirectory);
 
-        Assert.Contains(dataFlowResult.Slices, slice => slice.SourceCategory == "cli" && slice.SinkCategory == "command");
+        Assert.Contains(dataFlowResult.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" });
     }
 
     [Fact]
@@ -1169,8 +1148,8 @@ public static class Program
 
         var dataFlowResult = ReadDataFlows(Path.Combine(outputDirectory, "AssemblyAsyncFlow.dll"));
 
-        Assert.Contains(dataFlowResult.Slices, slice => slice.SourceCategory == "cli" && slice.SinkCategory == "command");
-        Assert.Contains(dataFlowResult.Nodes, node => node.IsSink && node.FileName == "Program.cs" && node.LineNumber > 1);
+        Assert.Contains(dataFlowResult.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" });
+        Assert.Contains(dataFlowResult.Nodes, node => node is { IsSink: true, FileName: "Program.cs", LineNumber: > 1 });
     }
 
     [Fact]
@@ -1193,8 +1172,8 @@ public static class Program
 
         var dataFlowResult = ReadDataFlows(Path.Combine(outputDirectory, "AssemblyDelegateFlow.dll"));
 
-        Assert.Contains(dataFlowResult.Slices, slice => slice.SourceCategory == "cli" && slice.SinkCategory == "command");
-        Assert.Contains(dataFlowResult.Nodes, node => node.IsSink && node.FileName == "Program.cs" && node.LineNumber > 1);
+        Assert.Contains(dataFlowResult.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" });
+        Assert.Contains(dataFlowResult.Nodes, node => node is { IsSink: true, FileName: "Program.cs", LineNumber: > 1 });
     }
 
     [Fact]
@@ -1224,9 +1203,9 @@ class NestedFlow
         var result = DataFlowAnalyzer.Analyze(tempDirectory.Path);
         var nodeIds = result.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
 
-        Assert.Contains(result.Slices, slice => slice.SourceCategory == "cli" && slice.SinkCategory == "command");
+        Assert.Contains(result.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" });
         Assert.Contains(result.MethodSummaries, summary => summary.Method.Contains("NestedFlow.Launch") && summary.SinkParameterIndexes.Contains(0));
-        Assert.Contains(result.MethodSummaries, summary => summary.Method.Contains("NestedFlow.Launch") && summary.EvidenceKind == AnalysisEvidenceKind.SourceRoslynSummary && summary.Identity is not null);
+        Assert.Contains(result.MethodSummaries, summary => summary.Method.Contains("NestedFlow.Launch") && summary is { EvidenceKind: AnalysisEvidenceKind.SourceRoslynSummary, Identity: not null });
         Assert.All(result.Edges, edge =>
         {
             Assert.Contains(edge.SourceId, nodeIds);
@@ -1270,10 +1249,10 @@ class CryptoSample
 
         var result = CryptoAnalyzer.Analyze(tempDirectory.Path);
 
-        Assert.Contains(result.Assets, asset => asset.Name == "MD5" && asset.Strength == "weak");
-        Assert.Contains(result.Materials, material => material.Storage == "hardcoded" && material.Fingerprint is not null);
+        Assert.Contains(result.Assets, asset => asset is { Name: "MD5", Strength: "weak" });
+        Assert.Contains(result.Materials, material => material is { Storage: "hardcoded", Fingerprint: not null });
         Assert.Contains(result.Findings, finding => finding.RuleId == "DOSAI-CRYPTO-WEAK-HASH-MD5");
-        Assert.Contains(result.Findings, finding => finding.RuleId == "DOSAI-CRYPTO-WEAK-HASH-MD5" && finding.ReachableFromEntryPoint);
+        Assert.Contains(result.Findings, finding => finding is { RuleId: "DOSAI-CRYPTO-WEAK-HASH-MD5", ReachableFromEntryPoint: true });
         Assert.Contains(result.Findings, finding => finding.RuleId == "DOSAI-CRYPTO-TLS-CERT-VALIDATION-DISABLED");
 
         var cdx = CryptoAnalyzer.GetCryptoAnalysis(tempDirectory.Path, "cyclonedx");
@@ -1321,14 +1300,14 @@ int main(int argc, char** argv) {
         var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result, new JsonSerializerOptions { Converters = { new JsonStringEnumConverter() } });
 
         Assert.NotNull(methodsSlice);
-        Assert.Contains(methodsSlice.Methods ?? [], method => method.Module == "LanguageFrontend" && method.Name == "run");
-        Assert.Contains(methodsSlice.Methods ?? [], method => method.Name == "run" && method.Namespace == "R" && method.Module is "R.NativeParser" or "LanguageFrontend");
+        Assert.Contains(methodsSlice.Methods ?? [], method => method is { Module: "LanguageFrontend", Name: "run" });
+        Assert.Contains(methodsSlice.Methods ?? [], method => method is { Name: "run", Namespace: "R", Module: "R.NativeParser" or "LanguageFrontend" });
         if (LanguageFrontendAnalyzer.IsRNativeParserAvailable)
         {
-            Assert.Contains(methodsSlice.Methods ?? [], method => method.Name == "run" && method.Module == "R.NativeParser");
-            Assert.Contains(methodsSlice.Dependencies ?? [], dependency => dependency.Name == "DBI" && dependency.Module == "R.NativeParser");
+            Assert.Contains(methodsSlice.Methods ?? [], method => method is { Name: "run", Module: "R.NativeParser" });
+            Assert.Contains(methodsSlice.Dependencies ?? [], dependency => dependency is { Name: "DBI", Module: "R.NativeParser" });
         }
-        Assert.Contains(methodsSlice.Methods ?? [], method => method.Module == "VC++" && method.Name == "main");
+        Assert.Contains(methodsSlice.Methods ?? [], method => method is { Module: "VC++", Name: "main" });
         Assert.Contains(methodsSlice.MethodCalls ?? [], call => call.CalledMethod == "system");
         Assert.DoesNotContain(methodsSlice.MethodCalls ?? [], call => call.CalledMethod == "main");
         Assert.NotNull(methodsSlice.CallGraph);
@@ -1393,7 +1372,7 @@ run <- function(input) {
 
             stopwatch.Stop();
             Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(3), $"R parser timeout should be enforced before fallback, but took {stopwatch.Elapsed}.");
-            Assert.Contains(methods, method => method.Name == "run" && method.Module == "LanguageFrontend");
+            Assert.Contains(methods, method => method is { Name: "run", Module: "LanguageFrontend" });
         }
         finally
         {
@@ -1425,7 +1404,7 @@ int main(int argc, char** argv) {
         var result = JsonSerializer.Deserialize<DataFlowResult>(resultJson, new JsonSerializerOptions { Converters = { new JsonStringEnumConverter() } });
 
         Assert.NotNull(result);
-        Assert.Contains(result.Slices, slice => slice.SinkCategory == "command" && slice.Confidence == "Low");
+        Assert.Contains(result.Slices, slice => slice is { SinkCategory: "command", Confidence: "Low" });
         Assert.Contains(result.Nodes, node => node.Properties.TryGetValue("analysis", out var analysis) && analysis == "language-frontend");
         var nodeIds = result.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
         Assert.All(result.Edges, edge =>
@@ -1481,9 +1460,9 @@ class CustomFlow
         Assert.NotNull(dataFlowResult);
         Assert.Contains(dataFlowResult.Patterns.Sources, pattern => pattern.Pattern == "Input.Get");
         Assert.Contains(dataFlowResult.Patterns.Sinks, pattern => pattern.Pattern == "Dangerous.Exec");
-        Assert.Contains(dataFlowResult.Nodes, node => node.IsSource && node.Category == "custom-source");
-        Assert.Contains(dataFlowResult.Nodes, node => node.IsSink && node.Category == "custom-sink");
-        Assert.Contains(dataFlowResult.Slices, slice => slice.SourceCategory == "custom-source" && slice.SinkCategory == "custom-sink");
+        Assert.Contains(dataFlowResult.Nodes, node => node is { IsSource: true, Category: "custom-source" });
+        Assert.Contains(dataFlowResult.Nodes, node => node is { IsSink: true, Category: "custom-sink" });
+        Assert.Contains(dataFlowResult.Slices, slice => slice is { SourceCategory: "custom-source", SinkCategory: "custom-sink" });
     }
 
     [Fact]
@@ -1516,8 +1495,8 @@ class PurlFlow
         });
 
         Assert.NotNull(result);
-        Assert.Contains(result.Nodes, node => node.IsSource && node.Purl == "pkg:nuget/Input.Package@1.0.0");
-        Assert.Contains(result.Nodes, node => node.IsSink && node.Purl == "pkg:nuget/Dangerous.Package@2.0.0");
+        Assert.Contains(result.Nodes, node => node is { IsSource: true, Purl: "pkg:nuget/Input.Package@1.0.0" });
+        Assert.Contains(result.Nodes, node => node is { IsSink: true, Purl: "pkg:nuget/Dangerous.Package@2.0.0" });
         Assert.Contains(result.Slices, slice => slice.Purls.Contains("pkg:nuget/Input.Package@1.0.0") && slice.Purls.Contains("pkg:nuget/Dangerous.Package@2.0.0"));
     }
 
@@ -1554,7 +1533,7 @@ class AdvancedFlow
 
         Assert.NotNull(result);
         Assert.Contains(result.Slices, slice => slice.SinkCategory == "command");
-        Assert.Contains(result.Slices, slice => slice.SinkCategory == "file" && slice.SinkArgumentIndex == -1);
+        Assert.Contains(result.Slices, slice => slice is { SinkCategory: "file", SinkArgumentIndex: -1 });
     }
 
     [Fact]
@@ -1702,7 +1681,7 @@ class OrdersController
         Assert.Contains("orders.write", endpoint.RequiredScopes);
         Assert.Contains("Internal", endpoint.CorsPolicies);
         Assert.True(endpoint.AntiForgeryRequired);
-        Assert.Contains(methodsSlice?.EntryPoints ?? [], entryPoint => entryPoint.Route == "api/orders/{id}" && entryPoint.AuthorizationRequired == true && entryPoint.Roles.Contains("Admin"));
+        Assert.Contains(methodsSlice?.EntryPoints ?? [], entryPoint => entryPoint is { Route: "api/orders/{id}", AuthorizationRequired: true } && entryPoint.Roles.Contains("Admin"));
     }
 
     [Fact]
@@ -1822,9 +1801,9 @@ End Module
         });
 
         Assert.NotNull(result);
-        Assert.Contains(result.Nodes, node => node.IsSource && node.Category == "cli" && node.FileName == "VbFlow.vb");
-        Assert.Contains(result.Nodes, node => node.IsSink && node.Category == "command" && node.FileName == "VbFlow.vb");
-        Assert.Contains(result.Slices, slice => slice.SourceCategory == "cli" && slice.SinkCategory == "command");
+        Assert.Contains(result.Nodes, node => node is { IsSource: true, Category: "cli", FileName: "VbFlow.vb" });
+        Assert.Contains(result.Nodes, node => node is { IsSink: true, Category: "command", FileName: "VbFlow.vb" });
+        Assert.Contains(result.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" });
     }
 
     [Fact]
@@ -1862,10 +1841,10 @@ class Program
         });
 
         Assert.NotNull(methodsSlice);
-        Assert.Contains(methodsSlice.ApiEndpoints ?? [], endpoint => endpoint.HttpMethod == "GET" && endpoint.Route == "api/[controller]/{id}" && endpoint.Urls.Contains("https://api.example.test/orders/"));
-        Assert.Contains(methodsSlice.ApiEndpoints ?? [], endpoint => endpoint.HttpMethod == "POST" && endpoint.Route == "/upload" && endpoint.EndpointKind == "MinimalApi");
+        Assert.Contains(methodsSlice.ApiEndpoints ?? [], endpoint => endpoint is { HttpMethod: "GET", Route: "api/[controller]/{id}" } && endpoint.Urls.Contains("https://api.example.test/orders/"));
+        Assert.Contains(methodsSlice.ApiEndpoints ?? [], endpoint => endpoint is { HttpMethod: "POST", Route: "/upload", EndpointKind: "MinimalApi" });
         Assert.NotNull(methodsSlice.Metadata);
-        Assert.Contains(methodsSlice.EntryPoints ?? [], entryPoint => entryPoint.Kind == "HttpEndpoint" && entryPoint.Route == "api/[controller]/{id}");
+        Assert.Contains(methodsSlice.EntryPoints ?? [], entryPoint => entryPoint is { Kind: "HttpEndpoint", Route: "api/[controller]/{id}" });
     }
 
     [Fact]
@@ -1888,8 +1867,8 @@ class WeaknessFlow
         var result = DataFlowAnalyzer.Analyze(tempDirectory.Path);
 
         Assert.NotNull(result.Metadata);
-        Assert.Contains(result.EntryPoints, entryPoint => entryPoint.Kind == "Cli" && entryPoint.MethodName == "Main");
-        Assert.Contains(result.WeaknessCandidates, weakness => weakness.Kind == "CommandInjectionCandidate" && weakness.Cwe == "CWE-78");
+        Assert.Contains(result.EntryPoints, entryPoint => entryPoint is { Kind: "Cli", MethodName: "Main" });
+        Assert.Contains(result.WeaknessCandidates, weakness => weakness is { Kind: "CommandInjectionCandidate", Cwe: "CWE-78" });
         Assert.Contains(result.DangerousApiReachability, api => api.Category == "command");
 
         var context = TransparencyBuilder.BuildAgentContext(result, tempDirectory.Path);
@@ -2078,7 +2057,7 @@ class SqlFlow
         });
 
         Assert.NotNull(dataFlowResult);
-        Assert.Contains(dataFlowResult.Nodes, node => node.IsSink && node.Purl == "pkg:nuget/Microsoft.Data.SqlClient@5.1.1");
+        Assert.Contains(dataFlowResult.Nodes, node => node is { IsSink: true, Purl: "pkg:nuget/Microsoft.Data.SqlClient@5.1.1" });
         Assert.Contains(dataFlowResult.Slices, slice => slice.SinkPurl == "pkg:nuget/Microsoft.Data.SqlClient@5.1.1" && slice.Purls.Contains("pkg:nuget/Microsoft.Data.SqlClient@5.1.1"));
 
         var graphMl = DataFlowExporter.Export(dataFlowResult, DataFlowExportFormat.GraphMl);
@@ -2135,8 +2114,8 @@ class SqlFlow
         Assert.Contains(actualMethods, m => m.Name == "hello");
         Assert.Contains(actualMethods, m => m.Name == "goodbye");
         Assert.Contains(actualMethods, m => m.Name == "add");
-        Assert.Contains(actualMethods, m => m.ClassName == "Person" && m.Name == "Introduce");
-        Assert.Contains(actualMethods, m => m.ClassName == "Person" && m.Name == "CelebrateBirthday");
+        Assert.Contains(actualMethods, m => m is { ClassName: "Person", Name: "Introduce" });
+        Assert.Contains(actualMethods, m => m is { ClassName: "Person", Name: "CelebrateBirthday" });
     }
 
     [Fact]
@@ -2240,8 +2219,8 @@ class SqlFlow
         Assert.Contains(actualMethods, m => m.Name == "hello");
         Assert.Contains(actualMethods, m => m.Name == "goodbye");
         Assert.Contains(actualMethods, m => m.Name == "add");
-        Assert.Contains(actualMethods, m => m.ClassName == "Person" && m.Name == "Introduce");
-        Assert.Contains(actualMethods, m => m.ClassName == "Person" && m.Name == "CelebrateBirthday");
+        Assert.Contains(actualMethods, m => m is { ClassName: "Person", Name: "Introduce" });
+        Assert.Contains(actualMethods, m => m is { ClassName: "Person", Name: "CelebrateBirthday" });
     }
 
     [Fact]

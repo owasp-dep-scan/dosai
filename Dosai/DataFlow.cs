@@ -274,7 +274,7 @@ public static partial class DataFlowAnalyzer
     private static void AddDataFlowEntryPoints(DataFlowResult result)
     {
         var next = result.EntryPoints.Count;
-        foreach (var source in result.Nodes.Where(node => node.IsSource && node.Category == "cli" && node.MethodName == "Main"))
+        foreach (var source in result.Nodes.Where(node => node is { IsSource: true, Category: "cli", MethodName: "Main" }))
         {
             if (result.EntryPoints.Any(entryPoint => entryPoint.Kind == "Cli" && entryPoint.FileName == source.FileName && entryPoint.LineNumber == source.LineNumber))
             {
@@ -857,7 +857,7 @@ public static partial class DataFlowAnalyzer
         {
             using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
             using var peReader = new PEReader(stream);
-            return peReader.HasMetadata && peReader.PEHeaders.CorHeader is not null;
+            return peReader is { HasMetadata: true, PEHeaders.CorHeader: not null };
         }
         catch
         {
@@ -1128,7 +1128,7 @@ public static partial class DataFlowAnalyzer
             var trueGuardedKeys = GetSanitizedGuardKeys(operation.Condition, whenConditionIsTrue: true).ToList();
             var falseGuardedKeys = GetSanitizedGuardKeys(operation.Condition, whenConditionIsTrue: false).ToList();
             Visit(operation.Condition);
-            if (trueGuardedKeys.Count == 0 || operation.WhenTrue is null)
+            if (trueGuardedKeys.Count == 0)
             {
                 Visit(operation.WhenTrue);
             }
@@ -1376,7 +1376,7 @@ public static partial class DataFlowAnalyzer
                 return true;
             }
 
-            if (method.OriginalDefinition is not null && summaries.TryGetValue(DescribeSymbol(method.OriginalDefinition), out summary!))
+            if (summaries.TryGetValue(DescribeSymbol(method.OriginalDefinition), out summary!))
             {
                 return true;
             }
@@ -1392,7 +1392,7 @@ public static partial class DataFlowAnalyzer
                 return true;
             }
 
-            if (operation is IObjectCreationOperation objectCreation && objectCreation.Constructor is not null && MatchSymbol(objectCreation.Constructor, operation.Syntax, _patternIndex.Sanitizers).Any())
+            if (operation is IObjectCreationOperation { Constructor: not null } objectCreation && MatchSymbol(objectCreation.Constructor, operation.Syntax, _patternIndex.Sanitizers).Any())
             {
                 return true;
             }

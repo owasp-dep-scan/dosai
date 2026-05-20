@@ -519,7 +519,7 @@ public static class Dosai
         {
             using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
             using var peReader = new PEReader(fs);
-            return peReader.HasMetadata && peReader.PEHeaders.CorHeader is not null;
+            return peReader is { HasMetadata: true, PEHeaders.CorHeader: not null };
         }
         catch
         {
@@ -2604,7 +2604,7 @@ public static class Dosai
 
             foreach (var argument in operation.Arguments)
             {
-                if (argument.Value is ITypeOfOperation typeOf && typeOf.TypeOperand is INamedTypeSymbol namedType)
+                if (argument.Value is ITypeOfOperation { TypeOperand: INamedTypeSymbol namedType })
                 {
                     yield return namedType;
                 }
@@ -2619,7 +2619,7 @@ public static class Dosai
             }
             foreach (var argument in operation.Arguments)
             {
-                if (argument.Value is ITypeOfOperation typeOf && typeOf.TypeOperand is INamedTypeSymbol namedType)
+                if (argument.Value is ITypeOfOperation { TypeOperand: INamedTypeSymbol namedType })
                 {
                     yield return namedType;
                 }
@@ -2634,7 +2634,7 @@ public static class Dosai
             }
             foreach (var argument in operation.Arguments)
             {
-                if (argument.Value is ITypeOfOperation typeOf && typeOf.TypeOperand is INamedTypeSymbol namedType)
+                if (argument.Value is ITypeOfOperation { TypeOperand: INamedTypeSymbol namedType })
                 {
                     yield return namedType;
                 }

@@ -11,13 +11,13 @@ internal static class AssemblyCallGraphAnalyzer
 {
     private static readonly Dictionary<short, OpCode> SingleByteOpCodes = typeof(OpCodes)
         .GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
-        .Where(field => field.GetValue(null) is OpCode opCode && opCode.Size == 1)
+        .Where(field => field.GetValue(null) is OpCode { Size: 1 })
         .Select(field => (OpCode)field.GetValue(null)!)
         .ToDictionary(opCode => unchecked((short)(ushort)opCode.Value));
 
     private static readonly Dictionary<short, OpCode> MultiByteOpCodes = typeof(OpCodes)
         .GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
-        .Where(field => field.GetValue(null) is OpCode opCode && opCode.Size == 2)
+        .Where(field => field.GetValue(null) is OpCode { Size: 2 })
         .Select(field => (OpCode)field.GetValue(null)!)
         .ToDictionary(opCode => unchecked((short)(ushort)opCode.Value));
 
@@ -363,7 +363,7 @@ internal static class AssemblyCallGraphAnalyzer
             : simpleName + ".dll";
     }
 
-    private static bool IsDelegateConstructor(AssemblyCallMember member) => member.Name == ".ctor" && member.ParameterCount >= 2;
+    private static bool IsDelegateConstructor(AssemblyCallMember member) => member is { Name: ".ctor", ParameterCount: >= 2 };
 
     private static void ApplyDefaultDelegateStackBehaviour(OpCode opCode, AssemblyDelegateState state)
     {
@@ -1002,7 +1002,7 @@ internal static class AssemblyCallGraphAnalyzer
         {
             using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
             using var peReader = new PEReader(stream);
-            return peReader.HasMetadata && peReader.PEHeaders.CorHeader is not null;
+            return peReader is { HasMetadata: true, PEHeaders.CorHeader: not null };
         }
         catch
         {

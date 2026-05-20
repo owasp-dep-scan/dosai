@@ -12,13 +12,13 @@ public static partial class DataFlowAnalyzer
 {
     private static readonly Dictionary<short, OpCode> SingleByteOpCodes = typeof(OpCodes)
         .GetFields(BindingFlags.Public | BindingFlags.Static)
-        .Where(field => field.GetValue(null) is OpCode opCode && opCode.Size == 1)
+        .Where(field => field.GetValue(null) is OpCode { Size: 1 })
         .Select(field => (OpCode)field.GetValue(null)!)
         .ToDictionary(opCode => unchecked((short)(ushort)opCode.Value));
 
     private static readonly Dictionary<short, OpCode> MultiByteOpCodes = typeof(OpCodes)
         .GetFields(BindingFlags.Public | BindingFlags.Static)
-        .Where(field => field.GetValue(null) is OpCode opCode && opCode.Size == 2)
+        .Where(field => field.GetValue(null) is OpCode { Size: 2 })
         .Select(field => (OpCode)field.GetValue(null)!)
         .ToDictionary(opCode => unchecked((short)(ushort)opCode.Value));
 
@@ -85,6 +85,7 @@ public static partial class DataFlowAnalyzer
                 continue;
             }
 
+            var identityParts = ParseAssemblyMethodSymbol(summary.Method);
             result.MethodSummaries.Add(new DataFlowMethodSummary
             {
                 Method = summary.Method,
@@ -93,7 +94,7 @@ public static partial class DataFlowAnalyzer
                 SinkCategories = [.. summary.SinkCategories],
                 SummaryKind = "AssemblyIL",
                 EvidenceKind = AnalysisEvidenceKind.AssemblyIlSummary,
-                Identity = MethodIdentityFactory.FromParts(summary.Method, null, summary.Method, summary.Method, null, null, GetNamespace(summary.Method), null, summary.Method.Split('.').LastOrDefault(), 0, null, AnalysisEvidenceKind.AssemblyIlSummary),
+                Identity = MethodIdentityFactory.FromParts(summary.Method, null, summary.Method, summary.Method, null, null, identityParts.Namespace, identityParts.ClassName, identityParts.MethodName, 0, null, AnalysisEvidenceKind.AssemblyIlSummary),
                 Evidence =
                 [
                     new AnalysisEvidence
@@ -107,6 +108,53 @@ public static partial class DataFlowAnalyzer
         }
 
         return analyzedAssemblies;
+    }
+
+    private static AssemblyMethodSymbolParts ParseAssemblyMethodSymbol(string methodSymbol)
+    {
+        var parameterStart = methodSymbol.IndexOf('(', StringComparison.Ordinal);
+        var memberPrefix = parameterStart >= 0 ? methodSymbol[..parameterStart] : methodSymbol;
+        var separatorIndex = FindMethodSeparator(memberPrefix);
+        if (separatorIndex < 0)
+        {
+            return new AssemblyMethodSymbolParts(string.Empty, string.Empty, memberPrefix);
+        }
+
+        var containingType = memberPrefix[..separatorIndex];
+        var methodName = memberPrefix[(separatorIndex + 1)..];
+        return new AssemblyMethodSymbolParts(GetNamespace(containingType), GetSimpleTypeName(containingType), methodName);
+    }
+
+    private static int FindMethodSeparator(string memberPrefix)
+    {
+        var depth = 0;
+        for (var index = memberPrefix.Length - 1; index >= 0; index--)
+        {
+            var current = memberPrefix[index];
+            if (current == '>')
+            {
+                depth++;
+                continue;
+            }
+            if (current == '<')
+            {
+                depth = Math.Max(0, depth - 1);
+                continue;
+            }
+            if (current == '.' && depth == 0)
+            {
+                return index > 0 && memberPrefix[index - 1] == '.' ? index - 1 : index;
+            }
+        }
+        return -1;
+    }
+
+    private static string GetSimpleTypeName(string typeName)
+    {
+        var genericIndex = typeName.IndexOf('<', StringComparison.Ordinal);
+        var plainType = genericIndex >= 0 ? typeName[..genericIndex] : typeName;
+        var index = plainType.LastIndexOf('.');
+        return index < 0 ? plainType : plainType[(index + 1)..];
     }
 
     private static void CollectAssemblyMethodSummaries(PEReader peReader, MetadataReader reader, AssemblySourceMap sourceMap, string assemblyPath, AssemblyDataFlowContext context, Dictionary<string, AssemblyMethodSummary> summaries)
@@ -482,7 +530,10 @@ public static partial class DataFlowAnalyzer
             ? $"arg{sinkArgumentIndex}"
             : receiverTaint is not null
                 ? "receiver"
-                : argumentTaints.Select((taint, index) => (taint, index)).FirstOrDefault(item => item.taint is not null) is var item && item.taint is not null
+                : argumentTaints.Select((taint, index) => (taint, index)).FirstOrDefault(valueTuple => valueTuple.taint is not null) is
+                {
+                    taint: not null
+                } item
                     ? $"arg{item.index}"
                     : "tainted-value";
 
@@ -685,7 +736,7 @@ public static partial class DataFlowAnalyzer
         var typeName = GetFullTypeName(reader, declaringType);
         var methodName = reader.GetString(method.Name);
         var signature = ReadSignatureInfo(reader, method.Signature, method.Attributes);
-        var normalizedMethodName = methodName == ".ctor" || methodName == ".cctor" ? methodName : methodName;
+        var normalizedMethodName = methodName;
         var symbol = BuildAssemblyMethodSymbol(typeName, normalizedMethodName, signature.ParameterTypes, signature.ReturnsVoid, signature.ReturnType, methodName);
 
         var metadataToken = MetadataTokens.GetToken(methodHandle);
@@ -739,7 +790,7 @@ public static partial class DataFlowAnalyzer
             {
                 yield return name;
                 var simpleName = name.Split('.').LastOrDefault();
-                if (!string.IsNullOrWhiteSpace(simpleName)) yield return simpleName!;
+                if (!string.IsNullOrWhiteSpace(simpleName)) yield return simpleName;
             }
         }
     }
@@ -1418,7 +1469,7 @@ public static partial class DataFlowAnalyzer
         {
             using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
             using var peReader = new PEReader(stream);
-            return peReader.HasMetadata && peReader.PEHeaders.CorHeader is not null;
+            return peReader is { HasMetadata: true, PEHeaders.CorHeader: not null };
         }
         catch
         {
@@ -1497,7 +1548,7 @@ public static partial class DataFlowAnalyzer
         private static bool IsAssemblySourceMemberPattern(DataFlowPattern pattern) => pattern.Kind switch
         {
             DataFlowPatternKind.Code or DataFlowPatternKind.Parameter or DataFlowPatternKind.Attribute => false,
-            DataFlowPatternKind.Name when pattern.Match == DataFlowMatchKind.Contains && pattern.Pattern.Length < 4 => false,
+            DataFlowPatternKind.Name when pattern is { Match: DataFlowMatchKind.Contains, Pattern.Length: < 4 } => false,
             _ => true
         };
 
@@ -1670,6 +1721,7 @@ public static partial class DataFlowAnalyzer
     private sealed record AssemblySuccessor(int Index, bool IsExceptionHandler, ExceptionRegionKind RegionKind);
     private sealed record AssemblySignatureInfo(int ParameterCount, bool HasThis, bool ReturnsVoid, string ReturnType, IReadOnlyList<string> ParameterTypes);
     private sealed record AssemblyMemberInfo(string Symbol, string Name, string ContainingType, int ParameterCount, bool HasThis, bool ReturnsVoid, string ReturnType);
+    private sealed record AssemblyMethodSymbolParts(string Namespace, string ClassName, string MethodName);
     private sealed record AssemblySourceLocation(string FilePath, int LineNumber, int ColumnNumber);
     private sealed record AssemblySequencePoint(int Offset, string FilePath, int LineNumber, int ColumnNumber);
     private sealed record AssemblyLocalScope(int Index, string Name, int StartOffset, int Length)
