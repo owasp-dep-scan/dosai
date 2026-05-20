@@ -57,6 +57,8 @@ References are populated from:
 
 This improves cross-file symbol resolution compared with one-file compilations. It also lets the data-flow walker observe method calls, constructor calls, property references, field references, and invalid operations with better context.
 
+When enumerating source files from a directory, Dosai excludes `bin` and `obj` directories relative to the inspected root. This keeps source-only analysis aligned with endpoint, crypto, and data-flow scans. Assembly discovery keeps app output directories valid because binary-only users often point directly at `bin/Debug/...` or publish directories.
+
 ## Stable method identities
 
 Call graph node IDs are stable signatures rather than lossy `Namespace.Class.Method` strings:
@@ -85,6 +87,10 @@ Supported operation kinds include:
 - assignment context for property set/get detection
 
 The graph builder guarantees that every edge endpoint exists as a node. External targets become external nodes when no source declaration exists.
+
+Source and binary call graph extraction share a small CHA/RTA-style dispatch resolver. For source, it indexes concrete application types, interface implementations, overrides, and instantiated types observed from object creation operations. For assemblies, it matches known methods against decoded type metadata, base types, implemented interfaces, and instantiated IL types. Candidate edges are still marked as inferred evidence, not direct calls.
+
+The source walker also emits explicit inferred evidence for common callback and framework patterns. Delegate creation, event subscription, lambda callbacks, DI registrations such as `AddSingleton`, service resolution helpers such as `GetRequiredService`, and simple reflection forms such as `Activator.CreateInstance<T>()` or `typeof(T).GetMethod("Name")` are represented as `FrameworkModel` or `ReflectionHeuristic` edges rather than folded into direct Roslyn calls.
 
 ```text
 Invocation Operation
@@ -122,6 +128,7 @@ Keys are normalized Roslyn symbol display strings. Values are ordered node trace
 - sink argument flows
 - sink receiver flows, e.g. `model.File.CopyTo(stream)`
 - fallback invalid-operation sink matching for projects with unresolved legacy frameworks
+- branch-aware sanitizer guards for validators such as `Regex.IsMatch`
 
 ### Performance-sensitive implementation details
 
@@ -142,6 +149,14 @@ flowchart LR
     Assign --> Invalid[unresolved invocation]
     Invalid -->|syntax matches CopyTo/SaveAs/etc| Sink[file sink]
 ```
+
+## Assembly IL analysis
+
+Assembly analysis reads managed method bodies without intentionally executing target code. The methods command uses IL call instructions, constructor calls, delegate target loads, event accessors, generated async/iterator state-machine mappings, and the shared dispatch resolver to add binary call graph evidence. Portable PDBs provide source locations when available, with IL offsets as a fallback.
+
+The assembly data-flow pass uses a bounded worklist over decoded IL. It follows branch, switch, fallthrough, and exception-region successors. Catch and filter handlers receive exception-object stack state when it is available, while finally and fault handlers preserve local and argument state with handler stack semantics. This lets taint reach sinks that run from exception paths without treating those edges as direct source syntax.
+
+Binary signatures are decoded from metadata blobs for method identity, summary replay, and dispatch matching. The decoder handles common constructed generic types and method specifications, arrays, byrefs, pointers, generic type and method parameters, nested type specifications, and custom modifier wrappers. The output remains best-effort because some runtime substitutions are not available from IL alone.
 
 ## Endpoint extraction
 
@@ -208,8 +223,8 @@ Confidence is deliberately simple and explainable:
 ## Current limitations
 
 - Data-flow is mostly intraprocedural with lightweight summaries for parameter-to-return and parameter-to-sink callees.
-- Generic type flow is normalized for signatures but not fully substituted.
-- Sanitizers are pattern-driven and can stop propagation or suppress guarded true branches, but custom validation logic may require project-specific patterns.
+- Generic type flow is decoded for common metadata signatures but not fully substituted through every runtime construction.
+- Sanitizers are pattern-driven and can stop propagation or suppress validated branches, but custom validation logic may require project-specific patterns.
 - Endpoint extraction is intentionally syntax-based and may capture routes from non-runtime code.
 - PURL attribution is package-asset based; source-only projects without assets/deps cannot always be attributed.
 

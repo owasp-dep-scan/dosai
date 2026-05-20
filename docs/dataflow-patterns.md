@@ -40,17 +40,17 @@ Property names are case-insensitive. The examples use lowercase collection names
 
 Each pattern supports these fields:
 
-| Field               | Required | Values                                                                            | Purpose                                                                                                                    |
-| ------------------- | -------- | --------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `pattern`           | yes      | string                                                                            | Text or regex to match.                                                                                                    |
-| `kind`              | no       | `Symbol`, `Method`, `Type`, `Namespace`, `Name`, `Parameter`, `Attribute`, `Code` | Which semantic/code value to compare. Defaults to `Symbol`.                                                                |
-| `match`             | no       | `Contains`, `Exact`, `Prefix`, `Suffix`, `Regex`                                  | Match mode. Defaults to `Contains`.                                                                                        |
-| `category`          | no       | string                                                                            | Source/sink category emitted in nodes, slices, and weakness candidates.                                                    |
-| `purl`              | no       | package URL string                                                                | Optional package/package-like identity to attach to matching nodes.                                                        |
-| `description`       | no       | string                                                                            | Human-readable reason for the pattern.                                                                                     |
-| `taintKinds`        | no       | string array                                                                      | Labels carried with the taint trace, such as `user-input`, `secret`, or `path`.                                            |
-| `removesTaintKinds` | no       | string array                                                                      | Reserved for sanitizer metadata. Current sanitizer matching stops taint for the matched expression or guarded true branch. |
-| `confidence`        | no       | string                                                                            | Confidence label. Defaults to `Medium`; common values are `Low`, `Medium`, and `High`.                                     |
+| Field               | Required | Values                                                                            | Purpose                                                                                                                       |
+| ------------------- | -------- | --------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `pattern`           | yes      | string                                                                            | Text or regex to match.                                                                                                       |
+| `kind`              | no       | `Symbol`, `Method`, `Type`, `Namespace`, `Name`, `Parameter`, `Attribute`, `Code` | Which semantic/code value to compare. Defaults to `Symbol`.                                                                   |
+| `match`             | no       | `Contains`, `Exact`, `Prefix`, `Suffix`, `Regex`                                  | Match mode. Defaults to `Contains`.                                                                                           |
+| `category`          | no       | string                                                                            | Source/sink category emitted in nodes, slices, and weakness candidates.                                                       |
+| `purl`              | no       | package URL string                                                                | Optional package/package-like identity to attach to matching nodes.                                                           |
+| `description`       | no       | string                                                                            | Human-readable reason for the pattern.                                                                                        |
+| `taintKinds`        | no       | string array                                                                      | Labels carried with the taint trace, such as `user-input`, `secret`, or `path`.                                               |
+| `removesTaintKinds` | no       | string array                                                                      | Reserved for sanitizer metadata. Current sanitizer matching stops taint for the matched expression or validated guard branch. |
+| `confidence`        | no       | string                                                                            | Confidence label. Defaults to `Medium`; common values are `Low`, `Medium`, and `High`.                                        |
 
 ## Pattern kinds
 
@@ -74,6 +74,8 @@ Prefer semantic kinds over `Code` when possible. Semantic matching is more accur
 For source inputs, `Code` patterns match syntax text and are useful as a fallback for unresolved references or legacy source shapes. For assembly-only inputs, Dosai has metadata symbols and IL literals rather than original syntax. To keep binary analysis precise, assembly matching applies semantic `Method`, `Symbol`, `Type`, `Namespace`, and `Name` patterns to resolved metadata members; `Code` source patterns are applied only to literal IL evidence such as `ldstr` strings, not to arbitrary metadata names. `Parameter` source patterns still seed method parameters, including `Main(string[] args)` as `cli`, and portable PDBs are used for source locations when available.
 
 Short broad `Name`/`Contains` source patterns are intentionally filtered in assembly metadata mode to avoid noisy matches against compiler-generated members such as `get_Key`. Prefer `Method`, `Type`, or exact/regex `Parameter` patterns for binary-friendly custom rules.
+
+Sanitizer patterns also participate in simple guard reasoning. In source mode, a condition such as `if (AllowListedCommand(input))` suppresses taint for `input` in the validated true branch. Negated guards and common `&&` and `||` forms preserve the unvalidated path instead of globally clearing taint. This is intentionally conservative and pattern-driven. If a validator has unusual semantics, model it with a narrower custom pattern or leave it unmodeled for manual review.
 
 ## Example: custom legacy source and sink wrappers
 
