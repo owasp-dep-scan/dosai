@@ -126,6 +126,9 @@ public static class Dosai
         var purlResolver = PackageUrlResolver.Create(path);
         var methods = GetAssemblyMethods(path);
         var (sourceMethods, usings, methodCalls, properties, fields, events, constructors, callGraph, sourceAssemblyMapping) = GetSourceMethods(path, methods);
+        var (assemblyMethodCalls, assemblyCallGraph) = AssemblyCallGraphAnalyzer.Analyze(path, methods);
+        methodCalls.AddRange(assemblyMethodCalls);
+        MergeCallGraph(callGraph, assemblyCallGraph);
         var assemblyInformation = GetAssemblyInformation(path);
         var apiEndpoints = ApiEndpointAnalyzer.GetApiEndpoints(path);
         methods.AddRange(sourceMethods);
@@ -293,6 +296,44 @@ public static class Dosai
         {
             mapping.Purl = resolver.Resolve(mapping.AssemblyName, mapping.ModuleName, mapping.AssemblyId ?? mapping.SourceId, mapping.Namespace, mapping.ClassName);
         }
+    }
+
+    private static void MergeCallGraph(CallGraph target, CallGraph source)
+    {
+        var nodeIds = target.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
+        foreach (var node in source.Nodes)
+        {
+            if (nodeIds.Add(node.Id))
+            {
+                target.Nodes.Add(node);
+            }
+        }
+
+        var edgeKeys = target.Edges
+            .Select(edge => $"{edge.SourceId}\u001f{edge.TargetId}\u001f{edge.CallLocation.FileName}\u001f{edge.CallLocation.LineNumber}\u001f{edge.CallLocation.ColumnNumber}\u001f{edge.CallType}")
+            .ToHashSet(StringComparer.Ordinal);
+        foreach (var edge in source.Edges)
+        {
+            var key = $"{edge.SourceId}\u001f{edge.TargetId}\u001f{edge.CallLocation.FileName}\u001f{edge.CallLocation.LineNumber}\u001f{edge.CallLocation.ColumnNumber}\u001f{edge.CallType}";
+            if (edgeKeys.Add(key))
+            {
+                target.Edges.Add(edge);
+            }
+        }
+
+        target.Nodes = target.Nodes.OrderBy(node => node.Id, StringComparer.Ordinal).ToList();
+        target.Edges = target.Edges
+            .OrderBy(edge => edge.SourceId, StringComparer.Ordinal)
+            .ThenBy(edge => edge.TargetId, StringComparer.Ordinal)
+            .ThenBy(edge => edge.CallLocation.FileName, StringComparer.Ordinal)
+            .ThenBy(edge => edge.CallLocation.LineNumber)
+            .ThenBy(edge => edge.CallLocation.ColumnNumber)
+            .Select((edge, index) =>
+            {
+                edge.Id = $"e{index + 1}";
+                return edge;
+            })
+            .ToList();
     }
     
     /// <summary>

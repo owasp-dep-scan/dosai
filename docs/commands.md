@@ -96,7 +96,7 @@ The primary output is `MethodsSlice`. Important collections include `Methods`, `
 
 ### Weaknesses and edge cases
 
-Reflection-based assembly inspection cannot recover local variable flow or source-only context. Roslyn semantic quality depends on available references. F#, R, and VC++ frontends are conservative and may over-approximate calls when full project metadata is absent. VC++ extraction does not yet perform full libclang semantic analysis.
+Reflection-based assembly inventory is enriched with IL method-body call graph extraction for managed binaries. Portable PDBs improve call locations, and the binary call graph includes direct calls, constructor calls, delegate target loads, and lightweight RTA-style virtual candidates for instantiated application types. Roslyn semantic quality depends on available references. F#, R, and VC++ frontends are conservative and may over-approximate calls when full project metadata is absent. VC++ extraction does not yet perform full libclang semantic analysis.
 
 ## `dataflows`
 
@@ -195,7 +195,7 @@ The analyzer uses pattern objects with target, kind, match mode, category, descr
 
 The C# and VB path is operation based. `DataFlowOperationWalker` seeds taint from matched parameters, attributes, request objects, CLI arguments, and source expressions. It propagates taint through local variables, field and property assignments, receiver-sensitive member keys, common expressions, passthrough calls, object creation, return values, and simple interprocedural summaries. Sanitizer patterns stop or suppress taint, and validator guards can suppress taint in guarded true branches. Slices contain node IDs, edge IDs, source and sink categories, PURLs, taint kinds, field paths, confidence, and sink argument metadata.
 
-The method summary pass records parameter-to-return and parameter-to-sink relationships. These summaries allow calls to local helper methods to preserve taint without inlining the callee body every time. Assembly-only analysis performs a parallel IL pass over managed method bodies: it decodes opcodes, follows branch/switch successors with a bounded worklist, summarizes callees, replays parameter-to-return and parameter-to-sink summaries at call sites, resolves metadata symbols for pattern matching, scopes application assemblies with `.deps.json`, and maps IL offsets to source lines through portable PDB sequence points when available. Frontend analysis for F#, R, and VC++ adds conservative source-to-sink evidence for common script and native patterns.
+The method summary pass records parameter-to-return and parameter-to-sink relationships. These summaries allow calls to local helper methods to preserve taint without inlining the callee body every time. Assembly-only analysis performs a parallel IL pass over managed method bodies: it decodes opcodes, follows branch/switch successors with a bounded worklist, summarizes callees, replays parameter-to-return and parameter-to-sink summaries at call sites, resolves metadata symbols for pattern matching, scopes application assemblies with `.deps.json`, applies external passthrough summaries, recovers local names from portable PDB scopes, pre-seeds compiler-generated async/iterator/display-class fields, matches emitted framework attributes, and maps IL offsets to source lines through portable PDB sequence points when available. Frontend analysis for F#, R, and VC++ adds conservative source-to-sink evidence for common script and native patterns.
 
 The hot path is optimized for full source-tree CI runs. Pattern lists are pre-indexed by commonly queried kind, syntax text is cached and only materialized for code-like matches, duplicate edges are suppressed, and slice edge collection uses an outgoing-edge index instead of scanning every graph edge for every slice. The repository CI smoke test runs `dataflows --path ./Dosai` to catch regressions in this path.
 
@@ -205,7 +205,7 @@ The primary output is `DataFlowResult`. It contains `Nodes`, `Edges`, `Slices`, 
 
 ### Strengths
 
-`dataflows` is practical for CI and security triage. It handles missing references, legacy frameworks, route and CLI entry points, PURL enrichment, graph exports, sanitizer stop-flow, field-sensitive taint where receiver identity is available, assembly-only IL slicing, portable PDB locations, and basic interprocedural flow.
+`dataflows` is practical for CI and security triage. It handles missing references, legacy frameworks, route and CLI entry points, PURL enrichment, graph exports, sanitizer stop-flow, field-sensitive taint where receiver identity is available, assembly-only IL slicing, PDB local/source locations, async and closure captured fields, and basic interprocedural flow.
 
 ### Weaknesses and edge cases
 

@@ -53,6 +53,7 @@ public static partial class DataFlowAnalyzer
                 var reader = peReader.GetMetadataReader();
                 var sourceMap = LoadPortablePdbSourceMap(assemblyPath, result.Diagnostics);
                 CollectAssemblyMethodSummaries(peReader, reader, sourceMap, assemblyPath, context, summaries);
+                PreseedAssemblyFieldTaints(peReader, reader, sourceMap, assemblyPath, context);
                 foreach (var methodHandle in reader.MethodDefinitions)
                 {
                     var method = reader.GetMethodDefinition(methodHandle);
@@ -110,6 +111,49 @@ public static partial class DataFlowAnalyzer
             if (!changed)
             {
                 break;
+            }
+        }
+    }
+
+    private static void PreseedAssemblyFieldTaints(PEReader peReader, MetadataReader reader, AssemblySourceMap sourceMap, string assemblyPath, AssemblyDataFlowContext context)
+    {
+        foreach (var methodHandle in reader.MethodDefinitions)
+        {
+            var method = reader.GetMethodDefinition(methodHandle);
+            if (method.RelativeVirtualAddress == 0) continue;
+            try
+            {
+                var methodInfo = BuildMethodInfo(reader, methodHandle, method, assemblyPath, sourceMap);
+                var isStatic = (method.Attributes & MethodAttributes.Static) != 0;
+                var argumentTaints = SeedAssemblyParameters(reader, method, methodInfo, isStatic, context);
+                if (argumentTaints.Count == 0) continue;
+                var stack = new List<AssemblyTaint?>();
+                foreach (var instruction in DecodeInstructions(peReader.GetMethodBody(method.RelativeVirtualAddress).GetILReader()))
+                {
+                    if (TryGetLdargIndex(instruction.OpCode, instruction.Operand, out var argIndex))
+                    {
+                        stack.Add(argumentTaints.TryGetValue(argIndex, out var taint) ? taint : null);
+                        continue;
+                    }
+
+                    if (instruction.OpCode == OpCodes.Stfld || instruction.OpCode == OpCodes.Stsfld)
+                    {
+                        var valueTaint = stack.Count == 0 ? null : stack[^1];
+                        if (stack.Count > 0) stack.RemoveAt(stack.Count - 1);
+                        if (instruction.OpCode == OpCodes.Stfld && stack.Count > 0) stack.RemoveAt(stack.Count - 1);
+                        if (valueTaint is not null && instruction.Operand is int fieldToken && ResolveMember(reader, fieldToken) is { } field)
+                        {
+                            context.RecordFieldTaint(field.Symbol, valueTaint);
+                        }
+                        continue;
+                    }
+
+                    ApplyDefaultListStackBehaviour(instruction.OpCode, stack);
+                }
+            }
+            catch
+            {
+                // Best-effort field preseed only.
             }
         }
     }
@@ -180,7 +224,15 @@ public static partial class DataFlowAnalyzer
 
             if (TryGetStlocIndex(opCode, instruction.Operand, out var stlocIndex))
             {
-                state.Locals[stlocIndex] = state.Pop();
+                var localTaint = state.Pop();
+                if (localTaint is not null)
+                {
+                    var localName = sourceMap.GetLocalName(methodInfo.MetadataToken, stlocIndex, instruction.Offset) ?? $"local_{stlocIndex}";
+                    var assignmentNode = context.AddNode("Assignment", localName, methodInfo, assemblyPath, isSource: false, isSink: false, [], null, $"{methodInfo.Symbol}.{localName}", null, localName, instruction.Offset + 1);
+                    context.AddEdges(localTaint.NodeIds, assignmentNode.Id, "AssemblyLocalAssignment", methodInfo, assemblyPath, instruction.Offset + 1, localName);
+                    localTaint = localTaint.Append(assignmentNode.Id);
+                }
+                state.Locals[stlocIndex] = localTaint;
                 EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, state, worklist);
                 continue;
             }
@@ -206,7 +258,11 @@ public static partial class DataFlowAnalyzer
             {
                 var instanceTaint = opCode == OpCodes.Ldfld ? state.Pop() : null;
                 var member = instruction.Operand is int fieldToken ? ResolveMember(reader, fieldToken) : null;
-                var fieldTaint = member is not null && state.Fields.TryGetValue(member.Symbol, out var taint) ? taint : instanceTaint;
+                var fieldTaint = member is not null && state.Fields.TryGetValue(member.Symbol, out var taint)
+                    ? taint
+                    : member is not null && context.TryGetFieldTaint(member.Symbol, out var storedTaint)
+                        ? storedTaint
+                        : instanceTaint;
                 state.Push(fieldTaint);
                 EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, state, worklist);
                 continue;
@@ -222,6 +278,10 @@ public static partial class DataFlowAnalyzer
                 if (instruction.Operand is int fieldToken && ResolveMember(reader, fieldToken) is { } member)
                 {
                     state.Fields[member.Symbol] = valueTaint;
+                    if (valueTaint is not null)
+                    {
+                        context.RecordFieldTaint(member.Symbol, valueTaint);
+                    }
                 }
                 EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, state, worklist);
                 continue;
@@ -394,7 +454,10 @@ public static partial class DataFlowAnalyzer
 
             var parameterName = reader.GetString(parameter.Name);
             var ilIndex = isStatic ? parameter.SequenceNumber - 1 : parameter.SequenceNumber;
-            var matched = context.MatchParameterSource(parameterName, methodInfo).ToList();
+            var matched = context.MatchParameterSource(parameterName, methodInfo)
+                .Concat(context.MatchAttributeSource(GetAttributeNames(reader, method.GetCustomAttributes()).Concat(GetAttributeNames(reader, parameter.GetCustomAttributes()))))
+                .DistinctBy(pattern => pattern.Pattern)
+                .ToList();
             if (matched.Count == 0)
             {
                 continue;
@@ -603,6 +666,33 @@ public static partial class DataFlowAnalyzer
             HandleKind.FieldDefinition => ResolveFieldDefinition(reader, (FieldDefinitionHandle)handle),
             _ => null
         };
+    }
+
+    private static IEnumerable<string> GetAttributeNames(MetadataReader reader, CustomAttributeHandleCollection attributes)
+    {
+        foreach (var attributeHandle in attributes)
+        {
+            var attribute = reader.GetCustomAttribute(attributeHandle);
+            EntityHandle constructor = attribute.Constructor;
+            EntityHandle parent = constructor.Kind switch
+            {
+                HandleKind.MemberReference => reader.GetMemberReference((MemberReferenceHandle)constructor).Parent,
+                HandleKind.MethodDefinition => reader.GetMethodDefinition((MethodDefinitionHandle)constructor).GetDeclaringType(),
+                _ => default
+            };
+            var name = parent.Kind switch
+            {
+                HandleKind.TypeReference => GetFullTypeName(reader, reader.GetTypeReference((TypeReferenceHandle)parent)),
+                HandleKind.TypeDefinition => GetFullTypeName(reader, reader.GetTypeDefinition((TypeDefinitionHandle)parent)),
+                _ => string.Empty
+            };
+            if (!string.IsNullOrWhiteSpace(name))
+            {
+                yield return name;
+                var simpleName = name.Split('.').LastOrDefault();
+                if (!string.IsNullOrWhiteSpace(simpleName)) yield return simpleName!;
+            }
+        }
     }
 
     private static AssemblyMemberInfo ResolveMemberReference(MetadataReader reader, MemberReferenceHandle handle)
@@ -871,6 +961,7 @@ public static partial class DataFlowAnalyzer
             using var provider = MetadataReaderProvider.FromPortablePdbStream(pdbStream);
             var reader = provider.GetMetadataReader();
             var locations = new Dictionary<int, List<AssemblySequencePoint>>();
+            var locals = new Dictionary<int, List<AssemblyLocalScope>>();
             foreach (var methodDebugHandle in reader.MethodDebugInformation)
             {
                 var rowNumber = MetadataTokens.GetRowNumber(methodDebugHandle);
@@ -888,7 +979,28 @@ public static partial class DataFlowAnalyzer
                     locations[MetadataTokens.GetToken(MetadataTokens.MethodDefinitionHandle(rowNumber))] = points.OrderBy(point => point.Offset).ToList();
                 }
             }
-            return new AssemblySourceMap(locations);
+
+            foreach (var localScopeHandle in reader.LocalScopes)
+            {
+                var localScope = reader.GetLocalScope(localScopeHandle);
+                var methodToken = MetadataTokens.GetToken(localScope.Method);
+                if (!locals.TryGetValue(methodToken, out var localScopes))
+                {
+                    localScopes = [];
+                    locals[methodToken] = localScopes;
+                }
+
+                foreach (var variableHandle in localScope.GetLocalVariables())
+                {
+                    var variable = reader.GetLocalVariable(variableHandle);
+                    if (variable.Attributes.HasFlag(LocalVariableAttributes.DebuggerHidden)) continue;
+                    var name = reader.GetString(variable.Name);
+                    if (string.IsNullOrWhiteSpace(name)) continue;
+                    localScopes.Add(new AssemblyLocalScope(variable.Index, name, localScope.StartOffset, localScope.Length));
+                }
+            }
+
+            return new AssemblySourceMap(locations, locals);
         }
         catch (Exception ex) when (ex is BadImageFormatException or IOException or UnauthorizedAccessException or InvalidOperationException)
         {
@@ -925,6 +1037,14 @@ public static partial class DataFlowAnalyzer
         {
             state.Push(null);
         }
+    }
+
+    private static void ApplyDefaultListStackBehaviour(OpCode opCode, List<AssemblyTaint?> stack)
+    {
+        var popCount = GetPopCount(opCode.StackBehaviourPop);
+        for (var i = 0; i < popCount && stack.Count > 0; i++) stack.RemoveAt(stack.Count - 1);
+        var pushCount = GetPushCount(opCode.StackBehaviourPush);
+        for (var i = 0; i < pushCount; i++) stack.Add(null);
     }
 
     private static int GetPopCount(StackBehaviour behaviour) => behaviour switch
@@ -1109,6 +1229,7 @@ public static partial class DataFlowAnalyzer
         private readonly Dictionary<string, List<DataFlowEdge>> _outgoingEdgesBySource = result.Edges.GroupBy(edge => edge.SourceId, StringComparer.Ordinal).ToDictionary(group => group.Key, group => group.ToList(), StringComparer.Ordinal);
         private readonly DataFlowPatternIndex _patternIndex = new(patterns);
         private readonly PackageUrlResolver _purlResolver = PackageUrlResolver.Create(basePath);
+        private readonly Dictionary<string, AssemblyTaint> _fieldTaints = new(StringComparer.Ordinal);
 
         public IEnumerable<DataFlowPattern> MatchParameterSource(string parameterName, AssemblyMethodInfo method)
         {
@@ -1132,6 +1253,19 @@ public static partial class DataFlowAnalyzer
         public IEnumerable<DataFlowPattern> MatchSanitizer(AssemblyMemberInfo member) => MatchMember(member, _patternIndex.Sanitizers);
         public IEnumerable<DataFlowPattern> MatchPassthrough(AssemblyMemberInfo member) => MatchMember(member, _patternIndex.Passthroughs);
         public IEnumerable<DataFlowPattern> MatchSourceCode(string code) => _patternIndex.SourceCode.Where(pattern => AssemblyPatternMatches(code, pattern));
+        public IEnumerable<DataFlowPattern> MatchAttributeSource(IEnumerable<string> attributes) => _patternIndex.SourceAttributes.Where(pattern => attributes.Any(attribute => AssemblyPatternMatches(attribute, pattern)));
+
+        public void RecordFieldTaint(string fieldSymbol, AssemblyTaint taint)
+        {
+            if (_fieldTaints.TryGetValue(fieldSymbol, out var existing) && CombineAssemblyTaints([existing, taint]) is { } combined)
+            {
+                _fieldTaints[fieldSymbol] = combined;
+                return;
+            }
+            _fieldTaints[fieldSymbol] = taint;
+        }
+
+        public bool TryGetFieldTaint(string fieldSymbol, out AssemblyTaint taint) => _fieldTaints.TryGetValue(fieldSymbol, out taint!);
 
         private static bool IsAssemblySourceMemberPattern(DataFlowPattern pattern) => pattern.Kind switch
         {
@@ -1296,6 +1430,10 @@ public static partial class DataFlowAnalyzer
     private sealed record AssemblyMemberInfo(string Symbol, string Name, string ContainingType, int ParameterCount, bool HasThis, bool ReturnsVoid, string ReturnType);
     private sealed record AssemblySourceLocation(string FilePath, int LineNumber, int ColumnNumber);
     private sealed record AssemblySequencePoint(int Offset, string FilePath, int LineNumber, int ColumnNumber);
+    private sealed record AssemblyLocalScope(int Index, string Name, int StartOffset, int Length)
+    {
+        public bool Contains(int offset) => offset >= StartOffset && offset <= StartOffset + Length;
+    }
     private sealed record AssemblyMethodInfo(string Symbol, string Name, string ContainingType, string Namespace, string AssemblyName, string ReturnType, string AssemblyPath, int MetadataToken, IReadOnlyList<AssemblySequencePoint> SourceLocations)
     {
         public AssemblySourceLocation ResolveLocation(int ilOffset, string assemblyPath)
@@ -1307,10 +1445,13 @@ public static partial class DataFlowAnalyzer
         }
     }
 
-    private sealed class AssemblySourceMap(Dictionary<int, List<AssemblySequencePoint>> locationsByMethodToken)
+    private sealed class AssemblySourceMap(Dictionary<int, List<AssemblySequencePoint>> locationsByMethodToken, Dictionary<int, List<AssemblyLocalScope>> localsByMethodToken)
     {
-        public static AssemblySourceMap Empty { get; } = new([]);
+        public static AssemblySourceMap Empty { get; } = new([], []);
         public IReadOnlyList<AssemblySequencePoint> GetLocations(int methodToken) => locationsByMethodToken.TryGetValue(methodToken, out var locations) ? locations : [];
+        public string? GetLocalName(int methodToken, int localIndex, int ilOffset) => localsByMethodToken.TryGetValue(methodToken, out var locals)
+            ? locals.Where(local => local.Index == localIndex && local.Contains(ilOffset)).OrderBy(local => local.Length).Select(local => local.Name).FirstOrDefault() ?? locals.FirstOrDefault(local => local.Index == localIndex)?.Name
+            : null;
     }
 
     private sealed class AssemblyMethodSummary(string method)

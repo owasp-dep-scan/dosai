@@ -28,6 +28,49 @@ public class DosaiTests
     }
 
     [Fact]
+    public void GetMethods_AssemblyOnly_IlCallGraphIncludesMethodBodyEdges()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "AssemblyCallGraphFlow", """
+using System.Diagnostics;
+
+public static class Program
+{
+    public static void Main(string[] args)
+    {
+        Launch(args[0]);
+    }
+
+    private static void Launch(string command)
+    {
+        Process.Start(command);
+    }
+}
+""");
+
+        var result = Depscan.Dosai.GetMethods(Path.Combine(outputDirectory, "AssemblyCallGraphFlow.dll"));
+        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result, new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() }
+        });
+
+        Assert.NotNull(methodsSlice?.CallGraph);
+        Assert.NotNull(methodsSlice.MethodCalls);
+        var callGraph = methodsSlice.CallGraph;
+        Assert.NotEmpty(callGraph.Edges);
+        Assert.Contains(callGraph.Edges, edge => edge.SourceId.Contains("Program.Main", StringComparison.Ordinal) && edge.TargetId.Contains("Program.Launch", StringComparison.Ordinal));
+        Assert.Contains(callGraph.Edges, edge => edge.SourceId.Contains("Program.Launch", StringComparison.Ordinal) && edge.TargetId.Contains("System.Diagnostics.Process.Start", StringComparison.Ordinal));
+        var nodeIds = callGraph.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
+        Assert.All(callGraph.Edges, edge =>
+        {
+            Assert.Contains(edge.SourceId, nodeIds);
+            Assert.Contains(edge.TargetId, nodeIds);
+            Assert.True(edge.CallLocation.LineNumber > 0);
+        });
+        Assert.Contains(methodsSlice.MethodCalls!, call => call.SourceId is not null && call.SourceId.Contains("Program.Launch", StringComparison.Ordinal) && call.TargetId is not null && call.TargetId.Contains("System.Diagnostics.Process.Start", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void GetMethods_VBAssembly_PathIsFile_ReturnsDetails()
     {
         var assemblyPath = GetFilePath(DosaiTestDataVBDLL);
@@ -377,7 +420,8 @@ public static class Program
 {
     public static void Main(string[] args)
     {
-        Process.Start(args[0]);
+        var command = args[0];
+        Process.Start(command);
     }
 }
 """);
@@ -385,6 +429,7 @@ public static class Program
         var dataFlowResult = ReadDataFlows(Path.Combine(outputDirectory, "AssemblyPdbFlow.dll"));
 
         Assert.Contains(dataFlowResult.Nodes, node => node.Properties.TryGetValue("analysis", out var analysis) && analysis == "assembly-il" && node.FileName == "Program.cs" && node.LineNumber > 1);
+        Assert.Contains(dataFlowResult.Nodes, node => node.Kind == "Assignment" && node.Name == "command" && node.Properties.TryGetValue("analysis", out var analysis) && analysis == "assembly-il");
         Assert.Contains(dataFlowResult.Edges, edge => edge.FileName == "Program.cs" && edge.LineNumber > 1);
     }
 
@@ -410,6 +455,54 @@ public static class Program
 
         Assert.Contains(dataFlowResult.Slices, slice => slice.SourceCategory == "cli" && slice.SinkCategory == "command");
         Assert.DoesNotContain(dataFlowResult.Nodes, node => node.Properties.TryGetValue("assembly", out var assembly) && assembly == Path.GetFileName(runtimeAssembly));
+    }
+
+    [Fact]
+    public void GetDataFlows_AssemblyOnlyAsyncStateMachine_ReconstructsCapturedArgumentFlow()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "AssemblyAsyncFlow", """
+using System.Diagnostics;
+using System.Threading.Tasks;
+
+public static class Program
+{
+    public static async Task Main(string[] args)
+    {
+        await Task.Yield();
+        Process.Start(args[0]);
+    }
+}
+""");
+
+        var dataFlowResult = ReadDataFlows(Path.Combine(outputDirectory, "AssemblyAsyncFlow.dll"));
+
+        Assert.Contains(dataFlowResult.Slices, slice => slice.SourceCategory == "cli" && slice.SinkCategory == "command");
+        Assert.Contains(dataFlowResult.Nodes, node => node.IsSink && node.FileName == "Program.cs" && node.LineNumber > 1);
+    }
+
+    [Fact]
+    public void GetDataFlows_AssemblyOnlyDelegateClosure_ReconstructsCapturedArgumentFlow()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "AssemblyDelegateFlow", """
+using System;
+using System.Diagnostics;
+
+public static class Program
+{
+    public static void Main(string[] args)
+    {
+        Action launch = () => Process.Start(args[0]);
+        launch();
+    }
+}
+""");
+
+        var dataFlowResult = ReadDataFlows(Path.Combine(outputDirectory, "AssemblyDelegateFlow.dll"));
+
+        Assert.Contains(dataFlowResult.Slices, slice => slice.SourceCategory == "cli" && slice.SinkCategory == "command");
+        Assert.Contains(dataFlowResult.Nodes, node => node.IsSink && node.FileName == "Program.cs" && node.LineNumber > 1);
     }
 
     [Fact]

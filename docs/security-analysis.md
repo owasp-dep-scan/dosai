@@ -48,6 +48,8 @@ The `dosai.json` output includes:
 - `SourceAssemblyMapping`
 - PURL fields where NuGet package identity is known
 
+For managed assembly-only inputs, call graph edges are extracted from IL method bodies. Direct calls, constructor calls, delegate target loads, and lightweight RTA-style virtual candidates are emitted with portable PDB source locations when available, so `methods` remains useful when source is unavailable.
+
 ### Data-flow slices
 
 ```bash
@@ -60,7 +62,7 @@ dotnet run --project ./Dosai -- dataflows \
 
 The `dataflows.json` output includes `Metadata`, `EntryPoints`, `PackageReachability`, `DangerousApiReachability`, and `WeaknessCandidates` in addition to nodes, edges, and slices.
 
-`--path` may point at a source tree, a single managed `.dll`/`.exe`, or a directory containing managed assemblies. Source analysis uses Roslyn `IOperation`; assembly-only analysis reconstructs local and interprocedural flows from IL method bodies, branch targets, metadata symbols, and portable PDB sequence points when `.pdb` files are present. For assembly directories, Dosai reads adjacent `.deps.json` files to prefer project/application assemblies and avoid flooding results with framework and package dependency internals.
+`--path` may point at a source tree, a single managed `.dll`/`.exe`, or a directory containing managed assemblies. Source analysis uses Roslyn `IOperation`; assembly-only analysis reconstructs local and interprocedural flows from IL method bodies, branch targets, metadata symbols, portable PDB local scopes/sequence points, emitted framework attributes, and compiler-generated async/iterator/display-class fields. For assembly directories, Dosai reads adjacent `.deps.json` files to prefer project/application assemblies and avoid flooding results with framework and package dependency internals.
 
 Assembly-derived nodes include `Properties.analysis = "assembly-il"`, `Properties.assembly`, `Properties.ilOffset`, and a metadata token. When a portable PDB is available, node and edge `FileName`, `Path`, `LineNumber`, and `ColumnNumber` use source locations; otherwise they fall back to the assembly file and IL offset.
 

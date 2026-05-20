@@ -138,9 +138,14 @@ jobs:
         }
         CS
         dotnet build /tmp/dosai-assembly-smoke/AssemblySmoke.csproj -o /tmp/dosai-assembly-smoke/out -v:quiet
+        dotnet run --no-build --project ./Dosai/Dosai.csproj -- methods --path /tmp/dosai-assembly-smoke/out/AssemblySmoke.dll --o /tmp/dosai-assembly-methods.json --callgraph-format graphml --callgraph-out /tmp/dosai-assembly-callgraph.graphml
         dotnet run --no-build --project ./Dosai/Dosai.csproj -- dataflows --path /tmp/dosai-assembly-smoke/out/AssemblySmoke.dll --o /tmp/dosai-assembly-dataflows.json --graph-format graphml --graph-out /tmp/dosai-assembly-dataflows.graphml
         python3 - <<'PY'
         import json, xml.etree.ElementTree as ET
+        methods = json.load(open('/tmp/dosai-assembly-methods.json'))
+        callgraph = methods['CallGraph']
+        assert any(edge['SourceId'].find('Program.Main') >= 0 and edge['TargetId'].find('Program.Launch') >= 0 for edge in callgraph['Edges'])
+        assert any(edge['TargetId'].find('System.Diagnostics.Process.Start') >= 0 for edge in callgraph['Edges'])
         dataflows = json.load(open('/tmp/dosai-assembly-dataflows.json'))
         stats = dataflows['Statistics']
         assert stats['FilesAnalyzed'] == 1, stats
@@ -151,6 +156,7 @@ jobs:
         assert any(edge['Kind'] == 'AssemblyInterproceduralSink' for edge in dataflows['Edges'])
         node_ids = {node['Id'] for node in dataflows['Nodes']}
         assert all(edge['SourceId'] in node_ids and edge['TargetId'] in node_ids for edge in dataflows['Edges'])
+        ET.parse('/tmp/dosai-assembly-callgraph.graphml')
         ET.parse('/tmp/dosai-assembly-dataflows.graphml')
         PY
 

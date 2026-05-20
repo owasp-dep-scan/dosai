@@ -8,7 +8,7 @@ Dosai inspects source code, assemblies, and NuGet packages. It extracts methods,
 
 ### Commands
 
-Use `methods` for method inventory, endpoints, call graph, and dependency evidence. Use `dataflows` for source-to-sink slicing. Use `crypto` for cryptographic assets, materials, misuse findings, reachability, and CBOM evidence. `agent-context`, `query`, `mcp`, `report`, and `diff` support review automation and CI workflows.
+Use `methods` for method inventory, endpoints, call graph, and dependency evidence. For managed assemblies, `methods` also extracts IL method-body call edges, portable PDB call locations, delegate targets, and lightweight virtual-call candidates. Use `dataflows` for source-to-sink slicing. Use `crypto` for cryptographic assets, materials, misuse findings, reachability, and CBOM evidence. `agent-context`, `query`, `mcp`, `report`, and `diff` support review automation and CI workflows.
 
 For detailed command usage, implementation notes, algorithms, strengths, and limitations, see [the Dosai command reference](./docs/commands.md).
 
@@ -29,7 +29,7 @@ dotnet run --project ./Dosai/Dosai.csproj -- dataflows \
   --graph-out /tmp/dosai-dataflows.graphml
 ```
 
-The data-flow engine performs field-sensitive property/field taint where receiver identity is available and emits simple interprocedural summaries for parameter-to-return and parameter-to-sink callees. For C# and VB source it uses Roslyn `IOperation`; for assembly-only inputs it reconstructs method-body flow from IL metadata, control-flow branches, portable PDB sequence points, and package dependency scope. Slices can carry taint kinds, field paths, confidence, source/assembly evidence, and F#/R/VC++ frontend evidence for common script and native input and sink patterns.
+The data-flow engine performs field-sensitive property/field taint where receiver identity is available and emits simple interprocedural summaries for parameter-to-return and parameter-to-sink callees. For C# and VB source it uses Roslyn `IOperation`; for assembly-only inputs it reconstructs method-body flow from IL metadata, control-flow branches, portable PDB sequence points and local scopes, async/iterator/display-class captured fields, external passthrough summaries, emitted framework attributes, and package dependency scope. Slices can carry taint kinds, field paths, confidence, source/assembly evidence, and F#/R/VC++ frontend evidence for common script and native input and sink patterns.
 
 `dataflows` is quiet by default and writes the JSON/graph artifacts. Add `--print` during local triage to render each slice as a stack-trace-style path with frames such as `at Source/cli args [dfn1] in Program.cs:5:5`, code snippets, symbols, PURLs, and `via ...` edge transitions:
 
