@@ -90,7 +90,7 @@ F#, R, and VC++ frontends are intentionally tolerant of incomplete project metad
 
 ### Output
 
-The primary output is `MethodsSlice`. Important collections include `Methods`, `MethodCalls`, `Properties`, `Fields`, `Events`, `Constructors`, `CallGraph`, `ApiEndpoints`, `EntryPoints`, `PackageReachability`, `AssemblyInformation`, and `SourceAssemblyMapping`.
+The primary output is `MethodsSlice`. Important collections include `Methods`, `MethodCalls`, `Properties`, `Fields`, `Events`, `Constructors`, `CallGraph`, `ApiEndpoints`, `EntryPoints`, `PackageReachability`, `AssemblyInformation`, and `SourceAssemblyMapping`. `PackageReachability[].SourceLocations` records source-file-backed call graph nodes or edges that support each reachable PURL; assembly DLL fallback locations are filtered out so downstream SBOM occurrence matching can prefer actionable source files.
 
 ### Strengths
 
@@ -203,7 +203,7 @@ The hot path is optimized for full source-tree CI runs. Pattern lists are pre-in
 
 ### Output
 
-The primary output is `DataFlowResult`. It contains `Nodes`, `Edges`, `Slices`, `EntryPoints`, `PackageReachability`, `DangerousApiReachability`, `WeaknessCandidates`, `Patterns`, `MethodSummaries`, `Statistics`, and `Diagnostics`.
+The primary output is `DataFlowResult`. It contains `Nodes`, `Edges`, `Slices`, `EntryPoints`, `PackageReachability`, `DangerousApiReachability`, `WeaknessCandidates`, `Patterns`, `MethodSummaries`, `Statistics`, and `Diagnostics`. `PackageReachability[].SourceLocations` is populated from matching PURL-bearing data-flow nodes and edges, with a sink/source fallback for pattern-provided slice PURLs. Locations are deduplicated, sorted, and limited to source files (`.cs`, `.csx`, `.vb`, `.fs`, `.fsx`) to keep package occurrence evidence precise.
 
 Method inventory, call graph, and data-flow records carry shared source/binary evidence metadata. `MethodIdentity` links source signatures, assembly signatures, metadata tokens, package identity, and symbol names where known. `AnalysisEvidenceKind` distinguishes `SourceRoslynDirect`, `SourceRoslynSummary`, `SourceRoslynVirtualCandidate`, `SourceRoslynDelegateTarget`, `AssemblyReflection`, `AssemblyIlDirect`, `AssemblyIlSummary`, `AssemblyIlVirtualCandidate`, `AssemblyIlDelegateTarget`, `AssemblyIlGeneratedState`, `ExternalSummary`, `FrameworkModel`, `ReflectionHeuristic`, and `LanguageFrontend` facts so combined analysis can merge and prioritize evidence instead of treating source and binary outputs as unrelated modes.
 

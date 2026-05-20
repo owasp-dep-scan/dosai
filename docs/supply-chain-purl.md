@@ -94,6 +94,29 @@ Package metadata from `project.assets.json` or `*.deps.json` still takes precede
 
 GraphML/GEXF exports include PURL node/edge attributes for both call graphs and data-flow graphs.
 
+### Reachable package occurrence locations
+
+`methods` and `dataflows` also emit `PackageReachability[]` facts. Each fact can include `SourceLocations[]` entries that help SBOM and vulnerability tools correlate a reachable PURL to concrete source evidence:
+
+```json
+{
+  "Purl": "pkg:nuget/System.Diagnostics.Process",
+  "Reachable": true,
+  "ReachabilityKind": "CallGraphEdge",
+  "SourceLocations": [
+    {
+      "Path": "src/Program.cs",
+      "FileName": "Program.cs",
+      "LineNumber": 10,
+      "ColumnNumber": 9,
+      "Kind": "CallGraphEdge"
+    }
+  ]
+}
+```
+
+Dosai only emits source-file locations for package reachability occurrences (`.cs`, `.csx`, `.vb`, `.fs`, `.fsx`). Assembly-only fallback paths such as `Package.dll` are suppressed because they are usually poor occurrence evidence for source-oriented SBOMs. For data-flow slices, locations are attached only when the node or edge carries the same PURL, with a source/sink fallback for pattern-provided PURLs. This keeps unrelated source nodes in the same slice from being reported as occurrences of a dependency package.
+
 ### Printed data-flow traces
 
 When `dataflows --print` is used, PURLs are included inline on stack-trace-style frames and transitions, for example:
