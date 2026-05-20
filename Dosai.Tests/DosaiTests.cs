@@ -62,6 +62,15 @@ public static class Program
         Assert.Contains(callGraph.Edges, edge => edge.EvidenceKind == AnalysisEvidenceKind.AssemblyIlDirect && edge.Evidence.Any(evidence => evidence.Kind == AnalysisEvidenceKind.AssemblyIlDirect));
         Assert.Contains(callGraph.Edges, edge => edge.SourceId.Contains("Program.Main", StringComparison.Ordinal) && edge.TargetId.Contains("Program.Launch", StringComparison.Ordinal));
         Assert.Contains(callGraph.Edges, edge => edge.SourceId.Contains("Program.Launch", StringComparison.Ordinal) && edge.TargetId.Contains("System.Diagnostics.Process.Start", StringComparison.Ordinal));
+        Assert.Contains(callGraph.Nodes, node =>
+            node.Id.Contains("System.Diagnostics.Process.Start", StringComparison.Ordinal) &&
+            node.IsExternal &&
+            node.Module == "System.Diagnostics.Process.dll" &&
+            node.FileName == "System.Diagnostics.Process.dll");
+        Assert.Contains(methodsSlice.MethodCalls!, call =>
+            call.TargetId is not null &&
+            call.TargetId.Contains("System.Diagnostics.Process.Start", StringComparison.Ordinal) &&
+            call.Module == "System.Diagnostics.Process.dll");
         var nodeIds = callGraph.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
         Assert.All(callGraph.Edges, edge =>
         {
@@ -100,6 +109,10 @@ public static class Program
             edge.SourceId.Contains("Program.Main", StringComparison.Ordinal) &&
             edge.TargetId.Contains("System.Diagnostics.Process.Start", StringComparison.Ordinal));
         Assert.Contains(callGraph.Nodes, node => node.Id.Contains("Program.Main", StringComparison.Ordinal) && node.Identity?.Evidence.Contains(AnalysisEvidenceKind.AssemblyIlGeneratedState) == true);
+        Assert.Contains(methodsSlice.PackageReachability!, package =>
+            package.Purl == "pkg:nuget/System.Diagnostics.Process" &&
+            package.Confidence == "High" &&
+            package.EvidenceKinds.Contains(AnalysisEvidenceKind.AssemblyIlGeneratedState));
         Assert.All(callGraph.Edges, edge =>
         {
             Assert.Contains(edge.SourceId, nodeIds);
@@ -1104,6 +1117,36 @@ public static class Program
 
         Assert.Contains(dataFlowResult.Slices, slice => slice.SourceCategory == "cli" && slice.SinkCategory == "command");
         Assert.DoesNotContain(dataFlowResult.Nodes, node => node.Properties.TryGetValue("assembly", out var assembly) && assembly == Path.GetFileName(runtimeAssembly));
+    }
+
+    [Fact]
+    public void GetDataFlows_AssemblyDirectoryWithMalformedDepsJson_RemainsBestEffort()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "AssemblyMalformedDepsFlow", """
+using System.Diagnostics;
+
+public static class Program
+{
+    public static void Main(string[] args)
+    {
+        Process.Start(args[0]);
+    }
+}
+""");
+        File.WriteAllText(Path.Combine(outputDirectory, "AssemblyMalformedDepsFlow.deps.json"), """
+{
+  "libraries": {
+    "AssemblyMalformedDepsFlow/1.0.0": {
+      "type": null
+    }
+  }
+}
+""");
+
+        var dataFlowResult = ReadDataFlows(outputDirectory);
+
+        Assert.Contains(dataFlowResult.Slices, slice => slice.SourceCategory == "cli" && slice.SinkCategory == "command");
     }
 
     [Fact]

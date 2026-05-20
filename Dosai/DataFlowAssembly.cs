@@ -1389,10 +1389,10 @@ public static partial class DataFlowAnalyzer
             try
             {
                 using var document = JsonDocument.Parse(File.ReadAllText(depsFile));
-                if (!document.RootElement.TryGetProperty("libraries", out var libraries)) continue;
+                if (!document.RootElement.TryGetProperty("libraries", out var libraries) || libraries.ValueKind != JsonValueKind.Object) continue;
                 foreach (var library in libraries.EnumerateObject())
                 {
-                    if (!library.Value.TryGetProperty("type", out var typeElement) || !typeElement.GetString()!.Equals("project", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (!library.Value.TryGetProperty("type", out var typeElement) || !string.Equals(typeElement.GetString(), "project", StringComparison.OrdinalIgnoreCase)) continue;
                     var slashIndex = library.Name.IndexOf('/');
                     names.Add(slashIndex > 0 ? library.Name[..slashIndex] : library.Name);
                 }

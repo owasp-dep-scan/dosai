@@ -91,7 +91,7 @@ internal static class AssemblyCallGraphAnalyzer
                                 : CallType.MethodCall;
                         var evidenceKind = isGeneratedStateMachine ? AnalysisEvidenceKind.AssemblyIlGeneratedState : callType == CallType.DelegateInvoke ? AnalysisEvidenceKind.AssemblyIlDelegateTarget : AnalysisEvidenceKind.AssemblyIlDirect;
                         var targetId = ResolveInternalTargetId(assemblyFullPath, target.MetadataToken, target.Symbol, methodLookup);
-                        AddNode(nodes, targetId, target.Name, target.ClassName, target.Namespace, Path.GetFileName(target.FilePath), target.AssemblyName, Path.GetFileName(target.FilePath), callType == CallType.ConstructorCall ? "Constructor" : "Method", target.LineNumber, target.ColumnNumber, isExternal: !target.IsInternal);
+                        AddNode(nodes, targetId, target.Name, target.ClassName, target.Namespace, GetTargetFileName(target), target.AssemblyName, GetTargetModuleName(target), callType == CallType.ConstructorCall ? "Constructor" : "Method", target.LineNumber, target.ColumnNumber, isExternal: !target.IsInternal);
                         var evidenceDescription = isGeneratedStateMachine
                             ? "Call edge discovered from generated async/iterator state-machine IL and collapsed to the user method."
                             : "Call edge discovered from assembly IL method body.";
@@ -100,7 +100,7 @@ internal static class AssemblyCallGraphAnalyzer
                             Path = location.FilePath,
                             FileName = Path.GetFileName(location.FilePath),
                             Assembly = target.AssemblyName,
-                            Module = Path.GetFileName(target.FilePath),
+                            Module = GetTargetModuleName(target),
                             Namespace = target.Namespace,
                             ClassName = target.ClassName,
                             CalledMethod = target.Name,
@@ -119,7 +119,7 @@ internal static class AssemblyCallGraphAnalyzer
                             Evidence = [CreateEvidence(evidenceKind, location, evidenceDescription)]
                         };
                         calls.Add(call);
-                        var edgeKey = $"{sourceId}\u001f{targetId}\u001f{location.FilePath}\u001f{location.LineNumber}\u001f{location.ColumnNumber}\u001f{callType}";
+                        var edgeKey = $"{sourceId}\u001f{targetId}\u001f{location.FilePath}\u001f{location.LineNumber}\u001f{location.ColumnNumber}\u001f{callType}\u001f{evidenceKind}";
                         if (edgeKeys.Add(edgeKey))
                         {
                             edges.Add(new MethodCallEdge
@@ -301,13 +301,13 @@ internal static class AssemblyCallGraphAnalyzer
     {
         var target = resolved.Target.Member;
         var targetId = resolved.Target.TargetId;
-        AddNode(nodes, targetId, target.Name, target.ClassName, target.Namespace, Path.GetFileName(target.FilePath), target.AssemblyName, Path.GetFileName(target.FilePath), "Method", target.LineNumber, target.ColumnNumber, isExternal: !target.IsInternal, AnalysisEvidenceKind.AssemblyIlDelegateTarget);
+        AddNode(nodes, targetId, target.Name, target.ClassName, target.Namespace, GetTargetFileName(target), target.AssemblyName, GetTargetModuleName(target), "Method", target.LineNumber, target.ColumnNumber, isExternal: !target.IsInternal, AnalysisEvidenceKind.AssemblyIlDelegateTarget);
         var call = new MethodCalls
         {
             Path = location.FilePath,
             FileName = Path.GetFileName(location.FilePath),
             Assembly = target.AssemblyName,
-            Module = Path.GetFileName(target.FilePath),
+            Module = GetTargetModuleName(target),
             Namespace = target.Namespace,
             ClassName = target.ClassName,
             CalledMethod = target.Name,
@@ -346,6 +346,21 @@ internal static class AssemblyCallGraphAnalyzer
                 Evidence = [CreateEvidence(AnalysisEvidenceKind.AssemblyIlDelegateTarget, location, resolved.Description)]
             });
         }
+    }
+
+    private static string GetTargetFileName(AssemblyCallMember target) =>
+        target.IsInternal ? Path.GetFileName(target.FilePath) : GetExternalModuleName(target.AssemblyName);
+
+    private static string GetTargetModuleName(AssemblyCallMember target) =>
+        target.IsInternal ? Path.GetFileName(target.FilePath) : GetExternalModuleName(target.AssemblyName);
+
+    private static string GetExternalModuleName(string assemblyName)
+    {
+        if (string.IsNullOrWhiteSpace(assemblyName)) return string.Empty;
+        var simpleName = assemblyName.Split(',')[0].Trim();
+        return simpleName.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) || simpleName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
+            ? simpleName
+            : simpleName + ".dll";
     }
 
     private static bool IsDelegateConstructor(AssemblyCallMember member) => member.Name == ".ctor" && member.ParameterCount >= 2;

@@ -281,9 +281,9 @@ public static class TransparencyBuilder
 
     private static int EvidenceScore(AnalysisEvidenceKind kind) => kind switch
     {
-        AnalysisEvidenceKind.SourceRoslynDirect or AnalysisEvidenceKind.AssemblyIlDirect => 3,
+        AnalysisEvidenceKind.SourceRoslynDirect or AnalysisEvidenceKind.AssemblyIlDirect or AnalysisEvidenceKind.AssemblyIlGeneratedState or AnalysisEvidenceKind.AssemblyIlDelegateTarget or AnalysisEvidenceKind.SourceRoslynDelegateTarget => 3,
         AnalysisEvidenceKind.SourceRoslynSummary or AnalysisEvidenceKind.AssemblyIlSummary or AnalysisEvidenceKind.AssemblyReflection or AnalysisEvidenceKind.ExternalSummary or AnalysisEvidenceKind.FrameworkModel => 2,
-        AnalysisEvidenceKind.SourceRoslynVirtualCandidate or AnalysisEvidenceKind.SourceRoslynDelegateTarget or AnalysisEvidenceKind.AssemblyIlVirtualCandidate or AnalysisEvidenceKind.AssemblyIlDelegateTarget or AnalysisEvidenceKind.AssemblyIlGeneratedState or AnalysisEvidenceKind.ReflectionHeuristic or AnalysisEvidenceKind.LanguageFrontend => 1,
+        AnalysisEvidenceKind.SourceRoslynVirtualCandidate or AnalysisEvidenceKind.AssemblyIlVirtualCandidate or AnalysisEvidenceKind.ReflectionHeuristic or AnalysisEvidenceKind.LanguageFrontend => 1,
         _ => 0
     };
 
