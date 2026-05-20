@@ -576,7 +576,7 @@ public static class Dosai
     /// <returns>List of assembly information</returns>
     private static List<AssemblyInformation> GetAssemblyInformation(string path)
     {
-        var assembliesToInspect = GetFilesToInspect(path, Constants.AssemblyExtension, Constants.ExeExtension);
+        var assembliesToInspect = ScopeApplicationAssemblies(path, GetFilesToInspect(path, Constants.AssemblyExtension, Constants.ExeExtension));
         List<AssemblyInformation> assemblyInformation = [];
         List<string> failedAssemblies = [];
 
@@ -625,7 +625,7 @@ public static class Dosai
     /// <returns>List of assembly methods</returns>
     private static List<Method> GetAssemblyMethods(string path)
     {
-        var assembliesToInspect = GetFilesToInspect(path, Constants.AssemblyExtension, Constants.ExeExtension);
+        var assembliesToInspect = ScopeApplicationAssemblies(path, GetFilesToInspect(path, Constants.AssemblyExtension, Constants.ExeExtension));
         var assemblyMethods = new List<Method>();
         var processedAssemblyIdentities = new HashSet<string>();
         var sharedRuntimePaths = GetDotnetSharedRuntimePaths();
@@ -791,6 +791,64 @@ public static class Dosai
             };
         }
     }
+
+    private static List<string> ScopeApplicationAssemblies(string path, List<string> assemblyPaths)
+    {
+        if (assemblyPaths.Count == 0 || File.Exists(path))
+        {
+            return assemblyPaths;
+        }
+
+        var applicationAssemblyNames = GetApplicationAssemblyNames(path);
+        return assemblyPaths
+            .Where(assemblyPath => applicationAssemblyNames.Count == 0
+                ? IsLikelyApplicationAssembly(Path.GetFileName(assemblyPath))
+                : applicationAssemblyNames.Contains(Path.GetFileNameWithoutExtension(assemblyPath)))
+            .DistinctBy(Path.GetFullPath, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static HashSet<string> GetApplicationAssemblyNames(string directory)
+    {
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (!Directory.Exists(directory))
+        {
+            return names;
+        }
+
+        foreach (var depsFile in Directory.EnumerateFiles(directory, "*.deps.json", SearchOption.TopDirectoryOnly))
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(File.ReadAllText(depsFile));
+                if (!document.RootElement.TryGetProperty("libraries", out var libraries) || libraries.ValueKind != JsonValueKind.Object)
+                {
+                    continue;
+                }
+                foreach (var library in libraries.EnumerateObject())
+                {
+                    if (!library.Value.TryGetProperty("type", out var typeElement) || !string.Equals(typeElement.GetString(), "project", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+                    var slashIndex = library.Name.IndexOf('/');
+                    names.Add(slashIndex > 0 ? library.Name[..slashIndex] : library.Name);
+                }
+            }
+            catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
+            {
+                Console.WriteLine($"Warning: Could not read assembly dependency scope from {depsFile}: {ex.Message}");
+            }
+        }
+        return names;
+    }
+
+    private static bool IsLikelyApplicationAssembly(string fileName) =>
+        !fileName.StartsWith("System.", StringComparison.OrdinalIgnoreCase) &&
+        !fileName.StartsWith("Microsoft.", StringComparison.OrdinalIgnoreCase) &&
+        !fileName.StartsWith("Newtonsoft.", StringComparison.OrdinalIgnoreCase) &&
+        !fileName.StartsWith("FSharp.", StringComparison.OrdinalIgnoreCase) &&
+        !fileName.StartsWith("Humanizer", StringComparison.OrdinalIgnoreCase);
 
     private static string GetContainingTypeNameVb(Microsoft.CodeAnalysis.VisualBasic.Syntax.FieldDeclarationSyntax member)
     {

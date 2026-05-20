@@ -73,6 +73,130 @@ public static class Program
     }
 
     [Fact]
+    public void GetMethods_AssemblyOnlyAsyncStateMachine_CollapsesMoveNextToUserMethod()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "AssemblyAsyncCallGraph", """
+using System.Diagnostics;
+using System.Threading.Tasks;
+
+public static class Program
+{
+    public static async Task Main(string[] args)
+    {
+        await Task.Yield();
+        Process.Start(args[0]);
+    }
+}
+""");
+
+        var methodsSlice = ReadMethods(Path.Combine(outputDirectory, "AssemblyAsyncCallGraph.dll"));
+        var callGraph = methodsSlice.CallGraph!;
+        var nodeIds = callGraph.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
+
+        Assert.DoesNotContain(callGraph.Edges, edge => edge.SourceId.Contains("MoveNext", StringComparison.Ordinal));
+        Assert.Contains(callGraph.Edges, edge =>
+            edge.EvidenceKind == AnalysisEvidenceKind.AssemblyIlGeneratedState &&
+            edge.SourceId.Contains("Program.Main", StringComparison.Ordinal) &&
+            edge.TargetId.Contains("System.Diagnostics.Process.Start", StringComparison.Ordinal));
+        Assert.Contains(callGraph.Nodes, node => node.Id.Contains("Program.Main", StringComparison.Ordinal) && node.Identity?.Evidence.Contains(AnalysisEvidenceKind.AssemblyIlGeneratedState) == true);
+        Assert.All(callGraph.Edges, edge =>
+        {
+            Assert.Contains(edge.SourceId, nodeIds);
+            Assert.Contains(edge.TargetId, nodeIds);
+        });
+    }
+
+    [Fact]
+    public void GetMethods_AssemblyOnlyIteratorStateMachine_CollapsesMoveNextToIteratorMethod()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "AssemblyIteratorCallGraph", """
+using System.Collections.Generic;
+using System.Diagnostics;
+
+public static class Program
+{
+    public static void Main(string[] args)
+    {
+        foreach (var item in Commands(args)) { }
+    }
+
+    private static IEnumerable<string> Commands(string[] args)
+    {
+        Process.Start(args[0]);
+        yield return args[0];
+    }
+}
+""");
+
+        var methodsSlice = ReadMethods(Path.Combine(outputDirectory, "AssemblyIteratorCallGraph.dll"));
+        var callGraph = methodsSlice.CallGraph!;
+        var nodeIds = callGraph.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
+
+        Assert.DoesNotContain(callGraph.Edges, edge => edge.SourceId.Contains("MoveNext", StringComparison.Ordinal));
+        Assert.Contains(callGraph.Edges, edge =>
+            edge.EvidenceKind == AnalysisEvidenceKind.AssemblyIlGeneratedState &&
+            edge.SourceId.Contains("Program.Commands", StringComparison.Ordinal) &&
+            edge.TargetId.Contains("System.Diagnostics.Process.Start", StringComparison.Ordinal));
+        Assert.All(callGraph.Edges, edge =>
+        {
+            Assert.Contains(edge.SourceId, nodeIds);
+            Assert.Contains(edge.TargetId, nodeIds);
+        });
+    }
+
+    [Fact]
+    public void GetMethods_AssemblyOnlyDelegateInvokeAndEventAdd_ResolvesCallbackTargets()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "AssemblyDelegateCallGraph", """
+using System;
+
+public sealed class Publisher
+{
+    public event Action? Fired;
+    public void Raise() => Fired?.Invoke();
+}
+
+public static class Program
+{
+    public static void Main()
+    {
+        Action action = Handle;
+        action();
+        var publisher = new Publisher();
+        publisher.Fired += Handle;
+    }
+
+    private static void Handle() { }
+}
+""");
+
+        var methodsSlice = ReadMethods(Path.Combine(outputDirectory, "AssemblyDelegateCallGraph.dll"));
+        var callGraph = methodsSlice.CallGraph!;
+        var nodeIds = callGraph.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
+
+        Assert.Contains(callGraph.Edges, edge =>
+            edge.EvidenceKind == AnalysisEvidenceKind.AssemblyIlDelegateTarget &&
+            edge.CallType == CallType.DelegateInvoke &&
+            edge.SourceId.Contains("Program.Main", StringComparison.Ordinal) &&
+            edge.TargetId.Contains("Program.Handle", StringComparison.Ordinal) &&
+            edge.ArgumentExpressions?.Contains("delegate-invoke") == true);
+        Assert.Contains(callGraph.Edges, edge =>
+            edge.EvidenceKind == AnalysisEvidenceKind.AssemblyIlDelegateTarget &&
+            edge.CallType == CallType.EventSubscribe &&
+            edge.SourceId.Contains("Program.Main", StringComparison.Ordinal) &&
+            edge.TargetId.Contains("Program.Handle", StringComparison.Ordinal) &&
+            edge.ArgumentExpressions?.Contains("event-callback-target") == true);
+        Assert.All(callGraph.Edges, edge =>
+        {
+            Assert.Contains(edge.SourceId, nodeIds);
+            Assert.Contains(edge.TargetId, nodeIds);
+        });
+    }
+
+    [Fact]
     public void GetMethods_CombinedSourceAndAssembly_EmitsSharedEvidenceAndSourceAssemblyMapping()
     {
         using var tempDirectory = new TemporaryDirectory();
@@ -1893,6 +2017,18 @@ class SqlFlow
         });
         Assert.NotNull(dataFlowResult);
         return dataFlowResult;
+    }
+
+    private static MethodsSlice ReadMethods(string path)
+    {
+        var resultJson = Depscan.Dosai.GetMethods(path);
+        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(resultJson, new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() }
+        });
+        Assert.NotNull(methodsSlice);
+        Assert.NotNull(methodsSlice.CallGraph);
+        return methodsSlice;
     }
 
     private static string BuildTemporaryProject(string tempRoot, string projectName, string programSource)
