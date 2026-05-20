@@ -1525,7 +1525,8 @@ public static partial class DataFlowAnalyzer
         public DataFlowNode AddNode(string kind, string name, AssemblyMethodInfo method, string assemblyPath, bool isSource, bool isSink, IReadOnlyCollection<DataFlowPattern> matchedPatterns, string? category, string? symbol, string? typeName, string? code, int ilOffset)
         {
             var location = method.ResolveLocation(ilOffset, assemblyPath);
-            var nodeKey = $"{kind}\u001f{name}\u001f{symbol}\u001f{method.MetadataToken}\u001f{ilOffset}\u001f{isSource}\u001f{isSink}\u001f{category}\u001f{string.Join(',', matchedPatterns.Select(pattern => pattern.Pattern).Order(StringComparer.Ordinal))}";
+            var assemblyKey = Path.GetFullPath(string.IsNullOrWhiteSpace(method.AssemblyPath) ? assemblyPath : method.AssemblyPath);
+            var nodeKey = $"{assemblyKey}\u001f{kind}\u001f{name}\u001f{symbol}\u001f{method.MetadataToken}\u001f{ilOffset}\u001f{isSource}\u001f{isSink}\u001f{category}\u001f{string.Join(',', matchedPatterns.Select(pattern => pattern.Pattern).Order(StringComparer.Ordinal))}";
             if (_nodesByKey.TryGetValue(nodeKey, out var existingNode))
             {
                 return existingNode;

@@ -302,14 +302,17 @@ public static class Dosai
 
     private static void MergeCallGraph(CallGraph target, CallGraph source)
     {
-        var nodeIds = target.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
+        var nodesById = target.Nodes
+            .GroupBy(node => node.Id, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
         foreach (var node in source.Nodes)
         {
-            if (nodeIds.Add(node.Id))
+            if (!nodesById.TryGetValue(node.Id, out var existingNode))
             {
                 target.Nodes.Add(node);
+                nodesById[node.Id] = node;
             }
-            else if (target.Nodes.FirstOrDefault(existing => existing.Id == node.Id) is { } existingNode)
+            else
             {
                 MergeNodeEvidence(existingNode, node);
             }

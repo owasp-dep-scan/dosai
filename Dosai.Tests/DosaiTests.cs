@@ -975,6 +975,53 @@ public static class Program
     }
 
     [Fact]
+    public void GetDataFlows_AssemblyDirectory_DoesNotMergeNodesAcrossAssemblies()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var firstOutput = BuildTemporaryProject(tempDirectory.Path, "AssemblyNodeScopeOne", """
+using System.Diagnostics;
+
+public static class Program
+{
+    public static void Main(string[] args)
+    {
+        Process.Start(args[0]);
+    }
+}
+""");
+        var secondOutput = BuildTemporaryProject(tempDirectory.Path, "AssemblyNodeScopeTwo", """
+using System.Diagnostics;
+
+public static class Program
+{
+    public static void Main(string[] args)
+    {
+        Process.Start(args[0]);
+    }
+}
+""");
+        var inputDirectory = Path.Combine(tempDirectory.Path, "assembly-node-scope-input");
+        Directory.CreateDirectory(inputDirectory);
+        foreach (var outputDirectory in new[] { firstOutput, secondOutput })
+        {
+            var assemblyName = Path.GetFileNameWithoutExtension(Directory.EnumerateFiles(outputDirectory, "*.dll").Single(file => Path.GetFileName(file).StartsWith("AssemblyNodeScope", StringComparison.Ordinal)));
+            File.Copy(Path.Combine(outputDirectory, assemblyName + ".dll"), Path.Combine(inputDirectory, assemblyName + ".dll"));
+            File.Copy(Path.Combine(outputDirectory, assemblyName + ".pdb"), Path.Combine(inputDirectory, assemblyName + ".pdb"));
+        }
+
+        var dataFlowResult = ReadDataFlows(inputDirectory);
+
+        var sinkAssemblies = dataFlowResult.Nodes
+            .Where(node => node.Kind == "Sink" && node.Name == "Start")
+            .Select(node => node.Properties.GetValueOrDefault("assembly"))
+            .Where(assembly => !string.IsNullOrWhiteSpace(assembly))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        Assert.Contains("AssemblyNodeScopeOne.dll", sinkAssemblies);
+        Assert.Contains("AssemblyNodeScopeTwo.dll", sinkAssemblies);
+    }
+
+    [Fact]
     public void GetDataFlows_AssemblyOnlyMethodSummaries_UseDecodedParameterTypesForOverloads()
     {
         using var tempDirectory = new TemporaryDirectory();
