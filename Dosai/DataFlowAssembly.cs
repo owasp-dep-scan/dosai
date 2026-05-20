@@ -4,7 +4,6 @@ using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
 using System.Reflection.PortableExecutable;
 using System.Text.RegularExpressions;
-using System.Text.Json;
 
 namespace Depscan;
 
@@ -1443,55 +1442,8 @@ public static partial class DataFlowAnalyzer
 
     private static List<string> GetAssemblyFiles(string path, bool includeBuildArtifacts, List<string> diagnostics)
     {
-        var attributes = File.GetAttributes(path);
-        if (!attributes.HasFlag(FileAttributes.Directory))
-        {
-            var extension = Path.GetExtension(path);
-            return extension.Equals(Constants.AssemblyExtension, StringComparison.OrdinalIgnoreCase) || extension.Equals(Constants.ExeExtension, StringComparison.OrdinalIgnoreCase) ? [path] : [];
-        }
-
-        var applicationAssemblyNames = GetApplicationAssemblyNames(path, diagnostics);
-        return new DirectoryInfo(path)
-            .EnumerateFiles("*.*", SearchOption.AllDirectories)
-            .Where(file => file.Extension.Equals(Constants.AssemblyExtension, StringComparison.OrdinalIgnoreCase) || file.Extension.Equals(Constants.ExeExtension, StringComparison.OrdinalIgnoreCase))
-            .Where(file => includeBuildArtifacts || !file.FullName.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase))
-            .Where(file => includeBuildArtifacts || !file.FullName.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase))
-            .Where(file => applicationAssemblyNames.Count == 0 ? IsLikelyApplicationAssembly(file.Name) : applicationAssemblyNames.Contains(Path.GetFileNameWithoutExtension(file.Name)))
-            .ToDictionary(file => Path.GetFullPath(file.FullName), file => file.FullName, StringComparer.OrdinalIgnoreCase)
-            .Values
-            .ToList();
+        return AssemblyScope.GetAssemblyFiles(path, includeBuildArtifacts, excludeBinWhenSourceFilesPresent: false, diagnostics.Add);
     }
-
-    private static HashSet<string> GetApplicationAssemblyNames(string directory, List<string> diagnostics)
-    {
-        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var depsFile in Directory.EnumerateFiles(directory, "*.deps.json", SearchOption.TopDirectoryOnly))
-        {
-            try
-            {
-                using var document = JsonDocument.Parse(File.ReadAllText(depsFile));
-                if (!document.RootElement.TryGetProperty("libraries", out var libraries) || libraries.ValueKind != JsonValueKind.Object) continue;
-                foreach (var library in libraries.EnumerateObject())
-                {
-                    if (!library.Value.TryGetProperty("type", out var typeElement) || !string.Equals(typeElement.GetString(), "project", StringComparison.OrdinalIgnoreCase)) continue;
-                    var slashIndex = library.Name.IndexOf('/');
-                    names.Add(slashIndex > 0 ? library.Name[..slashIndex] : library.Name);
-                }
-            }
-            catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
-            {
-                diagnostics.Add($"Could not read assembly dependency scope from {depsFile}: {ex.Message}");
-            }
-        }
-        return names;
-    }
-
-    private static bool IsLikelyApplicationAssembly(string fileName) =>
-        !fileName.StartsWith("System.", StringComparison.OrdinalIgnoreCase) &&
-        !fileName.StartsWith("Microsoft.", StringComparison.OrdinalIgnoreCase) &&
-        !fileName.StartsWith("Newtonsoft.", StringComparison.OrdinalIgnoreCase) &&
-        !fileName.StartsWith("FSharp.", StringComparison.OrdinalIgnoreCase) &&
-        !fileName.StartsWith("Humanizer", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsManagedAssemblyFile(string filePath)
     {

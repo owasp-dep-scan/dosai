@@ -125,7 +125,7 @@ public static class Dosai
     {
         var purlResolver = PackageUrlResolver.Create(path);
         var methods = GetAssemblyMethods(path);
-        var (sourceMethods, usings, methodCalls, properties, fields, events, constructors, callGraph, sourceAssemblyMapping) = GetSourceMethods(path, methods);
+        var (sourceMethods, usings, methodCalls, properties, fields, events, constructors, callGraph, sourceAssemblyMapping, sourceMode) = GetSourceMethods(path, methods);
         var (assemblyMethodCalls, assemblyCallGraph) = AssemblyCallGraphAnalyzer.Analyze(path, methods);
         NormalizeAssemblyGraphToSourceIds(assemblyMethodCalls, assemblyCallGraph, sourceAssemblyMapping);
         methodCalls.AddRange(assemblyMethodCalls);
@@ -135,7 +135,7 @@ public static class Dosai
         methods.AddRange(sourceMethods);
         EnrichPackageUrls(purlResolver, methods, usings, methodCalls, properties, fields, events, constructors, callGraph, assemblyInformation, sourceAssemblyMapping);
         var entryPoints = TransparencyBuilder.BuildEntryPoints(apiEndpoints, methods);
-        EnrichMethodIdentities(methods, callGraph, path);
+        EnrichMethodIdentities(methods, callGraph, sourceMode);
         var packageReachability = TransparencyBuilder.BuildPackageReachability(callGraph);
 
         return JsonSerializer.Serialize(new MethodsSlice 
@@ -518,9 +518,8 @@ public static class Dosai
         assemblyCallGraph.Nodes = normalizedNodes.Values.OrderBy(node => node.Id, StringComparer.Ordinal).ToList();
     }
 
-    private static void EnrichMethodIdentities(List<Method> methods, CallGraph callGraph, string analysisPath)
+    private static void EnrichMethodIdentities(List<Method> methods, CallGraph callGraph, bool sourceMode)
     {
-        var sourceMode = HasInspectableSourceFiles(analysisPath);
         var methodIdentityById = new Dictionary<string, MethodIdentity>(StringComparer.Ordinal);
         foreach (var method in methods)
         {
@@ -655,7 +654,7 @@ public static class Dosai
     /// <returns>List of assembly information</returns>
     private static List<AssemblyInformation> GetAssemblyInformation(string path)
     {
-        var assembliesToInspect = ScopeApplicationAssemblies(path, GetFilesToInspect(path, Constants.AssemblyExtension, Constants.ExeExtension));
+        var assembliesToInspect = AssemblyScope.ScopeApplicationAssemblies(path, GetFilesToInspect(path, Constants.AssemblyExtension, Constants.ExeExtension), message => Console.WriteLine($"Warning: {message}"));
         List<AssemblyInformation> assemblyInformation = [];
         List<string> failedAssemblies = [];
 
@@ -704,7 +703,7 @@ public static class Dosai
     /// <returns>List of assembly methods</returns>
     private static List<Method> GetAssemblyMethods(string path)
     {
-        var assembliesToInspect = ScopeApplicationAssemblies(path, GetFilesToInspect(path, Constants.AssemblyExtension, Constants.ExeExtension));
+        var assembliesToInspect = AssemblyScope.ScopeApplicationAssemblies(path, GetFilesToInspect(path, Constants.AssemblyExtension, Constants.ExeExtension), message => Console.WriteLine($"Warning: {message}"));
         var assemblyMethods = new List<Method>();
         var processedAssemblyIdentities = new HashSet<string>();
         var sharedRuntimePaths = GetDotnetSharedRuntimePaths();
@@ -870,64 +869,6 @@ public static class Dosai
             };
         }
     }
-
-    private static List<string> ScopeApplicationAssemblies(string path, List<string> assemblyPaths)
-    {
-        if (assemblyPaths.Count == 0 || File.Exists(path))
-        {
-            return assemblyPaths;
-        }
-
-        var applicationAssemblyNames = GetApplicationAssemblyNames(path);
-        return assemblyPaths
-            .Where(assemblyPath => applicationAssemblyNames.Count == 0
-                ? IsLikelyApplicationAssembly(Path.GetFileName(assemblyPath))
-                : applicationAssemblyNames.Contains(Path.GetFileNameWithoutExtension(assemblyPath)))
-            .DistinctBy(Path.GetFullPath, StringComparer.OrdinalIgnoreCase)
-            .ToList();
-    }
-
-    private static HashSet<string> GetApplicationAssemblyNames(string directory)
-    {
-        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        if (!Directory.Exists(directory))
-        {
-            return names;
-        }
-
-        foreach (var depsFile in Directory.EnumerateFiles(directory, "*.deps.json", SearchOption.TopDirectoryOnly))
-        {
-            try
-            {
-                using var document = JsonDocument.Parse(File.ReadAllText(depsFile));
-                if (!document.RootElement.TryGetProperty("libraries", out var libraries) || libraries.ValueKind != JsonValueKind.Object)
-                {
-                    continue;
-                }
-                foreach (var library in libraries.EnumerateObject())
-                {
-                    if (!library.Value.TryGetProperty("type", out var typeElement) || !string.Equals(typeElement.GetString(), "project", StringComparison.OrdinalIgnoreCase))
-                    {
-                        continue;
-                    }
-                    var slashIndex = library.Name.IndexOf('/');
-                    names.Add(slashIndex > 0 ? library.Name[..slashIndex] : library.Name);
-                }
-            }
-            catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
-            {
-                Console.WriteLine($"Warning: Could not read assembly dependency scope from {depsFile}: {ex.Message}");
-            }
-        }
-        return names;
-    }
-
-    private static bool IsLikelyApplicationAssembly(string fileName) =>
-        !fileName.StartsWith("System.", StringComparison.OrdinalIgnoreCase) &&
-        !fileName.StartsWith("Microsoft.", StringComparison.OrdinalIgnoreCase) &&
-        !fileName.StartsWith("Newtonsoft.", StringComparison.OrdinalIgnoreCase) &&
-        !fileName.StartsWith("FSharp.", StringComparison.OrdinalIgnoreCase) &&
-        !fileName.StartsWith("Humanizer", StringComparison.OrdinalIgnoreCase);
 
     private static string GetContainingTypeNameVb(Microsoft.CodeAnalysis.VisualBasic.Syntax.FieldDeclarationSyntax member)
     {
@@ -1226,12 +1167,13 @@ public static class Dosai
     /// <param name="path">Filesystem path to C# source file or directory containing C# source files</param>
     /// <param name="assemblyMethods">List of assembly methods</param>
     /// <returns>Tuple with List of source methods and using directives</returns>
-    private static (List<Method>, List<Dependency>, List<MethodCalls>, List<PropertyInfo>, List<FieldInfo>, List<EventInfo>, List<ConstructorInfo>, CallGraph, List<SourceAssemblyMapping>) GetSourceMethods(string path, List<Method> assemblyMethods)
+    private static (List<Method>, List<Dependency>, List<MethodCalls>, List<PropertyInfo>, List<FieldInfo>, List<EventInfo>, List<ConstructorInfo>, CallGraph, List<SourceAssemblyMapping>, bool SourceMode) GetSourceMethods(string path, List<Method> assemblyMethods)
     {
         var assembliesToInspect = GetFilesToInspect(path, Constants.AssemblyExtension, Constants.ExeExtension);
         var sourcesToInspect = GetFilesToInspect(path, Constants.CSharpSourceExtension);
         sourcesToInspect.AddRange(GetFilesToInspect(path, Constants.VBSourceExtension));
         sourcesToInspect.AddRange(GetFilesToInspect(path, Constants.FSharpSourceExtension));
+        var sourceMode = sourcesToInspect.Count > 0;
         var sourceMethods = new List<Method>();
         var allUsingDirectives = new List<Dependency>();
         var allMethodCalls = new List<MethodCalls>();
@@ -2222,7 +2164,7 @@ public static class Dosai
         {
             AddMapping(method, "Method");
         }
-        return (sourceMethods, allUsingDirectives, allMethodCalls, properties, fields, events, constructors, callGraph, sourceAssemblyMappings);
+        return (sourceMethods, allUsingDirectives, allMethodCalls, properties, fields, events, constructors, callGraph, sourceAssemblyMappings, sourceMode);
 
         void AddNode(string id, string name, string? className, string? namespaceName, string? file, string? assembly, string? module, string kind, int lineNumber, int columnNumber, bool isExternal)
         {
@@ -3074,16 +3016,6 @@ public static class Dosai
             }
         }
         return filesToInspect;
-    }
-
-    private static bool HasInspectableSourceFiles(string path)
-    {
-        if (!File.Exists(path) && !Directory.Exists(path))
-        {
-            return false;
-        }
-
-        return GetFilesToInspect(path, Constants.CSharpSourceExtension, Constants.VBSourceExtension, Constants.FSharpSourceExtension).Count > 0;
     }
 
     private static bool HasDirectorySegment(string relativePath, string segment)
