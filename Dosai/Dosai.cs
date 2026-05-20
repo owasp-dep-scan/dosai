@@ -125,12 +125,17 @@ public static class Dosai
     {
         var purlResolver = PackageUrlResolver.Create(path);
         var methods = GetAssemblyMethods(path);
-        var (sourceMethods, usings, methodCalls, properties, fields, events, constructors, callGraph, sourceAssemblyMapping) = GetSourceMethods(path, methods);
+        var (sourceMethods, usings, methodCalls, properties, fields, events, constructors, callGraph, sourceAssemblyMapping, sourceMode) = GetSourceMethods(path, methods);
+        var (assemblyMethodCalls, assemblyCallGraph) = AssemblyCallGraphAnalyzer.Analyze(path, methods);
+        NormalizeAssemblyGraphToSourceIds(assemblyMethodCalls, assemblyCallGraph, sourceAssemblyMapping);
+        methodCalls.AddRange(assemblyMethodCalls);
+        MergeCallGraph(callGraph, assemblyCallGraph);
         var assemblyInformation = GetAssemblyInformation(path);
         var apiEndpoints = ApiEndpointAnalyzer.GetApiEndpoints(path);
         methods.AddRange(sourceMethods);
         EnrichPackageUrls(purlResolver, methods, usings, methodCalls, properties, fields, events, constructors, callGraph, assemblyInformation, sourceAssemblyMapping);
         var entryPoints = TransparencyBuilder.BuildEntryPoints(apiEndpoints, methods);
+        EnrichMethodIdentities(methods, callGraph, sourceMode);
         var packageReachability = TransparencyBuilder.BuildPackageReachability(callGraph);
 
         return JsonSerializer.Serialize(new MethodsSlice 
@@ -294,6 +299,288 @@ public static class Dosai
             mapping.Purl = resolver.Resolve(mapping.AssemblyName, mapping.ModuleName, mapping.AssemblyId ?? mapping.SourceId, mapping.Namespace, mapping.ClassName);
         }
     }
+
+    private static void MergeCallGraph(CallGraph target, CallGraph source)
+    {
+        var nodesById = target.Nodes
+            .GroupBy(node => node.Id, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
+        foreach (var node in source.Nodes)
+        {
+            if (!nodesById.TryGetValue(node.Id, out var existingNode))
+            {
+                target.Nodes.Add(node);
+                nodesById[node.Id] = node;
+            }
+            else
+            {
+                MergeNodeEvidence(existingNode, node);
+            }
+        }
+
+        var edgeKeys = target.Edges
+            .Select(BuildCallGraphEdgeKey)
+            .ToHashSet(StringComparer.Ordinal);
+        foreach (var edge in source.Edges)
+        {
+            var key = BuildCallGraphEdgeKey(edge);
+            if (edgeKeys.Add(key))
+            {
+                target.Edges.Add(edge);
+            }
+        }
+
+        target.Nodes = target.Nodes.OrderBy(node => node.Id, StringComparer.Ordinal).ToList();
+        target.Edges = target.Edges
+            .OrderBy(edge => edge.SourceId, StringComparer.Ordinal)
+            .ThenBy(edge => edge.TargetId, StringComparer.Ordinal)
+            .ThenBy(edge => edge.CallLocation.FileName, StringComparer.Ordinal)
+            .ThenBy(edge => edge.CallLocation.LineNumber)
+            .ThenBy(edge => edge.CallLocation.ColumnNumber)
+            .Select((edge, index) =>
+            {
+                edge.Id = $"e{index + 1}";
+                return edge;
+            })
+            .ToList();
+    }
+
+    private static string BuildCallGraphEdgeKey(MethodCallEdge edge) => $"{edge.SourceId}\u001f{edge.TargetId}\u001f{edge.CallLocation.FileName}\u001f{edge.CallLocation.LineNumber}\u001f{edge.CallLocation.ColumnNumber}\u001f{edge.CallType}\u001f{edge.EvidenceKind}";
+
+    private static AnalysisEvidenceKind ResolveCallEvidenceKind(MethodCalls call)
+    {
+        if (call.EvidenceKind != AnalysisEvidenceKind.Unknown)
+        {
+            return call.EvidenceKind;
+        }
+
+        return string.Equals(call.Module, "LanguageFrontend", StringComparison.Ordinal)
+               || (string.Equals(call.Assembly, "Source", StringComparison.Ordinal) && call.TargetId?.StartsWith("external.", StringComparison.Ordinal) == true)
+            ? AnalysisEvidenceKind.LanguageFrontend
+            : AnalysisEvidenceKind.Unknown;
+    }
+
+    private static AnalysisEvidence CreateDefaultCallEvidence(MethodCalls call, AnalysisEvidenceKind evidenceKind) => new()
+    {
+        Kind = evidenceKind,
+        Source = evidenceKind switch
+        {
+            AnalysisEvidenceKind.SourceRoslynDirect => "roslyn-source",
+            AnalysisEvidenceKind.LanguageFrontend => "language-frontend",
+            _ => "unknown"
+        },
+        Description = evidenceKind switch
+        {
+            AnalysisEvidenceKind.SourceRoslynDirect => "Call edge discovered from source semantic operations.",
+            AnalysisEvidenceKind.LanguageFrontend => "Call edge discovered from language frontend source scanning.",
+            _ => "Call edge discovered without producer-specific evidence metadata."
+        },
+        FileName = call.FileName,
+        LineNumber = call.LineNumber,
+        ColumnNumber = call.ColumnNumber
+    };
+
+    private static void MergeNodeEvidence(MethodNode target, MethodNode source)
+    {
+        foreach (var evidence in source.Evidence)
+        {
+            if (!target.Evidence.Any(item => item.Kind == evidence.Kind && item.Source == evidence.Source && item.FileName == evidence.FileName && item.LineNumber == evidence.LineNumber && item.ColumnNumber == evidence.ColumnNumber))
+            {
+                target.Evidence.Add(evidence);
+            }
+        }
+
+        if (source.Identity is null)
+        {
+            return;
+        }
+
+        if (target.Identity is null)
+        {
+            target.Identity = CloneMethodIdentity(source.Identity);
+            return;
+        }
+
+        MergeMethodIdentity(target.Identity, source.Identity);
+    }
+
+    private static MethodIdentity CloneMethodIdentity(MethodIdentity identity) => new()
+    {
+        Id = identity.Id,
+        SourceSignature = identity.SourceSignature,
+        AssemblySignature = identity.AssemblySignature,
+        Symbol = identity.Symbol,
+        AssemblyName = identity.AssemblyName,
+        ModuleName = identity.ModuleName,
+        Namespace = identity.Namespace,
+        ClassName = identity.ClassName,
+        MethodName = identity.MethodName,
+        MetadataToken = identity.MetadataToken,
+        Purl = identity.Purl,
+        Evidence = identity.Evidence.Distinct().ToList()
+    };
+
+    private static void MergeMethodIdentity(MethodIdentity target, MethodIdentity source)
+    {
+        target.Id = FirstNonBlank(target.Id, source.Id);
+        target.SourceSignature = FirstNonBlank(target.SourceSignature, source.SourceSignature);
+        target.AssemblySignature = FirstNonBlank(target.AssemblySignature, source.AssemblySignature);
+        target.Symbol = FirstNonBlank(target.Symbol, source.Symbol);
+        target.AssemblyName = FirstNonBlank(target.AssemblyName, source.AssemblyName);
+        target.ModuleName = FirstNonBlank(target.ModuleName, source.ModuleName);
+        target.Namespace = FirstNonBlank(target.Namespace, source.Namespace);
+        target.ClassName = FirstNonBlank(target.ClassName, source.ClassName);
+        target.MethodName = FirstNonBlank(target.MethodName, source.MethodName);
+        if (target.MetadataToken == 0) target.MetadataToken = source.MetadataToken;
+        target.Purl = FirstNonBlank(target.Purl, source.Purl);
+        foreach (var evidenceKind in source.Evidence.Where(kind => !target.Evidence.Contains(kind)))
+        {
+            target.Evidence.Add(evidenceKind);
+        }
+    }
+
+    private static string? FirstNonBlank(string? preferred, string? fallback) => string.IsNullOrWhiteSpace(preferred) ? fallback : preferred;
+
+    private static void NormalizeAssemblyGraphToSourceIds(List<MethodCalls> assemblyMethodCalls, CallGraph assemblyCallGraph, List<SourceAssemblyMapping> sourceAssemblyMappings)
+    {
+        var sourceIdByAssemblyId = sourceAssemblyMappings
+            .Where(mapping => mapping.IsMapped && !string.IsNullOrWhiteSpace(mapping.SourceId) && !string.IsNullOrWhiteSpace(mapping.AssemblyId))
+            .GroupBy(mapping => mapping.AssemblyId!, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.First().SourceId!, StringComparer.Ordinal);
+        if (sourceIdByAssemblyId.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var call in assemblyMethodCalls)
+        {
+            if (call.SourceId is not null && sourceIdByAssemblyId.TryGetValue(call.SourceId, out var sourceId))
+            {
+                call.SourceId = sourceId;
+            }
+            if (call.TargetId is not null && sourceIdByAssemblyId.TryGetValue(call.TargetId, out var targetId))
+            {
+                call.TargetId = targetId;
+            }
+        }
+
+        foreach (var edge in assemblyCallGraph.Edges)
+        {
+            if (sourceIdByAssemblyId.TryGetValue(edge.SourceId, out var sourceId))
+            {
+                edge.SourceId = sourceId;
+            }
+            if (sourceIdByAssemblyId.TryGetValue(edge.TargetId, out var targetId))
+            {
+                edge.TargetId = targetId;
+            }
+        }
+
+        var normalizedNodes = new Dictionary<string, MethodNode>(StringComparer.Ordinal);
+        foreach (var node in assemblyCallGraph.Nodes)
+        {
+            var wasMapped = sourceIdByAssemblyId.TryGetValue(node.Id, out var mappedSourceId);
+            var normalizedId = mappedSourceId ?? node.Id;
+            if (!normalizedNodes.TryGetValue(normalizedId, out var existing))
+            {
+                node.Id = normalizedId;
+                if (node.Identity is not null)
+                {
+                    node.Identity.Id = normalizedId;
+                    if (wasMapped)
+                    {
+                        node.Identity.SourceSignature ??= normalizedId;
+                        node.Identity.Symbol = normalizedId;
+                    }
+                }
+                normalizedNodes[normalizedId] = node;
+                continue;
+            }
+
+            foreach (var evidence in node.Evidence)
+            {
+                if (!existing.Evidence.Any(item => item.Kind == evidence.Kind && item.Source == evidence.Source && item.FileName == evidence.FileName && item.LineNumber == evidence.LineNumber && item.ColumnNumber == evidence.ColumnNumber))
+                {
+                    existing.Evidence.Add(evidence);
+                }
+            }
+            if (existing.Identity is not null && node.Identity is not null)
+            {
+                foreach (var evidenceKind in node.Identity.Evidence.Where(kind => !existing.Identity.Evidence.Contains(kind)))
+                {
+                    existing.Identity.Evidence.Add(evidenceKind);
+                }
+                existing.Identity.AssemblySignature ??= node.Identity.AssemblySignature;
+                existing.Identity.Purl ??= node.Identity.Purl;
+            }
+        }
+
+        assemblyCallGraph.Nodes = normalizedNodes.Values.OrderBy(node => node.Id, StringComparer.Ordinal).ToList();
+    }
+
+    private static void EnrichMethodIdentities(List<Method> methods, CallGraph callGraph, bool sourceMode)
+    {
+        var methodIdentityById = new Dictionary<string, MethodIdentity>(StringComparer.Ordinal);
+        foreach (var method in methods)
+        {
+            var evidenceKind = !string.IsNullOrWhiteSpace(method.SourceSignature)
+                ? AnalysisEvidenceKind.SourceRoslynDirect
+                : AnalysisEvidenceKind.AssemblyReflection;
+            if (sourceMode && evidenceKind == AnalysisEvidenceKind.AssemblyReflection)
+            {
+                continue;
+            }
+            method.Identity = MethodIdentityFactory.FromMethod(method, evidenceKind);
+            method.Identity.Purl = method.Purl;
+            method.Evidence.Add(new AnalysisEvidence
+            {
+                Kind = evidenceKind,
+                Source = evidenceKind == AnalysisEvidenceKind.SourceRoslynDirect ? "roslyn-source" : "assembly-metadata",
+                Description = evidenceKind == AnalysisEvidenceKind.SourceRoslynDirect ? "Method discovered from source semantics." : "Method discovered from assembly metadata.",
+                FileName = method.FileName,
+                LineNumber = method.LineNumber,
+                ColumnNumber = method.ColumnNumber
+            });
+            if (!string.IsNullOrWhiteSpace(method.Identity.Id)) methodIdentityById.TryAdd(method.Identity.Id!, method.Identity);
+            if (!string.IsNullOrWhiteSpace(method.SourceSignature)) methodIdentityById.TryAdd(method.SourceSignature!, method.Identity);
+            if (!string.IsNullOrWhiteSpace(method.AssemblySignature)) methodIdentityById.TryAdd(method.AssemblySignature!, method.Identity);
+        }
+
+        foreach (var node in callGraph.Nodes)
+        {
+            var existingIdentity = node.Identity;
+            var existingEvidenceKinds = node.Identity?.Evidence.ToList() ?? [];
+            existingEvidenceKinds.AddRange(node.Evidence.Select(evidence => evidence.Kind));
+            if (!methodIdentityById.TryGetValue(node.Id, out var identity))
+            {
+                var evidenceKind = node.IsExternal ? AnalysisEvidenceKind.ExternalSummary : AnalysisEvidenceKind.Unknown;
+                identity = MethodIdentityFactory.FromParts(node.Id, null, node.Id, node.Id, node.Assembly, node.Module, node.Namespace, node.ClassName, node.Name, 0, node.Purl, evidenceKind);
+            }
+            var mergedIdentity = CloneMethodIdentity(identity);
+            if (existingIdentity is not null)
+            {
+                MergeMethodIdentity(mergedIdentity, existingIdentity);
+            }
+            foreach (var evidenceKind in existingEvidenceKinds.Where(kind => !mergedIdentity.Evidence.Contains(kind)))
+            {
+                mergedIdentity.Evidence.Add(evidenceKind);
+            }
+            node.Identity = mergedIdentity;
+            node.Identity.Purl ??= node.Purl;
+            if (node.Evidence.Count == 0)
+            {
+                node.Evidence.Add(new AnalysisEvidence
+                {
+                    Kind = identity.Evidence.FirstOrDefault(),
+                    Source = identity.Evidence.Contains(AnalysisEvidenceKind.SourceRoslynDirect) ? "roslyn-source" : identity.Evidence.Contains(AnalysisEvidenceKind.AssemblyReflection) ? "assembly-metadata" : "callgraph",
+                    Description = "Call graph method node identity evidence.",
+                    FileName = node.FileName,
+                    LineNumber = node.LineNumber,
+                    ColumnNumber = node.ColumnNumber
+                });
+            }
+        }
+    }
     
     /// <summary>
     /// Checks if a DLL is a managed .NET assembly by inspecting its PE header.
@@ -307,7 +594,7 @@ public static class Dosai
         {
             using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
             using var peReader = new PEReader(fs);
-            return peReader.HasMetadata && peReader.PEHeaders.CorHeader is not null;
+            return peReader is { HasMetadata: true, PEHeaders.CorHeader: not null };
         }
         catch
         {
@@ -367,7 +654,7 @@ public static class Dosai
     /// <returns>List of assembly information</returns>
     private static List<AssemblyInformation> GetAssemblyInformation(string path)
     {
-        var assembliesToInspect = GetFilesToInspect(path, Constants.AssemblyExtension, Constants.ExeExtension);
+        var assembliesToInspect = AssemblyScope.ScopeApplicationAssemblies(path, GetFilesToInspect(path, Constants.AssemblyExtension, Constants.ExeExtension), message => Console.WriteLine($"Warning: {message}"));
         List<AssemblyInformation> assemblyInformation = [];
         List<string> failedAssemblies = [];
 
@@ -416,7 +703,7 @@ public static class Dosai
     /// <returns>List of assembly methods</returns>
     private static List<Method> GetAssemblyMethods(string path)
     {
-        var assembliesToInspect = GetFilesToInspect(path, Constants.AssemblyExtension, Constants.ExeExtension);
+        var assembliesToInspect = AssemblyScope.ScopeApplicationAssemblies(path, GetFilesToInspect(path, Constants.AssemblyExtension, Constants.ExeExtension), message => Console.WriteLine($"Warning: {message}"));
         var assemblyMethods = new List<Method>();
         var processedAssemblyIdentities = new HashSet<string>();
         var sharedRuntimePaths = GetDotnetSharedRuntimePaths();
@@ -880,12 +1167,13 @@ public static class Dosai
     /// <param name="path">Filesystem path to C# source file or directory containing C# source files</param>
     /// <param name="assemblyMethods">List of assembly methods</param>
     /// <returns>Tuple with List of source methods and using directives</returns>
-    private static (List<Method>, List<Dependency>, List<MethodCalls>, List<PropertyInfo>, List<FieldInfo>, List<EventInfo>, List<ConstructorInfo>, CallGraph, List<SourceAssemblyMapping>) GetSourceMethods(string path, List<Method> assemblyMethods)
+    private static (List<Method>, List<Dependency>, List<MethodCalls>, List<PropertyInfo>, List<FieldInfo>, List<EventInfo>, List<ConstructorInfo>, CallGraph, List<SourceAssemblyMapping>, bool SourceMode) GetSourceMethods(string path, List<Method> assemblyMethods)
     {
         var assembliesToInspect = GetFilesToInspect(path, Constants.AssemblyExtension, Constants.ExeExtension);
         var sourcesToInspect = GetFilesToInspect(path, Constants.CSharpSourceExtension);
         sourcesToInspect.AddRange(GetFilesToInspect(path, Constants.VBSourceExtension));
         sourcesToInspect.AddRange(GetFilesToInspect(path, Constants.FSharpSourceExtension));
+        var sourceMode = sourcesToInspect.Count > 0;
         var sourceMethods = new List<Method>();
         var allUsingDirectives = new List<Dependency>();
         var allMethodCalls = new List<MethodCalls>();
@@ -894,6 +1182,7 @@ public static class Dosai
         var events = new List<EventInfo>();
         var constructors = new List<ConstructorInfo>();
         var sourceAssemblyMappings = new List<SourceAssemblyMapping>();
+        var dispatchIndexes = new Dictionary<Compilation, DispatchResolver.SourceIndex>();
 #pragma warning disable IL3000
         var mscorlib = MetadataReference.CreateFromFile(Path.Combine(AppContext.BaseDirectory, typeof(object).Assembly.Location));
 #pragma warning restore IL3000
@@ -1758,7 +2047,7 @@ public static class Dosai
             // method calls / object creation / property access / event assignment
             if (model is not null)
             {
-                var walker = new MethodCallOperationWalker(model, allMethodCalls, path, sourceFilePath, fileName);
+                var walker = new MethodCallOperationWalker(model, GetDispatchIndex(model.Compilation), allMethodCalls, path, sourceFilePath, fileName);
                 var operationNodes = csRoot is not null
                     ? csRoot.DescendantNodes().Where(node => node is Microsoft.CodeAnalysis.CSharp.Syntax.BlockSyntax or ArrowExpressionClauseSyntax or EqualsValueClauseSyntax or ConstructorInitializerSyntax or GlobalStatementSyntax)
                     : vbRoot?.DescendantNodes().Where(node => node is Microsoft.CodeAnalysis.VisualBasic.Syntax.StatementSyntax or Microsoft.CodeAnalysis.VisualBasic.Syntax.EqualsValueSyntax) ?? [];
@@ -1814,21 +2103,27 @@ public static class Dosai
         var methodNodes = methodNodeLookup.Values.OrderBy(n => n.Id, StringComparer.Ordinal).ToList();
         var callEdges = allMethodCalls
             .Where(call => !string.IsNullOrWhiteSpace(call.SourceId) && !string.IsNullOrWhiteSpace(call.TargetId))
-            .Select(call => new MethodCallEdge
+            .Select(call =>
             {
-                SourceId = call.SourceId!,
-                TargetId = call.TargetId!,
-                CallLocation = new CallLocation { FileName = call.FileName, LineNumber = call.LineNumber, ColumnNumber = call.ColumnNumber },
-                FileName = call.FileName,
-                IsInternal = call.IsInternal,
-                CalledMethodName = call.CalledMethod,
-                SourceName = call.CallerMethod,
-                TargetName = call.CalledMethod,
-                Arguments = call.Arguments ?? [],
-                ArgumentExpressions = call.ArgumentExpressions ?? [],
-                CallType = call.CallType
+                var evidenceKind = ResolveCallEvidenceKind(call);
+                return new MethodCallEdge
+                {
+                    SourceId = call.SourceId!,
+                    TargetId = call.TargetId!,
+                    CallLocation = new CallLocation { FileName = call.FileName, LineNumber = call.LineNumber, ColumnNumber = call.ColumnNumber },
+                    FileName = call.FileName,
+                    IsInternal = call.IsInternal,
+                    CalledMethodName = call.CalledMethod,
+                    SourceName = call.CallerMethod,
+                    TargetName = call.CalledMethod,
+                    Arguments = call.Arguments ?? [],
+                    ArgumentExpressions = call.ArgumentExpressions ?? [],
+                    CallType = call.CallType,
+                    EvidenceKind = evidenceKind,
+                    Evidence = call.Evidence.Count > 0 ? call.Evidence : [CreateDefaultCallEvidence(call, evidenceKind)]
+                };
             })
-            .GroupBy(edge => $"{edge.SourceId}\u001f{edge.TargetId}\u001f{edge.CallLocation.FileName}\u001f{edge.CallLocation.LineNumber}\u001f{edge.CallLocation.ColumnNumber}\u001f{edge.CallType}", StringComparer.Ordinal)
+            .GroupBy(edge => $"{edge.SourceId}\u001f{edge.TargetId}\u001f{edge.CallLocation.FileName}\u001f{edge.CallLocation.LineNumber}\u001f{edge.CallLocation.ColumnNumber}\u001f{edge.CallType}\u001f{edge.EvidenceKind}", StringComparer.Ordinal)
             .Select(group => group.First())
             .OrderBy(edge => edge.SourceId, StringComparer.Ordinal)
             .ThenBy(edge => edge.TargetId, StringComparer.Ordinal)
@@ -1848,7 +2143,7 @@ public static class Dosai
         };
         // Source-to-Assembly Mapping Logic
         var assemblyMemberLookup = new Dictionary<string, object>();
-        var assemblyNameLookup = new Dictionary<string, object>();
+        var assemblyNameLookup = new Dictionary<string, List<Method>>(StringComparer.Ordinal);
         foreach (var asmMethod in assemblyMethods)
         {
             var asmSignature = asmMethod.AssemblySignature;
@@ -1856,14 +2151,20 @@ public static class Dosai
             {
                 assemblyMemberLookup.TryAdd(asmSignature, asmMethod);
             }
-            assemblyNameLookup.TryAdd($"{asmMethod.Namespace}.{asmMethod.ClassName}.{asmMethod.Name}", asmMethod);
+            var nameKey = MemberNameLookupKey(asmMethod.Namespace, asmMethod.ClassName, asmMethod.Name);
+            if (!assemblyNameLookup.TryGetValue(nameKey, out var candidates))
+            {
+                candidates = [];
+                assemblyNameLookup[nameKey] = candidates;
+            }
+            candidates.Add(asmMethod);
         }
 
         foreach (var method in sourceMethods)
         {
             AddMapping(method, "Method");
         }
-        return (sourceMethods, allUsingDirectives, allMethodCalls, properties, fields, events, constructors, callGraph, sourceAssemblyMappings);
+        return (sourceMethods, allUsingDirectives, allMethodCalls, properties, fields, events, constructors, callGraph, sourceAssemblyMappings, sourceMode);
 
         void AddNode(string id, string name, string? className, string? namespaceName, string? file, string? assembly, string? module, string kind, int lineNumber, int columnNumber, bool isExternal)
         {
@@ -1888,16 +2189,18 @@ public static class Dosai
         {
             switch (sourceMember)
             {
-                case Method { SourceSignature: not null } sourceMethod:
+                case Method sourceMethod:
                 {
-                    var sourceId = sourceMethod.SourceSignature;
-                    var isMapped = assemblyMemberLookup.TryGetValue(sourceMethod.SourceSignature, out var asmMemberObj);
+                    var sourceId = sourceMethod.SourceSignature ?? CreateMemberId(sourceMethod.Namespace, sourceMethod.ClassName, sourceMethod.Name, sourceMethod.Parameters, sourceMethod.ReturnType);
+                    object? asmMemberObj = null;
+                    var isMapped = !string.IsNullOrWhiteSpace(sourceMethod.SourceSignature) && assemblyMemberLookup.TryGetValue(sourceMethod.SourceSignature, out asmMemberObj);
                     if (!isMapped)
                     {
-                        isMapped = assemblyNameLookup.TryGetValue($"{sourceMethod.Namespace}.{sourceMethod.ClassName}.{sourceMethod.Name}", out var asmMember);
-                        if (isMapped)
+                        var nameKey = MemberNameLookupKey(sourceMethod.Namespace, sourceMethod.ClassName, sourceMethod.Name);
+                        if (assemblyNameLookup.TryGetValue(nameKey, out var candidates) && TryFindAssemblyMethodMatch(sourceMethod, candidates, out var asmMember))
                         {
                             asmMemberObj = asmMember;
+                            isMapped = true;
                         }
                     }
                     if (!isMapped)
@@ -1905,7 +2208,8 @@ public static class Dosai
                         break;
                     }
                     string? asmId = null;
-                    if (isMapped && asmMemberObj is Method asmMethod)
+                    var asmMethod = asmMemberObj as Method;
+                    if (isMapped && asmMethod is not null)
                     {
                         asmId = asmMethod.AssemblySignature;
                     }
@@ -1915,11 +2219,13 @@ public static class Dosai
                         SourcePath = sourceMethod.Path,
                         SourceLineNumber = sourceMethod.LineNumber,
                         SourceColumnNumber = sourceMethod.ColumnNumber,
+                        SourceSignature = sourceMethod.SourceSignature,
                         SourceMetadataToken = sourceMethod.MetadataToken,
                         AssemblyMetadataToken = isMapped ? (asmMemberObj is Method m ? m.MetadataToken : 0) : 0,
-                        AssemblyName = sourceMethod.Assembly,
-                        ModuleName = sourceMethod.Module,
+                        AssemblyName = GetMappedAssemblyName(asmMethod, sourceMethod.Assembly),
+                        ModuleName = GetMappedModuleName(asmMethod, sourceMethod.Module),
                         AssemblyId = asmId,
+                        AssemblySignature = asmId,
                         MemberType = memberType,
                         MemberName = sourceMethod.Name,
                         ClassName = sourceMethod.ClassName,
@@ -1929,6 +2235,163 @@ public static class Dosai
                     break;
                 }
             }
+        }
+
+        static string MemberNameLookupKey(string? namespaceName, string? className, string? memberName) => string.Join('.', new[] { namespaceName is "<global namespace>" ? null : namespaceName, className, memberName }.Where(part => !string.IsNullOrWhiteSpace(part)));
+
+        static string? GetMappedAssemblyName(Method? assemblyMethod, string? fallback) =>
+            !string.IsNullOrWhiteSpace(assemblyMethod?.Assembly)
+                ? assemblyMethod.Assembly
+                : !string.IsNullOrWhiteSpace(assemblyMethod?.Path)
+                    ? Path.GetFileNameWithoutExtension(assemblyMethod.Path)
+                    : !string.IsNullOrWhiteSpace(assemblyMethod?.FileName)
+                        ? Path.GetFileNameWithoutExtension(assemblyMethod.FileName)
+                        : fallback;
+
+        static string? GetMappedModuleName(Method? assemblyMethod, string? fallback) =>
+            !string.IsNullOrWhiteSpace(assemblyMethod?.Module)
+                ? assemblyMethod.Module
+                : !string.IsNullOrWhiteSpace(assemblyMethod?.FileName)
+                    ? assemblyMethod.FileName
+                    : !string.IsNullOrWhiteSpace(assemblyMethod?.Path)
+                        ? Path.GetFileName(assemblyMethod.Path)
+                        : fallback;
+
+        DispatchResolver.SourceIndex GetDispatchIndex(Compilation compilation)
+        {
+            if (!dispatchIndexes.TryGetValue(compilation, out var index))
+            {
+                index = DispatchResolver.SourceIndex.Create(compilation);
+                dispatchIndexes[compilation] = index;
+            }
+            return index;
+        }
+
+        static bool TryFindAssemblyMethodMatch(Method sourceMethod, IReadOnlyList<Method> candidates, out Method? match)
+        {
+            match = null;
+            if (candidates.Count == 0)
+            {
+                return false;
+            }
+
+            var sourceParameters = sourceMethod.Parameters ?? [];
+            var parameterCountMatches = candidates
+                .Where(candidate => candidate.Parameters is null || candidate.Parameters.Count == sourceParameters.Count)
+                .ToList();
+            var typedMatches = parameterCountMatches
+                .Where(candidate => ParametersMatch(sourceMethod.Parameters, candidate.Parameters))
+                .ToList();
+            var returnMatches = typedMatches
+                .Where(candidate => ReturnTypesMatch(sourceMethod.ReturnType, candidate.ReturnType, sourceMethod.Name))
+                .ToList();
+
+            var candidateSets = new List<List<Method>> { returnMatches };
+            if (returnMatches.Count == typedMatches.Count)
+            {
+                candidateSets.Add(typedMatches);
+            }
+            if (typedMatches.Count == parameterCountMatches.Count)
+            {
+                candidateSets.Add(parameterCountMatches);
+            }
+
+            foreach (var candidateSet in candidateSets)
+            {
+                if (candidateSet.Count == 1)
+                {
+                    match = candidateSet[0];
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        static bool ParametersMatch(IReadOnlyList<Parameter>? sourceParameters, IReadOnlyList<Parameter>? assemblyParameters)
+        {
+            if (sourceParameters is null || assemblyParameters is null)
+            {
+                return true;
+            }
+
+            if (sourceParameters.Count != assemblyParameters.Count)
+            {
+                return false;
+            }
+
+            for (var index = 0; index < sourceParameters.Count; index++)
+            {
+                var sourceType = sourceParameters[index].TypeFullName ?? sourceParameters[index].Type;
+                var assemblyType = assemblyParameters[index].TypeFullName ?? assemblyParameters[index].Type;
+                if (!string.IsNullOrWhiteSpace(sourceType) && !string.IsNullOrWhiteSpace(assemblyType) && !MemberTypeNamesMatch(sourceType, assemblyType))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        static bool ReturnTypesMatch(string? sourceReturnType, string? assemblyReturnType, string? memberName) =>
+            memberName == ".ctor" || string.IsNullOrWhiteSpace(sourceReturnType) || string.IsNullOrWhiteSpace(assemblyReturnType) || MemberTypeNamesMatch(sourceReturnType, assemblyReturnType);
+
+        static bool MemberTypeNamesMatch(string sourceType, string assemblyType)
+        {
+            var sourceAliases = MemberTypeAliases(sourceType).ToHashSet(StringComparer.Ordinal);
+            return MemberTypeAliases(assemblyType).Any(sourceAliases.Contains);
+        }
+
+        static IEnumerable<string> MemberTypeAliases(string typeName)
+        {
+            var normalized = NormalizeSymbolName(typeName)
+                .Replace('+', '.')
+                .Trim();
+            if (string.IsNullOrWhiteSpace(normalized))
+            {
+                yield break;
+            }
+
+            yield return normalized;
+            if (normalized.EndsWith("[]", StringComparison.Ordinal))
+            {
+                foreach (var elementAlias in MemberTypeAliases(normalized[..^2]))
+                {
+                    yield return elementAlias + "[]";
+                }
+            }
+            var dotIndex = normalized.LastIndexOf('.');
+            if (dotIndex >= 0 && dotIndex < normalized.Length - 1)
+            {
+                yield return normalized[(dotIndex + 1)..];
+            }
+
+            foreach (var alias in PrimitiveTypeAliases(normalized))
+            {
+                yield return alias;
+            }
+        }
+
+        static IEnumerable<string> PrimitiveTypeAliases(string typeName)
+        {
+            return typeName switch
+            {
+                "bool" or "Boolean" or "System.Boolean" => ["bool", "Boolean", "System.Boolean"],
+                "byte" or "Byte" or "System.Byte" => ["byte", "Byte", "System.Byte"],
+                "char" or "Char" or "System.Char" => ["char", "Char", "System.Char"],
+                "decimal" or "Decimal" or "System.Decimal" => ["decimal", "Decimal", "System.Decimal"],
+                "double" or "Double" or "System.Double" => ["double", "Double", "System.Double"],
+                "float" or "Single" or "System.Single" => ["float", "Single", "System.Single"],
+                "int" or "Integer" or "Int32" or "System.Int32" => ["int", "Integer", "Int32", "System.Int32"],
+                "long" or "Long" or "Int64" or "System.Int64" => ["long", "Long", "Int64", "System.Int64"],
+                "object" or "Object" or "System.Object" => ["object", "Object", "System.Object"],
+                "short" or "Short" or "Int16" or "System.Int16" => ["short", "Short", "Int16", "System.Int16"],
+                "string" or "String" or "System.String" => ["string", "String", "System.String"],
+                "uint" or "UInt32" or "System.UInt32" => ["uint", "UInt32", "System.UInt32"],
+                "ulong" or "UInt64" or "System.UInt64" => ["ulong", "UInt64", "System.UInt64"],
+                "ushort" or "UInt16" or "System.UInt16" => ["ushort", "UInt16", "System.UInt16"],
+                "void" or "Void" or "System.Void" => ["void", "Void", "System.Void"],
+                _ => []
+            };
         }
     }
 
@@ -1946,17 +2409,20 @@ public static class Dosai
         return "";
     }
 
-    private sealed class MethodCallOperationWalker(SemanticModel model, List<MethodCalls> methodCalls, string basePath, string sourceFilePath, string fileName) : OperationWalker
+    private sealed class MethodCallOperationWalker(SemanticModel model, DispatchResolver.SourceIndex dispatchIndex, List<MethodCalls> methodCalls, string basePath, string sourceFilePath, string fileName) : OperationWalker
     {
         public override void VisitInvocation(IInvocationOperation operation)
         {
             AddMethodCall(operation, operation.TargetMethod, CallType.MethodCall, operation.Arguments);
+            AddSourceDispatchCandidates(operation);
+            AddFrameworkAndReflectionCandidates(operation);
             base.VisitInvocation(operation);
         }
 
         public override void VisitObjectCreation(IObjectCreationOperation operation)
         {
             AddMethodCall(operation, operation.Constructor, CallType.ConstructorCall, operation.Arguments);
+            AddReflectionConstructorCandidate(operation);
             base.VisitObjectCreation(operation);
         }
 
@@ -1966,6 +2432,24 @@ public static class Dosai
             var accessor = callType == CallType.PropertySet ? operation.Property.SetMethod : operation.Property.GetMethod;
             AddMethodCall(operation, accessor, callType, []);
             base.VisitPropertyReference(operation);
+        }
+
+        public override void VisitDelegateCreation(IDelegateCreationOperation operation)
+        {
+            AddCallbackTarget(operation, operation.Target, CallType.DelegateInvoke, AnalysisEvidenceKind.SourceRoslynDelegateTarget, "Delegate target inferred from Roslyn delegate creation operation.");
+            base.VisitDelegateCreation(operation);
+        }
+
+        public override void VisitEventAssignment(IEventAssignmentOperation operation)
+        {
+            AddCallbackTarget(operation, operation.HandlerValue, operation.Adds ? CallType.EventSubscribe : CallType.EventUnsubscribe, AnalysisEvidenceKind.SourceRoslynDelegateTarget, "Event handler target inferred from Roslyn event assignment operation.");
+            base.VisitEventAssignment(operation);
+        }
+
+        public override void VisitAnonymousFunction(IAnonymousFunctionOperation operation)
+        {
+            AddInferredMethodCall(operation, operation.Symbol, CallType.DelegateInvoke, [], ["source-lambda-target"], AnalysisEvidenceKind.SourceRoslynDelegateTarget, "Lambda callback target inferred from Roslyn anonymous-function operation.", "Medium", operation.Symbol.ContainingSymbol as IMethodSymbol);
+            base.VisitAnonymousFunction(operation);
         }
 
         private void AddMethodCall(IOperation operation, IMethodSymbol? targetMethod, CallType callType, IEnumerable<IArgumentOperation> arguments)
@@ -2012,8 +2496,303 @@ public static class Dosai
                 CallerMethod = callerSymbol.Name,
                 CallerNamespace = callerSymbol.ContainingNamespace?.ToDisplayString() ?? string.Empty,
                 CallerClass = callerSymbol.ContainingType?.Name ?? string.Empty,
-                IsInternal = isInternal && !isInMetadata
+                IsInternal = isInternal && !isInMetadata,
+                EvidenceKind = AnalysisEvidenceKind.SourceRoslynDirect,
+                Evidence =
+                [
+                    new AnalysisEvidence
+                    {
+                        Kind = AnalysisEvidenceKind.SourceRoslynDirect,
+                        Source = "roslyn-source",
+                        Description = "Call discovered from Roslyn semantic operation.",
+                        FileName = fileName,
+                        LineNumber = location.Line + 1,
+                        ColumnNumber = location.Character + 1
+                    }
+                ]
             });
+        }
+
+        private void AddSourceDispatchCandidates(IInvocationOperation operation)
+        {
+            if (!ShouldInferDispatchCandidates(operation.TargetMethod))
+            {
+                return;
+            }
+
+            foreach (var candidate in dispatchIndex.FindDispatchCandidates(operation.TargetMethod, operation.Instance?.Type).Take(16))
+            {
+                AddInferredMethodCall(
+                    operation,
+                    candidate,
+                    CallType.MethodCall,
+                    operation.Arguments,
+                    ["source-dispatch-candidate"],
+                    AnalysisEvidenceKind.SourceRoslynVirtualCandidate,
+                    "Virtual/interface dispatch candidate inferred from source type hierarchy.",
+                    "Low");
+            }
+        }
+
+        private void AddFrameworkAndReflectionCandidates(IInvocationOperation operation)
+        {
+            AddDelegateArgumentCallbackCandidates(operation);
+            AddDiFrameworkCandidates(operation);
+            AddReflectionCandidates(operation);
+        }
+
+        private void AddDelegateArgumentCallbackCandidates(IInvocationOperation operation)
+        {
+            if (!IsFrameworkCallbackRegistration(operation.TargetMethod))
+            {
+                return;
+            }
+
+            foreach (var argument in operation.Arguments)
+            {
+                if (argument.Value.Type?.TypeKind == TypeKind.Delegate)
+                {
+                    AddCallbackTarget(operation, argument.Value, CallType.DelegateInvoke, AnalysisEvidenceKind.FrameworkModel, "Framework callback target inferred from delegate argument registration.");
+                }
+            }
+        }
+
+        private void AddDiFrameworkCandidates(IInvocationOperation operation)
+        {
+            var methodName = operation.TargetMethod.Name;
+            if (methodName is "AddSingleton" or "AddScoped" or "AddTransient" or "AddHostedService")
+            {
+                foreach (var implementationType in ResolveRegistrationImplementationTypes(operation))
+                {
+                    AddTypeConstructorCandidate(operation, implementationType, AnalysisEvidenceKind.FrameworkModel, $"DI registration {methodName} inferred service implementation constructor.");
+                }
+            }
+
+            if (methodName is "GetService" or "GetRequiredService")
+            {
+                foreach (var serviceType in ResolveServiceProviderTypes(operation))
+                {
+                    AddTypeConstructorCandidate(operation, serviceType, AnalysisEvidenceKind.FrameworkModel, $"DI service resolution {methodName} inferred service constructor.");
+                }
+            }
+        }
+
+        private void AddReflectionCandidates(IInvocationOperation operation)
+        {
+            var method = operation.TargetMethod;
+            var containingType = NormalizeSymbolName(method.ContainingType?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty);
+            if (containingType == "System.Activator" && method.Name == "CreateInstance")
+            {
+                foreach (var createdType in ResolveActivatorTypes(operation))
+                {
+                    AddTypeConstructorCandidate(operation, createdType, AnalysisEvidenceKind.ReflectionHeuristic, "Activator.CreateInstance target inferred from generic type or typeof argument.");
+                }
+            }
+
+            if (method.Name == "GetMethod" && operation.Instance is ITypeOfOperation typeOf && operation.Arguments.FirstOrDefault()?.Value is { } methodNameOperation && TryGetStringConstant(methodNameOperation, out var reflectedMethodName))
+            {
+                foreach (var reflectedMethod in ResolveMethodsByName(typeOf.TypeOperand, reflectedMethodName))
+                {
+                    AddInferredMethodCall(operation, reflectedMethod, CallType.MethodCall, [], ["reflection-getmethod"], AnalysisEvidenceKind.ReflectionHeuristic, "Reflection GetMethod target inferred from typeof(...) and literal method name.", "Low");
+                }
+            }
+        }
+
+        private void AddReflectionConstructorCandidate(IObjectCreationOperation operation)
+        {
+            if (operation.Type is INamedTypeSymbol createdType && IsFrameworkType(operation.Constructor?.ContainingType))
+            {
+                AddTypeConstructorCandidate(operation, createdType, AnalysisEvidenceKind.FrameworkModel, "Framework-created type constructor inferred from object creation.");
+            }
+        }
+
+        private IEnumerable<INamedTypeSymbol> ResolveRegistrationImplementationTypes(IInvocationOperation operation)
+        {
+            foreach (var typeArgument in operation.TargetMethod.TypeArguments.OfType<INamedTypeSymbol>().Reverse().Take(1))
+            {
+                yield return typeArgument;
+            }
+
+            foreach (var argument in operation.Arguments)
+            {
+                if (argument.Value is ITypeOfOperation { TypeOperand: INamedTypeSymbol namedType })
+                {
+                    yield return namedType;
+                }
+            }
+        }
+
+        private IEnumerable<INamedTypeSymbol> ResolveServiceProviderTypes(IInvocationOperation operation)
+        {
+            foreach (var typeArgument in operation.TargetMethod.TypeArguments.OfType<INamedTypeSymbol>())
+            {
+                yield return typeArgument;
+            }
+            foreach (var argument in operation.Arguments)
+            {
+                if (argument.Value is ITypeOfOperation { TypeOperand: INamedTypeSymbol namedType })
+                {
+                    yield return namedType;
+                }
+            }
+        }
+
+        private IEnumerable<INamedTypeSymbol> ResolveActivatorTypes(IInvocationOperation operation)
+        {
+            foreach (var typeArgument in operation.TargetMethod.TypeArguments.OfType<INamedTypeSymbol>())
+            {
+                yield return typeArgument;
+            }
+            foreach (var argument in operation.Arguments)
+            {
+                if (argument.Value is ITypeOfOperation { TypeOperand: INamedTypeSymbol namedType })
+                {
+                    yield return namedType;
+                }
+            }
+        }
+
+        private IEnumerable<IMethodSymbol> ResolveMethodsByName(ITypeSymbol type, string methodName)
+        {
+            if (type is not INamedTypeSymbol namedType)
+            {
+                yield break;
+            }
+
+            foreach (var method in namedType.GetMembers(methodName).OfType<IMethodSymbol>().Where(method => method.MethodKind == MethodKind.Ordinary))
+            {
+                yield return method;
+            }
+        }
+
+        private void AddTypeConstructorCandidate(IOperation operation, INamedTypeSymbol type, AnalysisEvidenceKind evidenceKind, string description)
+        {
+            var constructor = type.InstanceConstructors
+                .Where(ctor => !ctor.IsStatic)
+                .OrderBy(ctor => ctor.Parameters.Length)
+                .FirstOrDefault();
+            if (constructor is null || constructor.IsImplicitlyDeclared)
+            {
+                return;
+            }
+
+            AddInferredMethodCall(operation, constructor, CallType.ConstructorCall, [], [evidenceKind == AnalysisEvidenceKind.ReflectionHeuristic ? "reflection-constructor" : "framework-constructor"], evidenceKind, description, evidenceKind == AnalysisEvidenceKind.ReflectionHeuristic ? "Low" : "Medium");
+        }
+
+        private bool TryGetStringConstant(IOperation operation, out string value)
+        {
+            var constant = model.GetConstantValue(operation.Syntax);
+            value = constant.HasValue ? constant.Value as string ?? string.Empty : string.Empty;
+            return !string.IsNullOrWhiteSpace(value);
+        }
+
+        private static bool IsFrameworkCallbackRegistration(IMethodSymbol method)
+        {
+            var name = method.Name;
+            var ns = method.ContainingNamespace?.ToDisplayString() ?? string.Empty;
+            return ns.StartsWith("Microsoft.AspNetCore", StringComparison.Ordinal) || name.StartsWith("Map", StringComparison.Ordinal) || name.StartsWith("Use", StringComparison.Ordinal) || name is "Run" or "On" or "Subscribe";
+        }
+
+        private static bool IsFrameworkType(INamedTypeSymbol? type)
+        {
+            var ns = type?.ContainingNamespace?.ToDisplayString() ?? string.Empty;
+            return ns.StartsWith("Microsoft.AspNetCore", StringComparison.Ordinal) || ns.StartsWith("Microsoft.Extensions", StringComparison.Ordinal);
+        }
+
+        private void AddCallbackTarget(IOperation operation, IOperation? callbackOperation, CallType callType, AnalysisEvidenceKind evidenceKind, string description)
+        {
+            var callback = ResolveCallbackMethod(callbackOperation);
+            if (callback is null)
+            {
+                return;
+            }
+
+            AddInferredMethodCall(operation, callback, callType, [], ["source-callback-target"], evidenceKind, description, "Medium");
+        }
+
+        private void AddInferredMethodCall(IOperation operation, IMethodSymbol targetMethod, CallType callType, IEnumerable<IArgumentOperation> arguments, List<string> argumentExpressions, AnalysisEvidenceKind evidenceKind, string description, string confidence, IMethodSymbol? callerOverride = null)
+        {
+            if ((callerOverride ?? model.GetEnclosingSymbol(operation.Syntax.SpanStart)) is not IMethodSymbol callerSymbol)
+            {
+                return;
+            }
+
+            var sourceId = GenerateMethodSignature(callerSymbol);
+            var targetId = GenerateMethodSignature(targetMethod);
+            if (string.IsNullOrWhiteSpace(sourceId) || string.IsNullOrWhiteSpace(targetId) || sourceId == targetId)
+            {
+                return;
+            }
+
+            var location = operation.Syntax.GetLocation().GetLineSpan().StartLinePosition;
+            var argumentList = arguments.Select(argument => NormalizeSymbolName(argument.Parameter?.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? argument.Value.Type?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty)).ToList();
+            var targetLocations = targetMethod.Locations;
+            var isInMetadata = targetLocations.Any(locationInfo => locationInfo.IsInMetadata);
+            var isInSource = targetLocations.Any(locationInfo => locationInfo.IsInSource);
+
+            methodCalls.Add(new MethodCalls
+            {
+                Path = Path.GetRelativePath(basePath, sourceFilePath),
+                FileName = fileName,
+                Assembly = targetMethod.ContainingAssembly?.ToDisplayString() ?? string.Empty,
+                Module = targetMethod.ContainingModule?.ToDisplayString() ?? string.Empty,
+                Namespace = targetMethod.ContainingNamespace?.ToDisplayString() ?? string.Empty,
+                ClassName = targetMethod.ContainingType?.Name ?? string.Empty,
+                CalledMethod = targetMethod.MethodKind == MethodKind.Constructor ? targetMethod.ContainingType?.Name ?? targetMethod.Name : NormalizeSymbolName(targetMethod.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat)),
+                LineNumber = location.Line + 1,
+                ColumnNumber = location.Character + 1,
+                Arguments = argumentList,
+                ArgumentExpressions = argumentExpressions,
+                CallType = callType,
+                SourceId = sourceId,
+                TargetId = targetId,
+                CallerMethod = callerSymbol.Name,
+                CallerNamespace = callerSymbol.ContainingNamespace?.ToDisplayString() ?? string.Empty,
+                CallerClass = callerSymbol.ContainingType?.Name ?? string.Empty,
+                IsInternal = (isInSource || SymbolEqualityComparer.Default.Equals(targetMethod.ContainingAssembly, model.Compilation.Assembly)) && !isInMetadata,
+                EvidenceKind = evidenceKind,
+                Evidence =
+                [
+                    new AnalysisEvidence
+                    {
+                        Kind = evidenceKind,
+                        Source = "roslyn-source-inferred",
+                        Description = description,
+                        Confidence = confidence,
+                        FileName = fileName,
+                        LineNumber = location.Line + 1,
+                        ColumnNumber = location.Character + 1
+                    }
+                ]
+            });
+        }
+
+        private bool ShouldInferDispatchCandidates(IMethodSymbol targetMethod)
+        {
+            if (targetMethod.IsStatic || targetMethod.MethodKind != MethodKind.Ordinary || targetMethod.ContainingType is null)
+            {
+                return false;
+            }
+
+            var containingType = targetMethod.ContainingType;
+            var sourceOrApplicationType = containingType.Locations.Any(location => location.IsInSource) || SymbolEqualityComparer.Default.Equals(containingType.ContainingAssembly, model.Compilation.Assembly);
+            return sourceOrApplicationType && (containingType.TypeKind == TypeKind.Interface || targetMethod.IsVirtual || targetMethod.IsAbstract || targetMethod.IsOverride);
+        }
+
+        private static IMethodSymbol? ResolveCallbackMethod(IOperation? operation)
+        {
+            while (operation is IConversionOperation conversion)
+            {
+                operation = conversion.Operand;
+            }
+
+            return operation switch
+            {
+                IDelegateCreationOperation delegateCreation => ResolveCallbackMethod(delegateCreation.Target),
+                IMethodReferenceOperation methodReference => methodReference.Method,
+                IAnonymousFunctionOperation anonymousFunction => anonymousFunction.Symbol,
+                _ => null
+            };
         }
 
         private static bool IsPropertyWrite(IPropertyReferenceOperation operation)
@@ -2034,6 +2813,7 @@ public static class Dosai
                 _ => false
             };
         }
+
     }
 
     private static void TrackCsMethodCall(InvocationExpressionSyntax methodCall, SemanticModel model, List<MethodCalls> allMethodCalls, string path, string sourceFilePath, string fileName)
@@ -2215,10 +2995,15 @@ public static class Dosai
         }
         if (fileAttributes.HasFlag(FileAttributes.Directory))
         {
+            var sourceExtensions = new HashSet<string>([Constants.CSharpSourceExtension, Constants.VBSourceExtension, Constants.FSharpSourceExtension], StringComparer.OrdinalIgnoreCase);
             filesToInspect.AddRange(
                 from extension in fileExtensions 
-                from inputFile in new DirectoryInfo(path).EnumerateFiles($"*{extension}", SearchOption.AllDirectories) 
-                where !inputFile.FullName.Contains("/obj/") && !inputFile.FullName.EndsWith($".g{extension}") 
+                from inputFile in new DirectoryInfo(path).EnumerateFiles($"*{extension}", SearchOption.AllDirectories)
+                let isSourceExtension = sourceExtensions.Contains(extension)
+                let relativePath = Path.GetRelativePath(path, inputFile.FullName)
+                where !HasDirectorySegment(relativePath, "obj")
+                      && (!isSourceExtension || !HasDirectorySegment(relativePath, "bin"))
+                      && !inputFile.FullName.EndsWith($".g{extension}", StringComparison.OrdinalIgnoreCase) 
                 select inputFile.FullName);
         }
         else
@@ -2231,5 +3016,11 @@ public static class Dosai
             }
         }
         return filesToInspect;
+    }
+
+    private static bool HasDirectorySegment(string relativePath, string segment)
+    {
+        var parts = relativePath.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        return parts.Take(Math.Max(0, parts.Length - 1)).Any(part => part.Equals(segment, StringComparison.OrdinalIgnoreCase));
     }
 }

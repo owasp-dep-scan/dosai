@@ -48,6 +48,10 @@ The `dosai.json` output includes:
 - `SourceAssemblyMapping`
 - PURL fields where NuGet package identity is known
 
+For managed assembly-only inputs, call graph edges are extracted from IL method bodies. Direct calls, constructor calls, delegate/event callback targets, generated async/iterator state-machine calls, and shared CHA/RTA-style virtual candidates are emitted with portable PDB source locations when available, so `methods` remains useful when source is unavailable.
+
+For source directories, `methods` ignores source files under `bin` and `obj` relative to the inspected root. Assembly analysis still accepts app output directories because binary-only reviews often start from build or publish output.
+
 ### Data-flow slices
 
 ```bash
@@ -59,6 +63,10 @@ dotnet run --project ./Dosai -- dataflows \
 ```
 
 The `dataflows.json` output includes `Metadata`, `EntryPoints`, `PackageReachability`, `DangerousApiReachability`, and `WeaknessCandidates` in addition to nodes, edges, and slices.
+
+`--path` may point at a source tree, a single managed `.dll`/`.exe`, or a directory containing managed assemblies. Source analysis uses Roslyn `IOperation`; assembly-only analysis reconstructs local and interprocedural flows from IL method bodies, branch targets, exception regions, metadata symbols, portable PDB local scopes/sequence points, emitted framework attributes, and compiler-generated async/iterator/display-class fields. For assembly directories, Dosai reads adjacent `.deps.json` files to prefer project/application assemblies and avoid flooding results with framework and package dependency internals.
+
+Assembly-derived nodes include `Properties.analysis = "assembly-il"`, `Properties.assembly`, `Properties.ilOffset`, and a metadata token. When a portable PDB is available, node and edge `FileName`, `Path`, `LineNumber`, and `ColumnNumber` use source locations; otherwise they fall back to the assembly file and IL offset.
 
 For local triage, add `--print` to render each slice as a stack-trace-style path with code, file, line, column, symbols, PURLs, and edge transitions:
 
@@ -101,6 +109,10 @@ dotnet run --project ./Dosai -- dataflows \
 ```
 
 Pattern files contain `sources`, `sinks`, `passthroughs`, and `sanitizers` arrays. See [Data-flow custom patterns](./dataflow-patterns.md) for the full schema and examples. See [Built-in data-flow pattern pack catalog](./pattern-packs.md) for the exact defaults behind `--pattern-packs`.
+
+Validator-style sanitizers such as `Regex.IsMatch(input, pattern)` are branch aware for common `if` conditions. Dosai suppresses taint on the validated path and preserves taint on the unvalidated path. This reduces obvious false positives, but it is still pattern-based static analysis. Project-specific validation helpers should be added as custom sanitizer patterns.
+
+Call graph evidence distinguishes direct observations from inferred framework and reflection edges. DI registrations, service-provider resolution, framework callback registrations, and simple reflection patterns are useful triage hints, but they should be reviewed as inferred `FrameworkModel` or `ReflectionHeuristic` evidence rather than proof that a runtime call always occurs.
 
 Use [Dosai query language](./query-language.md) to filter large JSON outputs down to the slices, weakness candidates, packages, or crypto findings relevant to a review. Use [AI-agent and automation workflows](./agent-workflows.md) for recommended `agent-context`, MCP, query, report, and diff loops.
 

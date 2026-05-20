@@ -21,6 +21,8 @@ public class Method
     public string? SourceSignature { get; init; }
     public string? AssemblySignature { get; init; }
     public string? Purl { get; set; }
+    public MethodIdentity? Identity { get; set; }
+    public List<AnalysisEvidence> Evidence { get; set; } = [];
     public bool IsGenericMethod { get; init; }
     public List<string>? GenericParameters { get; init; }
     public bool IsGenericMethodDefinition { get; set; }

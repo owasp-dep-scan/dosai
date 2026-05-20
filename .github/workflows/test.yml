@@ -112,6 +112,56 @@ jobs:
         assert open('/tmp/dosai-report.md').read().startswith('# Dosai Analysis Report')
         ET.parse('/tmp/dosai-dataflows.gexf')
         PY
+    - name: Assembly-only dataflow smoke
+      run: |
+        set -euo pipefail
+        mkdir -p /tmp/dosai-assembly-smoke
+        cat > /tmp/dosai-assembly-smoke/AssemblySmoke.csproj <<'XML'
+        <Project Sdk="Microsoft.NET.Sdk">
+          <PropertyGroup>
+            <TargetFramework>net10.0</TargetFramework>
+            <OutputType>Exe</OutputType>
+            <DebugType>portable</DebugType>
+          </PropertyGroup>
+        </Project>
+        XML
+        cat > /tmp/dosai-assembly-smoke/Program.cs <<'CS'
+        using System.Diagnostics;
+        public static class Program
+        {
+            public static void Main(string[] args)
+            {
+                Launch(Wrap(args[0]));
+            }
+            static string Wrap(string input) => string.Concat(input, "");
+            static void Launch(string command) => Process.Start(command);
+        }
+        CS
+        dotnet build /tmp/dosai-assembly-smoke/AssemblySmoke.csproj -o /tmp/dosai-assembly-smoke/out -v:quiet
+        dotnet run --no-build --project ./Dosai/Dosai.csproj -- methods --path /tmp/dosai-assembly-smoke/out/AssemblySmoke.dll --o /tmp/dosai-assembly-methods.json --callgraph-format graphml --callgraph-out /tmp/dosai-assembly-callgraph.graphml
+        dotnet run --no-build --project ./Dosai/Dosai.csproj -- dataflows --path /tmp/dosai-assembly-smoke/out/AssemblySmoke.dll --o /tmp/dosai-assembly-dataflows.json --graph-format graphml --graph-out /tmp/dosai-assembly-dataflows.graphml
+        python3 - <<'PY'
+        import json, xml.etree.ElementTree as ET
+        methods = json.load(open('/tmp/dosai-assembly-methods.json'))
+        callgraph = methods['CallGraph']
+        assert any(edge['SourceId'].find('Program.Main') >= 0 and edge['TargetId'].find('Program.Launch') >= 0 for edge in callgraph['Edges'])
+        assert any(edge['TargetId'].find('System.Diagnostics.Process.Start') >= 0 for edge in callgraph['Edges'])
+        assert any(edge.get('EvidenceKind') == 'AssemblyIlDirect' for edge in callgraph['Edges'])
+        dataflows = json.load(open('/tmp/dosai-assembly-dataflows.json'))
+        stats = dataflows['Statistics']
+        assert stats['FilesAnalyzed'] == 1, stats
+        assert stats['SourceCount'] >= 1, stats
+        assert stats['SinkCount'] >= 1, stats
+        assert stats['SliceCount'] >= 1, stats
+        assert any(node.get('Properties', {}).get('analysis') == 'assembly-il' for node in dataflows['Nodes'])
+        assert any(node.get('MethodIdentity', {}).get('Evidence') for node in dataflows['Nodes'])
+        assert any(summary.get('EvidenceKind') == 'AssemblyIlSummary' for summary in dataflows.get('MethodSummaries', []))
+        assert any(edge['Kind'] == 'AssemblyInterproceduralSink' for edge in dataflows['Edges'])
+        node_ids = {node['Id'] for node in dataflows['Nodes']}
+        assert all(edge['SourceId'] in node_ids and edge['TargetId'] in node_ids for edge in dataflows['Edges'])
+        ET.parse('/tmp/dosai-assembly-callgraph.graphml')
+        ET.parse('/tmp/dosai-assembly-dataflows.graphml')
+        PY
 
   smoke-crypto:
     runs-on: ubuntu-latest

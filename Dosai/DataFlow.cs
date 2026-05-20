@@ -74,6 +74,9 @@ public sealed class DataFlowMethodSummary
     public List<string> FieldPaths { get; set; } = [];
     public string SummaryKind { get; set; } = "InferredLocal";
     public string Confidence { get; set; } = "Medium";
+    public MethodIdentity? Identity { get; set; }
+    public AnalysisEvidenceKind EvidenceKind { get; set; } = AnalysisEvidenceKind.Unknown;
+    public List<AnalysisEvidence> Evidence { get; set; } = [];
 }
 
 public sealed class DataFlowNode
@@ -96,6 +99,8 @@ public sealed class DataFlowNode
     public bool IsSink { get; set; }
     public List<string> MatchedPatterns { get; set; } = [];
     public string? Category { get; set; }
+    public MethodIdentity? MethodIdentity { get; set; }
+    public List<AnalysisEvidence> Evidence { get; set; } = [];
     public Dictionary<string, string> Properties { get; set; } = [];
 }
 
@@ -242,11 +247,17 @@ public static partial class DataFlowAnalyzer
         }
 
         AnalyzeLanguageFrontendDataFlows(path, sourcesToInspect, patterns, result);
+        result.Statistics.FilesAnalyzed += AnalyzeAssemblyDataFlows(path, patterns, result, includeBuildArtifacts: sourcesToInspect.Count == 0);
 
         result.Nodes = result.Nodes.OrderBy(n => n.FileName, StringComparer.Ordinal).ThenBy(n => n.LineNumber).ThenBy(n => n.ColumnNumber).ThenBy(n => n.Id, StringComparer.Ordinal).ToList();
         result.Edges = result.Edges.OrderBy(e => e.FileName, StringComparer.Ordinal).ThenBy(e => e.LineNumber).ThenBy(e => e.ColumnNumber).ThenBy(e => e.Id, StringComparer.Ordinal).ToList();
         result.Slices = result.Slices.OrderBy(s => s.Id, StringComparer.Ordinal).ToList();
-        result.MethodSummaries = summaries.Values.OrderBy(summary => summary.Method, StringComparer.Ordinal).ToList();
+        result.MethodSummaries = summaries.Values
+            .Concat(result.MethodSummaries)
+            .GroupBy(summary => $"{summary.Method}\u001f{summary.SummaryKind}\u001f{summary.EvidenceKind}", StringComparer.Ordinal)
+            .Select(group => group.First())
+            .OrderBy(summary => summary.Method, StringComparer.Ordinal)
+            .ToList();
         result.Statistics.NodeCount = result.Nodes.Count;
         result.Statistics.EdgeCount = result.Edges.Count;
         result.Statistics.SourceCount = result.Nodes.Count(n => n.IsSource);
@@ -263,7 +274,7 @@ public static partial class DataFlowAnalyzer
     private static void AddDataFlowEntryPoints(DataFlowResult result)
     {
         var next = result.EntryPoints.Count;
-        foreach (var source in result.Nodes.Where(node => node.IsSource && node.Category == "cli" && node.MethodName == "Main"))
+        foreach (var source in result.Nodes.Where(node => node is { IsSource: true, Category: "cli", MethodName: "Main" }))
         {
             if (result.EntryPoints.Any(entryPoint => entryPoint.Kind == "Cli" && entryPoint.FileName == source.FileName && entryPoint.LineNumber == source.LineNumber))
             {
@@ -684,7 +695,19 @@ public static partial class DataFlowAnalyzer
             IsSink = isSink,
             MatchedPatterns = [pattern.Pattern],
             Category = pattern.Category,
-            Code = code.Trim().Length <= 240 ? code.Trim() : code.Trim()[..240] + "…"
+            Code = code.Trim().Length <= 240 ? code.Trim() : code.Trim()[..240] + "…",
+            Evidence =
+            [
+                new AnalysisEvidence
+                {
+                    Kind = AnalysisEvidenceKind.LanguageFrontend,
+                    Source = "language-frontend",
+                    Description = "Data-flow node discovered by non-Roslyn language frontend.",
+                    FileName = Path.GetFileName(file),
+                    LineNumber = line,
+                    ColumnNumber = column
+                }
+            ]
         };
         node.Properties["confidence"] = pattern.Confidence;
         if (pattern.TaintKinds.Count > 0) node.Properties["taintKinds"] = string.Join(",", pattern.TaintKinds);
@@ -834,7 +857,7 @@ public static partial class DataFlowAnalyzer
         {
             using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
             using var peReader = new PEReader(stream);
-            return peReader.HasMetadata && peReader.PEHeaders.CorHeader is not null;
+            return peReader is { HasMetadata: true, PEHeaders.CorHeader: not null };
         }
         catch
         {
@@ -924,7 +947,21 @@ public static partial class DataFlowAnalyzer
             var key = DescribeSymbol(method);
             if (!summaries.TryGetValue(key, out var summary))
             {
-                summary = new DataFlowMethodSummary { Method = key };
+                summary = new DataFlowMethodSummary
+                {
+                    Method = key,
+                    EvidenceKind = AnalysisEvidenceKind.SourceRoslynSummary,
+                    Identity = MethodIdentityFactory.FromParts(key, key, null, key, method.ContainingAssembly?.ToDisplayString(), method.ContainingModule?.ToDisplayString(), method.ContainingNamespace?.ToDisplayString(), method.ContainingType?.Name, method.Name, 0, null, AnalysisEvidenceKind.SourceRoslynSummary),
+                    Evidence =
+                    [
+                        new AnalysisEvidence
+                        {
+                            Kind = AnalysisEvidenceKind.SourceRoslynSummary,
+                            Source = "roslyn-source",
+                            Description = "Method summary inferred from Roslyn operation analysis."
+                        }
+                    ]
+                };
                 summaries[key] = summary;
             }
             return summary;
@@ -1088,17 +1125,26 @@ public static partial class DataFlowAnalyzer
 
         public override void VisitConditional(IConditionalOperation operation)
         {
-            var guardedKeys = GetSanitizedGuardKeys(operation.Condition).ToList();
+            var trueGuardedKeys = GetSanitizedGuardKeys(operation.Condition, whenConditionIsTrue: true).ToList();
+            var falseGuardedKeys = GetSanitizedGuardKeys(operation.Condition, whenConditionIsTrue: false).ToList();
             Visit(operation.Condition);
-            if (guardedKeys.Count == 0 || operation.WhenTrue is null)
+            if (trueGuardedKeys.Count == 0)
             {
                 Visit(operation.WhenTrue);
             }
             else
             {
-                VisitWithSuppressedTaint(guardedKeys, operation.WhenTrue);
+                VisitWithSuppressedTaint(trueGuardedKeys, operation.WhenTrue);
             }
-            Visit(operation.WhenFalse);
+
+            if (falseGuardedKeys.Count == 0 || operation.WhenFalse is null)
+            {
+                Visit(operation.WhenFalse);
+            }
+            else
+            {
+                VisitWithSuppressedTaint(falseGuardedKeys, operation.WhenFalse);
+            }
         }
 
         public override void VisitInvocation(IInvocationOperation operation)
@@ -1330,7 +1376,7 @@ public static partial class DataFlowAnalyzer
                 return true;
             }
 
-            if (method.OriginalDefinition is not null && summaries.TryGetValue(DescribeSymbol(method.OriginalDefinition), out summary!))
+            if (summaries.TryGetValue(DescribeSymbol(method.OriginalDefinition), out summary!))
             {
                 return true;
             }
@@ -1346,7 +1392,7 @@ public static partial class DataFlowAnalyzer
                 return true;
             }
 
-            if (operation is IObjectCreationOperation objectCreation && objectCreation.Constructor is not null && MatchSymbol(objectCreation.Constructor, operation.Syntax, _patternIndex.Sanitizers).Any())
+            if (operation is IObjectCreationOperation { Constructor: not null } objectCreation && MatchSymbol(objectCreation.Constructor, operation.Syntax, _patternIndex.Sanitizers).Any())
             {
                 return true;
             }
@@ -1354,15 +1400,42 @@ public static partial class DataFlowAnalyzer
             return _patternIndex.SanitizerCodeLike.Count > 0 && MatchCode(SyntaxText(operation.Syntax), _patternIndex.SanitizerCodeLike).Any();
         }
 
-        private IEnumerable<string> GetSanitizedGuardKeys(IOperation condition)
+        private IEnumerable<string> GetSanitizedGuardKeys(IOperation condition, bool whenConditionIsTrue)
         {
             condition = Strip(condition);
             if (condition is IUnaryOperation { OperatorKind: UnaryOperatorKind.Not } negated)
             {
-                condition = Strip(negated.Operand);
+                foreach (var key in GetSanitizedGuardKeys(negated.Operand, !whenConditionIsTrue))
+                {
+                    yield return key;
+                }
+                yield break;
             }
 
-            if (condition is IInvocationOperation invocation && MatchSymbol(invocation.TargetMethod, invocation.Syntax, _patternIndex.Sanitizers).Any())
+            if (condition is IBinaryOperation { OperatorKind: BinaryOperatorKind.ConditionalAnd } andOperation)
+            {
+                if (whenConditionIsTrue)
+                {
+                    foreach (var key in GetSanitizedGuardKeys(andOperation.LeftOperand, true).Concat(GetSanitizedGuardKeys(andOperation.RightOperand, true))) yield return key;
+                }
+                yield break;
+            }
+
+            if (condition is IBinaryOperation { OperatorKind: BinaryOperatorKind.ConditionalOr } orOperation)
+            {
+                if (!whenConditionIsTrue)
+                {
+                    foreach (var key in GetSanitizedGuardKeys(orOperation.LeftOperand, false).Concat(GetSanitizedGuardKeys(orOperation.RightOperand, false))) yield return key;
+                }
+                else
+                {
+                    var left = GetSanitizedGuardKeys(orOperation.LeftOperand, true).ToHashSet(StringComparer.Ordinal);
+                    foreach (var key in GetSanitizedGuardKeys(orOperation.RightOperand, true).Where(left.Contains)) yield return key;
+                }
+                yield break;
+            }
+
+            if (whenConditionIsTrue && condition is IInvocationOperation invocation && MatchSymbol(invocation.TargetMethod, invocation.Syntax, _patternIndex.Sanitizers).Any())
             {
                 foreach (var argument in invocation.Arguments)
                 {
@@ -1379,7 +1452,7 @@ public static partial class DataFlowAnalyzer
 
             foreach (var child in condition.ChildOperations)
             {
-                foreach (var key in GetSanitizedGuardKeys(child))
+                foreach (var key in GetSanitizedGuardKeys(child, whenConditionIsTrue))
                 {
                     yield return key;
                 }
@@ -1909,7 +1982,20 @@ public static partial class DataFlowAnalyzer
                 IsSource = isSource,
                 IsSink = isSink,
                 MatchedPatterns = matchedPatterns.Select(p => p.Pattern).Distinct(StringComparer.Ordinal).ToList(),
-                Category = category
+                Category = category,
+                MethodIdentity = method is null ? null : MethodIdentityFactory.FromParts(null, Normalize(method.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)), null, Normalize(method.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)), method.ContainingAssembly?.ToDisplayString(), method.ContainingModule?.ToDisplayString(), method.ContainingNamespace?.ToDisplayString(), method.ContainingType?.Name, method.Name, 0, null, AnalysisEvidenceKind.SourceRoslynDirect),
+                Evidence =
+                [
+                    new AnalysisEvidence
+                    {
+                        Kind = AnalysisEvidenceKind.SourceRoslynDirect,
+                        Source = "roslyn-source",
+                        Description = "Data-flow node discovered from Roslyn operation analysis.",
+                        FileName = Path.GetFileName(sourceFilePath),
+                        LineNumber = lineSpan.StartLinePosition.Line + 1,
+                        ColumnNumber = lineSpan.StartLinePosition.Character + 1
+                    }
+                ]
             };
             if (method is not null)
             {

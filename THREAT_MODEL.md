@@ -37,16 +37,16 @@ flowchart LR
 
 ## Threats and mitigations
 
-| Threat                                   | Scenario                                        | Existing mitigation                                                                              | Future hardening                                 |
-| ---------------------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------ |
-| Arbitrary code execution during analysis | Malicious assembly triggers code execution      | Dosai uses reflection metadata and custom load context; avoids running target code intentionally | Prefer metadata-only loading everywhere possible |
-| Dependency load confusion                | Analyzer resolves unexpected local assemblies   | Search paths are local to target/runtime                                                         | Add strict mode limiting assembly load roots     |
-| Path traversal in nupkg extraction       | Malicious archive entry writes outside temp dir | Current extraction should be reviewed for canonical path checks                                  | Add explicit full-path containment validation    |
-| Resource exhaustion                      | Huge source tree or malformed syntax            | Roslyn parsing may consume memory/CPU                                                            | Add timeout/max-file/max-size options            |
-| Output injection                         | Source strings appear in GraphML/GEXF           | XML output uses escaping; Mermaid labels are escaped                                             | Add tests for more special characters            |
-| False confidence                         | Missing refs produce incomplete graphs          | Invalid-operation fallback captures some legacy cases; diagnostics emitted                       | Add confidence scores per slice                  |
-| PURL misattribution                      | Namespace prefix maps to wrong package          | Longest-prefix best-effort matching                                                              | Add ambiguity list in diagnostics                |
-| Pattern abuse                            | User pattern regex causes backtracking          | Regex patterns are supported                                                                     | Add regex timeout                                |
+| Threat                                   | Scenario                                                            | Existing mitigation                                                                                                                                    | Future hardening                                 |
+| ---------------------------------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------ |
+| Arbitrary code execution during analysis | Malicious assembly triggers code execution                          | IL call graph and data-flow analysis read metadata and method bodies; reflection inventory avoids running target code intentionally                    | Prefer metadata-only loading everywhere possible |
+| Dependency load confusion                | Analyzer resolves unexpected local assemblies                       | Search paths are local to target/runtime, and `.deps.json` scoping prefers project assemblies in app output directories                                | Add strict mode limiting assembly load roots     |
+| Path traversal in nupkg extraction       | Malicious archive entry writes outside temp dir                     | Current extraction should be reviewed for canonical path checks                                                                                        | Add explicit full-path containment validation    |
+| Resource exhaustion                      | Huge source tree or malformed syntax                                | Roslyn parsing may consume memory/CPU                                                                                                                  | Add timeout/max-file/max-size options            |
+| Output injection                         | Source strings appear in GraphML/GEXF                               | XML output uses escaping; Mermaid labels are escaped                                                                                                   | Add tests for more special characters            |
+| False confidence                         | Missing refs or inferred runtime behavior produce incomplete graphs | Invalid-operation fallback captures some legacy cases; evidence kinds separate direct, framework, reflection, and heuristic facts; diagnostics emitted | Add more confidence scores per edge and slice    |
+| PURL misattribution                      | Namespace prefix maps to wrong package                              | Longest-prefix best-effort matching                                                                                                                    | Add ambiguity list in diagnostics                |
+| Pattern abuse                            | User pattern regex causes backtracking                              | Regex patterns are supported                                                                                                                           | Add regex timeout                                |
 
 ## Data-flow specific risks
 
@@ -54,16 +54,17 @@ Dosai data-flow slices are triage artifacts, not proof of exploitability.
 
 False positives can occur when:
 
-- validation/sanitization is not modeled
+- validation/sanitization is not modeled or a custom validator has different semantics than a configured sanitizer pattern
 - a variable is tainted by name but constrained by control flow
 - syntax fallback captures an unresolved API shape
+- inferred framework, DI, dispatch, or reflection evidence over-approximates runtime behavior
 
 False negatives can occur when:
 
 - flow crosses method boundaries without explicit passthrough
 - taint is stored in object graphs not tracked field-sensitively
 - dynamic/reflection calls hide sink invocations
-- generated code is excluded
+- dynamic framework dispatch is driven by configuration not visible in source or IL metadata
 
 ## Supply-chain/PURL risks
 

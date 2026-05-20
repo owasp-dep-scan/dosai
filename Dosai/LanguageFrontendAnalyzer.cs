@@ -257,7 +257,7 @@ write.table(pd, file = "", sep = "\t", row.names = FALSE, col.names = TRUE, quot
                     calls.Add(CreateCall(basePath, file, sourceId, "R", className, row.Text, row.Line, row.Column));
                 }
 
-                if (row.Token == "SYMBOL_FUNCTION_CALL" && row.Text is "library" or "require")
+                if (row is { Token: "SYMBOL_FUNCTION_CALL", Text: "library" or "require" })
                 {
                     var package = rows.FirstOrDefault(candidate => candidate.Line == row.Line && candidate.Column > row.Column && candidate.Token is "SYMBOL" or "STR_CONST")?.Text.Trim('"', '\'');
                     if (!string.IsNullOrWhiteSpace(package))

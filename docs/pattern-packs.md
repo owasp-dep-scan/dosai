@@ -95,7 +95,7 @@ These calls preserve taint through common string transformations:
 | `Name`   | `Exact`    | `IsMatch`                                      | `validation`    | Validator method by simple name. |
 | `Name`   | `Exact`    | `TryParse`                                     | `validation`    | Parse validator.                 |
 
-Validator/sanitizer matches can stop taint for the matched expression, and validator guards can suppress taint inside guarded true branches.
+Validator/sanitizer matches can stop taint for the matched expression. Validator guards can suppress taint on validated branches and keep taint on unvalidated branches for common positive, negated, `&&`, and `||` conditions.
 
 ## Optional packs
 

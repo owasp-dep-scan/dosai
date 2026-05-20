@@ -662,7 +662,7 @@ public static class CryptoAnalyzer
 
         public override void VisitLiteral(ILiteralOperation operation)
         {
-            if (operation.ConstantValue.HasValue && operation.ConstantValue.Value is string)
+            if (operation.ConstantValue is { HasValue: true, Value: string })
             {
                 var method = model.GetEnclosingSymbol(operation.Syntax.SpanStart) as IMethodSymbol;
                 var line = operation.Syntax.Parent?.ToString() ?? operation.Syntax.ToString();
