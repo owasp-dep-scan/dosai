@@ -244,6 +244,110 @@ public static class Program
     }
 
     [Fact]
+    public void GetMethods_CSharpSource_AddsInterfaceDispatchCandidateEdges()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "SourceDispatch.cs"), """
+interface IRunner
+{
+    void Run(string value);
+}
+
+class DefaultRunner : IRunner
+{
+    public void Run(string value) { }
+}
+
+class DispatchEntry
+{
+    static void Main()
+    {
+        IRunner runner = new DefaultRunner();
+        runner.Run("hello");
+    }
+}
+""");
+
+        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(tempDirectory.Path), new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() }
+        });
+
+        Assert.NotNull(methodsSlice?.CallGraph);
+        var nodeIds = methodsSlice.CallGraph.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
+        Assert.All(methodsSlice.CallGraph.Edges, edge =>
+        {
+            Assert.Contains(edge.SourceId, nodeIds);
+            Assert.Contains(edge.TargetId, nodeIds);
+        });
+        Assert.Contains(methodsSlice.CallGraph.Edges, edge =>
+            edge.EvidenceKind == AnalysisEvidenceKind.SourceRoslynVirtualCandidate &&
+            edge.SourceId == "DispatchEntry.Main():void" &&
+            edge.TargetId == "DefaultRunner.Run(string):void" &&
+            edge.Evidence.Any(evidence => evidence.Kind == AnalysisEvidenceKind.SourceRoslynVirtualCandidate && evidence.Source == "roslyn-source-inferred"));
+        Assert.Contains(methodsSlice.MethodCalls!, call => call.EvidenceKind == AnalysisEvidenceKind.SourceRoslynVirtualCandidate && call.TargetId == "DefaultRunner.Run(string):void");
+    }
+
+    [Fact]
+    public void GetMethods_CSharpSource_AddsDelegateAndEventCallbackEdges()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "SourceCallbacks.cs"), """
+using System;
+
+class EventSource
+{
+    public event Action? Fired;
+    public void Raise() => Fired?.Invoke();
+}
+
+class CallbackEntry
+{
+    static void Main()
+    {
+        var source = new EventSource();
+        source.Fired += Handle;
+        Action action = Handle;
+        action();
+        Action lambda = () => Handle();
+        lambda();
+    }
+
+    static void Handle() { }
+}
+""");
+
+        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(tempDirectory.Path), new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() }
+        });
+
+        Assert.NotNull(methodsSlice?.CallGraph);
+        var nodeIds = methodsSlice.CallGraph.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
+        Assert.All(methodsSlice.CallGraph.Edges, edge =>
+        {
+            Assert.Contains(edge.SourceId, nodeIds);
+            Assert.Contains(edge.TargetId, nodeIds);
+        });
+        Assert.Contains(methodsSlice.CallGraph.Edges, edge =>
+            edge.EvidenceKind == AnalysisEvidenceKind.SourceRoslynDelegateTarget &&
+            edge.CallType == CallType.EventSubscribe &&
+            edge.SourceId == "CallbackEntry.Main():void" &&
+            edge.TargetId == "CallbackEntry.Handle():void");
+        Assert.Contains(methodsSlice.CallGraph.Edges, edge =>
+            edge.EvidenceKind == AnalysisEvidenceKind.SourceRoslynDelegateTarget &&
+            edge.CallType == CallType.DelegateInvoke &&
+            edge.SourceId == "CallbackEntry.Main():void" &&
+            edge.TargetId == "CallbackEntry.Handle():void");
+        Assert.Contains(methodsSlice.CallGraph.Edges, edge =>
+            edge.EvidenceKind == AnalysisEvidenceKind.SourceRoslynDelegateTarget &&
+            edge.CallType == CallType.DelegateInvoke &&
+            edge.SourceId == "CallbackEntry.Main():void" &&
+            edge.TargetId.StartsWith("CallbackEntry.", StringComparison.Ordinal) &&
+            edge.TargetId != "CallbackEntry.Handle():void");
+    }
+
+    [Fact]
     public void CallGraphExporter_ExportsMermaidGraphMlAndGexf()
     {
         var sourcePath = GetFilePath(HelloWorldCSharpSource);

@@ -2050,7 +2050,7 @@ public static class Dosai
                     }
                 ]
             })
-            .GroupBy(edge => $"{edge.SourceId}\u001f{edge.TargetId}\u001f{edge.CallLocation.FileName}\u001f{edge.CallLocation.LineNumber}\u001f{edge.CallLocation.ColumnNumber}\u001f{edge.CallType}", StringComparer.Ordinal)
+            .GroupBy(edge => $"{edge.SourceId}\u001f{edge.TargetId}\u001f{edge.CallLocation.FileName}\u001f{edge.CallLocation.LineNumber}\u001f{edge.CallLocation.ColumnNumber}\u001f{edge.CallType}\u001f{edge.EvidenceKind}", StringComparer.Ordinal)
             .Select(group => group.First())
             .OrderBy(edge => edge.SourceId, StringComparer.Ordinal)
             .ThenBy(edge => edge.TargetId, StringComparer.Ordinal)
@@ -2186,9 +2186,12 @@ public static class Dosai
 
     private sealed class MethodCallOperationWalker(SemanticModel model, List<MethodCalls> methodCalls, string basePath, string sourceFilePath, string fileName) : OperationWalker
     {
+        private SourceDispatchIndex? dispatchIndex;
+
         public override void VisitInvocation(IInvocationOperation operation)
         {
             AddMethodCall(operation, operation.TargetMethod, CallType.MethodCall, operation.Arguments);
+            AddSourceDispatchCandidates(operation);
             base.VisitInvocation(operation);
         }
 
@@ -2204,6 +2207,24 @@ public static class Dosai
             var accessor = callType == CallType.PropertySet ? operation.Property.SetMethod : operation.Property.GetMethod;
             AddMethodCall(operation, accessor, callType, []);
             base.VisitPropertyReference(operation);
+        }
+
+        public override void VisitDelegateCreation(IDelegateCreationOperation operation)
+        {
+            AddCallbackTarget(operation, operation.Target, CallType.DelegateInvoke, AnalysisEvidenceKind.SourceRoslynDelegateTarget, "Delegate target inferred from Roslyn delegate creation operation.");
+            base.VisitDelegateCreation(operation);
+        }
+
+        public override void VisitEventAssignment(IEventAssignmentOperation operation)
+        {
+            AddCallbackTarget(operation, operation.HandlerValue, operation.Adds ? CallType.EventSubscribe : CallType.EventUnsubscribe, AnalysisEvidenceKind.SourceRoslynDelegateTarget, "Event handler target inferred from Roslyn event assignment operation.");
+            base.VisitEventAssignment(operation);
+        }
+
+        public override void VisitAnonymousFunction(IAnonymousFunctionOperation operation)
+        {
+            AddInferredMethodCall(operation, operation.Symbol, CallType.DelegateInvoke, [], ["source-lambda-target"], AnalysisEvidenceKind.SourceRoslynDelegateTarget, "Lambda callback target inferred from Roslyn anonymous-function operation.", "Medium", operation.Symbol.ContainingSymbol as IMethodSymbol);
+            base.VisitAnonymousFunction(operation);
         }
 
         private void AddMethodCall(IOperation operation, IMethodSymbol? targetMethod, CallType callType, IEnumerable<IArgumentOperation> arguments)
@@ -2267,6 +2288,125 @@ public static class Dosai
             });
         }
 
+        private void AddSourceDispatchCandidates(IInvocationOperation operation)
+        {
+            if (!ShouldInferDispatchCandidates(operation.TargetMethod))
+            {
+                return;
+            }
+
+            foreach (var candidate in DispatchIndex.FindDispatchCandidates(operation.TargetMethod).Take(16))
+            {
+                AddInferredMethodCall(
+                    operation,
+                    candidate,
+                    CallType.MethodCall,
+                    operation.Arguments,
+                    ["source-dispatch-candidate"],
+                    AnalysisEvidenceKind.SourceRoslynVirtualCandidate,
+                    "Virtual/interface dispatch candidate inferred from source type hierarchy.",
+                    "Low");
+            }
+        }
+
+        private void AddCallbackTarget(IOperation operation, IOperation? callbackOperation, CallType callType, AnalysisEvidenceKind evidenceKind, string description)
+        {
+            var callback = ResolveCallbackMethod(callbackOperation);
+            if (callback is null)
+            {
+                return;
+            }
+
+            AddInferredMethodCall(operation, callback, callType, [], ["source-callback-target"], evidenceKind, description, "Medium");
+        }
+
+        private void AddInferredMethodCall(IOperation operation, IMethodSymbol targetMethod, CallType callType, IEnumerable<IArgumentOperation> arguments, List<string> argumentExpressions, AnalysisEvidenceKind evidenceKind, string description, string confidence, IMethodSymbol? callerOverride = null)
+        {
+            if ((callerOverride ?? model.GetEnclosingSymbol(operation.Syntax.SpanStart)) is not IMethodSymbol callerSymbol)
+            {
+                return;
+            }
+
+            var sourceId = GenerateMethodSignature(callerSymbol);
+            var targetId = GenerateMethodSignature(targetMethod);
+            if (string.IsNullOrWhiteSpace(sourceId) || string.IsNullOrWhiteSpace(targetId) || sourceId == targetId)
+            {
+                return;
+            }
+
+            var location = operation.Syntax.GetLocation().GetLineSpan().StartLinePosition;
+            var argumentList = arguments.Select(argument => NormalizeSymbolName(argument.Parameter?.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? argument.Value.Type?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty)).ToList();
+            var targetLocations = targetMethod.Locations;
+            var isInMetadata = targetLocations.Any(locationInfo => locationInfo.IsInMetadata);
+            var isInSource = targetLocations.Any(locationInfo => locationInfo.IsInSource);
+
+            methodCalls.Add(new MethodCalls
+            {
+                Path = Path.GetRelativePath(basePath, sourceFilePath),
+                FileName = fileName,
+                Assembly = targetMethod.ContainingAssembly?.ToDisplayString() ?? string.Empty,
+                Module = targetMethod.ContainingModule?.ToDisplayString() ?? string.Empty,
+                Namespace = targetMethod.ContainingNamespace?.ToDisplayString() ?? string.Empty,
+                ClassName = targetMethod.ContainingType?.Name ?? string.Empty,
+                CalledMethod = targetMethod.MethodKind == MethodKind.Constructor ? targetMethod.ContainingType?.Name ?? targetMethod.Name : NormalizeSymbolName(targetMethod.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat)),
+                LineNumber = location.Line + 1,
+                ColumnNumber = location.Character + 1,
+                Arguments = argumentList,
+                ArgumentExpressions = argumentExpressions,
+                CallType = callType,
+                SourceId = sourceId,
+                TargetId = targetId,
+                CallerMethod = callerSymbol.Name,
+                CallerNamespace = callerSymbol.ContainingNamespace?.ToDisplayString() ?? string.Empty,
+                CallerClass = callerSymbol.ContainingType?.Name ?? string.Empty,
+                IsInternal = (isInSource || SymbolEqualityComparer.Default.Equals(targetMethod.ContainingAssembly, model.Compilation.Assembly)) && !isInMetadata,
+                EvidenceKind = evidenceKind,
+                Evidence =
+                [
+                    new AnalysisEvidence
+                    {
+                        Kind = evidenceKind,
+                        Source = "roslyn-source-inferred",
+                        Description = description,
+                        Confidence = confidence,
+                        FileName = fileName,
+                        LineNumber = location.Line + 1,
+                        ColumnNumber = location.Character + 1
+                    }
+                ]
+            });
+        }
+
+        private SourceDispatchIndex DispatchIndex => dispatchIndex ??= SourceDispatchIndex.Create(model.Compilation);
+
+        private bool ShouldInferDispatchCandidates(IMethodSymbol targetMethod)
+        {
+            if (targetMethod.IsStatic || targetMethod.MethodKind != MethodKind.Ordinary || targetMethod.ContainingType is null)
+            {
+                return false;
+            }
+
+            var containingType = targetMethod.ContainingType;
+            var sourceOrApplicationType = containingType.Locations.Any(location => location.IsInSource) || SymbolEqualityComparer.Default.Equals(containingType.ContainingAssembly, model.Compilation.Assembly);
+            return sourceOrApplicationType && (containingType.TypeKind == TypeKind.Interface || targetMethod.IsVirtual || targetMethod.IsAbstract || targetMethod.IsOverride);
+        }
+
+        private static IMethodSymbol? ResolveCallbackMethod(IOperation? operation)
+        {
+            while (operation is IConversionOperation conversion)
+            {
+                operation = conversion.Operand;
+            }
+
+            return operation switch
+            {
+                IDelegateCreationOperation delegateCreation => ResolveCallbackMethod(delegateCreation.Target),
+                IMethodReferenceOperation methodReference => methodReference.Method,
+                IAnonymousFunctionOperation anonymousFunction => anonymousFunction.Symbol,
+                _ => null
+            };
+        }
+
         private static bool IsPropertyWrite(IPropertyReferenceOperation operation)
         {
             var current = (IOperation)operation;
@@ -2284,6 +2424,97 @@ public static class Dosai
                 IIncrementOrDecrementOperation => true,
                 _ => false
             };
+        }
+
+        private sealed class SourceDispatchIndex
+        {
+            private readonly List<INamedTypeSymbol> concreteSourceTypes;
+
+            private SourceDispatchIndex(List<INamedTypeSymbol> concreteSourceTypes)
+            {
+                this.concreteSourceTypes = concreteSourceTypes;
+            }
+
+            public static SourceDispatchIndex Create(Compilation compilation)
+            {
+                var types = new List<INamedTypeSymbol>();
+                CollectTypes(compilation.Assembly.GlobalNamespace, types);
+                return new SourceDispatchIndex(types
+                    .Where(type => type.Locations.Any(location => location.IsInSource))
+                    .Where(type => type.TypeKind is TypeKind.Class or TypeKind.Struct)
+                    .Where(type => !type.IsAbstract)
+                    .ToList());
+            }
+
+            public IEnumerable<IMethodSymbol> FindDispatchCandidates(IMethodSymbol targetMethod)
+            {
+                var normalizedTarget = targetMethod.OriginalDefinition;
+                foreach (var type in concreteSourceTypes)
+                {
+                    IMethodSymbol? candidate = null;
+                    if (normalizedTarget.ContainingType?.TypeKind == TypeKind.Interface)
+                    {
+                        candidate = type.FindImplementationForInterfaceMember(normalizedTarget) as IMethodSymbol
+                            ?? type.FindImplementationForInterfaceMember(targetMethod) as IMethodSymbol;
+                    }
+                    else if (InheritsFrom(type, normalizedTarget.ContainingType))
+                    {
+                        candidate = type.GetMembers(normalizedTarget.Name)
+                            .OfType<IMethodSymbol>()
+                            .FirstOrDefault(method => method.IsOverride && Overrides(method, normalizedTarget));
+                    }
+
+                    if (candidate is not null && candidate.Locations.Any(location => location.IsInSource) && !SymbolEqualityComparer.Default.Equals(candidate.OriginalDefinition, normalizedTarget))
+                    {
+                        yield return candidate;
+                    }
+                }
+            }
+
+            private static void CollectTypes(INamespaceSymbol namespaceSymbol, List<INamedTypeSymbol> types)
+            {
+                foreach (var type in namespaceSymbol.GetTypeMembers())
+                {
+                    CollectTypes(type, types);
+                }
+                foreach (var childNamespace in namespaceSymbol.GetNamespaceMembers())
+                {
+                    CollectTypes(childNamespace, types);
+                }
+            }
+
+            private static void CollectTypes(INamedTypeSymbol type, List<INamedTypeSymbol> types)
+            {
+                types.Add(type);
+                foreach (var nestedType in type.GetTypeMembers())
+                {
+                    CollectTypes(nestedType, types);
+                }
+            }
+
+            private static bool InheritsFrom(INamedTypeSymbol? candidate, INamedTypeSymbol? baseType)
+            {
+                for (var current = candidate?.BaseType; current is not null; current = current.BaseType)
+                {
+                    if (SymbolEqualityComparer.Default.Equals(current.OriginalDefinition, baseType?.OriginalDefinition))
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            private static bool Overrides(IMethodSymbol method, IMethodSymbol targetMethod)
+            {
+                for (var current = method.OverriddenMethod; current is not null; current = current.OverriddenMethod)
+                {
+                    if (SymbolEqualityComparer.Default.Equals(current.OriginalDefinition, targetMethod))
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            }
         }
     }
 

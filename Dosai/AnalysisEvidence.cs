@@ -5,6 +5,8 @@ public enum AnalysisEvidenceKind
     Unknown,
     SourceRoslynDirect,
     SourceRoslynSummary,
+    SourceRoslynVirtualCandidate,
+    SourceRoslynDelegateTarget,
     AssemblyReflection,
     AssemblyIlDirect,
     AssemblyIlSummary,

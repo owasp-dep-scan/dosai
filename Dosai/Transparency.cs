@@ -283,7 +283,7 @@ public static class TransparencyBuilder
     {
         AnalysisEvidenceKind.SourceRoslynDirect or AnalysisEvidenceKind.AssemblyIlDirect => 3,
         AnalysisEvidenceKind.SourceRoslynSummary or AnalysisEvidenceKind.AssemblyIlSummary or AnalysisEvidenceKind.AssemblyReflection or AnalysisEvidenceKind.ExternalSummary or AnalysisEvidenceKind.FrameworkModel => 2,
-        AnalysisEvidenceKind.AssemblyIlVirtualCandidate or AnalysisEvidenceKind.AssemblyIlDelegateTarget or AnalysisEvidenceKind.AssemblyIlGeneratedState or AnalysisEvidenceKind.ReflectionHeuristic or AnalysisEvidenceKind.LanguageFrontend => 1,
+        AnalysisEvidenceKind.SourceRoslynVirtualCandidate or AnalysisEvidenceKind.SourceRoslynDelegateTarget or AnalysisEvidenceKind.AssemblyIlVirtualCandidate or AnalysisEvidenceKind.AssemblyIlDelegateTarget or AnalysisEvidenceKind.AssemblyIlGeneratedState or AnalysisEvidenceKind.ReflectionHeuristic or AnalysisEvidenceKind.LanguageFrontend => 1,
         _ => 0
     };
 
