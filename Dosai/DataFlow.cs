@@ -242,6 +242,7 @@ public static partial class DataFlowAnalyzer
         }
 
         AnalyzeLanguageFrontendDataFlows(path, sourcesToInspect, patterns, result);
+        result.Statistics.FilesAnalyzed += AnalyzeAssemblyDataFlows(path, patterns, result, includeBuildArtifacts: sourcesToInspect.Count == 0);
 
         result.Nodes = result.Nodes.OrderBy(n => n.FileName, StringComparer.Ordinal).ThenBy(n => n.LineNumber).ThenBy(n => n.ColumnNumber).ThenBy(n => n.Id, StringComparer.Ordinal).ToList();
         result.Edges = result.Edges.OrderBy(e => e.FileName, StringComparer.Ordinal).ThenBy(e => e.LineNumber).ThenBy(e => e.ColumnNumber).ThenBy(e => e.Id, StringComparer.Ordinal).ToList();

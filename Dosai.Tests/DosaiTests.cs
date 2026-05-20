@@ -242,6 +242,67 @@ class FlowSample
     }
 
     [Fact]
+    public void GetDataFlows_AssemblyOnlyCliSourceToProcessStart_ReturnsIlSliceWithValidEdges()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var projectDirectory = Path.Combine(tempDirectory.Path, "src");
+        var outputDirectory = Path.Combine(tempDirectory.Path, "bin");
+        Directory.CreateDirectory(projectDirectory);
+        Directory.CreateDirectory(outputDirectory);
+        File.WriteAllText(Path.Combine(projectDirectory, "AssemblyOnlyFlow.csproj"), """
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+</Project>
+""");
+        File.WriteAllText(Path.Combine(projectDirectory, "Program.cs"), """
+using System.Diagnostics;
+
+public static class Program
+{
+    public static void Main(string[] args)
+    {
+        var command = string.Concat(args[0], "");
+        Process.Start(command);
+    }
+}
+""");
+
+        var build = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = "dotnet",
+            Arguments = $"build \"{Path.Combine(projectDirectory, "AssemblyOnlyFlow.csproj")}\" -o \"{outputDirectory}\" -v:quiet",
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        });
+        Assert.NotNull(build);
+        build.WaitForExit();
+        var buildOutput = build.StandardOutput.ReadToEnd() + build.StandardError.ReadToEnd();
+        Assert.True(build.ExitCode == 0, buildOutput);
+
+        var resultJson = DataFlowAnalyzer.GetDataFlows(Path.Combine(outputDirectory, "AssemblyOnlyFlow.dll"));
+        var dataFlowResult = JsonSerializer.Deserialize<DataFlowResult>(resultJson, new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() }
+        });
+
+        Assert.NotNull(dataFlowResult);
+        Assert.Equal(1, dataFlowResult.Statistics.FilesAnalyzed);
+        Assert.Contains(dataFlowResult.Nodes, node => node.IsSource && node.Category == "cli" && node.Properties.TryGetValue("analysis", out var analysis) && analysis == "assembly-il");
+        Assert.Contains(dataFlowResult.Nodes, node => node.IsSink && node.Category == "command" && node.Symbol is not null && node.Symbol.Contains("System.Diagnostics.Process.Start", StringComparison.Ordinal));
+        Assert.Contains(dataFlowResult.Slices, slice => slice.SourceCategory == "cli" && slice.SinkCategory == "command");
+        var nodeIds = dataFlowResult.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
+        Assert.All(dataFlowResult.Edges, edge =>
+        {
+            Assert.Contains(edge.SourceId, nodeIds);
+            Assert.Contains(edge.TargetId, nodeIds);
+        });
+    }
+
+    [Fact]
     public void GetDataFlows_NestedInterproceduralExpression_PreservesCommandSlice()
     {
         using var tempDirectory = new TemporaryDirectory();
