@@ -1,4 +1,7 @@
 using Depscan;
+using System.Collections;
+using System.Reflection;
+using System.Reflection.Metadata;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Xml.Linq;
@@ -266,6 +269,24 @@ public static class Program
             edge.EvidenceKind == AnalysisEvidenceKind.AssemblyIlDelegateTarget &&
             edge.SourceId.Contains("Program.Main", StringComparison.Ordinal) &&
             edge.TargetId.Contains("Program.Handle", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AssemblyIlDecoders_MalformedSwitchOperands_StopWithoutLargeAllocation()
+    {
+        byte[] validEmptySwitch = [0x45, 0x00, 0x00, 0x00, 0x00];
+        byte[] negativeSwitchCount = [0x45, 0xff, 0xff, 0xff, 0xff];
+        byte[] truncatedSwitchTargets = [0x45, 0x01, 0x00, 0x00, 0x00];
+        byte[] excessiveSwitchCount = [0x45, 0x01, 0x10, 0x00, 0x00];
+
+        Assert.Equal(1, CountDecodedInstructions("Depscan.AssemblyCallGraphAnalyzer", validEmptySwitch));
+        Assert.Equal(1, CountDecodedInstructions("Depscan.DataFlowAnalyzer", validEmptySwitch));
+        Assert.Equal(0, CountDecodedInstructions("Depscan.AssemblyCallGraphAnalyzer", negativeSwitchCount));
+        Assert.Equal(0, CountDecodedInstructions("Depscan.DataFlowAnalyzer", negativeSwitchCount));
+        Assert.Equal(0, CountDecodedInstructions("Depscan.AssemblyCallGraphAnalyzer", truncatedSwitchTargets));
+        Assert.Equal(0, CountDecodedInstructions("Depscan.DataFlowAnalyzer", truncatedSwitchTargets));
+        Assert.Equal(0, CountDecodedInstructions("Depscan.AssemblyCallGraphAnalyzer", excessiveSwitchCount));
+        Assert.Equal(0, CountDecodedInstructions("Depscan.DataFlowAnalyzer", excessiveSwitchCount));
     }
 
     [Fact]
@@ -2490,6 +2511,23 @@ class SqlFlow
     private static string GenerateManyLocalDeclarations(int count) => string.Join(Environment.NewLine, Enumerable.Range(0, count).Select(index => $"        var filler{index} = {index};"));
 
     private static string GenerateManyLocalUses(int count) => string.Join(Environment.NewLine, Enumerable.Range(0, count).Select(index => $"        global::System.GC.KeepAlive(filler{index});"));
+
+    private static unsafe int CountDecodedInstructions(string analyzerTypeName, byte[] ilBytes)
+    {
+        fixed (byte* pointer = ilBytes)
+        {
+            var reader = new BlobReader(pointer, ilBytes.Length);
+            var analyzerType = typeof(Depscan.Dosai).Assembly.GetType(analyzerTypeName, throwOnError: true)!;
+            var decodeMethod = analyzerType.GetMethod("DecodeInstructions", BindingFlags.NonPublic | BindingFlags.Static)!;
+            var instructions = (IEnumerable)decodeMethod.Invoke(null, [reader])!;
+            var count = 0;
+            foreach (var _ in instructions)
+            {
+                count++;
+            }
+            return count;
+        }
+    }
 
     private static string BuildTemporaryProject(string tempRoot, string projectName, string programSource)
     {

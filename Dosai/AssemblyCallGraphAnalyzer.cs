@@ -9,6 +9,8 @@ namespace Depscan;
 
 internal static class AssemblyCallGraphAnalyzer
 {
+    private const int MaxSwitchTargets = 4096;
+
     private static readonly Dictionary<short, OpCode> SingleByteOpCodes = typeof(OpCodes)
         .GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
         .Where(field => field.GetValue(null) is OpCode { Size: 1 })
@@ -955,7 +957,17 @@ internal static class AssemblyCallGraphAnalyzer
 
     private static int[] ReadSwitchOperand(ref BlobReader reader)
     {
+        if (reader.RemainingBytes < sizeof(int))
+        {
+            throw new BadImageFormatException("Switch operand is missing its target count.");
+        }
+
         var count = reader.ReadInt32();
+        if (count < 0 || count > MaxSwitchTargets || count > reader.RemainingBytes / sizeof(int))
+        {
+            throw new BadImageFormatException("Switch operand target count is invalid or truncated.");
+        }
+
         var targets = new int[count];
         for (var i = 0; i < count; i++) targets[i] = reader.ReadInt32();
         return targets;

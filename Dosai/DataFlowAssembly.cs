@@ -10,6 +10,8 @@ namespace Depscan;
 
 public static partial class DataFlowAnalyzer
 {
+    private const int MaxSwitchTargets = 4096;
+
     private static readonly Dictionary<short, OpCode> SingleByteOpCodes = typeof(OpCodes)
         .GetFields(BindingFlags.Public | BindingFlags.Static)
         .Where(field => field.GetValue(null) is OpCode { Size: 1 })
@@ -1050,30 +1052,48 @@ public static partial class DataFlowAnalyzer
             OpCode opCode;
             if (first == 0xfe)
             {
+                if (ilReader.RemainingBytes == 0)
+                {
+                    yield break;
+                }
                 var second = ilReader.ReadByte();
-                MultiByteOpCodes.TryGetValue(unchecked((short)(0xfe00 | second)), out opCode);
+                if (!MultiByteOpCodes.TryGetValue(unchecked((short)(0xfe00 | second)), out opCode))
+                {
+                    yield break;
+                }
             }
             else
             {
-                SingleByteOpCodes.TryGetValue(first, out opCode);
+                if (!SingleByteOpCodes.TryGetValue(first, out opCode))
+                {
+                    yield break;
+                }
             }
 
-            object? operand = opCode.OperandType switch
+            object? operand;
+            try
             {
-                OperandType.InlineNone => null,
-                OperandType.ShortInlineI => opCode == OpCodes.Ldc_I4_S ? ilReader.ReadSByte() : ilReader.ReadByte(),
-                OperandType.InlineI => ilReader.ReadInt32(),
-                OperandType.InlineI8 => ilReader.ReadInt64(),
-                OperandType.ShortInlineR => ilReader.ReadSingle(),
-                OperandType.InlineR => ilReader.ReadDouble(),
-                OperandType.ShortInlineBrTarget => ilReader.ReadSByte(),
-                OperandType.InlineBrTarget => ilReader.ReadInt32(),
-                OperandType.ShortInlineVar => ilReader.ReadByte(),
-                OperandType.InlineVar => (int)ilReader.ReadUInt16(),
-                OperandType.InlineSwitch => ReadSwitchOperand(ref ilReader),
-                OperandType.InlineString or OperandType.InlineSig or OperandType.InlineMethod or OperandType.InlineField or OperandType.InlineType or OperandType.InlineTok => ilReader.ReadInt32(),
-                _ => null
-            };
+                operand = opCode.OperandType switch
+                {
+                    OperandType.InlineNone => null,
+                    OperandType.ShortInlineI => opCode == OpCodes.Ldc_I4_S ? ilReader.ReadSByte() : ilReader.ReadByte(),
+                    OperandType.InlineI => ilReader.ReadInt32(),
+                    OperandType.InlineI8 => ilReader.ReadInt64(),
+                    OperandType.ShortInlineR => ilReader.ReadSingle(),
+                    OperandType.InlineR => ilReader.ReadDouble(),
+                    OperandType.ShortInlineBrTarget => ilReader.ReadSByte(),
+                    OperandType.InlineBrTarget => ilReader.ReadInt32(),
+                    OperandType.ShortInlineVar => ilReader.ReadByte(),
+                    OperandType.InlineVar => (int)ilReader.ReadUInt16(),
+                    OperandType.InlineSwitch => ReadSwitchOperand(ref ilReader),
+                    OperandType.InlineString or OperandType.InlineSig or OperandType.InlineMethod or OperandType.InlineField or OperandType.InlineType or OperandType.InlineTok => ilReader.ReadInt32(),
+                    _ => null
+                };
+            }
+            catch (BadImageFormatException)
+            {
+                yield break;
+            }
 
             yield return new AssemblyInstruction(offset, ilReader.Offset, opCode, operand);
         }
@@ -1081,7 +1101,17 @@ public static partial class DataFlowAnalyzer
 
     private static int[] ReadSwitchOperand(ref BlobReader reader)
     {
+        if (reader.RemainingBytes < sizeof(int))
+        {
+            throw new BadImageFormatException("Switch operand is missing its target count.");
+        }
+
         var count = reader.ReadInt32();
+        if (count < 0 || count > MaxSwitchTargets || count > reader.RemainingBytes / sizeof(int))
+        {
+            throw new BadImageFormatException("Switch operand target count is invalid or truncated.");
+        }
+
         var targets = new int[count];
         for (var i = 0; i < count; i++)
         {
