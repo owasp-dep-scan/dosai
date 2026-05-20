@@ -215,7 +215,7 @@ public static partial class DataFlowAnalyzer
 
             var visitKey = $"{instructionIndex}:{state.Signature()}";
             visitCounts.TryGetValue(visitKey, out var visitCount);
-            if (visitCount >= 2 || visitCounts.Values.Count(value => value > 0) > 20000)
+            if (visitCount >= 2 || visitCounts.Count > 20000)
             {
                 continue;
             }
@@ -413,7 +413,7 @@ public static partial class DataFlowAnalyzer
             var sinkNode = context.AddNode("Sink", member.Name, currentMethod, assemblyPath, isSource: false, isSink: true, sinkPatterns, sinkPatterns.FirstOrDefault()?.Category, member.Symbol, member.ContainingType, member.Symbol, instruction.Offset);
             context.AddEdges(combined.NodeIds, sinkNode.Id, opCode == OpCodes.Newobj ? "AssemblySinkObjectCreation" : "AssemblySinkCall", currentMethod, assemblyPath, instruction.Offset, member.Name);
             var sinkArgumentIndex = argumentTaints.FindIndex(taint => taint is not null);
-            context.AddSlice(combined, sinkNode, sinkPatterns.FirstOrDefault(), member.Symbol, sinkArgumentIndex >= 0 ? sinkArgumentIndex : -1);
+            context.AddSlice(combined, sinkNode, sinkPatterns.FirstOrDefault(), GetSinkArgumentLabel(argumentTaints, receiverTaint, sinkArgumentIndex), sinkArgumentIndex >= 0 ? sinkArgumentIndex : -1);
         }
 
         if (summaries.TryGetValue(member.Symbol, out var summary))
@@ -432,7 +432,7 @@ public static partial class DataFlowAnalyzer
                 var sinkNode = context.AddNode("Sink", member.Name, currentMethod, assemblyPath, isSource: false, isSink: true, [summaryPattern], summaryPattern.Category, member.Symbol, member.ContainingType, member.Symbol, instruction.Offset);
                 sinkNode.Properties["summaryMethod"] = summary.Method;
                 context.AddEdges(taint.NodeIds, sinkNode.Id, "AssemblyInterproceduralSink", currentMethod, assemblyPath, instruction.Offset, member.Name);
-                context.AddSlice(taint, sinkNode, summaryPattern, member.Symbol, sinkParameterIndex);
+                context.AddSlice(taint, sinkNode, summaryPattern, $"arg{sinkParameterIndex}", sinkParameterIndex);
             }
         }
 
@@ -476,6 +476,15 @@ public static partial class DataFlowAnalyzer
             state.Push(combined);
         }
     }
+
+    private static string GetSinkArgumentLabel(IReadOnlyList<AssemblyTaint?> argumentTaints, AssemblyTaint? receiverTaint, int sinkArgumentIndex) =>
+        sinkArgumentIndex >= 0
+            ? $"arg{sinkArgumentIndex}"
+            : receiverTaint is not null
+                ? "receiver"
+                : argumentTaints.Select((taint, index) => (taint, index)).FirstOrDefault(item => item.taint is not null) is var item && item.taint is not null
+                    ? $"arg{item.index}"
+                    : "tainted-value";
 
     private static Dictionary<int, AssemblyTaint?> SeedAssemblyParameters(MetadataReader reader, MethodDefinition method, AssemblyMethodInfo methodInfo, bool isStatic, AssemblyDataFlowContext context)
     {
@@ -677,11 +686,7 @@ public static partial class DataFlowAnalyzer
         var methodName = reader.GetString(method.Name);
         var signature = ReadSignatureInfo(reader, method.Signature, method.Attributes);
         var normalizedMethodName = methodName == ".ctor" || methodName == ".cctor" ? methodName : methodName;
-        var symbol = $"{typeName}.{normalizedMethodName}({string.Join(',', Enumerable.Repeat("?", signature.ParameterCount))})";
-        if (!signature.ReturnsVoid && methodName != ".ctor" && methodName != ".cctor")
-        {
-            symbol += $":{signature.ReturnType}";
-        }
+        var symbol = BuildAssemblyMethodSymbol(typeName, normalizedMethodName, signature.ParameterTypes, signature.ReturnsVoid, signature.ReturnType, methodName);
 
         var metadataToken = MetadataTokens.GetToken(methodHandle);
         return new AssemblyMethodInfo(symbol, methodName, typeName, GetNamespace(typeName), Path.GetFileNameWithoutExtension(assemblyPath), signature.ReturnType, assemblyPath, metadataToken, sourceMap?.GetLocations(metadataToken) ?? []);
@@ -745,12 +750,18 @@ public static partial class DataFlowAnalyzer
         var name = reader.GetString(member.Name);
         var containingType = ResolveMemberParent(reader, member.Parent);
         var signature = ReadSignatureInfo(reader, member.Signature, null);
-        var symbol = $"{containingType}.{name}({string.Join(',', Enumerable.Repeat("?", signature.ParameterCount))})";
-        if (!signature.ReturnsVoid && name != ".ctor")
-        {
-            symbol += $":{signature.ReturnType}";
-        }
+        var symbol = BuildAssemblyMethodSymbol(containingType, name, signature.ParameterTypes, signature.ReturnsVoid, signature.ReturnType, name);
         return new AssemblyMemberInfo(symbol, name, containingType, signature.ParameterCount, signature.HasThis, signature.ReturnsVoid, signature.ReturnType);
+    }
+
+    private static string BuildAssemblyMethodSymbol(string containingType, string methodName, IReadOnlyList<string> parameterTypes, bool returnsVoid, string returnType, string originalMethodName)
+    {
+        var symbol = $"{containingType}.{methodName}({string.Join(',', parameterTypes)})";
+        if (!returnsVoid && originalMethodName != ".ctor" && originalMethodName != ".cctor")
+        {
+            symbol += $":{returnType}";
+        }
+        return symbol;
     }
 
     private static AssemblyMemberInfo ResolveMethodDefinition(MetadataReader reader, MethodDefinitionHandle handle)
@@ -835,7 +846,7 @@ public static partial class DataFlowAnalyzer
             var blob = reader.GetBlobReader(signatureHandle);
             if (blob.Length == 0)
             {
-                return new AssemblySignatureInfo(0, false, true, "void");
+                return new AssemblySignatureInfo(0, false, true, "void", []);
             }
 
             var header = blob.ReadByte();
@@ -846,13 +857,22 @@ public static partial class DataFlowAnalyzer
 
             var parameterCount = blob.RemainingBytes > 0 ? blob.ReadCompressedInteger() : 0;
             var returnType = blob.RemainingBytes > 0 ? ReadSignatureType(reader, ref blob) : "void";
+            var parameterTypes = new List<string>();
+            for (var index = 0; index < parameterCount && blob.RemainingBytes > 0; index++)
+            {
+                parameterTypes.Add(ReadSignatureType(reader, ref blob));
+            }
+            while (parameterTypes.Count < parameterCount)
+            {
+                parameterTypes.Add("?");
+            }
             var returnsVoid = string.Equals(returnType, "void", StringComparison.OrdinalIgnoreCase);
             var hasThis = attributes.HasValue ? (attributes.Value & MethodAttributes.Static) == 0 : (header & 0x20) != 0;
-            return new AssemblySignatureInfo(parameterCount, hasThis, returnsVoid, returnType);
+            return new AssemblySignatureInfo(parameterCount, hasThis, returnsVoid, returnType, parameterTypes);
         }
         catch
         {
-            return new AssemblySignatureInfo(0, false, false, string.Empty);
+            return new AssemblySignatureInfo(0, false, false, string.Empty, []);
         }
     }
 
@@ -1647,7 +1667,7 @@ public static partial class DataFlowAnalyzer
 
     private sealed record AssemblyInstruction(int Offset, int NextOffset, OpCode OpCode, object? Operand);
     private sealed record AssemblySuccessor(int Index, bool IsExceptionHandler, ExceptionRegionKind RegionKind);
-    private sealed record AssemblySignatureInfo(int ParameterCount, bool HasThis, bool ReturnsVoid, string ReturnType);
+    private sealed record AssemblySignatureInfo(int ParameterCount, bool HasThis, bool ReturnsVoid, string ReturnType, IReadOnlyList<string> ParameterTypes);
     private sealed record AssemblyMemberInfo(string Symbol, string Name, string ContainingType, int ParameterCount, bool HasThis, bool ReturnsVoid, string ReturnType);
     private sealed record AssemblySourceLocation(string FilePath, int LineNumber, int ColumnNumber);
     private sealed record AssemblySequencePoint(int Offset, string FilePath, int LineNumber, int ColumnNumber);

@@ -1161,6 +1161,7 @@ public static class Dosai
         var events = new List<EventInfo>();
         var constructors = new List<ConstructorInfo>();
         var sourceAssemblyMappings = new List<SourceAssemblyMapping>();
+        var dispatchIndexes = new Dictionary<Compilation, DispatchResolver.SourceIndex>();
 #pragma warning disable IL3000
         var mscorlib = MetadataReference.CreateFromFile(Path.Combine(AppContext.BaseDirectory, typeof(object).Assembly.Location));
 #pragma warning restore IL3000
@@ -2025,7 +2026,7 @@ public static class Dosai
             // method calls / object creation / property access / event assignment
             if (model is not null)
             {
-                var walker = new MethodCallOperationWalker(model, allMethodCalls, path, sourceFilePath, fileName);
+                var walker = new MethodCallOperationWalker(model, GetDispatchIndex(model.Compilation), allMethodCalls, path, sourceFilePath, fileName);
                 var operationNodes = csRoot is not null
                     ? csRoot.DescendantNodes().Where(node => node is Microsoft.CodeAnalysis.CSharp.Syntax.BlockSyntax or ArrowExpressionClauseSyntax or EqualsValueClauseSyntax or ConstructorInitializerSyntax or GlobalStatementSyntax)
                     : vbRoot?.DescendantNodes().Where(node => node is Microsoft.CodeAnalysis.VisualBasic.Syntax.StatementSyntax or Microsoft.CodeAnalysis.VisualBasic.Syntax.EqualsValueSyntax) ?? [];
@@ -2193,7 +2194,8 @@ public static class Dosai
                         break;
                     }
                     string? asmId = null;
-                    if (isMapped && asmMemberObj is Method asmMethod)
+                    var asmMethod = asmMemberObj as Method;
+                    if (isMapped && asmMethod is not null)
                     {
                         asmId = asmMethod.AssemblySignature;
                     }
@@ -2206,8 +2208,8 @@ public static class Dosai
                         SourceSignature = sourceMethod.SourceSignature,
                         SourceMetadataToken = sourceMethod.MetadataToken,
                         AssemblyMetadataToken = isMapped ? (asmMemberObj is Method m ? m.MetadataToken : 0) : 0,
-                        AssemblyName = sourceMethod.Assembly,
-                        ModuleName = sourceMethod.Module,
+                        AssemblyName = GetMappedAssemblyName(asmMethod, sourceMethod.Assembly),
+                        ModuleName = GetMappedModuleName(asmMethod, sourceMethod.Module),
                         AssemblyId = asmId,
                         AssemblySignature = asmId,
                         MemberType = memberType,
@@ -2222,6 +2224,34 @@ public static class Dosai
         }
 
         static string MemberNameLookupKey(string? namespaceName, string? className, string? memberName) => string.Join('.', new[] { namespaceName is "<global namespace>" ? null : namespaceName, className, memberName }.Where(part => !string.IsNullOrWhiteSpace(part)));
+
+        static string? GetMappedAssemblyName(Method? assemblyMethod, string? fallback) =>
+            !string.IsNullOrWhiteSpace(assemblyMethod?.Assembly)
+                ? assemblyMethod.Assembly
+                : !string.IsNullOrWhiteSpace(assemblyMethod?.Path)
+                    ? Path.GetFileNameWithoutExtension(assemblyMethod.Path)
+                    : !string.IsNullOrWhiteSpace(assemblyMethod?.FileName)
+                        ? Path.GetFileNameWithoutExtension(assemblyMethod.FileName)
+                        : fallback;
+
+        static string? GetMappedModuleName(Method? assemblyMethod, string? fallback) =>
+            !string.IsNullOrWhiteSpace(assemblyMethod?.Module)
+                ? assemblyMethod.Module
+                : !string.IsNullOrWhiteSpace(assemblyMethod?.FileName)
+                    ? assemblyMethod.FileName
+                    : !string.IsNullOrWhiteSpace(assemblyMethod?.Path)
+                        ? Path.GetFileName(assemblyMethod.Path)
+                        : fallback;
+
+        DispatchResolver.SourceIndex GetDispatchIndex(Compilation compilation)
+        {
+            if (!dispatchIndexes.TryGetValue(compilation, out var index))
+            {
+                index = DispatchResolver.SourceIndex.Create(compilation);
+                dispatchIndexes[compilation] = index;
+            }
+            return index;
+        }
 
         static bool TryFindAssemblyMethodMatch(Method sourceMethod, IReadOnlyList<Method> candidates, out Method? match)
         {
@@ -2365,10 +2395,8 @@ public static class Dosai
         return "";
     }
 
-    private sealed class MethodCallOperationWalker(SemanticModel model, List<MethodCalls> methodCalls, string basePath, string sourceFilePath, string fileName) : OperationWalker
+    private sealed class MethodCallOperationWalker(SemanticModel model, DispatchResolver.SourceIndex dispatchIndex, List<MethodCalls> methodCalls, string basePath, string sourceFilePath, string fileName) : OperationWalker
     {
-        private DispatchResolver.SourceIndex? dispatchIndex;
-
         public override void VisitInvocation(IInvocationOperation operation)
         {
             AddMethodCall(operation, operation.TargetMethod, CallType.MethodCall, operation.Arguments);
@@ -2478,7 +2506,7 @@ public static class Dosai
                 return;
             }
 
-            foreach (var candidate in DispatchIndex.FindDispatchCandidates(operation.TargetMethod, operation.Instance?.Type).Take(16))
+            foreach (var candidate in dispatchIndex.FindDispatchCandidates(operation.TargetMethod, operation.Instance?.Type).Take(16))
             {
                 AddInferredMethodCall(
                     operation,
@@ -2724,8 +2752,6 @@ public static class Dosai
                 ]
             });
         }
-
-        private DispatchResolver.SourceIndex DispatchIndex => dispatchIndex ??= DispatchResolver.SourceIndex.Create(model.Compilation);
 
         private bool ShouldInferDispatchCandidates(IMethodSymbol targetMethod)
         {

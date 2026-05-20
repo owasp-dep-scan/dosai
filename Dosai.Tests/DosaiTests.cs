@@ -259,6 +259,8 @@ public static class Program
         var mainMapping = Assert.Single(methodsSlice.SourceAssemblyMapping!, mapping => mapping.IsMapped && mapping.MemberName == "Main" && mapping.AssemblyMetadataToken != 0);
         Assert.Equal(mainMapping.SourceId, mainMapping.SourceSignature);
         Assert.Equal(mainMapping.AssemblyId, mainMapping.AssemblySignature);
+        Assert.StartsWith("CombinedEvidenceFlow", mainMapping.AssemblyName, StringComparison.Ordinal);
+        Assert.Equal("CombinedEvidenceFlow.dll", mainMapping.ModuleName);
         Assert.Contains(methodsSlice.CallGraph.Edges, edge => edge.EvidenceKind == AnalysisEvidenceKind.AssemblyIlDirect && edge.SourceId == mainMapping.SourceId);
         Assert.DoesNotContain(methodsSlice.CallGraph.Nodes, node => node.Id == mainMapping.AssemblyId);
         Assert.Contains(methodsSlice.CallGraph.Nodes, node => node.Id == mainMapping.SourceId && node.Identity?.Evidence.Contains(AnalysisEvidenceKind.SourceRoslynDirect) == true && node.Identity.Evidence.Contains(AnalysisEvidenceKind.AssemblyIlDirect));
@@ -969,6 +971,35 @@ public static class Program
 
         Assert.Contains(dataFlowResult.Slices, slice => slice.SourceCategory == "cli" && slice.SinkCategory == "command");
         Assert.Contains(dataFlowResult.Nodes, node => node.Kind == "Assignment" && node.Name == "command");
+        Assert.Contains(dataFlowResult.Slices, slice => slice.SinkCategory == "command" && slice.SinkArgument == "arg0");
+    }
+
+    [Fact]
+    public void GetDataFlows_AssemblyOnlyMethodSummaries_UseDecodedParameterTypesForOverloads()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "AssemblySummaryOverloads", """
+using System.Diagnostics;
+
+public static class Program
+{
+    public static void Main(string[] args)
+    {
+        var command = Choose(args[0]);
+        Process.Start(command);
+    }
+
+    private static string Choose(string value) => value;
+
+    private static int Choose(int value) => value;
+}
+""");
+
+        var dataFlowResult = ReadDataFlows(Path.Combine(outputDirectory, "AssemblySummaryOverloads.dll"));
+
+        Assert.Contains(dataFlowResult.MethodSummaries, summary => summary.Method.Contains("Program.Choose(string):string", StringComparison.Ordinal));
+        Assert.Contains(dataFlowResult.MethodSummaries, summary => summary.Method.Contains("Program.Choose(int):int", StringComparison.Ordinal));
+        Assert.Contains(dataFlowResult.Slices, slice => slice.SourceCategory == "cli" && slice.SinkCategory == "command" && slice.SinkArgument == "arg0");
     }
 
     [Fact]
