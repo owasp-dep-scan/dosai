@@ -785,6 +785,7 @@ class FlowSample
         {
             Assert.Contains(dataFlowResult.Nodes, node => node.Id == edge.SourceId);
             Assert.Contains(dataFlowResult.Nodes, node => node.Id == edge.TargetId);
+            Assert.False(!string.IsNullOrWhiteSpace(edge.Path) && Path.IsPathFullyQualified(edge.Path), $"Data-flow edge path should be relative or file-only: {edge.Path}");
         });
 
         var graphMl = DataFlowExporter.Export(dataFlowResult, DataFlowExportFormat.GraphMl);
@@ -1067,6 +1068,7 @@ public static class Program
         Assert.Contains(dataFlowResult.Nodes, node => node.MethodIdentity?.Evidence.Contains(AnalysisEvidenceKind.AssemblyIlDirect) == true && node.Evidence.Any(evidence => evidence.Kind == AnalysisEvidenceKind.AssemblyIlDirect));
         Assert.Contains(dataFlowResult.Nodes, node => node is { Kind: "Assignment", Name: "command" } && node.Properties.TryGetValue("analysis", out var analysis) && analysis == "assembly-il");
         Assert.Contains(dataFlowResult.Edges, edge => edge is { FileName: "Program.cs", LineNumber: > 1 });
+        Assert.DoesNotContain(dataFlowResult.Edges, edge => !string.IsNullOrWhiteSpace(edge.Path) && Path.IsPathFullyQualified(edge.Path));
     }
 
     [Fact]
@@ -2137,6 +2139,11 @@ open type Newtonsoft.Json.JsonConvert
 
 let run value = value
 """);
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "DependencyImports.fsi"), """
+module DependencyImports
+
+open Newtonsoft.Json
+""");
         File.WriteAllText(Path.Combine(tempDirectory.Path, "dependencyImports.R"), """
 library(Newtonsoft.Json)
 run <- function(value) {
@@ -2154,6 +2161,7 @@ run <- function(value) {
         var expectedPurl = "pkg:nuget/Newtonsoft.Json@13.0.3";
         Assert.Contains(methodsSlice.Dependencies ?? [], dependency => dependency is { FileName: "DependencyImports.vb", Purl: var purl } && purl == expectedPurl);
         Assert.Contains(methodsSlice.Dependencies ?? [], dependency => dependency is { FileName: "DependencyImports.fs", Purl: var purl } && purl == expectedPurl);
+        Assert.Contains(methodsSlice.Dependencies ?? [], dependency => dependency is { FileName: "DependencyImports.fsi", Purl: var purl } && purl == expectedPurl);
         Assert.DoesNotContain(methodsSlice.Dependencies ?? [], dependency => dependency is { FileName: "DependencyImports.fs", Name: "type" });
         Assert.Contains(methodsSlice.Dependencies ?? [], dependency => dependency is { FileName: "dependencyImports.R", Purl: var purl } && purl == expectedPurl);
 
@@ -2162,6 +2170,7 @@ run <- function(value) {
         Assert.Contains(reachability.ConfidenceReasons, reason => reason.Contains("dependency/import metadata", StringComparison.Ordinal));
         Assert.Contains(reachability.SourceLocations, location => location is { FileName: "DependencyImports.vb", Kind: "Dependency" });
         Assert.Contains(reachability.SourceLocations, location => location is { FileName: "DependencyImports.fs", Kind: "Dependency" });
+        Assert.Contains(reachability.SourceLocations, location => location is { FileName: "DependencyImports.fsi", Kind: "Dependency" });
         Assert.Contains(reachability.SourceLocations, location => location is { FileName: "dependencyImports.R", Kind: "Dependency" });
     }
 

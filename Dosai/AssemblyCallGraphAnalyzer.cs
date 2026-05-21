@@ -179,7 +179,7 @@ internal static class AssemblyCallGraphAnalyzer
                                         SourceId = sourceId,
                                         TargetId = candidateId,
                                         CallLocation = new CallLocation { FileName = Path.GetFileName(location.FilePath), LineNumber = location.LineNumber, ColumnNumber = location.ColumnNumber },
-                                        Path = location.FilePath,
+                                        Path = SafeRelativeSourcePath(path, location.FilePath),
                                         FileName = Path.GetFileName(location.FilePath),
                                         IsInternal = true,
                                         CalledMethodName = candidate.Name,

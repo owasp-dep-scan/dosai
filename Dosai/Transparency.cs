@@ -387,6 +387,7 @@ public static class TransparencyBuilder
          fileName.EndsWith(".csx", StringComparison.OrdinalIgnoreCase) ||
          fileName.EndsWith(".vb", StringComparison.OrdinalIgnoreCase) ||
          fileName.EndsWith(".fs", StringComparison.OrdinalIgnoreCase) ||
+         fileName.EndsWith(".fsi", StringComparison.OrdinalIgnoreCase) ||
          fileName.EndsWith(".fsx", StringComparison.OrdinalIgnoreCase) ||
          fileName.EndsWith(".r", StringComparison.OrdinalIgnoreCase) ||
          fileName.EndsWith(".rmd", StringComparison.OrdinalIgnoreCase) ||
