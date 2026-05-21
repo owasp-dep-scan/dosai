@@ -13,7 +13,7 @@ public static partial class LanguageFrontendAnalyzer
     [GeneratedRegex(@"^\s*(?:namespace|module)\s+([\w\.]+)", RegexOptions.Compiled)]
     private static partial Regex FSharpNamespaceOrModule();
 
-    [GeneratedRegex(@"^\s*open\s+([\w\.]+)", RegexOptions.Compiled)]
+    [GeneratedRegex(@"^\s*open\s+(?:type\s+)?([\w\.]+)", RegexOptions.Compiled)]
     private static partial Regex FSharpOpen();
 
     [GeneratedRegex(@"^\s*type\s+(\w+)", RegexOptions.Compiled)]

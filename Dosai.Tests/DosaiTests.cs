@@ -141,6 +141,7 @@ public static class Program
             edge.EvidenceKind == AnalysisEvidenceKind.AssemblyIlGeneratedState &&
             edge.SourceId.Contains("Program.Main", StringComparison.Ordinal) &&
             edge.TargetId.Contains("System.Diagnostics.Process.Start", StringComparison.Ordinal));
+        Assert.DoesNotContain(callGraph.Edges, edge => !string.IsNullOrWhiteSpace(edge.Path) && Path.IsPathFullyQualified(edge.Path));
         Assert.Contains(callGraph.Nodes, node =>
             node.Id.Contains("Program.Main", StringComparison.Ordinal) &&
             node.Identity?.Evidence.Contains(AnalysisEvidenceKind.AssemblyIlGeneratedState) == true &&
@@ -2132,6 +2133,7 @@ End Module
 module DependencyImports
 
 open Newtonsoft.Json
+open type Newtonsoft.Json.JsonConvert
 
 let run value = value
 """);
@@ -2152,6 +2154,7 @@ run <- function(value) {
         var expectedPurl = "pkg:nuget/Newtonsoft.Json@13.0.3";
         Assert.Contains(methodsSlice.Dependencies ?? [], dependency => dependency is { FileName: "DependencyImports.vb", Purl: var purl } && purl == expectedPurl);
         Assert.Contains(methodsSlice.Dependencies ?? [], dependency => dependency is { FileName: "DependencyImports.fs", Purl: var purl } && purl == expectedPurl);
+        Assert.DoesNotContain(methodsSlice.Dependencies ?? [], dependency => dependency is { FileName: "DependencyImports.fs", Name: "type" });
         Assert.Contains(methodsSlice.Dependencies ?? [], dependency => dependency is { FileName: "dependencyImports.R", Purl: var purl } && purl == expectedPurl);
 
         var reachability = Assert.Single(methodsSlice.PackageReachability ?? [], package => package.Purl == expectedPurl);
