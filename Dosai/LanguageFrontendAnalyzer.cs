@@ -13,6 +13,9 @@ public static partial class LanguageFrontendAnalyzer
     [GeneratedRegex(@"^\s*(?:namespace|module)\s+([\w\.]+)", RegexOptions.Compiled)]
     private static partial Regex FSharpNamespaceOrModule();
 
+    [GeneratedRegex(@"^\s*open\s+([\w\.]+)", RegexOptions.Compiled)]
+    private static partial Regex FSharpOpen();
+
     [GeneratedRegex(@"^\s*type\s+(\w+)", RegexOptions.Compiled)]
     private static partial Regex FSharpType();
 
@@ -80,6 +83,13 @@ public static partial class LanguageFrontendAnalyzer
                 className = namespaceName.Split('.').LastOrDefault() ?? "Module";
                 currentDeclarationIndent = int.MaxValue;
                 dependencies.Add(CreateDependency(basePath, file, namespaceName, namespaceName, i + 1, Math.Max(1, line.IndexOf(namespaceName, StringComparison.Ordinal) + 1)));
+                continue;
+            }
+            var open = FSharpOpen().Match(line);
+            if (open.Success)
+            {
+                var importedNamespace = open.Groups[1].Value;
+                dependencies.Add(CreateDependency(basePath, file, importedNamespace, importedNamespace, i + 1, Math.Max(1, line.IndexOf(importedNamespace, StringComparison.Ordinal) + 1)));
                 continue;
             }
             var type = FSharpType().Match(line);

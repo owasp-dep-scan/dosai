@@ -115,7 +115,7 @@ GraphML/GEXF exports include PURL node/edge attributes for both call graphs and 
 }
 ```
 
-Dosai only emits source-file locations for package reachability occurrences (`.cs`, `.csx`, `.vb`, `.fs`, `.fsx`). Assembly-only fallback paths such as `Package.dll` are suppressed because they are usually poor occurrence evidence for source-oriented SBOMs. For data-flow slices, locations are attached only when the node or edge carries the same PURL, with a source/sink fallback for pattern-provided PURLs. This keeps unrelated source nodes in the same slice from being reported as occurrences of a dependency package.
+Dosai only emits source-file locations for package reachability occurrences (`.cs`, `.csx`, `.vb`, `.fs`, `.fsx`, `.r`, `.rmd`, `.qmd`). Assembly-only fallback paths such as `Package.dll` are suppressed because they are usually poor occurrence evidence for source-oriented SBOMs. For `methods`, dependency/import records with `Dependencies[].Purl` produce low-confidence `Dependency` reachability facts when no stronger call graph evidence is available, covering C#/VB imports, F# `open`, and R `library`/`require` usage. For data-flow slices, locations are attached only when the node or edge carries the same PURL, with a source/sink fallback for pattern-provided PURLs. This keeps unrelated source nodes in the same slice from being reported as occurrences of a dependency package.
 
 ### Printed data-flow traces
 

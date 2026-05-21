@@ -2116,6 +2116,53 @@ class WeaknessFlow
     }
 
     [Fact]
+    public void GetMethods_DependencyPurlsPopulatePackageReachabilityForVbFSharpAndR()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        WriteProjectAssets(tempDirectory.Path, "Newtonsoft.Json", "13.0.3", "Newtonsoft.Json.dll");
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "DependencyImports.vb"), """
+Imports Newtonsoft.Json
+
+Public Module DependencyImports
+    Public Sub Run()
+    End Sub
+End Module
+""");
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "DependencyImports.fs"), """
+module DependencyImports
+
+open Newtonsoft.Json
+
+let run value = value
+""");
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "dependencyImports.R"), """
+library(Newtonsoft.Json)
+run <- function(value) {
+  value
+}
+""");
+
+        var result = Depscan.Dosai.GetMethods(tempDirectory.Path);
+        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result, new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() }
+        });
+
+        Assert.NotNull(methodsSlice);
+        var expectedPurl = "pkg:nuget/Newtonsoft.Json@13.0.3";
+        Assert.Contains(methodsSlice.Dependencies ?? [], dependency => dependency is { FileName: "DependencyImports.vb", Purl: var purl } && purl == expectedPurl);
+        Assert.Contains(methodsSlice.Dependencies ?? [], dependency => dependency is { FileName: "DependencyImports.fs", Purl: var purl } && purl == expectedPurl);
+        Assert.Contains(methodsSlice.Dependencies ?? [], dependency => dependency is { FileName: "dependencyImports.R", Purl: var purl } && purl == expectedPurl);
+
+        var reachability = Assert.Single(methodsSlice.PackageReachability ?? [], package => package.Purl == expectedPurl);
+        Assert.Equal("Low", reachability.Confidence);
+        Assert.Contains(reachability.ConfidenceReasons, reason => reason.Contains("dependency/import metadata", StringComparison.Ordinal));
+        Assert.Contains(reachability.SourceLocations, location => location is { FileName: "DependencyImports.vb", Kind: "Dependency" });
+        Assert.Contains(reachability.SourceLocations, location => location is { FileName: "DependencyImports.fs", Kind: "Dependency" });
+        Assert.Contains(reachability.SourceLocations, location => location is { FileName: "dependencyImports.R", Kind: "Dependency" });
+    }
+
+    [Fact]
     public void PackageUrlResolver_SystemSymbols_MapsCommonFrameworkSymbolsToBestEffortPurls()
     {
         using var tempDirectory = new TemporaryDirectory();

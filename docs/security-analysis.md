@@ -50,7 +50,7 @@ The `dosai.json` output includes:
 
 For managed assembly-only inputs, call graph edges are extracted from IL method bodies. Direct calls, constructor calls, delegate/event callback targets, generated async/iterator state-machine calls, and shared CHA/RTA-style virtual candidates are emitted with portable PDB source locations when available, so `methods` remains useful when source is unavailable.
 
-`PackageReachability` facts include `SourceLocations` when a reachable package can be tied to a source-backed call graph node or edge. These locations carry `Path`, `FileName`, `LineNumber`, `ColumnNumber`, and evidence `Kind`, and intentionally exclude DLL-only fallback locations so SBOM occurrence evidence points at user-reviewable source.
+`PackageReachability` facts include `SourceLocations` when a reachable package can be tied to a source-backed call graph node or edge. If only dependency/import evidence is available, for example in VB `Imports`, F# `open`, or R `library`/`require` statements, Dosai emits a low-confidence `Dependency` reachability fact from `Dependencies[].Purl`. These locations carry `Path`, `FileName`, `LineNumber`, `ColumnNumber`, and evidence `Kind`, and intentionally exclude DLL-only fallback locations so SBOM occurrence evidence points at user-reviewable source.
 
 For source directories, `methods` ignores source files under `bin` and `obj` relative to the inspected root. Assembly analysis still accepts app output directories because binary-only reviews often start from build or publish output.
 

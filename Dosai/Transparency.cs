@@ -170,7 +170,7 @@ public static class TransparencyBuilder
         return entries;
     }
 
-    public static List<PackageReachability> BuildPackageReachability(CallGraph callGraph, IEnumerable<DataFlowSlice>? slices = null)
+    public static List<PackageReachability> BuildPackageReachability(CallGraph callGraph, IEnumerable<DataFlowSlice>? slices = null, IEnumerable<Dependency>? dependencies = null)
     {
         var byPurl = new Dictionary<string, PackageReachability>(StringComparer.Ordinal);
 
@@ -195,6 +195,10 @@ public static class TransparencyBuilder
                 }
             }
         }
+        foreach (var dependency in dependencies ?? [])
+        {
+            Add(dependency.Purl, "Dependency", category: dependency.Name ?? dependency.Namespace, sourceLocation: SourceLocationFromDependency(dependency, "Dependency"));
+        }
         FinalizeConfidence(byPurl.Values);
         return byPurl.Values.OrderBy(p => p.Purl, StringComparer.Ordinal).ToList();
 
@@ -216,6 +220,7 @@ public static class TransparencyBuilder
                 if (!reachability.EvidenceKinds.Contains(evidenceKind)) reachability.EvidenceKinds.Add(evidenceKind);
             }
             if (!string.IsNullOrWhiteSpace(confidence)) AddConfidenceReason(reachability, $"Data-flow slice confidence is {confidence}.");
+            if (kind == "Dependency") AddConfidenceReason(reachability, "Package URL is supported by dependency/import metadata.");
         }
     }
 
@@ -362,13 +367,30 @@ public static class TransparencyBuilder
         };
     }
 
+    private static ReachabilityLocation? SourceLocationFromDependency(Dependency dependency, string kind)
+    {
+        var path = dependency.Path ?? dependency.FileName;
+        if (!IsSourceFile(path) || dependency.LineNumber <= 0) return null;
+        return new ReachabilityLocation
+        {
+            Path = path,
+            FileName = System.IO.Path.GetFileName(path),
+            LineNumber = dependency.LineNumber,
+            ColumnNumber = dependency.ColumnNumber,
+            Kind = kind
+        };
+    }
+
     private static bool IsSourceFile(string? fileName) =>
         !string.IsNullOrWhiteSpace(fileName) &&
         (fileName.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) ||
          fileName.EndsWith(".csx", StringComparison.OrdinalIgnoreCase) ||
          fileName.EndsWith(".vb", StringComparison.OrdinalIgnoreCase) ||
          fileName.EndsWith(".fs", StringComparison.OrdinalIgnoreCase) ||
-         fileName.EndsWith(".fsx", StringComparison.OrdinalIgnoreCase));
+         fileName.EndsWith(".fsx", StringComparison.OrdinalIgnoreCase) ||
+         fileName.EndsWith(".r", StringComparison.OrdinalIgnoreCase) ||
+         fileName.EndsWith(".rmd", StringComparison.OrdinalIgnoreCase) ||
+         fileName.EndsWith(".qmd", StringComparison.OrdinalIgnoreCase));
 
     private static void AddSourceLocation(PackageReachability reachability, ReachabilityLocation? location)
     {
