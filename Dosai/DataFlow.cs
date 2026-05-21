@@ -113,6 +113,7 @@ public sealed class DataFlowEdge
     public string? Label { get; set; }
     public string? SourcePurl { get; set; }
     public string? TargetPurl { get; set; }
+    public string? Path { get; set; }
     public string? FileName { get; set; }
     public int LineNumber { get; set; }
     public int ColumnNumber { get; set; }
@@ -230,7 +231,7 @@ public static partial class DataFlowAnalyzer
             CollectCompilationUnitSummaries(model, root, summaries, patterns);
         }
 
-        var graph = new DataFlowGraphBuilder(result, purlResolver);
+        var graph = new DataFlowGraphBuilder(result, purlResolver, path);
 
         foreach (var tree in csharpTrees)
         {
@@ -652,6 +653,7 @@ public static partial class DataFlowAnalyzer
                         Label = assignedName,
                         SourcePurl = source.Purl,
                         TargetPurl = sinkNode.Purl,
+                        Path = Directory.Exists(basePath) ? Path.GetRelativePath(basePath, file) : Path.GetFileName(file),
                         FileName = Path.GetFileName(file),
                         LineNumber = index + 1,
                         ColumnNumber = 1
@@ -1947,7 +1949,7 @@ public static partial class DataFlowAnalyzer
         private static bool IsCodeLike(DataFlowPattern pattern) => pattern.Kind is DataFlowPatternKind.Code or DataFlowPatternKind.Method or DataFlowPatternKind.Symbol or DataFlowPatternKind.Name;
     }
 
-    private sealed class DataFlowGraphBuilder(DataFlowResult result, PackageUrlResolver purlResolver)
+    private sealed class DataFlowGraphBuilder(DataFlowResult result, PackageUrlResolver purlResolver, string basePath)
     {
         private int _nodeCounter;
         private int _edgeCounter;
@@ -2025,6 +2027,7 @@ public static partial class DataFlowAnalyzer
                     Label = label,
                     SourcePurl = _nodesById.TryGetValue(sourceId, out var sourceNode) ? sourceNode.Purl : null,
                     TargetPurl = _nodesById.TryGetValue(targetId, out var targetNode) ? targetNode.Purl : null,
+                    Path = SafeRelativeSourcePath(basePath, sourceFilePath),
                     FileName = Path.GetFileName(sourceFilePath),
                     LineNumber = lineSpan.StartLinePosition.Line + 1,
                     ColumnNumber = lineSpan.StartLinePosition.Character + 1
@@ -2079,6 +2082,22 @@ public static partial class DataFlowAnalyzer
         {
             code = code.Replace("\r", " ", StringComparison.Ordinal).Replace("\n", " ", StringComparison.Ordinal).Trim();
             return code.Length <= 240 ? code : code[..240] + "…";
+        }
+
+        private static string SafeRelativeSourcePath(string inspectedPath, string sourcePath)
+        {
+            var root = Directory.Exists(inspectedPath) ? inspectedPath : Path.GetDirectoryName(inspectedPath);
+            if (string.IsNullOrWhiteSpace(root)) return Path.GetFileName(sourcePath);
+            try
+            {
+                var relative = Path.GetRelativePath(Path.GetFullPath(root), Path.GetFullPath(sourcePath));
+                if (string.IsNullOrWhiteSpace(relative) || Path.IsPathFullyQualified(relative) || relative == ".." || relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal) || relative.StartsWith($"..{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal)) return Path.GetFileName(sourcePath);
+                return relative;
+            }
+            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+            {
+                return Path.GetFileName(sourcePath);
+            }
         }
     }
 

@@ -141,13 +141,20 @@ public static class Program
             edge.EvidenceKind == AnalysisEvidenceKind.AssemblyIlGeneratedState &&
             edge.SourceId.Contains("Program.Main", StringComparison.Ordinal) &&
             edge.TargetId.Contains("System.Diagnostics.Process.Start", StringComparison.Ordinal));
+        Assert.DoesNotContain(callGraph.Edges, edge => !string.IsNullOrWhiteSpace(edge.Path) && Path.IsPathFullyQualified(edge.Path));
         Assert.Contains(callGraph.Nodes, node =>
             node.Id.Contains("Program.Main", StringComparison.Ordinal) &&
             node.Identity?.Evidence.Contains(AnalysisEvidenceKind.AssemblyIlGeneratedState) == true &&
             node.Evidence.Any(evidence => evidence.Kind == AnalysisEvidenceKind.AssemblyIlGeneratedState));
-        Assert.Contains(methodsSlice.PackageReachability!, package =>
-            package is { Purl: "pkg:nuget/System.Diagnostics.Process", Confidence: "High" } &&
-            package.EvidenceKinds.Contains(AnalysisEvidenceKind.AssemblyIlGeneratedState));
+        var processReachability = Assert.Single(methodsSlice.PackageReachability!, package => package.Purl == "pkg:nuget/System.Diagnostics.Process");
+        Assert.Equal("High", processReachability.Confidence);
+        Assert.Contains(AnalysisEvidenceKind.AssemblyIlGeneratedState, processReachability.EvidenceKinds);
+        Assert.Contains(processReachability.SourceLocations, location =>
+            location.FileName == "Program.cs" &&
+            location.LineNumber > 0 &&
+            location.Kind == "CallGraphEdge");
+        Assert.DoesNotContain(processReachability.SourceLocations, location =>
+            location.Path?.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) == true);
         Assert.All(callGraph.Edges, edge =>
         {
             Assert.Contains(edge.SourceId, nodeIds);
@@ -332,7 +339,15 @@ public static class Program
         Assert.Equal(mainMapping.AssemblySignature, mainNode.Identity?.AssemblySignature);
         Assert.Contains(AnalysisEvidenceKind.SourceRoslynDirect, mainNode.Identity!.Evidence);
         Assert.Contains(AnalysisEvidenceKind.AssemblyIlDirect, mainNode.Identity.Evidence);
-        Assert.Contains(methodsSlice.PackageReachability!, package => package is { Purl: "pkg:nuget/System.Diagnostics.Process", Confidence: "High" } && package.EvidenceKinds.Contains(AnalysisEvidenceKind.AssemblyIlDirect));
+        var processReachability = Assert.Single(methodsSlice.PackageReachability!, package => package.Purl == "pkg:nuget/System.Diagnostics.Process");
+        Assert.Equal("High", processReachability.Confidence);
+        Assert.Contains(AnalysisEvidenceKind.AssemblyIlDirect, processReachability.EvidenceKinds);
+        Assert.Contains(processReachability.SourceLocations, location =>
+            location.FileName == "Program.cs" &&
+            location.LineNumber > 0 &&
+            location.Kind == "CallGraphEdge");
+        Assert.DoesNotContain(processReachability.SourceLocations, location =>
+            location.Path?.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) == true);
     }
 
     [Fact]
@@ -770,6 +785,7 @@ class FlowSample
         {
             Assert.Contains(dataFlowResult.Nodes, node => node.Id == edge.SourceId);
             Assert.Contains(dataFlowResult.Nodes, node => node.Id == edge.TargetId);
+            Assert.False(!string.IsNullOrWhiteSpace(edge.Path) && Path.IsPathFullyQualified(edge.Path), $"Data-flow edge path should be relative or file-only: {edge.Path}");
         });
 
         var graphMl = DataFlowExporter.Export(dataFlowResult, DataFlowExportFormat.GraphMl);
@@ -1052,6 +1068,7 @@ public static class Program
         Assert.Contains(dataFlowResult.Nodes, node => node.MethodIdentity?.Evidence.Contains(AnalysisEvidenceKind.AssemblyIlDirect) == true && node.Evidence.Any(evidence => evidence.Kind == AnalysisEvidenceKind.AssemblyIlDirect));
         Assert.Contains(dataFlowResult.Nodes, node => node is { Kind: "Assignment", Name: "command" } && node.Properties.TryGetValue("analysis", out var analysis) && analysis == "assembly-il");
         Assert.Contains(dataFlowResult.Edges, edge => edge is { FileName: "Program.cs", LineNumber: > 1 });
+        Assert.DoesNotContain(dataFlowResult.Edges, edge => !string.IsNullOrWhiteSpace(edge.Path) && Path.IsPathFullyQualified(edge.Path));
     }
 
     [Fact]
@@ -1982,6 +1999,14 @@ class WeaknessFlow
         Assert.Contains(result.EntryPoints, entryPoint => entryPoint is { Kind: "Cli", MethodName: "Main" });
         Assert.Contains(result.WeaknessCandidates, weakness => weakness is { Kind: "CommandInjectionCandidate", Cwe: "CWE-78" });
         Assert.Contains(result.DangerousApiReachability, api => api.Category == "command");
+        var processReachability = Assert.Single(result.PackageReachability, package => package.Purl == "pkg:nuget/System.Diagnostics.Process");
+        Assert.Contains(processReachability.SourceLocations, location =>
+            location.FileName == "WeaknessFlow.cs" &&
+            location.LineNumber > 0 &&
+            (location.Kind == "DataFlowNode" || location.Kind == "DataFlowEdge" || location.Kind == "DataFlowSlice"));
+        Assert.DoesNotContain(processReachability.SourceLocations, location =>
+            location.Path?.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) == true);
+
 
         var context = TransparencyBuilder.BuildAgentContext(result, tempDirectory.Path);
         Assert.Contains(context.HighRiskWeaknesses, weakness => weakness.Kind == "CommandInjectionCandidate");
@@ -1990,6 +2015,95 @@ class WeaknessFlow
         var markdown = TransparencyBuilder.ToMarkdownReport(result);
         Assert.Contains("CommandInjectionCandidate", markdown);
         Assert.Contains("WeaknessFlow.cs", markdown);
+    }
+
+    [Fact]
+    public void BuildPackageReachability_DataFlowSliceLocationsAreScopedToMatchingPurl()
+    {
+        var result = new DataFlowResult
+        {
+            Nodes =
+            [
+                new DataFlowNode
+                {
+                    Id = "source",
+                    Kind = "Source",
+                    Name = "args[0]",
+                    Path = "Program.cs",
+                    FileName = "Program.cs",
+                    LineNumber = 5,
+                    ColumnNumber = 21,
+                    IsSource = true,
+                    Category = "cli"
+                },
+                new DataFlowNode
+                {
+                    Id = "processSink",
+                    Kind = "Sink",
+                    Name = "Process.Start",
+                    Purl = "pkg:nuget/System.Diagnostics.Process",
+                    Path = "Program.cs",
+                    FileName = "Program.cs",
+                    LineNumber = 10,
+                    ColumnNumber = 9,
+                    IsSink = true,
+                    Category = "command"
+                },
+                new DataFlowNode
+                {
+                    Id = "otherPackage",
+                    Kind = "Call",
+                    Name = "Other.Call",
+                    Purl = "pkg:nuget/Other.Package",
+                    Path = "Other.cs",
+                    FileName = "Other.cs",
+                    LineNumber = 20,
+                    ColumnNumber = 13
+                }
+            ],
+            Edges =
+            [
+                new DataFlowEdge
+                {
+                    Id = "edge-to-process",
+                    SourceId = "source",
+                    TargetId = "processSink",
+                    Kind = "ValueFlow",
+                    TargetPurl = "pkg:nuget/System.Diagnostics.Process",
+                    Path = "src/Program.cs",
+                    FileName = "Program.cs",
+                    LineNumber = 10,
+                    ColumnNumber = 9
+                }
+            ],
+            Slices =
+            [
+                new DataFlowSlice
+                {
+                    Id = "slice1",
+                    SourceId = "source",
+                    SinkId = "processSink",
+                    NodeIds = ["source", "processSink", "otherPackage"],
+                    EdgeIds = ["edge-to-process"],
+                    SinkCategory = "command",
+                    SinkPurl = "pkg:nuget/System.Diagnostics.Process",
+                    Purls = ["pkg:nuget/System.Diagnostics.Process", "pkg:nuget/Other.Package"],
+                    Confidence = "High"
+                }
+            ]
+        };
+
+        var reachability = TransparencyBuilder.BuildPackageReachability(result);
+
+        var processReachability = Assert.Single(reachability, package => package.Purl == "pkg:nuget/System.Diagnostics.Process");
+        Assert.Contains(processReachability.SourceLocations, location => location is { FileName: "Program.cs", LineNumber: 10 });
+        Assert.Contains(processReachability.SourceLocations, location => location.Path == "src/Program.cs" && location is { FileName: "Program.cs", LineNumber: 10 });
+        Assert.DoesNotContain(processReachability.SourceLocations, location => location is { FileName: "Program.cs", LineNumber: 5 });
+        Assert.DoesNotContain(processReachability.SourceLocations, location => location.FileName == "Other.cs");
+
+        var otherReachability = Assert.Single(reachability, package => package.Purl == "pkg:nuget/Other.Package");
+        Assert.Contains(otherReachability.SourceLocations, location => location is { FileName: "Other.cs", LineNumber: 20 });
+        Assert.DoesNotContain(otherReachability.SourceLocations, location => location is { FileName: "Program.cs", LineNumber: 10 });
     }
 
     [Fact]
@@ -2002,6 +2116,62 @@ class WeaknessFlow
 
         Assert.Equal("pkg:nuget/Microsoft.Data.SqlClient@5.1.1", resolver.Resolve(module: "Microsoft.Data.SqlClient.dll"));
         Assert.Equal("pkg:nuget/Microsoft.Data.SqlClient@5.1.1", resolver.Resolve(symbol: "Microsoft.Data.SqlClient.SqlCommand..ctor(string)"));
+    }
+
+    [Fact]
+    public void GetMethods_DependencyPurlsPopulatePackageReachabilityForVbFSharpAndR()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        WriteProjectAssets(tempDirectory.Path, "Newtonsoft.Json", "13.0.3", "Newtonsoft.Json.dll");
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "DependencyImports.vb"), """
+Imports Newtonsoft.Json
+
+Public Module DependencyImports
+    Public Sub Run()
+    End Sub
+End Module
+""");
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "DependencyImports.fs"), """
+module DependencyImports
+
+open Newtonsoft.Json
+open type Newtonsoft.Json.JsonConvert
+
+let run value = value
+""");
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "DependencyImports.fsi"), """
+module DependencyImports
+
+open Newtonsoft.Json
+""");
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "dependencyImports.R"), """
+library(Newtonsoft.Json)
+run <- function(value) {
+  value
+}
+""");
+
+        var result = Depscan.Dosai.GetMethods(tempDirectory.Path);
+        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result, new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() }
+        });
+
+        Assert.NotNull(methodsSlice);
+        var expectedPurl = "pkg:nuget/Newtonsoft.Json@13.0.3";
+        Assert.Contains(methodsSlice.Dependencies ?? [], dependency => dependency is { FileName: "DependencyImports.vb", Purl: var purl } && purl == expectedPurl);
+        Assert.Contains(methodsSlice.Dependencies ?? [], dependency => dependency is { FileName: "DependencyImports.fs", Purl: var purl } && purl == expectedPurl);
+        Assert.Contains(methodsSlice.Dependencies ?? [], dependency => dependency is { FileName: "DependencyImports.fsi", Purl: var purl } && purl == expectedPurl);
+        Assert.DoesNotContain(methodsSlice.Dependencies ?? [], dependency => dependency is { FileName: "DependencyImports.fs", Name: "type" });
+        Assert.Contains(methodsSlice.Dependencies ?? [], dependency => dependency is { FileName: "dependencyImports.R", Purl: var purl } && purl == expectedPurl);
+
+        var reachability = Assert.Single(methodsSlice.PackageReachability ?? [], package => package.Purl == expectedPurl);
+        Assert.Equal("Low", reachability.Confidence);
+        Assert.Contains(reachability.ConfidenceReasons, reason => reason.Contains("dependency/import metadata", StringComparison.Ordinal));
+        Assert.Contains(reachability.SourceLocations, location => location is { FileName: "DependencyImports.vb", Kind: "Dependency" });
+        Assert.Contains(reachability.SourceLocations, location => location is { FileName: "DependencyImports.fs", Kind: "Dependency" });
+        Assert.Contains(reachability.SourceLocations, location => location is { FileName: "DependencyImports.fsi", Kind: "Dependency" });
+        Assert.Contains(reachability.SourceLocations, location => location is { FileName: "dependencyImports.R", Kind: "Dependency" });
     }
 
     [Fact]

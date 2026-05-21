@@ -50,6 +50,8 @@ The `dosai.json` output includes:
 
 For managed assembly-only inputs, call graph edges are extracted from IL method bodies. Direct calls, constructor calls, delegate/event callback targets, generated async/iterator state-machine calls, and shared CHA/RTA-style virtual candidates are emitted with portable PDB source locations when available, so `methods` remains useful when source is unavailable.
 
+`PackageReachability` facts include `SourceLocations` when a reachable package can be tied to a source-backed call graph node or edge. If only dependency/import evidence is available, for example in VB `Imports`, F# `open`, or R `library`/`require` statements, Dosai emits a low-confidence `Dependency` reachability fact from `Dependencies[].Purl`. These locations carry `Path`, `FileName`, `LineNumber`, `ColumnNumber`, and evidence `Kind`, and intentionally exclude DLL-only fallback locations so SBOM occurrence evidence points at user-reviewable source.
+
 For source directories, `methods` ignores source files under `bin` and `obj` relative to the inspected root. Assembly analysis still accepts app output directories because binary-only reviews often start from build or publish output.
 
 ### Data-flow slices
@@ -63,6 +65,8 @@ dotnet run --project ./Dosai -- dataflows \
 ```
 
 The `dataflows.json` output includes `Metadata`, `EntryPoints`, `PackageReachability`, `DangerousApiReachability`, and `WeaknessCandidates` in addition to nodes, edges, and slices.
+
+For data-flow outputs, `PackageReachability[].SourceLocations` is scoped to nodes or edges that carry the same PURL. When a PURL comes from a source/sink pattern rather than a concrete node or edge, Dosai falls back to the matching sink or source location. This avoids reporting unrelated source nodes in the same slice as package occurrences.
 
 `--path` may point at a source tree, a single managed `.dll`/`.exe`, or a directory containing managed assemblies. Source analysis uses Roslyn `IOperation`; assembly-only analysis reconstructs local and interprocedural flows from IL method bodies, branch targets, exception regions, metadata symbols, portable PDB local scopes/sequence points, emitted framework attributes, and compiler-generated async/iterator/display-class fields. For assembly directories, Dosai reads adjacent `.deps.json` files to prefer project/application assemblies and avoid flooding results with framework and package dependency internals.
 

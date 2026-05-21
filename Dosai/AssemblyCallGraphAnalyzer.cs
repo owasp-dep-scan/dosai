@@ -72,7 +72,7 @@ internal static class AssemblyCallGraphAnalyzer
                         var location = sourceMap.Resolve(methodToken, instruction.Offset, assemblyPath);
                         foreach (var resolvedDelegate in TrackDelegateInstruction(reader, instruction, delegateState, assemblyPath, sourceMap, assemblyFullPath, methodLookup))
                         {
-                            AddResolvedDelegateEdge(calls, nodes, edges, edgeKeys, sourceMethod, sourceId, resolvedDelegate, location);
+                            AddResolvedDelegateEdge(calls, nodes, edges, edgeKeys, sourceMethod, sourceId, resolvedDelegate, location, path);
                         }
 
                         if (instruction.OpCode != OpCodes.Call && instruction.OpCode != OpCodes.Callvirt && instruction.OpCode != OpCodes.Newobj && instruction.OpCode != OpCodes.Ldftn && instruction.OpCode != OpCodes.Ldvirtftn)
@@ -128,6 +128,7 @@ internal static class AssemblyCallGraphAnalyzer
                                 SourceId = sourceId,
                                 TargetId = targetId,
                                 CallLocation = new CallLocation { FileName = Path.GetFileName(location.FilePath), LineNumber = location.LineNumber, ColumnNumber = location.ColumnNumber },
+                                Path = SafeRelativeSourcePath(path, location.FilePath),
                                 FileName = Path.GetFileName(location.FilePath),
                                 IsInternal = target.IsInternal,
                                 CalledMethodName = target.Name,
@@ -152,7 +153,7 @@ internal static class AssemblyCallGraphAnalyzer
                                 {
                                     calls.Add(new MethodCalls
                                     {
-                                        Path = location.FilePath,
+                                        Path = SafeRelativeSourcePath(path, location.FilePath),
                                         FileName = Path.GetFileName(location.FilePath),
                                         Assembly = candidate.Assembly,
                                         Module = candidate.Module,
@@ -178,6 +179,7 @@ internal static class AssemblyCallGraphAnalyzer
                                         SourceId = sourceId,
                                         TargetId = candidateId,
                                         CallLocation = new CallLocation { FileName = Path.GetFileName(location.FilePath), LineNumber = location.LineNumber, ColumnNumber = location.ColumnNumber },
+                                        Path = SafeRelativeSourcePath(path, location.FilePath),
                                         FileName = Path.GetFileName(location.FilePath),
                                         IsInternal = true,
                                         CalledMethodName = candidate.Name,
@@ -298,7 +300,7 @@ internal static class AssemblyCallGraphAnalyzer
         ApplyDefaultDelegateStackBehaviour(opCode, state);
     }
 
-    private static void AddResolvedDelegateEdge(List<MethodCalls> calls, Dictionary<string, MethodNode> nodes, List<MethodCallEdge> edges, HashSet<string> edgeKeys, Method sourceMethod, string sourceId, AssemblyResolvedDelegateCall resolved, AssemblyCallSourceLocation location)
+    private static void AddResolvedDelegateEdge(List<MethodCalls> calls, Dictionary<string, MethodNode> nodes, List<MethodCallEdge> edges, HashSet<string> edgeKeys, Method sourceMethod, string sourceId, AssemblyResolvedDelegateCall resolved, AssemblyCallSourceLocation location, string inspectedPath)
     {
         var target = resolved.Target.Member;
         var targetId = resolved.Target.TargetId;
@@ -335,6 +337,7 @@ internal static class AssemblyCallGraphAnalyzer
                 SourceId = sourceId,
                 TargetId = targetId,
                 CallLocation = new CallLocation { FileName = Path.GetFileName(location.FilePath), LineNumber = location.LineNumber, ColumnNumber = location.ColumnNumber },
+                Path = SafeRelativeSourcePath(inspectedPath, location.FilePath),
                 FileName = Path.GetFileName(location.FilePath),
                 IsInternal = target.IsInternal,
                 CalledMethodName = target.Name,
@@ -407,6 +410,24 @@ internal static class AssemblyCallGraphAnalyzer
         metadataToken != 0 && methodLookup.TryGetValue((assemblyPath, metadataToken), out var method) && !string.IsNullOrWhiteSpace(method.AssemblySignature)
             ? method.AssemblySignature!
             : fallbackSymbol;
+
+    private static string? SafeRelativeSourcePath(string inspectedPath, string sourcePath)
+    {
+        if (string.IsNullOrWhiteSpace(sourcePath) || !Path.IsPathFullyQualified(sourcePath)) return null;
+        var root = Directory.Exists(inspectedPath) ? inspectedPath : Path.GetDirectoryName(inspectedPath);
+        if (string.IsNullOrWhiteSpace(root)) return null;
+
+        try
+        {
+            var relative = Path.GetRelativePath(Path.GetFullPath(root), Path.GetFullPath(sourcePath));
+            if (string.IsNullOrWhiteSpace(relative) || Path.IsPathFullyQualified(relative) || relative == ".." || relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal) || relative.StartsWith($"..{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal)) return null;
+            return relative;
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return null;
+        }
+    }
 
     private static AnalysisEvidence CreateEvidence(AnalysisEvidenceKind kind, AssemblyCallSourceLocation location, string description) => new()
     {

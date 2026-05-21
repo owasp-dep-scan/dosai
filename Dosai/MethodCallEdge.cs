@@ -12,6 +12,7 @@ public class MethodCallEdge
     public required string TargetId { get; set; } 
 
     public required CallLocation CallLocation {  get; set; } 
+    public string? Path { get; set; }
     public string? FileName { get; set; }
 
     public bool IsInternal { get; set; } 

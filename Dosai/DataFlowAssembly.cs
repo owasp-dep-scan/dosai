@@ -1636,6 +1636,7 @@ public static partial class DataFlowAnalyzer
                     Label = label,
                     SourcePurl = _nodesById.TryGetValue(sourceId, out var sourceNode) ? sourceNode.Purl : null,
                     TargetPurl = _nodesById.TryGetValue(targetId, out var targetNode) ? targetNode.Purl : null,
+                    Path = SafeRelativeSourcePath(basePath, location.FilePath),
                     FileName = Path.GetFileName(location.FilePath),
                     LineNumber = location.LineNumber,
                     ColumnNumber = location.ColumnNumber
@@ -1696,6 +1697,22 @@ public static partial class DataFlowAnalyzer
         {
             code = code.Replace("\r", " ", StringComparison.Ordinal).Replace("\n", " ", StringComparison.Ordinal).Trim();
             return code.Length <= 240 ? code : code[..240] + "…";
+        }
+
+        private static string SafeRelativeSourcePath(string inspectedPath, string sourcePath)
+        {
+            var root = Directory.Exists(inspectedPath) ? inspectedPath : Path.GetDirectoryName(inspectedPath);
+            if (string.IsNullOrWhiteSpace(root)) return Path.GetFileName(sourcePath);
+            try
+            {
+                var relative = Path.GetRelativePath(Path.GetFullPath(root), Path.GetFullPath(sourcePath));
+                if (string.IsNullOrWhiteSpace(relative) || Path.IsPathFullyQualified(relative) || relative == ".." || relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal) || relative.StartsWith($"..{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal)) return Path.GetFileName(sourcePath);
+                return relative;
+            }
+            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+            {
+                return Path.GetFileName(sourcePath);
+            }
         }
     }
 
