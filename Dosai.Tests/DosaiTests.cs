@@ -1454,6 +1454,31 @@ class CryptoSample
     }
 
     [Fact]
+    public void CryptoAnalysis_DetectsNativeTlsSymbolsWithUnderscoreAndVersionPrefixes()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "native_tls.cpp"), """
+#include <openssl/ssl.h>
+
+void configure_tls()
+{
+    auto default_method = TLS_method();
+    auto tls12_method = TLSv1_2_method();
+    auto tls12_alias = TLS1_2_method();
+}
+""");
+
+        var result = CryptoAnalyzer.Analyze(tempDirectory.Path);
+
+        Assert.Contains(result.Protocols, protocol => protocol is { Name: "TLS", Symbol: "TLS_method" });
+        Assert.Contains(result.Protocols, protocol => protocol is { Name: "TLS", Version: "TLS 1.2", Symbol: "TLSv1_2_method" });
+        Assert.Contains(result.Protocols, protocol => protocol is { Name: "TLS", Version: "TLS 1.2", Symbol: "TLS1_2_method" });
+        Assert.Contains(result.Operations, operation => operation is { Algorithm: "TLS", Symbol: "TLS_method" });
+        Assert.Contains(result.Operations, operation => operation is { Algorithm: "TLS", Symbol: "TLSv1_2_method" });
+        Assert.Contains(result.Operations, operation => operation is { Algorithm: "TLS", Symbol: "TLS1_2_method" });
+    }
+
+    [Fact]
     public void GetMethods_FSharpRAndVcxxSources_ReturnsFrontendMethodsCallsAndValidCallGraph()
     {
         using var tempDirectory = new TemporaryDirectory();

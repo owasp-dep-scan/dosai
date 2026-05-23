@@ -641,9 +641,9 @@ public static class CryptoAnalyzer
     private static string? InferProtocolVersion(string text)
     {
         if (text.Contains("Ssl3", StringComparison.OrdinalIgnoreCase) || text.Contains("SSLv3", StringComparison.OrdinalIgnoreCase)) return "SSL 3.0";
-        if (text.Contains("Tls11", StringComparison.OrdinalIgnoreCase) || text.Contains("TLSv1_1", StringComparison.OrdinalIgnoreCase)) return "TLS 1.1";
-        if (text.Contains("Tls12", StringComparison.OrdinalIgnoreCase) || text.Contains("TLSv1_2", StringComparison.OrdinalIgnoreCase)) return "TLS 1.2";
-        if (text.Contains("Tls13", StringComparison.OrdinalIgnoreCase) || text.Contains("TLSv1_3", StringComparison.OrdinalIgnoreCase)) return "TLS 1.3";
+        if (text.Contains("Tls11", StringComparison.OrdinalIgnoreCase) || text.Contains("TLSv1_1", StringComparison.OrdinalIgnoreCase) || text.Contains("TLS1_1", StringComparison.OrdinalIgnoreCase)) return "TLS 1.1";
+        if (text.Contains("Tls12", StringComparison.OrdinalIgnoreCase) || text.Contains("TLSv1_2", StringComparison.OrdinalIgnoreCase) || text.Contains("TLS1_2", StringComparison.OrdinalIgnoreCase)) return "TLS 1.2";
+        if (text.Contains("Tls13", StringComparison.OrdinalIgnoreCase) || text.Contains("TLSv1_3", StringComparison.OrdinalIgnoreCase) || text.Contains("TLS1_3", StringComparison.OrdinalIgnoreCase)) return "TLS 1.3";
         return null;
     }
 
@@ -749,11 +749,7 @@ public static class CryptoAnalyzer
                                  symbol.Contains("Microsoft.IdentityModel", StringComparison.OrdinalIgnoreCase);
         foreach (var candidate in candidates)
         {
-            if (symbol.Equals(candidate, StringComparison.OrdinalIgnoreCase) ||
-                symbol.StartsWith($"{candidate}.", StringComparison.OrdinalIgnoreCase) ||
-                symbol.StartsWith($"{candidate}::", StringComparison.OrdinalIgnoreCase) ||
-                symbol.Equals($"System.{candidate}", StringComparison.OrdinalIgnoreCase) ||
-                symbol.StartsWith($"System.{candidate}.", StringComparison.OrdinalIgnoreCase))
+            if (HasCryptoTokenPrefix(symbol, candidate) || HasCryptoTokenPrefix(symbol, $"System.{candidate}"))
             {
                 return true;
             }
@@ -770,6 +766,39 @@ public static class CryptoAnalyzer
         }
 
         return false;
+    }
+
+    private static bool HasCryptoTokenPrefix(string symbol, string candidate)
+    {
+        if (symbol.Equals(candidate, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (!symbol.StartsWith(candidate, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var suffix = symbol[candidate.Length..];
+        if (suffix.Length == 0)
+        {
+            return true;
+        }
+
+        if (suffix[0] is '.' or '_' || suffix.StartsWith("::", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        if (candidate.Length <= 3 && char.IsDigit(suffix[0]))
+        {
+            return true;
+        }
+
+        return candidate.Equals("TLS", StringComparison.OrdinalIgnoreCase) &&
+               suffix[0] is 'v' or 'V' &&
+               (suffix.Length == 1 || char.IsDigit(suffix[1]) || suffix[1] is '_' or '.' or ':');
     }
 
     private static string? ResolveMethodId(CryptoReachability reachability, string file, string? namespaceName, string? className, string? methodName)
