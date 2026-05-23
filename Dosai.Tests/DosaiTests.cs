@@ -1349,16 +1349,19 @@ class NestedFlow
         var samplePath = Path.Combine(tempDirectory.Path, "CryptoSample.cs");
         File.WriteAllText(samplePath, """
 using System.Net.Http;
+using System.Security.Authentication;
 using System.Security.Cryptography;
 using System.Text;
 
 class CryptoSample
 {
     static string StaticKey = "0123456789abcdef0123456789abcdef";
+    static string StaticNonce = "0123456789ab";
 
     static void Main(string[] args)
     {
         Hash(args[0]);
+        _ = SslProtocols.Ssl3;
     }
 
     public static byte[] Hash(string input)
@@ -1379,10 +1382,14 @@ class CryptoSample
         var result = CryptoAnalyzer.Analyze(tempDirectory.Path);
 
         Assert.Contains(result.Assets, asset => asset is { Name: "MD5", Strength: "weak" });
-        Assert.Contains(result.Materials, material => material is { Storage: "hardcoded", Fingerprint: not null });
+        Assert.Contains(result.Materials, material => material is { MaterialType: "key-or-secret", Storage: "hardcoded", Fingerprint: not null });
+        Assert.Contains(result.Materials, material => material is { MaterialType: "iv-or-nonce", Storage: "hardcoded", Fingerprint: not null });
+        Assert.DoesNotContain(result.Materials, material => material is { MaterialType: "iv-or-nonce", Location.LineNumber: 7 });
         Assert.Contains(result.Findings, finding => finding.RuleId == "DOSAI-CRYPTO-WEAK-HASH-MD5");
         Assert.Contains(result.Findings, finding => finding is { RuleId: "DOSAI-CRYPTO-WEAK-HASH-MD5", ReachableFromEntryPoint: true });
         Assert.Contains(result.Findings, finding => finding.RuleId == "DOSAI-CRYPTO-TLS-CERT-VALIDATION-DISABLED");
+        Assert.Contains(result.Protocols, protocol => protocol is { Name: "TLS", Version: "SSL 3.0", ReachableFromEntryPoint: true });
+        Assert.Equal(result.Findings.Select(finding => (finding.RuleId, finding.Location.FileName, finding.Location.LineNumber)).Distinct().Count(), result.Findings.Count);
 
         var cdx = CryptoAnalyzer.GetCryptoAnalysis(tempDirectory.Path, "cyclonedx");
         using var document = JsonDocument.Parse(cdx);

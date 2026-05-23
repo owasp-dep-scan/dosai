@@ -142,7 +142,8 @@ public static class CryptoAnalyzer
     };
 
     private static readonly Regex QuotedSecret = new("\"(?<value>(?:[A-Za-z0-9+/]{32,}={0,2}|[A-Fa-f0-9]{32,}|-----BEGIN [^-]+-----[\\s\\S]*?-----END [^-]+-----))\"", RegexOptions.Compiled);
-    private static readonly Regex AssignmentName = new("(?<name>key|secret|token|password|privateKey|clientSecret|jwtSecret|iv|nonce)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex QuotedLiteral = new("\"(?<value>[^\"\\r\\n]{8,})\"", RegexOptions.Compiled);
+    private static readonly Regex Identifier = new("\\b[A-Za-z_][A-Za-z0-9_]*\\b", RegexOptions.Compiled);
     private static readonly Regex RFunctionCall = new(@"(?<name>[A-Za-z_][\w\.:]*)\s*\(", RegexOptions.Compiled);
     private static readonly Regex CppFunctionCall = new(@"(?<name>[A-Za-z_][\w:]*)(?:\s*<[^>]+>)?\s*\(", RegexOptions.Compiled);
 
@@ -282,7 +283,7 @@ public static class CryptoAnalyzer
         {
             var line = lines[index];
             UpdateTextContext(line, language, ref currentNamespace, ref currentClass, ref currentMethod);
-            var symbolCandidates = ExtractSymbolCandidates(line, language);
+            var symbolCandidates = IsLikelyDeclarationLine(line, language) ? Enumerable.Empty<string>() : ExtractSymbolCandidates(line, language);
             foreach (var symbol in symbolCandidates)
             {
                 RecordCryptoUse(symbol, line, basePath, file, index + 1, Math.Max(1, line.IndexOf(symbol, StringComparison.Ordinal) + 1), currentNamespace, currentClass, currentMethod, reachability, result, source: language);
@@ -335,11 +336,31 @@ public static class CryptoAnalyzer
         }
         else
         {
-            names.AddRange(Regex.Matches(line, @"\b([A-Za-z_][\w\.]*)(?:<[^>]+>)?\s*\(").Select(match => match.Groups[1].Value));
-            names.AddRange(Regex.Matches(line, @"\b(AesGcm|AesCcm|Aes|DES|TripleDES|RC2|MD5|SHA1|SHA256|SHA384|SHA512|RSA|DSA|ECDsa|ECDiffieHellman|HMACSHA256|HMACSHA512|Rfc2898DeriveBytes|RandomNumberGenerator|RNGCryptoServiceProvider|X509Certificate2|SslStream|CipherMode\.ECB|SecurityAlgorithms\.None)\b").Select(match => match.Value));
+            names.AddRange(Regex.Matches(line, @"\b(AesGcm|AesCcm|Aes|DES|TripleDES|RC2|MD5|SHA1|SHA256|SHA384|SHA512|RSA|DSA|ECDsa|ECDiffieHellman|HMACSHA256|HMACSHA384|HMACSHA512|Rfc2898DeriveBytes|RandomNumberGenerator|RNGCryptoServiceProvider|X509Certificate2|SslStream|SslProtocols|System\.Random|Random|CipherMode\.ECB|SecurityAlgorithms\.None)\b").Select(match => match.Value));
         }
 
         return names.Where(name => !string.IsNullOrWhiteSpace(name)).Distinct(StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static bool IsLikelyDeclarationLine(string line, string language)
+    {
+        var trimmed = line.Trim();
+        if (language is "csharp" or "vb" or "text")
+        {
+            return Regex.IsMatch(trimmed, @"^(?:public|private|protected|internal|static|sealed|virtual|override|async|partial|extern|friend|shared|overrides|overridable|notinheritable|mustoverride|withevents|dim|sub|function)\b.*\([^;=]*\)\s*(?:=>|\{|$)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        }
+
+        if (language == "fsharp")
+        {
+            return Regex.IsMatch(trimmed, @"^(?:let|member)\s+", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant) && !trimmed.Contains('=');
+        }
+
+        if (language == "cpp")
+        {
+            return Regex.IsMatch(trimmed, @"^[\w:\<\>\*&\s]+\s+\w+\s*\([^;]*\)\s*(?:const\s*)?\{?$", RegexOptions.CultureInvariant) && !trimmed.Contains('=');
+        }
+
+        return false;
     }
 
     private static void RecordCryptoUse(string symbol, string code, string basePath, string file, int line, int column, string? namespaceName, string? className, string? methodName, CryptoReachability reachability, CryptoAnalysisResult result, string source)
@@ -355,23 +376,8 @@ public static class CryptoAnalyzer
         var entryPointIds = reachability.EntryPointsFor(methodId, file, methodName);
         var reachable = entryPointIds.Count > 0;
         var assetId = AddAsset(result, classification.Algorithm, classification.Family, classification.Strength, classification.Standard, location, reachable, entryPointIds, source);
-        var operationId = $"cop{result.Operations.Count + 1}";
-        result.Operations.Add(new CryptoOperation
-        {
-            Id = operationId,
-            OperationType = classification.OperationType,
-            Algorithm = classification.Algorithm,
-            Symbol = symbol,
-            MethodId = methodId,
-            MethodName = methodName,
-            ClassName = className,
-            Namespace = namespaceName,
-            Code = TrimCode(code),
-            Location = location,
-            ReachableFromEntryPoint = reachable,
-            EntryPointIds = entryPointIds,
-            Properties = { ["source"] = source }
-        });
+        AddProtocolIfApplicable(result, classification, symbol, code, location, methodId, reachable, entryPointIds, source);
+        var operationId = AddOperation(result, classification, symbol, code, location, methodId, methodName, className, namespaceName, reachable, entryPointIds, source);
 
         if (classification.FindingRule is not null)
         {
@@ -397,6 +403,10 @@ public static class CryptoAnalyzer
             var location = CreateLocation(basePath, file, lineNumber, Math.Max(1, line.IndexOf(check.Pattern, StringComparison.OrdinalIgnoreCase) + 1));
             var methodId = ResolveMethodId(reachability, file, namespaceName, className, methodName);
             var entryPointIds = reachability.EntryPointsFor(methodId, file, methodName);
+            if (check.Rule == "DOSAI-CRYPTO-LEGACY-TLS" || check.Pattern.Contains("SSL", StringComparison.OrdinalIgnoreCase))
+            {
+                AddProtocol(result, "TLS", InferProtocolVersion(check.Pattern), check.Severity == "High" ? "weak" : "legacy", check.Pattern, location, methodId, entryPointIds.Count > 0, entryPointIds, "line-fallback");
+            }
             AddFinding(result, check.Rule, check.Severity, "High", check.Summary, check.Recommendation, location, methodId, entryPointIds.Count > 0, entryPointIds, [], [], []);
         }
 
@@ -412,20 +422,29 @@ public static class CryptoAnalyzer
 
     private static void DetectLiteralMaterial(string line, string basePath, string file, int lineNumber, string? namespaceName, string? className, string? methodName, CryptoReachability reachability, CryptoAnalysisResult result)
     {
-        if (!AssignmentName.IsMatch(line) && !line.Contains("-----BEGIN", StringComparison.OrdinalIgnoreCase))
+        var materialNameKind = ClassifySensitiveMaterialName(line);
+        var hasPem = line.Contains("-----BEGIN", StringComparison.OrdinalIgnoreCase);
+        if (materialNameKind is null && !hasPem)
         {
             return;
         }
 
-        foreach (Match match in QuotedSecret.Matches(line))
+        var literalMatches = materialNameKind == "iv-or-nonce"
+            ? QuotedLiteral.Matches(line).Cast<Match>()
+            : QuotedSecret.Matches(line).Cast<Match>();
+        foreach (var match in literalMatches)
         {
             var value = match.Groups["value"].Value;
-            if (value.Length < 32 && !value.Contains("BEGIN", StringComparison.OrdinalIgnoreCase))
+            if (materialNameKind == "iv-or-nonce" && value.Length < 8)
+            {
+                continue;
+            }
+            if (materialNameKind != "iv-or-nonce" && value.Length < 32 && !value.Contains("BEGIN", StringComparison.OrdinalIgnoreCase))
             {
                 continue;
             }
 
-            var materialType = line.Contains("iv", StringComparison.OrdinalIgnoreCase) || line.Contains("nonce", StringComparison.OrdinalIgnoreCase) ? "iv-or-nonce" : value.Contains("BEGIN", StringComparison.OrdinalIgnoreCase) ? "private-key-or-certificate" : "key-or-secret";
+            var materialType = value.Contains("BEGIN", StringComparison.OrdinalIgnoreCase) ? "private-key-or-certificate" : materialNameKind ?? "key-or-secret";
             var location = CreateLocation(basePath, file, lineNumber, Math.Max(1, match.Index + 1));
             var methodId = ResolveMethodId(reachability, file, namespaceName, className, methodName);
             var entryPointIds = reachability.EntryPointsFor(methodId, file, methodName);
@@ -477,11 +496,59 @@ public static class CryptoAnalyzer
         return id;
     }
 
+    private static string AddOperation(CryptoAnalysisResult result, CryptoClassification classification, string symbol, string code, CodeLocation location, string? methodId, string? methodName, string? className, string? namespaceName, bool reachable, List<string> entryPointIds, string source)
+    {
+        var dedupeKey = $"{classification.Algorithm}\u001f{classification.OperationType}\u001f{location.Path}\u001f{location.LineNumber}";
+        var existing = result.Operations.FirstOrDefault(operation => operation.Properties.TryGetValue("dedupeKey", out var value) && value == dedupeKey);
+        if (existing is not null)
+        {
+            MergeUnique(existing.EntryPointIds, entryPointIds);
+            existing.ReachableFromEntryPoint = existing.ReachableFromEntryPoint || reachable;
+            existing.MethodId ??= methodId;
+            existing.MethodName ??= methodName;
+            existing.ClassName ??= className;
+            existing.Namespace ??= namespaceName;
+            if (source == "roslyn" && existing.Properties.TryGetValue("source", out var existingSource) && existingSource != "roslyn")
+            {
+                existing.Symbol = symbol;
+                existing.Code = TrimCode(code);
+                existing.Properties["source"] = source;
+            }
+            return existing.Id;
+        }
+
+        var operationId = $"cop{result.Operations.Count + 1}";
+        result.Operations.Add(new CryptoOperation
+        {
+            Id = operationId,
+            OperationType = classification.OperationType,
+            Algorithm = classification.Algorithm,
+            Symbol = symbol,
+            MethodId = methodId,
+            MethodName = methodName,
+            ClassName = className,
+            Namespace = namespaceName,
+            Code = TrimCode(code),
+            Location = location,
+            ReachableFromEntryPoint = reachable,
+            EntryPointIds = entryPointIds,
+            Properties = { ["source"] = source, ["dedupeKey"] = dedupeKey }
+        });
+        return operationId;
+    }
+
     private static void AddFinding(CryptoAnalysisResult result, string ruleId, string severity, string confidence, string summary, string? recommendation, CodeLocation location, string? methodId, bool reachable, List<string> entryPointIds, List<string> assetIds, List<string> operationIds, List<string> materialIds)
     {
-        var dedupeKey = $"{ruleId}\u001f{location.Path}\u001f{location.LineNumber}\u001f{location.ColumnNumber}";
-        if (result.Findings.Any(finding => finding.Properties.TryGetValue("dedupeKey", out var existing) && existing == dedupeKey))
+        var dedupeKey = $"{ruleId}\u001f{location.Path}\u001f{location.LineNumber}";
+        var existing = result.Findings.FirstOrDefault(finding => finding.Properties.TryGetValue("dedupeKey", out var existingKey) && existingKey == dedupeKey);
+        if (existing is not null)
         {
+            MergeUnique(existing.AssetIds, assetIds);
+            MergeUnique(existing.OperationIds, operationIds);
+            MergeUnique(existing.MaterialIds, materialIds);
+            MergeUnique(existing.EntryPointIds, entryPointIds);
+            existing.ReachableFromEntryPoint = existing.ReachableFromEntryPoint || reachable;
+            existing.MethodId ??= methodId;
             return;
         }
 
@@ -505,31 +572,127 @@ public static class CryptoAnalyzer
         });
     }
 
+    private static void AddProtocolIfApplicable(CryptoAnalysisResult result, CryptoClassification classification, string symbol, string code, CodeLocation location, string? methodId, bool reachable, List<string> entryPointIds, string source)
+    {
+        if (!classification.Family.Equals("protocol", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        AddProtocol(result, classification.Algorithm, InferProtocolVersion($"{symbol} {code}"), classification.Strength, symbol, location, methodId, reachable, entryPointIds, source);
+    }
+
+    private static void AddProtocol(CryptoAnalysisResult result, string name, string? version, string? strength, string symbol, CodeLocation location, string? methodId, bool reachable, List<string> entryPointIds, string source)
+    {
+        var dedupeKey = $"{name}\u001f{version}\u001f{location.Path}\u001f{location.LineNumber}";
+        var existing = result.Protocols.FirstOrDefault(protocol => protocol.Properties.TryGetValue("dedupeKey", out var value) && value == dedupeKey);
+        if (existing is not null)
+        {
+            MergeUnique(existing.EntryPointIds, entryPointIds);
+            existing.ReachableFromEntryPoint = existing.ReachableFromEntryPoint || reachable;
+            return;
+        }
+
+        result.Protocols.Add(new CryptoProtocol
+        {
+            Id = $"cpr{result.Protocols.Count + 1}",
+            Name = name,
+            Version = version,
+            Strength = strength,
+            Symbol = symbol,
+            MethodId = methodId,
+            Location = location,
+            ReachableFromEntryPoint = reachable,
+            EntryPointIds = entryPointIds,
+            Properties = { ["source"] = source, ["dedupeKey"] = dedupeKey }
+        });
+    }
+
+    private static string? InferProtocolVersion(string text)
+    {
+        if (text.Contains("Ssl3", StringComparison.OrdinalIgnoreCase) || text.Contains("SSLv3", StringComparison.OrdinalIgnoreCase)) return "SSL 3.0";
+        if (text.Contains("Tls11", StringComparison.OrdinalIgnoreCase) || text.Contains("TLSv1_1", StringComparison.OrdinalIgnoreCase)) return "TLS 1.1";
+        if (text.Contains("Tls12", StringComparison.OrdinalIgnoreCase) || text.Contains("TLSv1_2", StringComparison.OrdinalIgnoreCase)) return "TLS 1.2";
+        if (text.Contains("Tls13", StringComparison.OrdinalIgnoreCase) || text.Contains("TLSv1_3", StringComparison.OrdinalIgnoreCase)) return "TLS 1.3";
+        return null;
+    }
+
+    private static string? ClassifySensitiveMaterialName(string line)
+    {
+        var identifiers = Identifier.Matches(line)
+            .Select(match => match.Value)
+            .Where(identifier => !IsLanguageKeyword(identifier))
+            .ToList();
+        if (identifiers.Any(IsIvOrNonceName)) return "iv-or-nonce";
+        if (identifiers.Any(IsKeyOrSecretName)) return "key-or-secret";
+        return null;
+    }
+
+    private static bool IsLanguageKeyword(string identifier) => identifier is "private" or "public" or "protected" or "internal" or "static" or "readonly" or "const" or "string" or "byte" or "var" or "new" or "return";
+
+    private static bool IsIvOrNonceName(string identifier)
+    {
+        var tokens = SplitIdentifier(identifier).ToList();
+        return tokens.Contains("iv", StringComparer.OrdinalIgnoreCase) || tokens.Contains("nonce", StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static bool IsKeyOrSecretName(string identifier)
+    {
+        var tokens = SplitIdentifier(identifier).ToList();
+        return tokens.Contains("key", StringComparer.OrdinalIgnoreCase) ||
+               tokens.Contains("secret", StringComparer.OrdinalIgnoreCase) ||
+               tokens.Contains("token", StringComparer.OrdinalIgnoreCase) ||
+               tokens.Contains("password", StringComparer.OrdinalIgnoreCase) ||
+               identifier.Contains("privatekey", StringComparison.OrdinalIgnoreCase) ||
+               identifier.Contains("clientsecret", StringComparison.OrdinalIgnoreCase) ||
+               identifier.Contains("jwtsecret", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static IEnumerable<string> SplitIdentifier(string identifier)
+    {
+        foreach (Match match in Regex.Matches(identifier, @"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+"))
+        {
+            yield return match.Value.ToLowerInvariant();
+        }
+    }
+
+    private static void MergeUnique(List<string> target, IEnumerable<string> values)
+    {
+        foreach (var value in values.Where(value => !string.IsNullOrWhiteSpace(value)))
+        {
+            if (!target.Contains(value, StringComparer.Ordinal))
+            {
+                target.Add(value);
+            }
+        }
+    }
+
     private static CryptoClassification? ClassifyCryptoSymbol(string symbol, string code, string source)
     {
-        var text = $"{symbol} {code}";
+        var symbolText = symbol;
+        var codeText = code;
 
-        if (ContainsAny(text, "MD5", "EVP_md5", "digest::digest") || text.Contains("algo = \"md5\"", StringComparison.OrdinalIgnoreCase))
+        if (HasCryptoToken(symbolText, "MD5", "EVP_md5", "digest::digest") || codeText.Contains("algo = \"md5\"", StringComparison.OrdinalIgnoreCase))
             return Classify("MD5", "hash", "weak", rule: "DOSAI-CRYPTO-WEAK-HASH-MD5", severity: "High", summary: "MD5 hashing was detected.", recommendation: "Use SHA-256 or stronger for integrity, and password-specific hashing for passwords.");
-        if (ContainsAny(text, "SHA1", "SHA1CryptoServiceProvider", "EVP_sha1") || text.Contains("algo = \"sha1\"", StringComparison.OrdinalIgnoreCase))
+        if (HasCryptoToken(symbolText, "SHA1", "SHA1CryptoServiceProvider", "EVP_sha1") || codeText.Contains("algo = \"sha1\"", StringComparison.OrdinalIgnoreCase))
             return Classify("SHA-1", "hash", "weak", rule: "DOSAI-CRYPTO-WEAK-HASH-SHA1", severity: "Medium", summary: "SHA-1 hashing was detected.", recommendation: "Use SHA-256 or stronger, unless required only for legacy non-security identifiers.");
-        if (ContainsAny(text, "DES", "TripleDES", "RC2", "EVP_des", "EVP_rc4"))
+        if (HasCryptoToken(symbolText, "DES", "TripleDES", "RC2", "EVP_des", "EVP_rc4"))
             return Classify(symbol.Contains("Triple", StringComparison.OrdinalIgnoreCase) ? "3DES" : "DES/RC2/RC4", "symmetric", "weak", rule: "DOSAI-CRYPTO-WEAK-CIPHER", severity: "High", summary: "Weak or legacy symmetric cipher was detected.", recommendation: "Use AES-GCM or another approved authenticated encryption mode.");
-        if (ContainsAny(text, "AesGcm", "AES_gcm", "EVP_aes_256_gcm")) return Classify("AES-GCM", "symmetric", "strong", "encrypt/decrypt", "NIST");
-        if (ContainsAny(text, "AesCcm", "AES_ccm")) return Classify("AES-CCM", "symmetric", "strong", "encrypt/decrypt", "NIST");
-        if (ContainsAny(text, "Aes", "AES_", "EVP_aes")) return Classify("AES", "symmetric", "acceptable", "encrypt/decrypt", "NIST");
-        if (ContainsAny(text, "RSA", "RSA_")) return Classify("RSA", "asymmetric", "acceptable", "sign/encrypt", "PKCS#1");
-        if (ContainsAny(text, "ECDsa", "ECDSA")) return Classify("ECDSA", "asymmetric", "strong", "sign", "FIPS 186");
-        if (ContainsAny(text, "ECDiffieHellman", "ECDH")) return Classify("ECDH", "key-agreement", "strong", "key-agreement");
-        if (ContainsAny(text, "SHA256", "SHA384", "SHA512", "EVP_sha256", "EVP_sha512")) return Classify(symbol.Contains("512", StringComparison.Ordinal) ? "SHA-512" : "SHA-2", "hash", "strong");
-        if (ContainsAny(text, "HMACSHA256", "HMACSHA384", "HMACSHA512", "HMAC(")) return Classify("HMAC", "mac", "strong", "mac");
-        if (ContainsAny(text, "Rfc2898DeriveBytes", "PKCS5_PBKDF2_HMAC")) return Classify("PBKDF2", "kdf", "acceptable", "key-derivation", "PKCS#5");
-        if (ContainsAny(text, "RandomNumberGenerator", "RNGCryptoServiceProvider", "RAND_bytes")) return Classify("CSPRNG", "random", "strong", "random");
-        if (ContainsAny(text, "System.Random", "new Random", "rand()", "srand(")) return Classify("Non-cryptographic RNG", "random", "weak", "random", rule: "DOSAI-CRYPTO-INSECURE-RNG", severity: "Medium", summary: "Non-cryptographic random number generator was detected near security analysis context.", recommendation: "Use RandomNumberGenerator for security-sensitive randomness.");
-        if (ContainsAny(text, "X509Certificate2", "X509_STORE", "CertificateRequest")) return Classify("X.509", "certificate", "unknown", "certificate");
-        if (ContainsAny(text, "SslStream", "SSL_CTX", "SslProtocols", "TLS")) return Classify("TLS", "protocol", "acceptable", "transport-security", "TLS");
-        if (ContainsAny(text, "SecurityAlgorithms.None")) return Classify("JWT none", "signature", "weak", "sign", rule: "DOSAI-CRYPTO-JWT-NONE", severity: "High", summary: "JWT 'none' algorithm was detected.", recommendation: "Require strong token signing and validation.");
-        if (ContainsAny(text, "openssl::", "sodium::", "digest::")) return Classify(symbol, "library", "unknown", "library");
+        if (HasCryptoToken(symbolText, "AesGcm", "AES_gcm", "EVP_aes_256_gcm")) return Classify("AES-GCM", "symmetric", "strong", "encrypt/decrypt", "NIST");
+        if (HasCryptoToken(symbolText, "AesCcm", "AES_ccm")) return Classify("AES-CCM", "symmetric", "strong", "encrypt/decrypt", "NIST");
+        if (HasCryptoToken(symbolText, "Aes", "AES_", "EVP_aes")) return Classify("AES", "symmetric", "acceptable", "encrypt/decrypt", "NIST");
+        if (HasCryptoToken(symbolText, "RSA", "RSA_")) return Classify("RSA", "asymmetric", "acceptable", "sign/encrypt", "PKCS#1");
+        if (HasCryptoToken(symbolText, "ECDsa", "ECDSA")) return Classify("ECDSA", "asymmetric", "strong", "sign", "FIPS 186");
+        if (HasCryptoToken(symbolText, "ECDiffieHellman", "ECDH")) return Classify("ECDH", "key-agreement", "strong", "key-agreement");
+        if (HasCryptoToken(symbolText, "SHA256", "SHA384", "SHA512", "EVP_sha256", "EVP_sha512")) return Classify(symbol.Contains("512", StringComparison.Ordinal) ? "SHA-512" : "SHA-2", "hash", "strong");
+        if (HasCryptoToken(symbolText, "HMACSHA256", "HMACSHA384", "HMACSHA512", "HMAC(")) return Classify("HMAC", "mac", "strong", "mac");
+        if (HasCryptoToken(symbolText, "Rfc2898DeriveBytes", "PKCS5_PBKDF2_HMAC")) return Classify("PBKDF2", "kdf", "acceptable", "key-derivation", "PKCS#5");
+        if (HasCryptoToken(symbolText, "RandomNumberGenerator", "RNGCryptoServiceProvider", "RAND_bytes")) return Classify("CSPRNG", "random", "strong", "random");
+        if (HasCryptoToken(symbolText, "System.Random", "Random", "rand", "srand")) return Classify("Non-cryptographic RNG", "random", "weak", "random", rule: "DOSAI-CRYPTO-INSECURE-RNG", severity: "Medium", summary: "Non-cryptographic random number generator was detected near security analysis context.", recommendation: "Use RandomNumberGenerator for security-sensitive randomness.");
+        if (HasCryptoToken(symbolText, "X509Certificate2", "X509_STORE", "CertificateRequest")) return Classify("X.509", "certificate", "unknown", "certificate");
+        if (HasCryptoToken(symbolText, "SslStream", "SSL_CTX", "SslProtocols", "TLS")) return Classify("TLS", "protocol", "acceptable", "transport-security", "TLS");
+        if (HasCryptoToken(symbolText, "SecurityAlgorithms.None")) return Classify("JWT none", "signature", "weak", "sign", rule: "DOSAI-CRYPTO-JWT-NONE", severity: "High", summary: "JWT 'none' algorithm was detected.", recommendation: "Require strong token signing and validation.");
+        if (HasCryptoToken(symbolText, "openssl::", "sodium::", "digest::")) return Classify(symbol, "library", "unknown", "library");
         return null;
 
         CryptoClassification Classify(string algorithm, string family, string strength, string operationType = "use", string? standard = null, string? rule = null, string? severity = null, string? summary = null, string? recommendation = null) =>
@@ -537,6 +700,37 @@ public static class CryptoAnalyzer
     }
 
     private static bool ContainsAny(string value, params string[] candidates) => candidates.Any(candidate => value.Contains(candidate, StringComparison.OrdinalIgnoreCase));
+
+    private static bool HasCryptoToken(string symbol, params string[] candidates)
+    {
+        var frameworkQualified = symbol.Contains("System.Security.Cryptography", StringComparison.OrdinalIgnoreCase) ||
+                                 symbol.Contains("System.Security.Authentication", StringComparison.OrdinalIgnoreCase) ||
+                                 symbol.Contains("System.Net.Security", StringComparison.OrdinalIgnoreCase) ||
+                                 symbol.Contains("Microsoft.IdentityModel", StringComparison.OrdinalIgnoreCase);
+        foreach (var candidate in candidates)
+        {
+            if (symbol.Equals(candidate, StringComparison.OrdinalIgnoreCase) ||
+                symbol.StartsWith($"{candidate}.", StringComparison.OrdinalIgnoreCase) ||
+                symbol.StartsWith($"{candidate}::", StringComparison.OrdinalIgnoreCase) ||
+                symbol.Equals($"System.{candidate}", StringComparison.OrdinalIgnoreCase) ||
+                symbol.StartsWith($"System.{candidate}.", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            if ((candidate.Contains('_', StringComparison.Ordinal) || candidate.Contains("::", StringComparison.Ordinal)) && symbol.Contains(candidate, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            if (frameworkQualified && symbol.Contains(candidate, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     private static string? ResolveMethodId(CryptoReachability reachability, string file, string? namespaceName, string? className, string? methodName)
     {
