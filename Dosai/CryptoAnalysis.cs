@@ -21,6 +21,7 @@ public enum CryptoOutputFormat
 public sealed class CryptoAnalysisResult
 {
     public AnalysisMetadata Metadata { get; set; } = new();
+    public DataFlowResult? CryptoDataFlows { get; set; }
     public List<CryptoAsset> Assets { get; set; } = [];
     public List<CryptoOperation> Operations { get; set; } = [];
     public List<CryptoMaterial> Materials { get; set; } = [];
@@ -42,6 +43,7 @@ public sealed class CryptoAsset
     public CodeLocation Location { get; set; } = new();
     public bool ReachableFromEntryPoint { get; set; }
     public List<string> EntryPointIds { get; set; } = [];
+    public List<string> DataFlowSliceIds { get; set; } = [];
     public Dictionary<string, string> Properties { get; set; } = [];
 }
 
@@ -59,12 +61,14 @@ public sealed class CryptoOperation
     public CodeLocation Location { get; set; } = new();
     public bool ReachableFromEntryPoint { get; set; }
     public List<string> EntryPointIds { get; set; } = [];
+    public List<string> DataFlowSliceIds { get; set; } = [];
     public Dictionary<string, string> Properties { get; set; } = [];
 }
 
 public sealed class CryptoMaterial
 {
     public required string Id { get; set; }
+    public string? Name { get; set; }
     public required string MaterialType { get; set; }
     public string Storage { get; set; } = "unknown";
     public string? Algorithm { get; set; }
@@ -75,6 +79,7 @@ public sealed class CryptoMaterial
     public CodeLocation Location { get; set; } = new();
     public bool ReachableFromEntryPoint { get; set; }
     public List<string> EntryPointIds { get; set; } = [];
+    public List<string> DataFlowSliceIds { get; set; } = [];
     public Dictionary<string, string> Properties { get; set; } = [];
 }
 
@@ -108,6 +113,9 @@ public sealed class CryptoFinding
     public CodeLocation Location { get; set; } = new();
     public bool ReachableFromEntryPoint { get; set; }
     public List<string> EntryPointIds { get; set; } = [];
+    public List<string> DataFlowSliceIds { get; set; } = [];
+    public List<string> SourceMaterialIds { get; set; } = [];
+    public List<string> SinkOperationIds { get; set; } = [];
     public Dictionary<string, string> Properties { get; set; } = [];
 }
 
@@ -128,6 +136,7 @@ public sealed class CryptoStatistics
     public int ProtocolCount { get; set; }
     public int FindingCount { get; set; }
     public int ReachableFindingCount { get; set; }
+    public int CryptoDataFlowSliceCount { get; set; }
 }
 
 public static class CryptoAnalyzer
@@ -150,8 +159,10 @@ public static class CryptoAnalyzer
     public static string GetCryptoAnalysis(string path, string? format = null)
     {
         var result = Analyze(path);
-        return CryptoBomExporter.Export(result, ParseFormat(format));
+        return Export(result, format);
     }
+
+    public static string Export(CryptoAnalysisResult result, string? format = null) => CryptoBomExporter.Export(result, ParseFormat(format));
 
     public static CryptoAnalysisResult Analyze(string path)
     {
@@ -167,6 +178,7 @@ public static class CryptoAnalyzer
 
         AnalyzeDotNetSources(path, files, reachability, result);
         AnalyzeTextSources(path, files, reachability, result);
+        AttachCryptoDataFlows(path, result);
 
         result.Assets = result.Assets.OrderBy(a => a.Location.FileName, StringComparer.Ordinal).ThenBy(a => a.Location.LineNumber).ThenBy(a => a.Id, StringComparer.Ordinal).ToList();
         result.Operations = result.Operations.OrderBy(o => o.Location.FileName, StringComparer.Ordinal).ThenBy(o => o.Location.LineNumber).ThenBy(o => o.Id, StringComparer.Ordinal).ToList();
@@ -179,7 +191,22 @@ public static class CryptoAnalyzer
         result.Statistics.ProtocolCount = result.Protocols.Count;
         result.Statistics.FindingCount = result.Findings.Count;
         result.Statistics.ReachableFindingCount = result.Findings.Count(f => f.ReachableFromEntryPoint);
+        result.Statistics.CryptoDataFlowSliceCount = result.CryptoDataFlows?.Slices.Count ?? 0;
         return result;
+    }
+
+    private static void AttachCryptoDataFlows(string path, CryptoAnalysisResult result)
+    {
+        try
+        {
+            var dataFlows = DataFlowAnalyzer.Analyze(path, patternPacks: "crypto");
+            result.CryptoDataFlows = dataFlows;
+            CryptoDataFlowCorrelator.Attach(result, dataFlows);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or BadImageFormatException or JsonException or InvalidOperationException or ArgumentException or NotSupportedException)
+        {
+            result.Diagnostics.Add($"Crypto data-flow fallback: {ex.Message}");
+        }
     }
 
     private static CryptoOutputFormat ParseFormat(string? format)
@@ -445,6 +472,7 @@ public static class CryptoAnalyzer
             }
 
             var materialType = value.Contains("BEGIN", StringComparison.OrdinalIgnoreCase) ? "private-key-or-certificate" : materialNameKind ?? "key-or-secret";
+            var materialName = FindSensitiveMaterialIdentifier(line, materialType);
             var location = CreateLocation(basePath, file, lineNumber, Math.Max(1, match.Index + 1));
             var methodId = ResolveMethodId(reachability, file, namespaceName, className, methodName);
             var entryPointIds = reachability.EntryPointsFor(methodId, file, methodName);
@@ -452,6 +480,7 @@ public static class CryptoAnalyzer
             result.Materials.Add(new CryptoMaterial
             {
                 Id = materialId,
+                Name = materialName,
                 MaterialType = materialType,
                 Storage = "hardcoded",
                 RedactedValue = Redact(value),
@@ -460,7 +489,8 @@ public static class CryptoAnalyzer
                 MethodId = methodId,
                 Location = location,
                 ReachableFromEntryPoint = entryPointIds.Count > 0,
-                EntryPointIds = entryPointIds
+                EntryPointIds = entryPointIds,
+                Properties = { ["identifier"] = materialName ?? string.Empty }
             });
 
             var rule = materialType == "iv-or-nonce" ? "DOSAI-CRYPTO-STATIC-IV" : "DOSAI-CRYPTO-HARDCODED-MATERIAL";
@@ -626,6 +656,16 @@ public static class CryptoAnalyzer
         if (identifiers.Any(IsIvOrNonceName)) return "iv-or-nonce";
         if (identifiers.Any(IsKeyOrSecretName)) return "key-or-secret";
         return null;
+    }
+
+    private static string? FindSensitiveMaterialIdentifier(string line, string materialType)
+    {
+        var identifiers = Identifier.Matches(line)
+            .Select(match => match.Value)
+            .Where(identifier => !IsLanguageKeyword(identifier))
+            .ToList();
+        Func<string, bool> predicate = materialType == "iv-or-nonce" ? IsIvOrNonceName : IsKeyOrSecretName;
+        return identifiers.FirstOrDefault(predicate);
     }
 
     private static bool IsLanguageKeyword(string identifier) => identifier is "private" or "public" or "protected" or "internal" or "static" or "readonly" or "const" or "string" or "byte" or "var" or "new" or "return";
@@ -887,6 +927,184 @@ public static class CryptoAnalyzer
         }
     }
 
+    private static class CryptoDataFlowCorrelator
+    {
+        private static readonly HashSet<string> CryptoSinkCategories = new(StringComparer.OrdinalIgnoreCase) { "crypto", "certificate", "tls", "jwt" };
+        private static readonly HashSet<string> CryptoSourceCategories = new(StringComparer.OrdinalIgnoreCase) { "crypto-material", "secret" };
+        public static void Attach(CryptoAnalysisResult result, DataFlowResult dataFlows)
+        {
+            var index = SliceIndex.Create(dataFlows);
+            foreach (var material in result.Materials)
+            {
+                MergeUnique(material.DataFlowSliceIds, index.FindMaterialSliceIds(material));
+                if (material.DataFlowSliceIds.Count > 0) material.Properties["dataFlowSliceIds"] = string.Join(",", material.DataFlowSliceIds);
+            }
+            foreach (var operation in result.Operations)
+            {
+                MergeUnique(operation.DataFlowSliceIds, index.FindOperationSliceIds(operation));
+                if (operation.DataFlowSliceIds.Count > 0) operation.Properties["dataFlowSliceIds"] = string.Join(",", operation.DataFlowSliceIds);
+            }
+            var materialsById = result.Materials.ToDictionary(material => material.Id, StringComparer.Ordinal);
+            var operationsById = result.Operations.ToDictionary(operation => operation.Id, StringComparer.Ordinal);
+            var materialIdsBySliceId = BuildEvidenceIdsBySlice(result.Materials, material => material.DataFlowSliceIds, material => material.Id);
+            var operationIdsBySliceId = BuildEvidenceIdsBySlice(result.Operations, operation => operation.DataFlowSliceIds, operation => operation.Id);
+            var materialIdsByLocation = BuildEvidenceIdsByLocation(result.Materials, material => material.Location, material => material.Id);
+            var operationIdsByLocation = BuildEvidenceIdsByLocation(result.Operations, operation => operation.Location, operation => operation.Id);
+            foreach (var finding in result.Findings)
+            {
+                foreach (var materialId in finding.MaterialIds)
+                {
+                    if (materialsById.TryGetValue(materialId, out var material)) MergeUnique(finding.DataFlowSliceIds, material.DataFlowSliceIds);
+                }
+                foreach (var operationId in finding.OperationIds)
+                {
+                    if (operationsById.TryGetValue(operationId, out var operation)) MergeUnique(finding.DataFlowSliceIds, operation.DataFlowSliceIds);
+                }
+                MergeUnique(finding.DataFlowSliceIds, index.FindLocationSliceIds(finding.Location));
+                MergeUnique(finding.SourceMaterialIds, finding.MaterialIds);
+                MergeUnique(finding.SinkOperationIds, finding.OperationIds);
+                MergeUnique(finding.SourceMaterialIds, Lookup(materialIdsByLocation, finding.Location));
+                MergeUnique(finding.SinkOperationIds, Lookup(operationIdsByLocation, finding.Location));
+                foreach (var sliceId in finding.DataFlowSliceIds.ToList())
+                {
+                    MergeUnique(finding.SourceMaterialIds, Lookup(materialIdsBySliceId, sliceId));
+                    MergeUnique(finding.SinkOperationIds, Lookup(operationIdsBySliceId, sliceId));
+                }
+                if (finding.DataFlowSliceIds.Count > 0) finding.Properties["dataFlowSliceIds"] = string.Join(",", finding.DataFlowSliceIds);
+                if (finding.SourceMaterialIds.Count > 0) finding.Properties["sourceMaterialIds"] = string.Join(",", finding.SourceMaterialIds);
+                if (finding.SinkOperationIds.Count > 0) finding.Properties["sinkOperationIds"] = string.Join(",", finding.SinkOperationIds);
+            }
+        }
+        private static Dictionary<string, List<string>> BuildEvidenceIdsBySlice<T>(IEnumerable<T> evidence, Func<T, IEnumerable<string>> sliceIds, Func<T, string> idSelector)
+        {
+            var index = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+            foreach (var item in evidence)
+            {
+                foreach (var sliceId in sliceIds(item).Distinct(StringComparer.Ordinal))
+                {
+                    Add(index, sliceId, idSelector(item));
+                }
+            }
+            return index;
+        }
+        private static Dictionary<string, List<string>> BuildEvidenceIdsByLocation<T>(IEnumerable<T> evidence, Func<T, CodeLocation> locationSelector, Func<T, string> idSelector)
+        {
+            var index = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+            foreach (var item in evidence)
+            {
+                Add(index, LocationKey(locationSelector(item)), idSelector(item));
+            }
+            return index;
+        }
+        private static IReadOnlyList<string> Lookup(Dictionary<string, List<string>> index, CodeLocation location) => index.TryGetValue(LocationKey(location), out var values) ? values : [];
+        private static IReadOnlyList<string> Lookup(Dictionary<string, List<string>> index, string key) => index.TryGetValue(key, out var values) ? values : [];
+        private static void Add(Dictionary<string, List<string>> index, string key, string value)
+        {
+            if (!index.TryGetValue(key, out var values))
+            {
+                values = [];
+                index[key] = values;
+            }
+            if (!values.Contains(value, StringComparer.Ordinal)) values.Add(value);
+        }
+        private static string LocationKey(CodeLocation location) => $"{location.Path ?? location.FileName ?? string.Empty}\u001f{location.FileName ?? string.Empty}\u001f{location.LineNumber}";
+        private static bool SameFile(string? fileName, string? path, CodeLocation location)
+        {
+            if (!string.IsNullOrWhiteSpace(fileName) && !string.IsNullOrWhiteSpace(location.FileName) && string.Equals(fileName, location.FileName, StringComparison.OrdinalIgnoreCase)) return true;
+            return !string.IsNullOrWhiteSpace(path) && !string.IsNullOrWhiteSpace(location.Path) && string.Equals(path, location.Path, StringComparison.OrdinalIgnoreCase);
+        }
+        private sealed class SliceIndex
+        {
+            private readonly Dictionary<string, DataFlowSlice> _slicesById;
+            private readonly Dictionary<string, List<string>> _sliceIdsByLocation;
+            private readonly Dictionary<string, List<string>> _sourceSliceIdsByLocation;
+            private readonly Dictionary<string, List<string>> _sinkSliceIdsByLocation;
+            private readonly Dictionary<string, List<(DataFlowNode Node, string SliceId)>> _cryptoSourceNodesByFile;
+            private readonly Dictionary<string, List<(DataFlowNode Node, string SliceId)>> _cryptoSinkNodesByFile;
+            private SliceIndex(Dictionary<string, DataFlowSlice> slicesById, Dictionary<string, List<string>> sliceIdsByLocation, Dictionary<string, List<string>> sourceSliceIdsByLocation, Dictionary<string, List<string>> sinkSliceIdsByLocation, Dictionary<string, List<(DataFlowNode Node, string SliceId)>> cryptoSourceNodesByFile, Dictionary<string, List<(DataFlowNode Node, string SliceId)>> cryptoSinkNodesByFile)
+            {
+                _slicesById = slicesById;
+                _sliceIdsByLocation = sliceIdsByLocation;
+                _sourceSliceIdsByLocation = sourceSliceIdsByLocation;
+                _sinkSliceIdsByLocation = sinkSliceIdsByLocation;
+                _cryptoSourceNodesByFile = cryptoSourceNodesByFile;
+                _cryptoSinkNodesByFile = cryptoSinkNodesByFile;
+            }
+            public static SliceIndex Create(DataFlowResult dataFlows)
+            {
+                var nodesById = dataFlows.Nodes.ToDictionary(node => node.Id, StringComparer.Ordinal);
+                var slicesById = dataFlows.Slices.ToDictionary(slice => slice.Id, StringComparer.Ordinal);
+                var sliceIdsByLocation = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+                var sourceSliceIdsByLocation = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+                var sinkSliceIdsByLocation = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+                var cryptoSourceNodesByFile = new Dictionary<string, List<(DataFlowNode Node, string SliceId)>>(StringComparer.OrdinalIgnoreCase);
+                var cryptoSinkNodesByFile = new Dictionary<string, List<(DataFlowNode Node, string SliceId)>>(StringComparer.OrdinalIgnoreCase);
+                foreach (var slice in dataFlows.Slices)
+                {
+                    var sliceNodes = slice.NodeIds.Select(nodeId => nodesById.TryGetValue(nodeId, out var node) ? node : null).Where(node => node is not null).Cast<DataFlowNode>().ToList();
+                    foreach (var node in sliceNodes)
+                    {
+                        Add(sliceIdsByLocation, NodeLocationKey(node), slice.Id);
+                        if (node.IsSource)
+                        {
+                            Add(sourceSliceIdsByLocation, NodeLocationKey(node), slice.Id);
+                            if (CryptoSourceCategories.Contains(node.Category ?? string.Empty)) AddNodeByFile(cryptoSourceNodesByFile, node, slice.Id);
+                        }
+                        if (node.IsSink)
+                        {
+                            Add(sinkSliceIdsByLocation, NodeLocationKey(node), slice.Id);
+                            if (CryptoSinkCategories.Contains(node.Category ?? string.Empty)) AddNodeByFile(cryptoSinkNodesByFile, node, slice.Id);
+                        }
+                    }
+                }
+                return new SliceIndex(slicesById, sliceIdsByLocation, sourceSliceIdsByLocation, sinkSliceIdsByLocation, cryptoSourceNodesByFile, cryptoSinkNodesByFile);
+            }
+            public IEnumerable<string> FindMaterialSliceIds(CryptoMaterial material)
+            {
+                foreach (var sliceId in Lookup(_sourceSliceIdsByLocation, LocationKey(material.Location))) yield return sliceId;
+                if (string.IsNullOrWhiteSpace(material.Name)) yield break;
+                foreach (var (node, sliceId) in LookupNodes(_cryptoSourceNodesByFile, material.Location))
+                {
+                    if (ContainsIdentifier(node.Name, material.Name) || ContainsIdentifier(node.Symbol, material.Name) || ContainsIdentifier(node.Code, material.Name)) yield return sliceId;
+                }
+            }
+            public IEnumerable<string> FindOperationSliceIds(CryptoOperation operation)
+            {
+                foreach (var sliceId in Lookup(_sinkSliceIdsByLocation, LocationKey(operation.Location))) yield return sliceId;
+                foreach (var (node, sliceId) in LookupNodes(_cryptoSinkNodesByFile, operation.Location))
+                {
+                    if (!_slicesById.TryGetValue(sliceId, out var slice) || slice.SinkId != node.Id) continue;
+                    if (SliceSinkMatchesOperation(node, operation)) yield return sliceId;
+                }
+            }
+            public IEnumerable<string> FindLocationSliceIds(CodeLocation location) => Lookup(_sliceIdsByLocation, LocationKey(location));
+            private static bool SliceSinkMatchesOperation(DataFlowNode sink, CryptoOperation operation)
+            {
+                if (!SameFile(sink.FileName, sink.Path, operation.Location)) return false;
+                if (!string.IsNullOrWhiteSpace(operation.MethodName) && ContainsIdentifier(sink.Symbol, operation.MethodName)) return true;
+                return Math.Abs(sink.LineNumber - operation.Location.LineNumber) <= 1 &&
+                       (string.IsNullOrWhiteSpace(operation.Symbol) ||
+                        string.IsNullOrWhiteSpace(sink.Symbol) ||
+                        sink.Symbol.Contains(operation.Algorithm, StringComparison.OrdinalIgnoreCase) ||
+                        operation.Symbol.Contains(sink.Name, StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(sink.MethodName, operation.MethodName, StringComparison.OrdinalIgnoreCase));
+            }
+            private static void AddNodeByFile(Dictionary<string, List<(DataFlowNode Node, string SliceId)>> index, DataFlowNode node, string sliceId)
+            {
+                var key = FileKey(node.FileName, node.Path);
+                if (!index.TryGetValue(key, out var values))
+                {
+                    values = [];
+                    index[key] = values;
+                }
+                values.Add((node, sliceId));
+            }
+            private static IEnumerable<(DataFlowNode Node, string SliceId)> LookupNodes(Dictionary<string, List<(DataFlowNode Node, string SliceId)>> index, CodeLocation location) => index.TryGetValue(FileKey(location.FileName, location.Path), out var values) ? values : [];
+            private static string NodeLocationKey(DataFlowNode node) => $"{node.Path ?? node.FileName ?? string.Empty}\u001f{node.FileName ?? string.Empty}\u001f{node.LineNumber}";
+            private static string FileKey(string? fileName, string? path) => $"{path ?? string.Empty}\u001f{fileName ?? string.Empty}";
+        }
+        private static bool ContainsIdentifier(string? value, string identifier) => !string.IsNullOrWhiteSpace(value) && value.Contains(identifier, StringComparison.OrdinalIgnoreCase);
+    }
     private sealed record CryptoClassification(string Algorithm, string Family, string Strength, string OperationType, string? Standard, string? FindingRule, string? Severity, string? Confidence, string? Summary, string? Recommendation);
 
     private sealed class CryptoReachability
@@ -1074,6 +1292,7 @@ public static class CryptoBomExporter
                 ["dosai:namespace"] = operation.Namespace,
                 ["dosai:crypto:reachableFromEntryPoint"] = operation.ReachableFromEntryPoint.ToString().ToLowerInvariant(),
                 ["dosai:crypto:entryPointIds"] = string.Join(",", operation.EntryPointIds),
+                ["dosai:crypto:dataFlowSliceIds"] = string.Join(",", operation.DataFlowSliceIds),
                 ["dosai:location"] = FormatLocation(operation.Location)
             })
         }));
@@ -1085,6 +1304,7 @@ public static class CryptoBomExporter
             properties = ToProperties(new Dictionary<string, string?>
             {
                 ["dosai:crypto:evidenceType"] = "material",
+                ["dosai:crypto:materialName"] = material.Name,
                 ["dosai:crypto:materialType"] = material.MaterialType,
                 ["dosai:crypto:storage"] = material.Storage,
                 ["dosai:crypto:algorithm"] = material.Algorithm,
@@ -1094,6 +1314,7 @@ public static class CryptoBomExporter
                 ["dosai:method:id"] = material.MethodId,
                 ["dosai:crypto:reachableFromEntryPoint"] = material.ReachableFromEntryPoint.ToString().ToLowerInvariant(),
                 ["dosai:crypto:entryPointIds"] = string.Join(",", material.EntryPointIds),
+                ["dosai:crypto:dataFlowSliceIds"] = string.Join(",", material.DataFlowSliceIds),
                 ["dosai:location"] = FormatLocation(material.Location)
             })
         }));
@@ -1134,10 +1355,15 @@ public static class CryptoBomExporter
                 ["dosai:crypto:assetIds"] = string.Join(",", finding.AssetIds),
                 ["dosai:crypto:operationIds"] = string.Join(",", finding.OperationIds),
                 ["dosai:crypto:materialIds"] = string.Join(",", finding.MaterialIds),
+                ["dosai:crypto:dataFlowSliceIds"] = string.Join(",", finding.DataFlowSliceIds),
+                ["dosai:crypto:sourceMaterialIds"] = string.Join(",", finding.SourceMaterialIds),
+                ["dosai:crypto:sinkOperationIds"] = string.Join(",", finding.SinkOperationIds),
                 ["dosai:method:id"] = finding.MethodId,
                 ["dosai:location"] = FormatLocation(finding.Location)
             })
         }).ToList();
+
+        var dependencies = BuildDependencies(result).ToList();
 
         var bom = new
         {
@@ -1156,13 +1382,48 @@ public static class CryptoBomExporter
                     ["dosai:crypto:operationCount"] = result.Statistics.OperationCount.ToString(),
                     ["dosai:crypto:materialCount"] = result.Statistics.MaterialCount.ToString(),
                     ["dosai:crypto:protocolCount"] = result.Statistics.ProtocolCount.ToString(),
-                    ["dosai:crypto:findingCount"] = result.Statistics.FindingCount.ToString()
+                    ["dosai:crypto:findingCount"] = result.Statistics.FindingCount.ToString(),
+                    ["dosai:crypto:dataFlowSliceCount"] = result.Statistics.CryptoDataFlowSliceCount.ToString()
                 })
             },
             components,
+            dependencies,
             vulnerabilities
         };
         return JsonSerializer.Serialize(bom, JsonOptions);
+    }
+
+    private static IEnumerable<object> BuildDependencies(CryptoAnalysisResult result)
+    {
+        var materialReferencesBySliceId = new Dictionary<string, SortedSet<string>>(StringComparer.Ordinal);
+        foreach (var material in result.Materials)
+        {
+            var materialReference = $"dosai:crypto:material:{material.Id}";
+            foreach (var sliceId in material.DataFlowSliceIds.Distinct(StringComparer.Ordinal))
+            {
+                if (!materialReferencesBySliceId.TryGetValue(sliceId, out var materialReferences))
+                {
+                    materialReferences = new SortedSet<string>(StringComparer.Ordinal);
+                    materialReferencesBySliceId[sliceId] = materialReferences;
+                }
+                materialReferences.Add(materialReference);
+            }
+        }
+
+        foreach (var operation in result.Operations)
+        {
+            var sourceMaterialReferences = new SortedSet<string>(StringComparer.Ordinal);
+            foreach (var sliceId in operation.DataFlowSliceIds.Distinct(StringComparer.Ordinal))
+            {
+                if (!materialReferencesBySliceId.TryGetValue(sliceId, out var materialReferences)) continue;
+                sourceMaterialReferences.UnionWith(materialReferences);
+            }
+            var sourceMaterials = sourceMaterialReferences.ToArray();
+            if (sourceMaterials.Length > 0)
+            {
+                yield return new { @ref = $"dosai:crypto:operation:{operation.Id}", dependsOn = sourceMaterials };
+            }
+        }
     }
 
     private static object[] ToProperties(Dictionary<string, string?> values) => values

@@ -992,6 +992,31 @@ class GuardedFlow
     }
 
     [Fact]
+    public void GetDataFlows_CryptoIvPattern_DoesNotTaintNonTokenSuffix()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "CryptoIvNoise.cs"), """
+using System.Security.Cryptography;
+using System.Text;
+
+class CryptoIvNoise
+{
+    static void Main()
+    {
+        var deriv = "0123456789abcdef0123456789abcdef";
+        var bytes = Encoding.UTF8.GetBytes(deriv);
+        using var gcm = new AesGcm(bytes, 16);
+    }
+}
+""");
+
+        var result = DataFlowAnalyzer.Analyze(tempDirectory.Path, patternPacks: "crypto");
+
+        Assert.DoesNotContain(result.Nodes, node => node is { IsSource: true, Category: "crypto-material", Name: "deriv" });
+        Assert.DoesNotContain(result.Slices, slice => slice is { SourceCategory: "crypto-material", SinkCategory: "crypto" } && slice.SinkArgument?.Contains("deriv", StringComparison.OrdinalIgnoreCase) == true);
+    }
+
+    [Fact]
     public void GetDataFlows_AssemblyOnlyExceptionRegion_PropagatesThrownTaintToCatchHandler()
     {
         using var tempDirectory = new TemporaryDirectory();
@@ -1361,6 +1386,7 @@ class CryptoSample
     static void Main(string[] args)
     {
         Hash(args[0]);
+        Encrypt(args[0]);
         _ = SslProtocols.Ssl3;
     }
 
@@ -1368,6 +1394,18 @@ class CryptoSample
     {
         using var md5 = MD5.Create();
         return md5.ComputeHash(Encoding.UTF8.GetBytes(input));
+    }
+
+    public static byte[] Encrypt(string input)
+    {
+        var key = Encoding.UTF8.GetBytes(StaticKey);
+        var nonce = Encoding.UTF8.GetBytes(StaticNonce);
+        var plaintext = Encoding.UTF8.GetBytes(input);
+        var ciphertext = new byte[plaintext.Length];
+        var tag = new byte[16];
+        using var gcm = new AesGcm(key, 16);
+        gcm.Encrypt(nonce, plaintext, ciphertext, tag);
+        return ciphertext;
     }
 
     public static HttpClient UnsafeClient()
@@ -1390,6 +1428,11 @@ class CryptoSample
         Assert.Contains(result.Findings, finding => finding.RuleId == "DOSAI-CRYPTO-TLS-CERT-VALIDATION-DISABLED");
         Assert.Contains(result.Protocols, protocol => protocol is { Name: "TLS", Version: "SSL 3.0", ReachableFromEntryPoint: true });
         Assert.Equal(result.Findings.Select(finding => (finding.RuleId, finding.Location.FileName, finding.Location.LineNumber)).Distinct().Count(), result.Findings.Count);
+        Assert.NotNull(result.CryptoDataFlows);
+        Assert.True(result.Statistics.CryptoDataFlowSliceCount >= 1);
+        Assert.Contains(result.Materials, material => material.DataFlowSliceIds.Count > 0);
+        Assert.Contains(result.Operations, operation => operation.DataFlowSliceIds.Count > 0);
+        Assert.Contains(result.Findings, finding => finding.DataFlowSliceIds.Count > 0 && (finding.SourceMaterialIds.Count > 0 || finding.SinkOperationIds.Count > 0));
 
         var cdx = CryptoAnalyzer.GetCryptoAnalysis(tempDirectory.Path, "cyclonedx");
         using var document = JsonDocument.Parse(cdx);
@@ -1399,11 +1442,14 @@ class CryptoSample
         Assert.Contains(components, component => HasProperty(component, "dosai:crypto:evidenceType", "asset"));
         Assert.Contains(components, component => HasProperty(component, "dosai:crypto:evidenceType", "operation"));
         Assert.Contains(components, component => HasProperty(component, "dosai:crypto:evidenceType", "material"));
+        Assert.Contains(components, component => HasProperty(component, "dosai:crypto:dataFlowSliceIds"));
+        Assert.Contains(document.RootElement.GetProperty("vulnerabilities").EnumerateArray(), vulnerability => HasProperty(vulnerability, "dosai:crypto:dataFlowSliceIds"));
+        Assert.True(document.RootElement.GetProperty("dependencies").GetArrayLength() >= 1);
 
-        static bool HasProperty(JsonElement component, string name, string value)
+        static bool HasProperty(JsonElement component, string name, string? value = null)
         {
             return component.TryGetProperty("properties", out var properties)
-                   && properties.EnumerateArray().Any(property => property.GetProperty("name").GetString() == name && property.GetProperty("value").GetString() == value);
+                   && properties.EnumerateArray().Any(property => property.GetProperty("name").GetString() == name && (value is null || property.GetProperty("value").GetString() == value));
         }
     }
 
@@ -1876,11 +1922,15 @@ class CryptoWorkflow
         var unsupportedFormatOutput = Path.Combine(tempDirectory.Path, "unsupported.json");
 
         Assert.Equal(0, CommandLine.Main(["crypto", "--path", tempDirectory.Path, "--o", nativeOutput, "--format", "dosai"]));
-        Assert.Equal(0, CommandLine.Main(["crypto", "--path", tempDirectory.Path, "--o", cdxOutput, "--format", "cyclonedx"]));
+        Assert.Equal(0, CommandLine.Main(["crypto", "--path", tempDirectory.Path, "--o", cdxOutput, "--format", "cyclonedx", "--graph-format", "graphml,gexf"]));
         Assert.Equal(1, CommandLine.Main(["crypto", "--path", tempDirectory.Path, "--o", unsupportedFormatOutput, "--format", "unsupported"]));
+        Assert.True(File.Exists(Path.Combine(tempDirectory.Path, "cbom-dataflows.graphml")));
+        Assert.True(File.Exists(Path.Combine(tempDirectory.Path, "cbom-dataflows.gexf")));
 
         using var nativeDocument = JsonDocument.Parse(File.ReadAllText(nativeOutput));
         Assert.True(nativeDocument.RootElement.GetProperty("Statistics").GetProperty("ReachableFindingCount").GetInt32() >= 1);
+        Assert.True(nativeDocument.RootElement.GetProperty("Statistics").GetProperty("CryptoDataFlowSliceCount").GetInt32() >= 1);
+        Assert.True(nativeDocument.RootElement.TryGetProperty("CryptoDataFlows", out _));
 
         var semanticAnalysis = CryptoAnalyzer.Analyze(tempDirectory.Path);
         Assert.Contains(semanticAnalysis.Operations, operation => operation.Algorithm == "MD5" && operation.Properties.TryGetValue("source", out var source) && source == "roslyn");
@@ -1899,6 +1949,8 @@ class CryptoWorkflow
         Assert.Contains(combinedComponents, component => HasProperty(component, "dosai:crypto:evidenceType", "asset"));
         Assert.Contains(combinedComponents, component => HasProperty(component, "dosai:crypto:evidenceType", "operation"));
         Assert.True(cdxDocument.RootElement.GetProperty("vulnerabilities").GetArrayLength() >= 1);
+        Assert.Contains(cdxDocument.RootElement.GetProperty("components").EnumerateArray(), component => HasProperty(component, "dosai:crypto:dataFlowSliceIds"));
+        Assert.Contains(cdxDocument.RootElement.GetProperty("vulnerabilities").EnumerateArray(), vulnerability => HasProperty(vulnerability, "dosai:crypto:dataFlowSliceIds"));
 
         using var input = new StringReader("""
 {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"dosai.crypto","arguments":{"format":"cyclonedx"}}}
@@ -1909,10 +1961,10 @@ class CryptoWorkflow
         Assert.Contains("CycloneDX", output.ToString());
         Assert.Contains("dosai:crypto:reachableFromEntryPoint", output.ToString());
 
-        static bool HasProperty(JsonElement component, string name, string value)
+        static bool HasProperty(JsonElement component, string name, string? value = null)
         {
             return component.TryGetProperty("properties", out var properties)
-                   && properties.EnumerateArray().Any(property => property.GetProperty("name").GetString() == name && property.GetProperty("value").GetString() == value);
+                   && properties.EnumerateArray().Any(property => property.GetProperty("name").GetString() == name && (value is null || property.GetProperty("value").GetString() == value));
         }
     }
 
