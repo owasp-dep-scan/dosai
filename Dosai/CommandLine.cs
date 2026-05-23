@@ -68,6 +68,18 @@ public class CommandLine
             Arity = ArgumentArity.ExactlyOne
         };
 
+        var cryptoGraphFormatOption = new Option<string?>("--graph-format")
+        {
+            Description = "Export crypto data-flow graph sidecars in one or more comma-separated formats: mermaid, graphml, gexf.",
+            Arity = ArgumentArity.ExactlyOne
+        };
+
+        var cryptoGraphOutputFileOption = new Option<string?>("--graph-out")
+        {
+            Description = "Crypto data-flow graph sidecar output file. Only valid with a single --graph-format value; otherwise sidecars default to --o plus -dataflows and the format extension.",
+            Arity = ArgumentArity.ExactlyOne
+        };
+
         var printSourcesSinksOption = new Option<bool>("--print-sources-sinks")
         {
             Description = "Print auto-detected data-flow sources and sinks to stdout for pattern diagnostics."
@@ -135,7 +147,9 @@ public class CommandLine
         {
             pathOption,
             outputFileOption,
-            cryptoFormatOption
+            cryptoFormatOption,
+            cryptoGraphFormatOption,
+            cryptoGraphOutputFileOption
         };
 
         var agentContextCommand = new Command("agent-context", "Generate compact AI-agent context from data-flow analysis")
@@ -283,9 +297,17 @@ public class CommandLine
             var path = parseResult.GetValue(pathOption)!;
             var outputFile = parseResult.GetValue(outputFileOption)!;
             var format = parseResult.GetValue(cryptoFormatOption);
+            var graphFormat = parseResult.GetValue(cryptoGraphFormatOption);
+            var graphOutputFile = parseResult.GetValue(cryptoGraphOutputFileOption);
             try
             {
-                File.WriteAllText(outputFile, CryptoAnalyzer.GetCryptoAnalysis(path, format));
+                var result = CryptoAnalyzer.Analyze(path);
+                File.WriteAllText(outputFile, CryptoAnalyzer.Export(result, format));
+                if (!string.IsNullOrWhiteSpace(graphFormat))
+                {
+                    var graphExportResult = WriteCryptoDataFlowGraphSidecars(result, graphFormat, outputFile, graphOutputFile);
+                    if (graphExportResult != 0) return graphExportResult;
+                }
                 return 0;
             }
             catch (ArgumentException ex)
@@ -419,6 +441,54 @@ public class CommandLine
             }
             WriteDataPathLines(writer, childPrefix, slice, nodesById, edgesById);
         }
+    }
+
+    private static int WriteCryptoDataFlowGraphSidecars(CryptoAnalysisResult result, string graphFormats, string outputFile, string? graphOutputFile)
+    {
+        if (result.CryptoDataFlows is null)
+        {
+            Console.Error.WriteLine("Crypto data-flow result was not generated.");
+            return 1;
+        }
+
+        var requestedFormats = graphFormats
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (requestedFormats.Count == 0)
+        {
+            Console.Error.WriteLine("No crypto data-flow graph format was provided.");
+            return 1;
+        }
+
+        if (requestedFormats.Count > 1 && !string.IsNullOrWhiteSpace(graphOutputFile))
+        {
+            Console.Error.WriteLine("--graph-out can only be used with a single --graph-format value for crypto graph sidecars.");
+            return 1;
+        }
+
+        foreach (var requestedFormat in requestedFormats)
+        {
+            if (!DataFlowExporter.TryParseFormat(requestedFormat, out var format))
+            {
+                Console.Error.WriteLine($"Unsupported crypto data-flow graph format: {requestedFormat}. Supported formats: mermaid, graphml, gexf.");
+                return 1;
+            }
+
+            var sidecarPath = graphOutputFile ?? BuildCryptoDataFlowSidecarPath(outputFile, format);
+            File.WriteAllText(sidecarPath, DataFlowExporter.Export(result.CryptoDataFlows, format));
+        }
+
+        return 0;
+    }
+
+    private static string BuildCryptoDataFlowSidecarPath(string outputFile, DataFlowExportFormat format)
+    {
+        var directory = Path.GetDirectoryName(outputFile);
+        var fileName = Path.GetFileNameWithoutExtension(outputFile);
+        if (string.IsNullOrWhiteSpace(fileName)) fileName = "dosai-crypto";
+        var sidecarName = $"{fileName}-dataflows{DataFlowExporter.GetDefaultExtension(format)}";
+        return string.IsNullOrWhiteSpace(directory) ? sidecarName : Path.Combine(directory, sidecarName);
     }
 
     private static string BuildFlowSummary(DataFlowNode? source, DataFlowNode? sink, DataFlowSlice slice) =>

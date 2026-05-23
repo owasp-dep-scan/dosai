@@ -22,9 +22,23 @@ dotnet run --project ./Dosai/Dosai.csproj -- crypto \
   --format cyclonedx
 ```
 
+Combined CBOM plus crypto data-flow graph sidecars:
+
+```bash
+dotnet run --project ./Dosai/Dosai.csproj -- crypto \
+  --path ./Dosai \
+  --o /tmp/dosai-cbom.json \
+  --format cyclonedx \
+  --graph-format graphml,gexf
+```
+
+This writes `/tmp/dosai-cbom.json`, `/tmp/dosai-cbom-dataflows.graphml`, and `/tmp/dosai-cbom-dataflows.gexf`. Use `--graph-out` when exporting a single format and you need an explicit sidecar path.
+
 ## Evidence model
 
-The native result has five main evidence collections. `assets` describe algorithms, crypto libraries, protocols, certificates, and key-related assets. `operations` capture source operations and API calls that use those assets. `materials` record source-visible key, certificate, IV, nonce, and secret-like values with redaction and fingerprints. `protocols` capture protocol observations such as TLS usage. `findings` record weak crypto, hardcoded material, TLS validation bypass, static IV or nonce use, insecure RNG, low PBKDF2 iteration counts, and legacy TLS references. `statistics` provides aggregate counts, including the number of reachable findings.
+The native result has five main evidence collections. `assets` describe algorithms, crypto libraries, protocols, certificates, and key-related assets. `operations` capture source operations and API calls that use those assets. `materials` record source-visible key, certificate, IV, nonce, and secret-like values with redaction and fingerprints. `protocols` capture protocol observations such as TLS usage. `findings` record weak crypto, hardcoded material, TLS validation bypass, static IV or nonce use, insecure RNG, low PBKDF2 iteration counts, and legacy TLS references. `statistics` provides aggregate counts, including the number of reachable findings and crypto data-flow slices.
+
+Dosai also runs crypto-specific data-flow slicing as part of the `crypto` command. The native Dosai JSON output uses PascalCase property names and includes `CryptoDataFlows`; matching data-flow slice IDs are attached to `Materials`, `Operations`, and `Findings` as `DataFlowSliceIds`. Findings also include `SourceMaterialIds` and `SinkOperationIds` when Dosai can connect hardcoded material or input sources to crypto API use. CycloneDX output uses Dosai property names such as `dosai:crypto:dataFlowSliceIds`, `dosai:crypto:sourceMaterialIds`, and `dosai:crypto:sinkOperationIds`.
 
 ## Reachability
 
@@ -32,7 +46,7 @@ Dosai performs best-effort reachability by reusing method extraction, entry poin
 
 ## CycloneDX mapping
 
-CycloneDX output includes crypto assets, operations, materials, and protocols as components with Dosai properties such as `dosai:crypto:evidenceType`, `dosai:crypto:assetType`, `dosai:crypto:family`, `dosai:crypto:strength`, `dosai:crypto:reachableFromEntryPoint`, and `dosai:location`. Findings are emitted as vulnerability-like entries with rule IDs, severity, recommendation, CWE, affected crypto assets, operation/material references, reachability, and location properties. This keeps the CBOM and code-level evidence in one file.
+CycloneDX output includes crypto assets, operations, materials, and protocols as components with Dosai properties such as `dosai:crypto:evidenceType`, `dosai:crypto:assetType`, `dosai:crypto:family`, `dosai:crypto:strength`, `dosai:crypto:reachableFromEntryPoint`, `dosai:crypto:entryPointIds`, `dosai:crypto:dataFlowSliceIds`, and `dosai:location`. Findings are emitted as vulnerability-like entries with rule IDs, severity, recommendation, CWE, affected crypto assets, operation/material references, reachability, source material IDs, sink operation IDs, data-flow slice IDs, and location properties. Component-level `dependencies` connect crypto operations to source materials when the data-flow slices establish that relationship. This keeps the CBOM and code-level evidence in one file while graph sidecars preserve full path details.
 
 ## Language coverage
 

@@ -52,6 +52,8 @@ Each pattern supports these fields:
 | `removesTaintKinds` | no       | string array                                                                      | Reserved for sanitizer metadata. Current sanitizer matching stops taint for the matched expression or validated guard branch. |
 | `confidence`        | no       | string                                                                            | Confidence label. Defaults to `Medium`; common values are `Low`, `Medium`, and `High`.                                        |
 
+`Regex` matching is case-sensitive. Use inline regex options such as `(?i)` when a custom pattern should be case-insensitive.
+
 ## Pattern kinds
 
 Prefer semantic kinds over `Code` when possible. Semantic matching is more accurate and avoids extra syntax-text work in hot loops.

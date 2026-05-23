@@ -1472,7 +1472,7 @@ public static partial class DataFlowAnalyzer
             DataFlowMatchKind.Exact => value.Equals(pattern.Pattern, StringComparison.OrdinalIgnoreCase),
             DataFlowMatchKind.Prefix => value.StartsWith(pattern.Pattern, StringComparison.OrdinalIgnoreCase),
             DataFlowMatchKind.Suffix => value.EndsWith(pattern.Pattern, StringComparison.OrdinalIgnoreCase),
-            DataFlowMatchKind.Regex => Regex.IsMatch(value, pattern.Pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant),
+            DataFlowMatchKind.Regex => Regex.IsMatch(value, pattern.Pattern, RegexOptions.CultureInvariant),
             _ => value.Contains(pattern.Pattern, StringComparison.OrdinalIgnoreCase)
         };
     }

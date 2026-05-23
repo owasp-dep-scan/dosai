@@ -48,7 +48,7 @@ Source, binary, and combined analysis share a method identity and evidence model
 
 ### Cryptography and CBOM evidence
 
-`crypto` detects algorithms, operations, key and certificate material, TLS settings, weak algorithms, hardcoded material, static IVs and nonces, insecure RNG, disabled certificate validation, legacy TLS references, and low PBKDF2 iteration counts. Findings include source locations and best-effort reachability from CLI and API entry points when callgraph data is available.
+`crypto` detects algorithms, operations, key and certificate material, TLS settings, weak algorithms, hardcoded material, static IVs and nonces, insecure RNG, disabled certificate validation, legacy TLS references, and low PBKDF2 iteration counts. Findings include source locations, best-effort reachability from CLI and API entry points, and crypto-specific data-flow slice IDs when matching source-to-sink paths are available.
 
 Native Dosai JSON:
 
@@ -69,6 +69,18 @@ dotnet run --project ./Dosai/Dosai.csproj -- crypto \
 ```
 
 The CycloneDX mode preserves Dosai properties such as `dosai:crypto:family`, `dosai:crypto:strength`, `dosai:crypto:reachableFromEntryPoint`, `dosai:crypto:evidenceType`, and `dosai:location` so downstream BOM tooling can correlate code-level crypto assets, operations, materials, protocols, and findings with package BOMs without a separate evidence sidecar.
+
+CBOM output can also include graph sidecars for full path inspection:
+
+```bash
+dotnet run --project ./Dosai/Dosai.csproj -- crypto \
+  --path ./Dosai \
+  --o /tmp/dosai-cbom.json \
+  --format cyclonedx \
+  --graph-format graphml,gexf
+```
+
+The CBOM includes `dosai:crypto:dataFlowSliceIds`, `dosai:crypto:sourceMaterialIds`, and `dosai:crypto:sinkOperationIds` properties where Dosai can correlate material sources to crypto operations. Graph sidecars preserve the detailed data-flow nodes and edges.
 
 ### F#, R, and VC++ frontends
 

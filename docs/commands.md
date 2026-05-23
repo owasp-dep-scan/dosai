@@ -233,6 +233,16 @@ dotnet run --project ./Dosai/Dosai.csproj -- crypto \
   --format cyclonedx
 ```
 
+```bash
+dotnet run --project ./Dosai/Dosai.csproj -- crypto \
+  --path ./Dosai \
+  --o /tmp/dosai-cbom.json \
+  --format cyclonedx \
+  --graph-format graphml,gexf
+```
+
+`--graph-format` exports crypto data-flow sidecars in `mermaid`, `graphml`, and/or `gexf` format. Multiple formats can be comma-separated. With the command above, Dosai writes `/tmp/dosai-cbom-dataflows.graphml` and `/tmp/dosai-cbom-dataflows.gexf`. Use `--graph-out` with a single graph format for an explicit sidecar path.
+
 ### Implementation flow
 
 ```text
@@ -244,6 +254,8 @@ source discovery
   ├─ detect hardcoded key/cert/IV/secret material with redaction and fingerprinting
   ├─ detect misuse rules such as MD5, SHA1, DES, ECB, TLS bypass, low PBKDF2
   ├─ associate findings with method IDs and entry points where possible
+  ├─ run crypto-specific source-to-sink data-flow slicing
+  ├─ attach data-flow slice IDs to matching materials, operations, and findings
   └─ export native JSON or combined CycloneDX CBOM evidence
 ```
 
@@ -256,6 +268,10 @@ flowchart LR
     Scan --> Materials[Materials]
     Scan --> Findings[Findings]
     Inventory --> Reach[Reachability correlation]
+    Code --> Flow[Crypto data-flow slices]
+    Flow --> Materials
+    Flow --> Ops
+    Flow --> Findings
     Reach --> Findings
     Assets --> Export[Dosai JSON / combined CycloneDX]
     Findings --> Export
@@ -271,7 +287,7 @@ Reachability is best effort. Dosai reuses method extraction, entry point discove
 
 ### Output
 
-Native JSON includes `Assets`, `Operations`, `Materials`, `Protocols`, `Findings`, `Statistics`, and `Diagnostics`. CycloneDX output represents crypto assets, operations, materials, and protocols as components and findings as vulnerability-like entries with Dosai properties, keeping CBOM data and code-level evidence in one artifact.
+Native JSON includes `CryptoDataFlows`, `Assets`, `Operations`, `Materials`, `Protocols`, `Findings`, `Statistics`, and `Diagnostics`. Matching source-to-sink slices are attached to crypto evidence using `DataFlowSliceIds`; findings also include `SourceMaterialIds` and `SinkOperationIds` when the correlation is available. CycloneDX output represents crypto assets, operations, materials, and protocols as components and findings as vulnerability-like entries with Dosai properties, keeping CBOM data and code-level evidence in one artifact. CBOM properties include `dosai:crypto:dataFlowSliceIds`, `dosai:crypto:sourceMaterialIds`, and `dosai:crypto:sinkOperationIds`; component dependencies link crypto operations to source materials when data-flow slices establish that relationship.
 
 ### Strengths
 

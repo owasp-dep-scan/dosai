@@ -460,7 +460,9 @@ public static partial class DataFlowAnalyzer
             patterns.Sources.AddRange([
                 new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Code, Pattern = "-----BEGIN", Match = DataFlowMatchKind.Contains, Category = "crypto-material", Description = "PEM encoded crypto material", TaintKinds = ["secret", "crypto-key"] },
                 new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Name, Pattern = "key", Match = DataFlowMatchKind.Contains, Category = "crypto-material", Description = "Key-like value", TaintKinds = ["secret", "crypto-key"] },
-                new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Name, Pattern = "secret", Match = DataFlowMatchKind.Contains, Category = "secret", Description = "Secret-like value", TaintKinds = ["secret"] }
+                new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Name, Pattern = "secret", Match = DataFlowMatchKind.Contains, Category = "secret", Description = "Secret-like value", TaintKinds = ["secret"] },
+                new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Name, Pattern = @"^(iv|IV|.*[a-z0-9]Iv|.*[_\.-](iv|IV))$", Match = DataFlowMatchKind.Regex, Category = "crypto-material", Description = "IV-like value", TaintKinds = ["crypto-iv", "crypto-nonce"] },
+                new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Name, Pattern = @"^(nonce|Nonce|NONCE|.*[a-z0-9]Nonce|.*[_\.-](nonce|Nonce|NONCE))$", Match = DataFlowMatchKind.Regex, Category = "crypto-material", Description = "Nonce-like value", TaintKinds = ["crypto-nonce"] }
             ]);
             patterns.Sinks.AddRange([
                 new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "System.Security.Cryptography", Match = DataFlowMatchKind.Contains, Category = "crypto", Description = "Cryptographic API", TaintKinds = ["crypto-key", "secret"] },
@@ -806,7 +808,7 @@ public static partial class DataFlowAnalyzer
             DataFlowMatchKind.Exact => value.Equals(pattern.Pattern, StringComparison.OrdinalIgnoreCase),
             DataFlowMatchKind.Prefix => value.StartsWith(pattern.Pattern, StringComparison.OrdinalIgnoreCase),
             DataFlowMatchKind.Suffix => value.EndsWith(pattern.Pattern, StringComparison.OrdinalIgnoreCase),
-            DataFlowMatchKind.Regex => Regex.IsMatch(value, pattern.Pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant),
+            DataFlowMatchKind.Regex => Regex.IsMatch(value, pattern.Pattern, RegexOptions.CultureInvariant),
             _ => value.Contains(pattern.Pattern, StringComparison.OrdinalIgnoreCase)
         };
     }
@@ -1047,7 +1049,7 @@ public static partial class DataFlowAnalyzer
                 DataFlowMatchKind.Exact => value.Equals(pattern.Pattern, StringComparison.OrdinalIgnoreCase),
                 DataFlowMatchKind.Prefix => value.StartsWith(pattern.Pattern, StringComparison.OrdinalIgnoreCase),
                 DataFlowMatchKind.Suffix => value.EndsWith(pattern.Pattern, StringComparison.OrdinalIgnoreCase),
-                DataFlowMatchKind.Regex => Regex.IsMatch(value, pattern.Pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant),
+                DataFlowMatchKind.Regex => Regex.IsMatch(value, pattern.Pattern, RegexOptions.CultureInvariant),
                 _ => value.Contains(pattern.Pattern, StringComparison.OrdinalIgnoreCase)
             };
         }
@@ -1767,7 +1769,7 @@ public static partial class DataFlowAnalyzer
                 DataFlowMatchKind.Exact => value.Equals(pattern.Pattern, StringComparison.OrdinalIgnoreCase),
                 DataFlowMatchKind.Prefix => value.StartsWith(pattern.Pattern, StringComparison.OrdinalIgnoreCase),
                 DataFlowMatchKind.Suffix => value.EndsWith(pattern.Pattern, StringComparison.OrdinalIgnoreCase),
-                DataFlowMatchKind.Regex => Regex.IsMatch(value, pattern.Pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant),
+                DataFlowMatchKind.Regex => Regex.IsMatch(value, pattern.Pattern, RegexOptions.CultureInvariant),
                 _ => value.Contains(pattern.Pattern, StringComparison.OrdinalIgnoreCase)
             };
         }
