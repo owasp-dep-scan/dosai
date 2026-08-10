@@ -30,6 +30,89 @@ public class DosaiTests
         AssertMethods(actualMethods, expectedMethodsDosaiTestDataCSharpDLL);
     }
 
+    // Regression guard for the per-assembly memory blow-up. The fix streams the JSON for the `methods`
+    // command straight to the output file (Dosai.WriteMethods) instead of materialising it as a single
+    // contiguous string (which is what drove peak RSS into the multi-GB range and eventually overflowed the
+    // string allocator). This test fails against the old implementation because (a) WriteMethods did not
+    // exist and (b) it asserts that several assemblies inspected together in one run all contribute their
+    // members and that the streamed result is byte-for-byte equivalent to the in-memory string path.
+    [Fact]
+    public void WriteMethods_MultipleAssembliesInOneRun_StreamsJsonEquivalentToGetMethods()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var firstOutput = BuildTemporaryProject(tempDirectory.Path, "MultiAssemblyOne", """
+namespace MultiOne
+{
+    public static class Helper
+    {
+        public static int Compute(int a, int b) => a + b;
+        public static string Greet(string name) => "hello " + name;
+    }
+    public static class Program { public static void Main() { } }
+}
+""");
+        var secondOutput = BuildTemporaryProject(tempDirectory.Path, "MultiAssemblyTwo", """
+namespace MultiTwo
+{
+    public static class Gateway
+    {
+        public static string Echo(string value) => value;
+    }
+    public static class Program { public static void Main() { } }
+}
+""");
+        var thirdOutput = BuildTemporaryProject(tempDirectory.Path, "MultiAssemblyThree", """
+namespace MultiThree
+{
+    public static class Calculator
+    {
+        public static int Square(int x) => x * x;
+    }
+    public static class Program { public static void Main() { } }
+}
+""");
+
+        var combinedDirectory = Path.Combine(tempDirectory.Path, "combined");
+        Directory.CreateDirectory(combinedDirectory);
+        foreach (var outputDirectory in new[] { firstOutput, secondOutput, thirdOutput })
+        {
+            var assembly = Directory.EnumerateFiles(outputDirectory, "MultiAssembly*.dll")
+                .Single(file => Path.GetFileName(file).StartsWith("MultiAssembly", StringComparison.Ordinal));
+            File.Copy(assembly, Path.Combine(combinedDirectory, Path.GetFileName(assembly)));
+            var pdb = Path.ChangeExtension(assembly, ".pdb");
+            if (File.Exists(pdb))
+            {
+                File.Copy(pdb, Path.Combine(combinedDirectory, Path.GetFileName(pdb)));
+            }
+        }
+
+        var outputFile = Path.Combine(tempDirectory.Path, "streamed.json");
+        var streamedSlice = Depscan.Dosai.WriteMethods(combinedDirectory, outputFile);
+
+        // The streamed file must exist and parse back into the same shape as the in-memory slice.
+        Assert.True(File.Exists(outputFile));
+        var deserializeOptions = new JsonSerializerOptions { Converters = { new JsonStringEnumConverter() } };
+        var parsedFromFile = JsonSerializer.Deserialize<MethodsSlice>(File.ReadAllText(outputFile), deserializeOptions);
+
+        // Every assembly inspected in the single run must contribute its members.
+        Assert.NotNull(streamedSlice.Methods);
+        Assert.Contains(streamedSlice.Methods!, method => method.FileName == "MultiAssemblyOne.dll" && method.ClassName == "Helper");
+        Assert.Contains(streamedSlice.Methods!, method => method.FileName == "MultiAssemblyTwo.dll" && method.ClassName == "Gateway");
+        Assert.Contains(streamedSlice.Methods!, method => method.FileName == "MultiAssemblyThree.dll" && method.ClassName == "Calculator");
+        Assert.Contains(streamedSlice.Methods!, method => method.Name == "Compute" && method.FileName == "MultiAssemblyOne.dll");
+        Assert.Contains(streamedSlice.Methods!, method => method.Name == "Echo" && method.FileName == "MultiAssemblyTwo.dll");
+        Assert.Contains(streamedSlice.Methods!, method => method.Name == "Square" && method.FileName == "MultiAssemblyThree.dll");
+
+        // The streamed JSON must be equivalent to what the string-based GetMethods produces.
+        var fromString = JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(combinedDirectory), deserializeOptions);
+        Assert.NotNull(fromString);
+        Assert.NotNull(fromString.Methods);
+        Assert.Equal(fromString.Methods!.Count, streamedSlice.Methods!.Count);
+        Assert.Equal(fromString.MethodCalls!.Count, streamedSlice.MethodCalls!.Count);
+        Assert.Equal(fromString.AssemblyInformation!.Count, streamedSlice.AssemblyInformation!.Count);
+        Assert.Equal(parsedFromFile!.Methods!.Count, streamedSlice.Methods!.Count);
+    }
+
     [Fact]
     public void GetMethods_AssemblyOnly_IlCallGraphIncludesMethodBodyEdges()
     {

@@ -202,18 +202,20 @@ public class CommandLine
                 var outputFile = parseResult.GetValue(outputFileOption);
                 var callGraphFormat = parseResult.GetValue(callGraphFormatOption);
                 var callGraphOutputFile = parseResult.GetValue(callGraphOutputFileOption);
-                string result;
 
+                // Stream the JSON straight to the output file and keep the built slice around so the call-graph
+                // exporter can reuse it. This avoids materialising the full JSON as a single string (which drove
+                // peak RSS into the multi-GB range and overflowed the string allocator on large assembly trees)
+                // and avoids a serialize-then-deserialize round trip for the call-graph export.
+                MethodsSlice methodsSlice;
                 if (Path.GetExtension(path)!.Equals(".nupkg", StringComparison.OrdinalIgnoreCase))
                 {
-                    result = Dosai.GetMethodsFromNupkg(path!);
+                    methodsSlice = Dosai.WriteMethodsFromNupkg(path!, outputFile!);
                 }
                 else
                 {
-                    result = Dosai.GetMethods(path!);
+                    methodsSlice = Dosai.WriteMethods(path!, outputFile!);
                 }
-
-                File.WriteAllText(outputFile!, result);
 
                 if (!string.IsNullOrWhiteSpace(callGraphFormat))
                 {
@@ -223,12 +225,7 @@ public class CommandLine
                         return 1;
                     }
 
-                    var options = new JsonSerializerOptions
-                    {
-                        Converters = { new JsonStringEnumConverter() }
-                    };
-                    var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result, options);
-                    if (methodsSlice?.CallGraph is null)
+                    if (methodsSlice.CallGraph is null)
                     {
                         Console.Error.WriteLine("Call graph was not generated.");
                         return 1;
