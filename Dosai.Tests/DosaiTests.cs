@@ -35,7 +35,7 @@ public class DosaiTests
     // contiguous string (which is what drove peak RSS into the multi-GB range and eventually overflowed the
     // string allocator). This test fails against the old implementation because (a) WriteMethods did not
     // exist and (b) it asserts that several assemblies inspected together in one run all contribute their
-    // members and that the streamed result is byte-for-byte equivalent to the in-memory string path.
+    // members and that the streamed file matches the in-memory string path property for property.
     [Fact]
     public void WriteMethods_MultipleAssembliesInOneRun_StreamsJsonEquivalentToGetMethods()
     {
@@ -89,10 +89,7 @@ namespace MultiThree
         var outputFile = Path.Combine(tempDirectory.Path, "streamed.json");
         var streamedSlice = Depscan.Dosai.WriteMethods(combinedDirectory, outputFile);
 
-        // The streamed file must exist and parse back into the same shape as the in-memory slice.
         Assert.True(File.Exists(outputFile));
-        var deserializeOptions = new JsonSerializerOptions { Converters = { new JsonStringEnumConverter() } };
-        var parsedFromFile = JsonSerializer.Deserialize<MethodsSlice>(File.ReadAllText(outputFile), deserializeOptions);
 
         // Every assembly inspected in the single run must contribute its members.
         Assert.NotNull(streamedSlice.Methods);
@@ -103,14 +100,17 @@ namespace MultiThree
         Assert.Contains(streamedSlice.Methods!, method => method.Name == "Echo" && method.FileName == "MultiAssemblyTwo.dll");
         Assert.Contains(streamedSlice.Methods!, method => method.Name == "Square" && method.FileName == "MultiAssemblyThree.dll");
 
-        // The streamed JSON must be equivalent to what the string-based GetMethods produces.
-        var fromString = JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(combinedDirectory), deserializeOptions);
-        Assert.NotNull(fromString);
-        Assert.NotNull(fromString.Methods);
-        Assert.Equal(fromString.Methods!.Count, streamedSlice.Methods!.Count);
-        Assert.Equal(fromString.MethodCalls!.Count, streamedSlice.MethodCalls!.Count);
-        Assert.Equal(fromString.AssemblyInformation!.Count, streamedSlice.AssemblyInformation!.Count);
-        Assert.Equal(parsedFromFile!.Methods!.Count, streamedSlice.Methods!.Count);
+        // The streamed file must match the string-based GetMethods output verbatim on every property except
+        // Metadata, which carries a per-run timestamp.
+        var streamed = JsonSerializer.Deserialize<JsonElement>(File.ReadAllText(outputFile));
+        var inMemory = JsonSerializer.Deserialize<JsonElement>(Depscan.Dosai.GetMethods(combinedDirectory));
+        Assert.Equal(
+            inMemory.EnumerateObject().Select(property => property.Name).ToList(),
+            streamed.EnumerateObject().Select(property => property.Name).ToList());
+        foreach (var property in inMemory.EnumerateObject().Where(property => property.Name != "Metadata"))
+        {
+            Assert.Equal(property.Value.GetRawText(), streamed.GetProperty(property.Name).GetRawText());
+        }
     }
 
     [Fact]

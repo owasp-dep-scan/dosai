@@ -173,8 +173,10 @@ public static class Dosai
     /// contiguous string, which bounds peak memory on large assembly trees.
     /// </summary>
     public static MethodsSlice WriteMethods(string path, string outputFile)
+        => StreamSlice(GetMethodsSlice(path), outputFile);
+
+    private static MethodsSlice StreamSlice(MethodsSlice slice, string outputFile)
     {
-        var slice = GetMethodsSlice(path);
         using var stream = new FileStream(outputFile, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize: 65536);
         JsonSerializer.Serialize(stream, slice, Options);
         return slice;
@@ -193,12 +195,7 @@ public static class Dosai
     /// <see cref="WriteMethods"/> for why the result is streamed rather than materialised as a string.
     /// </summary>
     public static MethodsSlice WriteMethodsFromNupkg(string nupkgPath, string outputFile)
-    {
-        var slice = GetMethodsSliceFromNupkg(nupkgPath);
-        using var stream = new FileStream(outputFile, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize: 65536);
-        JsonSerializer.Serialize(stream, slice, Options);
-        return slice;
-    }
+        => StreamSlice(GetMethodsSliceFromNupkg(nupkgPath), outputFile);
 
     private static MethodsSlice GetMethodsSliceFromNupkg(string nupkgPath)
     {
