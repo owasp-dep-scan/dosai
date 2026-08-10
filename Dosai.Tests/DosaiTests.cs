@@ -30,6 +30,89 @@ public class DosaiTests
         AssertMethods(actualMethods, expectedMethodsDosaiTestDataCSharpDLL);
     }
 
+    // Regression guard for the per-assembly memory blow-up. The fix streams the JSON for the `methods`
+    // command straight to the output file (Dosai.WriteMethods) instead of materialising it as a single
+    // contiguous string (which is what drove peak RSS into the multi-GB range and eventually overflowed the
+    // string allocator). This test fails against the old implementation because (a) WriteMethods did not
+    // exist and (b) it asserts that several assemblies inspected together in one run all contribute their
+    // members and that the streamed file matches the in-memory string path property for property.
+    [Fact]
+    public void WriteMethods_MultipleAssembliesInOneRun_StreamsJsonEquivalentToGetMethods()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var firstOutput = BuildTemporaryProject(tempDirectory.Path, "MultiAssemblyOne", """
+namespace MultiOne
+{
+    public static class Helper
+    {
+        public static int Compute(int a, int b) => a + b;
+        public static string Greet(string name) => "hello " + name;
+    }
+    public static class Program { public static void Main() { } }
+}
+""");
+        var secondOutput = BuildTemporaryProject(tempDirectory.Path, "MultiAssemblyTwo", """
+namespace MultiTwo
+{
+    public static class Gateway
+    {
+        public static string Echo(string value) => value;
+    }
+    public static class Program { public static void Main() { } }
+}
+""");
+        var thirdOutput = BuildTemporaryProject(tempDirectory.Path, "MultiAssemblyThree", """
+namespace MultiThree
+{
+    public static class Calculator
+    {
+        public static int Square(int x) => x * x;
+    }
+    public static class Program { public static void Main() { } }
+}
+""");
+
+        var combinedDirectory = Path.Combine(tempDirectory.Path, "combined");
+        Directory.CreateDirectory(combinedDirectory);
+        foreach (var outputDirectory in new[] { firstOutput, secondOutput, thirdOutput })
+        {
+            var assembly = Directory.EnumerateFiles(outputDirectory, "MultiAssembly*.dll")
+                .Single(file => Path.GetFileName(file).StartsWith("MultiAssembly", StringComparison.Ordinal));
+            File.Copy(assembly, Path.Combine(combinedDirectory, Path.GetFileName(assembly)));
+            var pdb = Path.ChangeExtension(assembly, ".pdb");
+            if (File.Exists(pdb))
+            {
+                File.Copy(pdb, Path.Combine(combinedDirectory, Path.GetFileName(pdb)));
+            }
+        }
+
+        var outputFile = Path.Combine(tempDirectory.Path, "streamed.json");
+        var streamedSlice = Depscan.Dosai.WriteMethods(combinedDirectory, outputFile);
+
+        Assert.True(File.Exists(outputFile));
+
+        // Every assembly inspected in the single run must contribute its members.
+        Assert.NotNull(streamedSlice.Methods);
+        Assert.Contains(streamedSlice.Methods!, method => method.FileName == "MultiAssemblyOne.dll" && method.ClassName == "Helper");
+        Assert.Contains(streamedSlice.Methods!, method => method.FileName == "MultiAssemblyTwo.dll" && method.ClassName == "Gateway");
+        Assert.Contains(streamedSlice.Methods!, method => method.FileName == "MultiAssemblyThree.dll" && method.ClassName == "Calculator");
+        Assert.Contains(streamedSlice.Methods!, method => method.Name == "Compute" && method.FileName == "MultiAssemblyOne.dll");
+        Assert.Contains(streamedSlice.Methods!, method => method.Name == "Echo" && method.FileName == "MultiAssemblyTwo.dll");
+        Assert.Contains(streamedSlice.Methods!, method => method.Name == "Square" && method.FileName == "MultiAssemblyThree.dll");
+
+        // The streamed file must match the string-based GetMethods output verbatim on every property except
+        // Metadata, which carries a per-run timestamp.
+        var streamed = JsonSerializer.Deserialize<JsonElement>(File.ReadAllText(outputFile));
+        var inMemory = JsonSerializer.Deserialize<JsonElement>(Depscan.Dosai.GetMethods(combinedDirectory));
+        Assert.Equal(
+            inMemory.EnumerateObject().Select(property => property.Name).ToList(),
+            streamed.EnumerateObject().Select(property => property.Name).ToList());
+        foreach (var property in inMemory.EnumerateObject().Where(property => property.Name != "Metadata"))
+        {
+            Assert.Equal(property.Value.GetRawText(), streamed.GetProperty(property.Name).GetRawText());
+        }
+    }
+
     [Fact]
     public void GetMethods_AssemblyOnly_IlCallGraphIncludesMethodBodyEdges()
     {

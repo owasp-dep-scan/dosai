@@ -122,6 +122,15 @@ public static class Dosai
     /// <param name="path">Filesystem path to assembly/source file or directory containing assembly/source files</param>
     /// <returns>JSON list of assembly/source methods</returns>
     public static string GetMethods(string path)
+        => JsonSerializer.Serialize(GetMethodsSlice(path), Options);
+
+    /// <summary>
+    /// Build the <see cref="MethodsSlice"/> for the given path without serializing it. Exposed so callers that
+    /// write the result to a file can stream the JSON (see <see cref="WriteMethods"/>) instead of materialising a
+    /// single multi-hundred-MB string, which is what drove peak RSS into the multi-GB range and eventually
+    /// overflowed the string allocator on large assembly trees.
+    /// </summary>
+    public static MethodsSlice GetMethodsSlice(string path)
     {
         var purlResolver = PackageUrlResolver.Create(path);
         var methods = GetAssemblyMethods(path);
@@ -138,12 +147,12 @@ public static class Dosai
         EnrichMethodIdentities(methods, callGraph, sourceMode);
         var packageReachability = TransparencyBuilder.BuildPackageReachability(callGraph, dependencies: usings);
 
-        return JsonSerializer.Serialize(new MethodsSlice 
-        { 
+        return new MethodsSlice
+        {
             Metadata = TransparencyBuilder.CreateMetadata(path),
-            Dependencies = usings, 
-            Methods = methods, 
-            MethodCalls = methodCalls, 
+            Dependencies = usings,
+            Methods = methods,
+            MethodCalls = methodCalls,
             Properties = properties,
             Fields = fields,
             Events = events,
@@ -154,7 +163,23 @@ public static class Dosai
             PackageReachability = packageReachability,
             AssemblyInformation = assemblyInformation,
             SourceAssemblyMapping = sourceAssemblyMapping
-        }, Options);
+        };
+    }
+
+    /// <summary>
+    /// Build the methods slice for <paramref name="path"/> and stream it as JSON directly to
+    /// <paramref name="outputFile"/>, returning the slice so the caller can reuse it (e.g. for graph export)
+    /// without round-tripping through the serialized string. Streaming keeps the JSON out of a single
+    /// contiguous string, which bounds peak memory on large assembly trees.
+    /// </summary>
+    public static MethodsSlice WriteMethods(string path, string outputFile)
+        => StreamSlice(GetMethodsSlice(path), outputFile);
+
+    private static MethodsSlice StreamSlice(MethodsSlice slice, string outputFile)
+    {
+        using var stream = new FileStream(outputFile, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize: 65536);
+        JsonSerializer.Serialize(stream, slice, Options);
+        return slice;
     }
 
     /// <summary>
@@ -163,6 +188,16 @@ public static class Dosai
     /// <param name="nupkgPath">Path to the .nupkg file</param>
     /// <returns>JSON string containing the results</returns>
     public static string GetMethodsFromNupkg(string nupkgPath)
+        => JsonSerializer.Serialize(GetMethodsSliceFromNupkg(nupkgPath), Options);
+
+    /// <summary>
+    /// Build the methods slice for a .nupkg and stream it as JSON to <paramref name="outputFile"/>. See
+    /// <see cref="WriteMethods"/> for why the result is streamed rather than materialised as a string.
+    /// </summary>
+    public static MethodsSlice WriteMethodsFromNupkg(string nupkgPath, string outputFile)
+        => StreamSlice(GetMethodsSliceFromNupkg(nupkgPath), outputFile);
+
+    private static MethodsSlice GetMethodsSliceFromNupkg(string nupkgPath)
     {
         string? tempExtractionDir = null;
         try
@@ -191,7 +226,7 @@ public static class Dosai
                 }
                 entry.ExtractToFile(destinationPath, overwrite: true);
             }
-            return GetMethods(tempExtractionDir);
+            return GetMethodsSlice(tempExtractionDir);
 
         }
         catch (Exception ex)
