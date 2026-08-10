@@ -176,9 +176,20 @@ public static partial class DataFlowAnalyzer
     };
 
     public static string GetDataFlows(string path, string? patternsPath = null, string? patternPacks = null)
+        => JsonSerializer.Serialize(Analyze(path, patternsPath, patternPacks), JsonOptions);
+
+    /// <summary>
+    /// Analyze <paramref name="path"/> and stream the result as JSON directly to <paramref name="outputFile"/>,
+    /// returning the result so callers can reuse it (for graph export or printing) instead of round-tripping
+    /// through the serialized string. Streaming keeps the JSON out of a single contiguous string, which bounds
+    /// peak memory and avoids overflowing the string allocator on large trees.
+    /// </summary>
+    public static DataFlowResult WriteDataFlows(string path, string outputFile, string? patternsPath = null, string? patternPacks = null)
     {
         var result = Analyze(path, patternsPath, patternPacks);
-        return JsonSerializer.Serialize(result, JsonOptions);
+        using var stream = new FileStream(outputFile, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize: 65536);
+        JsonSerializer.Serialize(stream, result, JsonOptions);
+        return result;
     }
 
     public static DataFlowResult Analyze(string path, string? patternsPath = null, string? patternPacks = null)

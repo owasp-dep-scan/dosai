@@ -249,21 +249,17 @@ public class CommandLine
             var printDataFlows = parseResult.GetValue(printDataFlowsOption);
             var printSourcesSinks = parseResult.GetValue(printSourcesSinksOption);
 
-            var result = DataFlowAnalyzer.GetDataFlows(path!, patternsFile, patternPacks);
-            File.WriteAllText(outputFile!, result);
+            // Stream the JSON straight to the output file and keep the result around for printing and graph
+            // export. This avoids materialising the full JSON as a single string and the serialize-then-
+            // deserialize round trip, both of which drive peak memory on large trees.
+            var dataFlowResult = DataFlowAnalyzer.WriteDataFlows(path!, outputFile!, patternsFile, patternPacks);
 
-            var options = new JsonSerializerOptions
-            {
-                Converters = { new JsonStringEnumConverter() }
-            };
-            var dataFlowResult = JsonSerializer.Deserialize<DataFlowResult>(result, options);
-
-            if (printDataFlows && dataFlowResult is not null)
+            if (printDataFlows)
             {
                 PrintDataFlowTree(dataFlowResult, outputFile!);
             }
 
-            if (printSourcesSinks && dataFlowResult is not null)
+            if (printSourcesSinks)
             {
                 PrintSourcesAndSinks(dataFlowResult);
             }
@@ -273,12 +269,6 @@ public class CommandLine
                 if (!DataFlowExporter.TryParseFormat(graphFormat, out var format))
                 {
                     Console.Error.WriteLine($"Unsupported data-flow graph format: {graphFormat}. Supported formats: mermaid, graphml, gexf.");
-                    return 1;
-                }
-
-                if (dataFlowResult is null)
-                {
-                    Console.Error.WriteLine("Data-flow result was not generated.");
                     return 1;
                 }
 
