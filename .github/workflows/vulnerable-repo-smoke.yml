@@ -2,8 +2,8 @@ name: vulnerable repo smoke
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 3 * * 1'
+  push:
+    branches: [ "main" ]
 
 jobs:
   dataflow-smoke:
