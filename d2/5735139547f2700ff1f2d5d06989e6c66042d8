@@ -1,0 +1,29 @@
+Dosai/ApiEndpoint.cs
+  s_1246da50fbe044::t_513ef8a39857d1 2,13-18,20-23,29-30,32,45-46,48-69,113-114,126-128,132-137,140-141,143-144,165,170,175,201-202,206,208-209,214,219-224,244,249,255-313,480
+Dosai/Frameworks/AiModel.cs
+  s_1246da50fbe044::t_e301a8fe27d8d1 1-61
+Dosai/Frameworks/FrameworkRegistry.cs
+  s_1246da50fbe044::t_67ce684f41cbab 1-90
+Dosai/Frameworks/IFrameworkProvider.cs
+  s_1246da50fbe044::t_cfa17abc691c23 1-76
+Dosai/MethodsSlice.cs
+  s_1246da50fbe044::t_2dcdc0744393aa 7,14,16,18,20,22,28-30
+Dosai/Transparency.cs
+  s_1246da50fbe044::t_a072ac7cf1ee5f 8,117-140,150,155,159
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d25735139547f2700ff1f2d5d06989e6c66042d8",
+  "prompts": {},
+  "sessions": {
+    "s_1246da50fbe044": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bd1711ba-4707-4f06-9ddb-30649cd0126e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
