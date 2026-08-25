@@ -1,6 +1,6 @@
 # Dosai Compiler Engineering Notes
 
-This document describes the Roslyn-based implementation details added in the call graph, data-flow, endpoint, and PURL work on this branch. It is written for compiler engineers and maintainers who need to evolve Dosai's analysis pipeline.
+This document describes the Roslyn-based implementation details behind the call graph, data-flow, endpoint, crypto, and PURL analysis in Dosai. It is written for compiler engineers and maintainers who need to evolve Dosai's analysis pipeline.
 
 ## Architecture overview
 
@@ -8,6 +8,7 @@ This document describes the Roslyn-based implementation details added in the cal
 flowchart TD
     CLI[System.CommandLine CLI] --> Methods[methods command]
     CLI --> Dataflows[dataflows command]
+    CLI --> Crypto[crypto command]
     Methods --> Reflection[Assembly reflection]
     Methods --> Source[Roslyn source extraction]
     Methods --> Endpoints[API endpoint extraction]
@@ -16,6 +17,9 @@ flowchart TD
     Dataflows --> Patterns[Default + user patterns]
     Dataflows --> DFRoslyn[Roslyn operation walker]
     DFRoslyn --> DFGraph[Data-flow graph]
+    Crypto --> CryptoAnalyzer[Crypto assets, misuse, CBOM]
+    CryptoAnalyzer --> CBOM[CycloneDX-style CBOM]
+    CryptoAnalyzer --> DFGraph
     PURL[PackageUrlResolver] --> Methods
     PURL --> CallGraph
     PURL --> DFGraph
@@ -240,4 +244,4 @@ Confidence is deliberately simple and explainable:
 
 1. Cache Roslyn compilations and PURL resolver indexes for large monorepos.
 2. Add richer alias and collection modeling for complex object graphs.
-3. Add SARIF or CycloneDX properties for PURL-linked slices.
+3. Extend the CycloneDX CBOM surface with PURL-linked slice properties and SARIF export.

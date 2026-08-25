@@ -6,4 +6,8 @@
     <ItemGroup>
         <Compile Include="HelloWorld.fs" />
     </ItemGroup>
+    <!-- Update the SDK's implicit FSharp.Core to the exact version required by FSharp.Compiler.Service to avoid NU1608. -->
+    <ItemGroup>
+        <PackageReference Update="FSharp.Core" Version="10.1.400" />
+    </ItemGroup>
 </Project>

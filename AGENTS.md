@@ -24,6 +24,11 @@ dotnet test ./Dosai.sln
 | `Dosai/CallGraphExporter.cs`  | Mermaid/GraphML/GEXF call graph export                           |
 | `Dosai/ApiEndpoint.cs`        | API route and URL extraction                                     |
 | `Dosai/PackageUrlResolver.cs` | NuGet PURL enrichment from assets/deps files                     |
+| `Dosai/CryptoAnalysis.cs`     | Crypto assets, misuse, reachability, and CBOM evidence           |
+| `Dosai/DataFlowAssembly.cs`   | IL-based data-flow reconstruction for assembly-only inputs       |
+| `Dosai/AssemblyCallGraphAnalyzer.cs` | IL call graph, delegate targets, dispatch resolution       |
+| `Dosai/LanguageFrontendAnalyzer.cs` | F#, R, and VC++/C/C++ frontends                            |
+| `Dosai/Transparency.cs`       | Derived review facts, agent context, reports, diffs              |
 | `Dosai/CommandLine.cs`        | CLI commands and options                                         |
 | `Dosai.Tests/DosaiTests.cs`   | Unit/integration tests                                           |
 
@@ -82,8 +87,10 @@ When adding a new source/sink:
 
 ## Documentation locations
 
+- Command reference: `docs/commands.md`
 - Compiler internals: `docs/compiler-engineering.md`
 - Security analyst guide: `docs/security-analysis.md`
+- Cryptography and CBOM: `docs/crypto-cbom.md`
 - AI-agent and automation workflows: `docs/agent-workflows.md`
 - Query language: `docs/query-language.md`
 - Data-flow custom patterns: `docs/dataflow-patterns.md`
