@@ -1,6 +1,6 @@
 # Cryptography and CBOM analysis
 
-Dosai's `crypto` command produces code-level cryptographic evidence for security review and combined CycloneDX-style CBOM generation.
+Dosai's `crypto` command produces code-level cryptographic evidence for security review and combined CycloneDX-style CBOM generation. For audit-oriented workflows built on this evidence, see the [compliance and audit guide](./compliance.md).
 
 ## Commands
 

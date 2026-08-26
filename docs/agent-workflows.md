@@ -182,6 +182,7 @@ Then validate graph edge integrity directly against `Nodes` and `Edges`, and app
 - Built-in data-flow pattern packs: `docs/pattern-packs.md`
 - Graph exports: `docs/graph-formats.md`
 - Crypto and CBOM: `docs/crypto-cbom.md`
+- Compliance and audit workflows: `docs/compliance.md`
 
 ## New MCP tools (schema 4.0.0)
 

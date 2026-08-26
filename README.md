@@ -2,6 +2,18 @@
 
 Dosai inspects source code, assemblies, and NuGet packages. It extracts methods, dependencies, API endpoints, call graphs, data-flow slices, crypto evidence, and package reachability facts for security review.
 
+## Documentation
+
+The full documentation set lives in the `docs` directory. The paragraphs below group it by the role you are most likely to have when you arrive here.
+
+If you review code for security problems, start with the [security analyst guide](./docs/security-analysis.md). It walks through the `methods`, `dataflows`, and `crypto` outputs with triage workflows, the built-in source and sink categories, and weakness candidates with their CWE mappings. From there you can go deeper on [custom data-flow patterns](./docs/dataflow-patterns.md), the [built-in pattern pack catalog](./docs/pattern-packs.md), and the [query language](./docs/query-language.md) for filtering large JSON outputs. The [crypto and CBOM evidence](./docs/crypto-cbom.md) and [supply-chain PURL enrichment](./docs/supply-chain-purl.md) guides cover cryptographic findings and tracing results to NuGet packages, and [AI-agent and automation workflows](./docs/agent-workflows.md) describes the agent-context, MCP, report, and diff loops for review automation.
+
+If you maintain or extend the analyzer itself, the [compiler engineering notes](./docs/compiler-engineering.md) describe the Roslyn operation walkers, stable method identities, IL-based reconstruction, and the performance constraints of the pipeline. The [framework semantics](./docs/frameworks.md) guide documents the provider model that detects ASP.NET Core, WCF, gRPC, messaging, serverless, and AI frameworks, including confidence tiers, trust zones, and taint seeding. The [graph export formats](./docs/graph-formats.md) reference covers the Mermaid, GraphML, and GEXF outputs, and the [schema 4.0.0 migration guide](./docs/migration-4.0.md) lists every output-visible change for consumers of the JSON.
+
+If your work is compliance, audit, or bills of materials, see the [compliance and audit guide](./docs/compliance.md). It explains how to produce a CycloneDX-style CBOM, NuGet PURL occurrence evidence, service trust zones, data classification labels, and an AI component inventory, and it states plainly what that evidence does and does not prove.
+
+The [command reference](./docs/commands.md) documents every command with inputs, outputs, algorithms, strengths, and limitations, and it is useful regardless of role. The [threat model](./THREAT_MODEL.md) explains how Dosai handles untrusted input, and [SECURITY.md](./SECURITY.md) covers reporting security issues. [SKILL.md](./SKILL.md) packages the common workflows as an AI agent skill, and the [blint integration](./BLINT-INTEGRATION.md) and [YARA usage](./YARA-USAGE.md) notes cover complementary binary and rule-based analysis.
+
 ## Usage
 
 `Dosai [command] [options]`
@@ -116,6 +128,8 @@ The server exposes `dosai.methods`, `dosai.dataflows`, `dosai.crypto`, `dosai.ag
 
 Endpoint extraction records richer auth context from attributes and common minimal API chains, including authorization policies, roles, authentication schemes, required scopes/claims, CORS policies, anonymous access, and antiforgery hints.
 
+Since schema 4.0.0, a framework provider model also emits a first-class service inventory (`Services[]`), framework detections (`Frameworks[]`), and AI components (`AiComponents[]`), with resolved route paths, trust zones, and request/response data classification. See [Framework semantics](./docs/frameworks.md) for the provider catalog and [Migrating to schema 4.0.0](./docs/migration-4.0.md) for the output-visible changes.
+
 ---
 
 ## Developers
@@ -141,6 +155,8 @@ After publishing, invoke `Dosai.exe methods --path ./app.dll` on Windows or `Dos
 ### Run unit tests
 
 `dotnet test`
+
+The [scripts README](./scripts/README.md) documents a focused performance and precision harness for `dataflows` that complements the unit tests when changing the analysis pipeline.
 
 ---
 
