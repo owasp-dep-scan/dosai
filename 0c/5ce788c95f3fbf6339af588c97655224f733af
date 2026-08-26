@@ -1,0 +1,27 @@
+Dosai/Frameworks/Providers/BackgroundJobProvider.cs
+  s_1246da50fbe044::t_037f6275cb6cac 30
+Dosai/Frameworks/Providers/CommunityHttpProvider.cs
+  s_1246da50fbe044::t_f2782a5edebdb8 30
+Dosai/Frameworks/Providers/GrpcProvider.cs
+  s_1246da50fbe044::t_7502cde201458d 43
+Dosai/Frameworks/Providers/McpProvider.cs
+  s_1246da50fbe044::t_4db147d0048a04 32,99
+Dosai/Frameworks/Providers/ServerlessProvider.cs
+  s_1246da50fbe044::t_3e8a31fba095e6 38
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "0c5ce788c95f3fbf6339af588c97655224f733af",
+  "prompts": {},
+  "sessions": {
+    "s_1246da50fbe044": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bd1711ba-4707-4f06-9ddb-30649cd0126e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
