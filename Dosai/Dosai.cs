@@ -91,6 +91,12 @@ public static class Dosai
         return signature;
     }
 
+    /// <summary>
+    ///     Signature for an IMethodSymbol in Dosai's stable format. Exposed for framework
+    ///     providers so ServiceOperation.MethodId matches Methods[].SourceSignature exactly.
+    /// </summary>
+    internal static string FormatMethodSignature(IMethodSymbol methodSymbol) => GenerateMethodSignature(methodSymbol);
+
     private static string NormalizeSymbolName(string symbolName) => symbolName
         .Replace("global::", string.Empty, StringComparison.Ordinal)
         .Replace("Global.", string.Empty, StringComparison.Ordinal);
@@ -106,6 +112,16 @@ public static class Dosai
         }
         return id;
     }
+
+    /// <summary>
+    ///     Formats a TypedConstant for JSON output. Array-typed constants (params string[]
+    ///     constructor arguments such as HttpTriggerAttribute's methods) must be flattened —
+    ///     reading Value on them throws.
+    /// </summary>
+    private static string FormatTypedConstant(TypedConstant constant) =>
+        constant.Kind == TypedConstantKind.Array
+            ? string.Join(",", constant.Values.Select(value => value.Value?.ToString() ?? string.Empty))
+            : constant.Value?.ToString() ?? string.Empty;
 
     #endregion
 
@@ -130,20 +146,27 @@ public static class Dosai
     /// single multi-hundred-MB string, which is what drove peak RSS into the multi-GB range and eventually
     /// overflowed the string allocator on large assembly trees.
     /// </summary>
-    public static MethodsSlice GetMethodsSlice(string path)
+    public static MethodsSlice GetMethodsSlice(string path, Frameworks.FrameworkAnalysisOptions? frameworkOptions = null)
     {
         var purlResolver = PackageUrlResolver.Create(path);
         var methods = GetAssemblyMethods(path);
-        var (sourceMethods, usings, methodCalls, properties, fields, events, constructors, callGraph, sourceAssemblyMapping, sourceMode) = GetSourceMethods(path, methods);
+        var (sourceMethods, usings, methodCalls, properties, fields, events, constructors, callGraph, sourceAssemblyMapping, sourceMode, compilations) = GetSourceMethods(path, methods);
         var (assemblyMethodCalls, assemblyCallGraph) = AssemblyCallGraphAnalyzer.Analyze(path, methods);
         NormalizeAssemblyGraphToSourceIds(assemblyMethodCalls, assemblyCallGraph, sourceAssemblyMapping);
         methodCalls.AddRange(assemblyMethodCalls);
         MergeCallGraph(callGraph, assemblyCallGraph);
         var assemblyInformation = GetAssemblyInformation(path);
-        var apiEndpoints = ApiEndpointAnalyzer.GetApiEndpoints(path);
+        var frameworkContext = Frameworks.FrameworkContext.FromCompilations(path, compilations.CSharp, compilations.VisualBasic, purlResolver);
+        var frameworkResult = Frameworks.FrameworkRegistry.Analyze(frameworkContext, frameworkOptions);
+        Frameworks.FrameworkRegistry.ApplyTrustBoundaries(frameworkResult, callGraph);
+        // ApiEndpointAnalyzer now only covers what no provider owns (VB.NET); the framework providers
+        // own every C# endpoint. Entry points are therefore built from the analyzer's endpoints ALONE —
+        // feeding it the combined list produced a second, MethodId-less copy of every provider endpoint.
+        var legacyEndpoints = ApiEndpointAnalyzer.GetApiEndpoints(path);
+        var apiEndpoints = frameworkResult.ApiEndpoints.Concat(legacyEndpoints).ToList();
         methods.AddRange(sourceMethods);
         EnrichPackageUrls(purlResolver, methods, usings, methodCalls, properties, fields, events, constructors, callGraph, assemblyInformation, sourceAssemblyMapping);
-        var entryPoints = TransparencyBuilder.BuildEntryPoints(apiEndpoints, methods);
+        var entryPoints = MergeEntryPoints(TransparencyBuilder.BuildEntryPoints(legacyEndpoints, methods), frameworkResult.EntryPoints);
         EnrichMethodIdentities(methods, callGraph, sourceMode);
         var packageReachability = TransparencyBuilder.BuildPackageReachability(callGraph, dependencies: usings);
 
@@ -162,8 +185,49 @@ public static class Dosai
             EntryPoints = entryPoints,
             PackageReachability = packageReachability,
             AssemblyInformation = assemblyInformation,
-            SourceAssemblyMapping = sourceAssemblyMapping
+            SourceAssemblyMapping = sourceAssemblyMapping,
+            Services = frameworkResult.Services,
+            AiComponents = frameworkResult.AiComponents,
+            Frameworks = frameworkResult.Frameworks
         };
+    }
+
+    /// <summary>
+    ///     Entry points contributed by framework providers keep their stable ids so services can
+    ///     reference them. Analyzer-derived entry points are given content-derived ids rather than
+    ///     positional <c>epN</c> ones, so that ids stay byte-identical across runs and across machines
+    ///     (file discovery order must not change a bom-ref), and any that describe an endpoint a
+    ///     provider already claimed are dropped instead of duplicated.
+    /// </summary>
+    private static List<EntryPoint> MergeEntryPoints(List<EntryPoint> analyzerEntryPoints, List<EntryPoint> frameworkEntryPoints)
+    {
+        var merged = new List<EntryPoint>(frameworkEntryPoints);
+        var seen = frameworkEntryPoints.Select(EntryPointSignature).ToHashSet(StringComparer.Ordinal);
+        foreach (var entryPoint in analyzerEntryPoints)
+        {
+            var signature = EntryPointSignature(entryPoint);
+            if (!seen.Add(signature))
+            {
+                continue;
+            }
+
+            entryPoint.Id = $"ep:{signature}";
+            merged.Add(entryPoint);
+        }
+
+        return merged;
+    }
+
+    /// <summary>
+    ///     Identity of an entry point independent of who discovered it: kind, verb, route and the
+    ///     method it dispatches to. Deliberately excludes file paths and line numbers so the signature
+    ///     — and therefore the derived id — is reproducible.
+    /// </summary>
+    private static string EntryPointSignature(EntryPoint entryPoint)
+    {
+        var target = entryPoint.MethodId
+                     ?? $"{entryPoint.Namespace}.{entryPoint.ClassName}.{entryPoint.MethodName}";
+        return $"{entryPoint.Kind}#{entryPoint.HttpMethod}:{entryPoint.Route}:{target}";
     }
 
     /// <summary>
@@ -172,8 +236,8 @@ public static class Dosai
     /// without round-tripping through the serialized string. Streaming keeps the JSON out of a single
     /// contiguous string, which bounds peak memory on large assembly trees.
     /// </summary>
-    public static MethodsSlice WriteMethods(string path, string outputFile)
-        => StreamSlice(GetMethodsSlice(path), outputFile);
+    public static MethodsSlice WriteMethods(string path, string outputFile, Frameworks.FrameworkAnalysisOptions? frameworkOptions = null)
+        => StreamSlice(GetMethodsSlice(path, frameworkOptions), outputFile);
 
     private static MethodsSlice StreamSlice(MethodsSlice slice, string outputFile)
     {
@@ -1179,11 +1243,11 @@ public static class Dosai
                 {
                     Name = attr.AttributeClass?.Name,
                     FullName = attr.AttributeClass?.ToDisplayString(),
-                    ConstructorArguments = attr.ConstructorArguments.Select(arg => arg.Value?.ToString() ?? string.Empty).ToList(),
+                    ConstructorArguments = attr.ConstructorArguments.Select(arg => FormatTypedConstant(arg)).ToList(),
                     NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo
                     {
                         Name = na.Key,
-                        Value = na.Value.Value?.ToString() ?? string.Empty
+                        Value = FormatTypedConstant(na.Value)
                     }).ToList()
                 }).ToList(),
             BaseType = baseType,
@@ -1202,7 +1266,7 @@ public static class Dosai
     /// <param name="path">Filesystem path to C# source file or directory containing C# source files</param>
     /// <param name="assemblyMethods">List of assembly methods</param>
     /// <returns>Tuple with List of source methods and using directives</returns>
-    private static (List<Method>, List<Dependency>, List<MethodCalls>, List<PropertyInfo>, List<FieldInfo>, List<EventInfo>, List<ConstructorInfo>, CallGraph, List<SourceAssemblyMapping>, bool SourceMode) GetSourceMethods(string path, List<Method> assemblyMethods)
+    private static (List<Method> SourceMethods, List<Dependency> UsingDirectives, List<MethodCalls> MethodCalls, List<PropertyInfo> Properties, List<FieldInfo> Fields, List<EventInfo> Events, List<ConstructorInfo> Constructors, CallGraph CallGraph, List<SourceAssemblyMapping> SourceAssemblyMappings, bool SourceMode, Frameworks.SourceCompilations Compilations) GetSourceMethods(string path, List<Method> assemblyMethods)
     {
         var assembliesToInspect = GetFilesToInspect(path, Constants.AssemblyExtension, Constants.ExeExtension);
         var sourcesToInspect = GetFilesToInspect(path, Constants.CSharpSourceExtension);
@@ -1349,10 +1413,10 @@ public static class Dosai
                                 new CustomAttributeInfo {
                                     Name = attr.AttributeClass?.Name,
                                     FullName = attr.AttributeClass?.ToDisplayString(),
-                                    ConstructorArguments = attr.ConstructorArguments.Select(arg => arg.Value?.ToString() ?? string.Empty).ToList(),
+                                    ConstructorArguments = attr.ConstructorArguments.Select(arg => FormatTypedConstant(arg)).ToList(),
                                     NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo {
                                         Name = na.Key,
-                                        Value = na.Value.Value?.ToString() ?? string.Empty
+                                        Value = FormatTypedConstant(na.Value)
                                     }).ToList()
                                 }).ToList(),
                             BaseType = baseType,
@@ -1410,10 +1474,10 @@ public static class Dosai
                                 new CustomAttributeInfo {
                                     Name = attr.AttributeClass?.Name,
                                     FullName = attr.AttributeClass?.ToDisplayString(),
-                                    ConstructorArguments = attr.ConstructorArguments.Select(arg => arg.Value?.ToString() ?? string.Empty).ToList(),
+                                    ConstructorArguments = attr.ConstructorArguments.Select(arg => FormatTypedConstant(arg)).ToList(),
                                     NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo {
                                         Name = na.Key,
-                                        Value = na.Value.Value?.ToString() ?? string.Empty
+                                        Value = FormatTypedConstant(na.Value)
                                     }).ToList()
                                 }).ToList(),
                             BaseType = baseType,
@@ -1465,10 +1529,10 @@ public static class Dosai
                                 new CustomAttributeInfo {
                                     Name = attr.AttributeClass?.Name,
                                     FullName = attr.AttributeClass?.ToDisplayString(),
-                                    ConstructorArguments = attr.ConstructorArguments.Select(arg => arg.Value?.ToString() ?? string.Empty).ToList(),
+                                    ConstructorArguments = attr.ConstructorArguments.Select(arg => FormatTypedConstant(arg)).ToList(),
                                     NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo {
                                         Name = na.Key,
-                                        Value = na.Value.Value?.ToString() ?? string.Empty
+                                        Value = FormatTypedConstant(na.Value)
                                     }).ToList()
                                 }).ToList(),
                             HasGetter = propertySymbol.GetMethod is not null,
@@ -1532,10 +1596,10 @@ public static class Dosai
                                 new CustomAttributeInfo {
                                     Name = attr.AttributeClass?.Name,
                                     FullName = attr.AttributeClass?.ToDisplayString(),
-                                    ConstructorArguments = attr.ConstructorArguments.Select(arg => arg.Value?.ToString() ?? string.Empty).ToList(),
+                                    ConstructorArguments = attr.ConstructorArguments.Select(arg => FormatTypedConstant(arg)).ToList(),
                                     NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo {
                                         Name = na.Key,
-                                        Value = na.Value.Value?.ToString() ?? string.Empty
+                                        Value = FormatTypedConstant(na.Value)
                                     }).ToList()
                                 }).ToList(),
                             HasGetter = propertySymbol.GetMethod is not null,
@@ -1719,7 +1783,7 @@ public static class Dosai
                                 new CustomAttributeInfo {
                                     Name = attr.AttributeClass?.Name,
                                     FullName = attr.AttributeClass?.ToDisplayString(),
-                                    ConstructorArguments = attr.ConstructorArguments.Select(arg => arg.Value?.ToString() ?? string.Empty).ToList(),
+                                    ConstructorArguments = attr.ConstructorArguments.Select(arg => FormatTypedConstant(arg)).ToList(),
                                     NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo {
                                         Name = na.Key,
                                         Value = na.Value.Value?.ToString()
@@ -1831,10 +1895,10 @@ public static class Dosai
                                 new CustomAttributeInfo {
                                     Name = attr.AttributeClass?.Name,
                                     FullName = attr.AttributeClass?.ToDisplayString(),
-                                    ConstructorArguments = attr.ConstructorArguments.Select(arg => arg.Value?.ToString() ?? string.Empty).ToList(),
+                                    ConstructorArguments = attr.ConstructorArguments.Select(arg => FormatTypedConstant(arg)).ToList(),
                                     NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo {
                                         Name = na.Key,
-                                        Value = na.Value.Value?.ToString() ?? string.Empty
+                                        Value = FormatTypedConstant(na.Value)
                                     }).ToList()
                                 }).ToList(),
                             BaseType = baseType,
@@ -1898,10 +1962,10 @@ public static class Dosai
                                 new CustomAttributeInfo {
                                     Name = attr.AttributeClass?.Name,
                                     FullName = attr.AttributeClass?.ToDisplayString(),
-                                    ConstructorArguments = attr.ConstructorArguments.Select(arg => arg.Value?.ToString() ?? string.Empty).ToList(),
+                                    ConstructorArguments = attr.ConstructorArguments.Select(arg => FormatTypedConstant(arg)).ToList(),
                                     NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo {
                                         Name = na.Key,
-                                        Value = na.Value.Value?.ToString() ?? string.Empty
+                                        Value = FormatTypedConstant(na.Value)
                                     }).ToList()
                                 }).ToList(),
                             IsStatic = constructorSymbol.IsStatic,
@@ -1959,10 +2023,10 @@ public static class Dosai
                                     new CustomAttributeInfo {
                                         Name = attr.AttributeClass?.Name,
                                         FullName = attr.AttributeClass?.ToDisplayString(),
-                                        ConstructorArguments = attr.ConstructorArguments.Select(arg => arg.Value?.ToString() ?? string.Empty).ToList(),
+                                        ConstructorArguments = attr.ConstructorArguments.Select(arg => FormatTypedConstant(arg)).ToList(),
                                         NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo {
                                             Name = na.Key,
-                                            Value = na.Value.Value?.ToString() ?? string.Empty
+                                            Value = FormatTypedConstant(na.Value)
                                         }).ToList()
                                     }).ToList(),
                                 IsStatic = constructorSymbol.IsStatic,
@@ -2200,7 +2264,7 @@ public static class Dosai
         {
             AddMapping(method, "Method");
         }
-        return (sourceMethods, allUsingDirectives, allMethodCalls, properties, fields, events, constructors, callGraph, sourceAssemblyMappings, sourceMode);
+        return (sourceMethods, allUsingDirectives, allMethodCalls, properties, fields, events, constructors, callGraph, sourceAssemblyMappings, sourceMode, new Frameworks.SourceCompilations { CSharp = csharpCompilation, VisualBasic = vbCompilation });
 
         void AddNode(string id, string name, string? className, string? namespaceName, string? file, string? assembly, string? module, string kind, int lineNumber, int columnNumber, bool isExternal)
         {

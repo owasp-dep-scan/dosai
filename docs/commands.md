@@ -44,6 +44,15 @@ dotnet run --project ./Dosai/Dosai.csproj -- methods \
 
 Supported call graph formats are `mermaid`, `graphml`, and `gexf`. If `--callgraph-out` is omitted, Dosai derives the output name from `--o` and the selected format.
 
+Framework-analysis options:
+
+| Flag                     | Effect                                                                             |
+| ------------------------ | ---------------------------------------------------------------------------------- |
+| `--classify-data`        | Classify request/response DTO members as pii/credential/financial/health (default) |
+| `--no-classify-data`     | Disable data classification                                                         |
+| `--max-conventional-routes N` | Cap conventional routing expansion, default 500                               |
+| `--include-prompt-text`  | Emit full system prompt text in `AiComponents` (default: SHA-256 prefix + first 200 chars; secret-shaped prompts are always withheld) |
+
 ### Implementation flow
 
 ```text
@@ -455,6 +464,19 @@ Call a tool:
 printf '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"dosai.crypto","arguments":{"format":"cyclonedx"}}}\n' | \
   dotnet run --project ./Dosai/Dosai.csproj -- mcp --path ./Dosai
 ```
+
+### Path confinement
+
+Tool output carries source-derived text (code snippets, endpoints, raw URLs), so the server is a
+read-capable channel into every directory it can access. When the server is exposed to external
+MCP clients, confine it:
+
+```bash
+dotnet run --project ./Dosai/Dosai.csproj -- mcp --mcp-root /workspace/app --path /workspace/app
+```
+
+With `--mcp-root` set, every `path` (and `dosai.query`'s `input`) must resolve under that
+directory or the tool call fails. See THREAT_MODEL.md for the full exposure model.
 
 ### Implementation flow
 

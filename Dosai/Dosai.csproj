@@ -29,4 +29,7 @@
     <None Include="..\README.md" Pack="true" PackagePath="\" />
     <PackageReference Include="System.Reflection.MetadataLoadContext" Version="10.0.11" />
   </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Dosai.Tests" />
+  </ItemGroup>
 </Project>
