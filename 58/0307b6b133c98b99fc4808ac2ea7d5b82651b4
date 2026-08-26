@@ -1,0 +1,23 @@
+Dosai.Tests/Frameworks/WebProviderTests.cs
+  s_1246da50fbe044::t_ea2ac9a7f023da 163-164,167-170,172,183-206
+Dosai/Frameworks/Providers/AspNetCoreMvcProvider.cs
+  s_1246da50fbe044::t_3471c9191462a1 419-422,424,623-646
+docs/frameworks.md
+  s_1246da50fbe044::t_a0a781371d3e98 41-44
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "580307b6b133c98b99fc4808ac2ea7d5b82651b4",
+  "prompts": {},
+  "sessions": {
+    "s_1246da50fbe044": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bd1711ba-4707-4f06-9ddb-30649cd0126e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
