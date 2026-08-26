@@ -6,12 +6,12 @@ unchanged from 3.3.0.
 
 ## Metadata and entry points
 
-| Change | 3.3.0 | 4.0.0 |
-| ------ | ----- | ----- |
-| `Metadata.SchemaVersion` | `3.3.0` | `4.0.0` |
-| `EntryPoint.Urls` | file-scope absolute URLs | renamed to **`EntryPoint.RawUrls`** |
-| `EntryPoint.Id` | sequential `ep1`, `ep2`, … | framework entry points use stable ids `ep:op:svc:<framework>:<group>/<name>#<verb>:<path>`; analyzer/Cli entry points keep sequential ids but are numbered **after** the framework ones, so every `epN` index shifts |
-| `EntryPoint.Kind` | `HttpEndpoint` / `HttpMinimalApi` / `Cli` | `HttpController`, `HttpMinimalApi`, `HttpRazorPage`, `Grpc`, `SignalRHub`, `Soap`, `GraphQL`, `OData`, `AzureFunction`, `LambdaFunction`, `MessageConsumer`, `HostedService`, `McpTool`, `McpPrompt`, `McpResource`, `Cli`. **`HttpEndpoint` no longer exists.** |
+| Change                   | 3.3.0                                     | 4.0.0                                                                                                                                                                                                                                                            |
+| ------------------------ | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Metadata.SchemaVersion` | `3.3.0`                                   | `4.0.0`                                                                                                                                                                                                                                                          |
+| `EntryPoint.Urls`        | file-scope absolute URLs                  | renamed to **`EntryPoint.RawUrls`**                                                                                                                                                                                                                              |
+| `EntryPoint.Id`          | sequential `ep1`, `ep2`, …                | framework entry points use stable ids `ep:op:svc:<framework>:<group>/<name>#<verb>:<path>`; analyzer/Cli entry points keep sequential ids but are numbered **after** the framework ones, so every `epN` index shifts                                             |
+| `EntryPoint.Kind`        | `HttpEndpoint` / `HttpMinimalApi` / `Cli` | `HttpController`, `HttpMinimalApi`, `HttpRazorPage`, `Grpc`, `SignalRHub`, `Soap`, `GraphQL`, `OData`, `AzureFunction`, `LambdaFunction`, `MessageConsumer`, `HostedService`, `McpTool`, `McpPrompt`, `McpResource`, `Cli`. **`HttpEndpoint` no longer exists.** |
 
 Consumers that filter `Kind == "HttpEndpoint"` must switch to the new vocabulary; consumers that
 key on `epN` ids must treat ids as opaque strings, not indexes.
@@ -70,9 +70,9 @@ key on `epN` ids must treat ids as opaque strings, not indexes.
 
 ## CLI additions
 
-| Flag | Effect |
-| ---- | ------ |
-| `--classify-data` / `--no-classify-data` | Toggle DTO data classification (default on) |
-| `--max-conventional-routes N` | Cap conventional route expansion (default 500) |
-| `--include-prompt-text` | Emit full prompt text (default: SHA-256 prefix + first 200 chars; secret-shaped text is always withheld) |
-| `mcp --mcp-root DIR` | Confine the MCP server to paths under `DIR` |
+| Flag                                     | Effect                                                                                                   |
+| ---------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `--classify-data` / `--no-classify-data` | Toggle DTO data classification (default on)                                                              |
+| `--max-conventional-routes N`            | Cap conventional route expansion (default 500)                                                           |
+| `--include-prompt-text`                  | Emit full prompt text (default: SHA-256 prefix + first 200 chars; secret-shaped text is always withheld) |
+| `mcp --mcp-root DIR`                     | Confine the MCP server to paths under `DIR`                                                              |

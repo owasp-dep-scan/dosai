@@ -132,4 +132,4 @@ channel into every directory the process can access:
 - Use `mcp --mcp-root DIR` to confine every tool call (and the `input` file of `dosai.query`)
   to paths under `DIR`. With confinement enabled, out-of-root paths fail the call instead of
   being analyzed.
-- Prompt *text* is not exposed through MCP regardless of flags (see above).
+- Prompt _text_ is not exposed through MCP regardless of flags (see above).

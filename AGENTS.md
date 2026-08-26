@@ -16,21 +16,21 @@ dotnet test ./Dosai.sln
 
 ## Important source files
 
-| File                          | Purpose                                                          |
-| ----------------------------- | ---------------------------------------------------------------- |
-| `Dosai/Dosai.cs`              | Main methods/source/callgraph extraction pipeline                |
-| `Dosai/DataFlow.cs`           | Data-flow patterns, DTOs, Roslyn operation walker, slicing logic |
-| `Dosai/DataFlowExporter.cs`   | Mermaid/GraphML/GEXF data-flow export                            |
-| `Dosai/CallGraphExporter.cs`  | Mermaid/GraphML/GEXF call graph export                           |
-| `Dosai/ApiEndpoint.cs`        | API route and URL extraction                                     |
-| `Dosai/PackageUrlResolver.cs` | NuGet PURL enrichment from assets/deps files                     |
-| `Dosai/CryptoAnalysis.cs`     | Crypto assets, misuse, reachability, and CBOM evidence           |
-| `Dosai/DataFlowAssembly.cs`   | IL-based data-flow reconstruction for assembly-only inputs       |
-| `Dosai/AssemblyCallGraphAnalyzer.cs` | IL call graph, delegate targets, dispatch resolution       |
-| `Dosai/LanguageFrontendAnalyzer.cs` | F#, R, and VC++/C/C++ frontends                            |
-| `Dosai/Transparency.cs`       | Derived review facts, agent context, reports, diffs              |
-| `Dosai/CommandLine.cs`        | CLI commands and options                                         |
-| `Dosai.Tests/DosaiTests.cs`   | Unit/integration tests                                           |
+| File                                 | Purpose                                                          |
+| ------------------------------------ | ---------------------------------------------------------------- |
+| `Dosai/Dosai.cs`                     | Main methods/source/callgraph extraction pipeline                |
+| `Dosai/DataFlow.cs`                  | Data-flow patterns, DTOs, Roslyn operation walker, slicing logic |
+| `Dosai/DataFlowExporter.cs`          | Mermaid/GraphML/GEXF data-flow export                            |
+| `Dosai/CallGraphExporter.cs`         | Mermaid/GraphML/GEXF call graph export                           |
+| `Dosai/ApiEndpoint.cs`               | API route and URL extraction                                     |
+| `Dosai/PackageUrlResolver.cs`        | NuGet PURL enrichment from assets/deps files                     |
+| `Dosai/CryptoAnalysis.cs`            | Crypto assets, misuse, reachability, and CBOM evidence           |
+| `Dosai/DataFlowAssembly.cs`          | IL-based data-flow reconstruction for assembly-only inputs       |
+| `Dosai/AssemblyCallGraphAnalyzer.cs` | IL call graph, delegate targets, dispatch resolution             |
+| `Dosai/LanguageFrontendAnalyzer.cs`  | F#, R, and VC++/C/C++ frontends                                  |
+| `Dosai/Transparency.cs`              | Derived review facts, agent context, reports, diffs              |
+| `Dosai/CommandLine.cs`               | CLI commands and options                                         |
+| `Dosai.Tests/DosaiTests.cs`          | Unit/integration tests                                           |
 
 ## Coding expectations
 

@@ -46,12 +46,12 @@ Supported call graph formats are `mermaid`, `graphml`, and `gexf`. If `--callgra
 
 Framework-analysis options:
 
-| Flag                     | Effect                                                                             |
-| ------------------------ | ---------------------------------------------------------------------------------- |
-| `--classify-data`        | Classify request/response DTO members as pii/credential/financial/health (default) |
-| `--no-classify-data`     | Disable data classification                                                         |
-| `--max-conventional-routes N` | Cap conventional routing expansion, default 500                               |
-| `--include-prompt-text`  | Emit full system prompt text in `AiComponents` (default: SHA-256 prefix + first 200 chars; secret-shaped prompts are always withheld) |
+| Flag                          | Effect                                                                                                                                |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `--classify-data`             | Classify request/response DTO members as pii/credential/financial/health (default)                                                    |
+| `--no-classify-data`          | Disable data classification                                                                                                           |
+| `--max-conventional-routes N` | Cap conventional routing expansion, default 500                                                                                       |
+| `--include-prompt-text`       | Emit full system prompt text in `AiComponents` (default: SHA-256 prefix + first 200 chars; secret-shaped prompts are always withheld) |
 
 ### Implementation flow
 
