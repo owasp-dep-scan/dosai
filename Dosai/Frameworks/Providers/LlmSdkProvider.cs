@@ -37,7 +37,7 @@ public sealed partial class LlmSdkProvider : IFrameworkProvider
             }
 
             var root = tree.GetCompilationUnitRoot();
-            var model = ctx.CSharp.GetSemanticModel(tree);
+            var model = ctx.CSharp!.GetSemanticModel(tree);
 
             foreach (var invocation in root.DescendantNodes().OfType<InvocationExpressionSyntax>())
             {
@@ -71,8 +71,13 @@ public sealed partial class LlmSdkProvider : IFrameworkProvider
                     continue;
                 }
 
-                var arguments = creation.ArgumentList.Arguments;
-                if (arguments.Count == 2 && arguments[0].Expression.ToString().Contains("System", StringComparison.Ordinal) && arguments[1].Expression is LiteralExpressionSyntax literal && literal.Token.Value is string prompt && prompt.Length > 40)
+                // new ChatMessage { ... } has no argument list; only parenthesized forms carry one.
+                if (creation.ArgumentList is not { Arguments: { Count: 2 } arguments })
+                {
+                    continue;
+                }
+
+                if (arguments[0].Expression.ToString().Contains("System", StringComparison.Ordinal) && arguments[1].Expression is LiteralExpressionSyntax literal && literal.Token.Value is string prompt && prompt.Length > 40)
                 {
                     AddPrompt(ctx, results, prompt, tree.FilePath, creation.GetLocation().GetLineSpan().StartLinePosition.Line + 1);
                 }
@@ -198,12 +203,12 @@ public sealed partial class LlmSdkProvider : IFrameworkProvider
         }
     }
 
-    private static List<string> LiteralArguments(ArgumentListSyntax argumentList) => argumentList.Arguments
+    private static List<string> LiteralArguments(ArgumentListSyntax? argumentList) => argumentList?.Arguments
         .Select(argument => argument.Expression)
         .OfType<LiteralExpressionSyntax>()
         .Where(literal => literal.Token.Value is string)
         .Select(literal => (string)literal.Token.Value!)
-        .ToList();
+        .ToList() ?? [];
 
     /// <summary>
     ///     A prompt-bearing call. Unqualified <c>Create</c> is excluded; only receivers that actually

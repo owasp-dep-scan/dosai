@@ -60,7 +60,8 @@ public sealed class AspNetCoreMvcProvider : IFrameworkProvider
                     var patternArgument = arguments.Count > 1 ? arguments[1].Expression : arguments.Count == 1 ? arguments[0].Expression : null;
                     if (patternArgument is LiteralExpressionSyntax patternLiteral)
                     {
-                        conventionalPatterns.Add((arguments.FirstOrDefault().Expression.ToString() ?? "default", patternLiteral.Token.ValueText));
+                        // A literal pattern implies at least one argument, so the name argument exists.
+                        conventionalPatterns.Add((arguments[0].Expression.ToString(), patternLiteral.Token.ValueText));
                     }
                 }
                 else if (name.Equals("MapDefaultControllerRoute", StringComparison.Ordinal))

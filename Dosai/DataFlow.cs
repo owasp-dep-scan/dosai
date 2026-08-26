@@ -1777,7 +1777,7 @@ public static partial class DataFlowAnalyzer
                 // A lambda parameter must not be matched against the enclosing method's routing
                 // attributes: `claims.Select(c => ...)` inside an [HttpGet] action made `c` a
                 // phantom http source through exactly this path.
-                if (Equals(parameterReference.Parameter.ContainingSymbol, ownerMethod))
+                if (SymbolEqualityComparer.Default.Equals(parameterReference.Parameter.ContainingSymbol, ownerMethod))
                 {
                     foreach (var pattern in MatchParameterSource(parameterReference.Parameter, ownerMethod))
                     {

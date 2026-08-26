@@ -160,11 +160,11 @@ public class OrdersController
 
         var slice = global::Depscan.Dosai.GetMethodsSlice(_tempDirectory.Path);
 
-        var service = Assert.Single(slice.Services, candidate => candidate.Framework == "aspnetcore-mvc" && candidate.Name == "Orders");
+        var service = Assert.Single(slice.Services ?? [], candidate => candidate.Framework == "aspnetcore-mvc" && candidate.Name == "Orders");
         var operation = Assert.Single(service.Operations);
         Assert.Equal("/Orders/Index", operation.Path);
         Assert.Contains($"ep:{operation.Id}", service.EntryPointIds);
-        Assert.Contains(slice.EntryPoints, entryPoint => entryPoint.Id == $"ep:{operation.Id}");
+        Assert.Contains(slice.EntryPoints ?? [], entryPoint => entryPoint.Id == $"ep:{operation.Id}");
     }
 
     // ---- C2: .prompty files are classified as config and ingested as prompts -------------
@@ -193,7 +193,7 @@ You are a helpful assistant that answers questions about the catalog. Be terse a
 
         var slice = global::Depscan.Dosai.GetMethodsSlice(_tempDirectory.Path);
 
-        var prompt = slice.AiComponents.FirstOrDefault(component => component.Kind == "prompt");
+        var prompt = (slice.AiComponents ?? []).FirstOrDefault(component => component.Kind == "prompt");
         Assert.NotNull(prompt);
         Assert.StartsWith("prompt-", prompt.Name);
         Assert.NotNull(prompt.PromptText); // preview emitted for benign prose
@@ -217,7 +217,7 @@ name: leaky
 
         var slice = global::Depscan.Dosai.GetMethodsSlice(_tempDirectory.Path);
 
-        var prompt = slice.AiComponents.FirstOrDefault(component => component.Kind == "prompt");
+        var prompt = (slice.AiComponents ?? []).FirstOrDefault(component => component.Kind == "prompt");
         Assert.NotNull(prompt);
         Assert.Null(prompt.PromptText); // withheld even though no --include-prompt-text
     }

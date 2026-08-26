@@ -362,7 +362,7 @@ public class OrdersController
         var second = JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(otherDirectory.Path), new JsonSerializerOptions { Converters = { new JsonStringEnumConverter() } });
 
         Assert.Equal(first!.Services!.Select(s => s.Id).ToList(), second!.Services!.Select(s => s.Id).ToList());
-        Assert.Equal(first.Services.SelectMany(s => s.Operations.Select(o => o.Id)).ToList(), second.Services.SelectMany(s => s.Operations.Select(o => o.Id)).ToList());
+        Assert.Equal((first.Services ?? []).SelectMany(s => s.Operations.Select(o => o.Id)).ToList(), (second.Services ?? []).SelectMany(s => s.Operations.Select(o => o.Id)).ToList());
     }
 }
 

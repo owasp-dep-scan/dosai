@@ -29,7 +29,7 @@ public sealed class McpProvider : IFrameworkProvider
         foreach (var tree in ctx.CSharpTrees)
         {
             var text = ctx.TextFor(tree);
-            var model = ctx.CSharp.GetSemanticModel(tree);
+            var model = ctx.CSharp!.GetSemanticModel(tree);
             var root = tree.GetCompilationUnitRoot();
             registrationText = text.Contains("AddMcpServer", StringComparison.Ordinal) ? text : registrationText;
 
@@ -96,7 +96,7 @@ public sealed class McpProvider : IFrameworkProvider
                 continue;
             }
 
-            var model = ctx.CSharp.GetSemanticModel(tree);
+            var model = ctx.CSharp!.GetSemanticModel(tree);
             var root = tree.GetCompilationUnitRoot();
             foreach (var method in root.DescendantNodes().OfType<MethodDeclarationSyntax>())
             {

@@ -137,11 +137,11 @@ public class AccountController
 
         Assert.NotNull(slice);
         var service = Assert.Single(slice.Services ?? [], s => s.Name == "Account");
-        Assert.Contains(service.Data, data => data is { Classification: "pii", Name: "RegisterRequest" } && data.Description.Contains("Email"));
-        Assert.Contains(service.Data, data => data.Classification == "credential" && data.Description.Contains("Password"));
+        Assert.Contains(service.Data ?? [], data => data is { Classification: "pii", Name: "RegisterRequest" } && data.Description?.Contains("Email") == true);
+        Assert.Contains(service.Data ?? [], data => data.Classification == "credential" && data.Description?.Contains("Password") == true);
         // financial beats pii when both exist only via member precedence: CardNumber matches financial.
-        Assert.Contains(service.Data, data => data.Classification == "financial" && data.Description.Contains("CardNumber"));
-        Assert.DoesNotContain(service.Data, data => data.Classification == "public");
+        Assert.Contains(service.Data ?? [], data => data.Classification == "financial" && data.Description?.Contains("CardNumber") == true);
+        Assert.DoesNotContain(service.Data ?? [], data => data.Classification == "public");
     }
 
     [Fact]

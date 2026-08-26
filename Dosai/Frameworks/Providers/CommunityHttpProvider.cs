@@ -27,7 +27,7 @@ foreach (var tree in ctx.CSharpTrees)
                 continue;
             }
 
-            var model = ctx.CSharp.GetSemanticModel(tree);
+            var model = ctx.CSharp!.GetSemanticModel(tree);
             var root = tree.GetCompilationUnitRoot();
             var rawUrls = ctx.RawUrlsFor(tree);
             foreach (var typeDeclaration in root.DescendantNodes().OfType<TypeDeclarationSyntax>())

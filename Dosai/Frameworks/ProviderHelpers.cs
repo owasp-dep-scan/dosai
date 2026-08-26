@@ -257,13 +257,16 @@ internal static partial class ProviderHelpers
     /// <summary>Every string literal argument of an invocation.</summary>
     internal static List<string> StringArguments(InvocationExpressionSyntax invocation) => StringArguments(invocation.ArgumentList);
 
-    /// <summary>Every string literal argument of any argument list (invocations, constructions, indexers).</summary>
-    internal static List<string> StringArguments(Microsoft.CodeAnalysis.CSharp.Syntax.ArgumentListSyntax argumentList) => argumentList.Arguments
+    /// <summary>
+    ///     Every string literal argument of any argument list (invocations, constructions, indexers).
+    ///     A null argument list (object creation with initializer, without parentheses) has no arguments.
+    /// </summary>
+    internal static List<string> StringArguments(Microsoft.CodeAnalysis.CSharp.Syntax.ArgumentListSyntax? argumentList) => argumentList?.Arguments
         .Select(argument => argument.Expression)
         .OfType<LiteralExpressionSyntax>()
         .Where(literal => literal.Token.Value is string)
         .Select(literal => (string)literal.Token.Value!)
-        .ToList();
+        .ToList() ?? [];
 
     /// <summary>Absolute URLs found in file text: heuristic, file-scoped evidence (RawUrls), sorted and de-duplicated for stable output.</summary>
     internal static List<string> ExtractRawUrls(string text) =>
