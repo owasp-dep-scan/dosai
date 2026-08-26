@@ -38,8 +38,10 @@ See [migration to 4.0.0](./migration-4.0.md) for every output-visible change.
 
 Segment-versioned attribute routes (`v{version:apiVersion}/[controller]`) have a statically known
 value domain: one concrete endpoint is emitted per declared `[ApiVersion]` (with `[MapToApiVersion]`
-pinning an action to specific versions), e.g. `/v1.0/Orders` and `/v2.0/Orders`. The verbatim
-template always stays on `ApiEndpoint.Route`.
+pinning an action to specific versions), e.g. `/v1.0/Orders` and `/v2.0/Orders`. ASP.NET parses a
+missing minor as 0, so the equivalent compact spelling (`/v1/Orders`) is captured in
+`ServiceComponent.Endpoints` alongside the declared one. The verbatim template always stays on
+`ApiEndpoint.Route`.
 
 ## Performance expectations
 

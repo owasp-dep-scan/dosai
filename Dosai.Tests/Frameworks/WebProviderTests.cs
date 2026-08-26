@@ -160,11 +160,16 @@ public class OrdersController : Microsoft.AspNetCore.Mvc.ControllerBase
 
         var service = Assert.Single(slice.Services ?? [], s => s.Name == "Orders");
         // List/Get serve both declared versions; Create is pinned to 2.0 by [MapToApiVersion].
+        // Each version contributes its declared spelling and the equivalent compact one
+        // (ASP.NET parses a missing minor as 0, so "v1" also matches [ApiVersion("1.0")]).
         Assert.Equal(
         [
-            "/v1.0/Orders", "/v2.0/Orders",
-            "/v1.0/Orders/{id}", "/v2.0/Orders/{id}"
+            "/v1.0/Orders", "/v1/Orders",
+            "/v2.0/Orders", "/v2/Orders",
+            "/v1.0/Orders/{id}", "/v1/Orders/{id}",
+            "/v2.0/Orders/{id}", "/v2/Orders/{id}"
         ], service.Endpoints);
+        // One operation per version keeps ids stable; the compact spelling lives only in Endpoints.
         Assert.Equal(5, service.Operations.Count);
         Assert.Contains(service.Operations, op => op is { HttpMethod: "POST", Path: "/v2.0/Orders" } && op.Properties.TryGetValue("apiVersion", out var v) && v == "2.0");
         Assert.DoesNotContain(service.Operations, op => op is { HttpMethod: "POST", Path: "/v1.0/Orders" });
@@ -173,6 +178,30 @@ public class OrdersController : Microsoft.AspNetCore.Mvc.ControllerBase
         Assert.Equal("v{version:apiVersion}/[controller]/{id:int}", endpoint.Route);
         Assert.All(slice.ApiEndpoints ?? [], e => Assert.DoesNotContain("apiVersion", e.Path));
         Assert.All(slice.ApiEndpoints ?? [], e => Assert.DoesNotContain("[controller]", e.Path));
+    }
+
+    [Fact]
+    public void SegmentVersionedRoute_VersionWithMinorHasNoCompactAlias()
+    {
+        var slice = Run(("Minor.cs", MvcStubs + """
+
+namespace Asp.Versioning
+{
+    public class ApiVersionAttribute : System.Attribute { public ApiVersionAttribute(string version) { } }
+}
+
+[Route("v{version:apiVersion}/[controller]")]
+[Asp.Versioning.ApiVersion("1.1")]
+public class ThingsController : Microsoft.AspNetCore.Mvc.ControllerBase
+{
+    [HttpGet]
+    public object List() => null;
+}
+"""));
+
+        // "1.1" has no equivalent shorter segment; only the declared spelling is emitted.
+        var service = Assert.Single(slice.Services ?? [], s => s.Name == "Things");
+        Assert.Equal(["/v1.1/Things"], service.Endpoints);
     }
 
     [Fact]

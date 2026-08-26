@@ -416,9 +416,12 @@ public sealed class AspNetCoreMvcProvider : IFrameworkProvider
             }
 
             service.Operations.Add(operation);
-            if (resolved.Path is not null && !service.Endpoints.Contains(resolved.Path, StringComparer.Ordinal))
+            AddEndpointPath(service, resolved.Path);
+            // ASP.NET parses a missing minor as 0, so [ApiVersion("1.0")] matches both the "1.0"
+            // and "1" URL segments: capture both spellings in the endpoints array.
+            if (apiVersion is not null && versionParameter is not null && CompactApiVersion(apiVersion) is { } aliasVersion)
             {
-                service.Endpoints.Add(resolved.Path);
+                AddEndpointPath(service, RouteTemplateResolver.SubstituteParameter(baseTemplate, versionParameter.Name, aliasVersion).Path);
             }
 
             if (methodId is not null && !service.MethodIds.Contains(methodId, StringComparer.Ordinal))
@@ -615,6 +618,30 @@ public sealed class AspNetCoreMvcProvider : IFrameworkProvider
         }
 
         return versions;
+    }
+
+    /// <summary>
+    ///     ASP.NET parses a missing minor version as 0, so [ApiVersion("1.0")] matches both the
+    ///     "1.0" and "1" URL segments. Returns the shorter equivalent segment ("1" for "1.0"),
+    ///     or null when the declared version has no such alias (e.g. "1.1", "1.0-beta").
+    /// </summary>
+    private static string? CompactApiVersion(string version)
+    {
+        if (!version.EndsWith(".0", StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        var major = version[..^2];
+        return major.Length > 0 && major.All(character => character is >= '0' and <= '9') ? major : null;
+    }
+
+    private static void AddEndpointPath(ServiceComponent service, string? path)
+    {
+        if (path is not null && !service.Endpoints.Contains(path, StringComparer.Ordinal))
+        {
+            service.Endpoints.Add(path);
+        }
     }
 
     private static List<AttributeSyntax> classAttributes(ControllerCandidate controller) => ProviderHelpers.AttributesOf(controller.Type.AttributeLists).ToList();
