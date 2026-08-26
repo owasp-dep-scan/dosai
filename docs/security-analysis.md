@@ -292,3 +292,15 @@ This branch was tested against:
 | `kickmeforpresident/VulnerableMVCAppDemo` |            1 |
 
 The scheduled/manual workflow `.github/workflows/vulnerable-repo-smoke.yml` keeps these broad heuristics from regressing.
+
+## Framework services, trust zones, and AI findings (schema 4.0.0)
+
+Dosai's framework providers (`docs/frameworks.md`) surface security-relevant facts beyond endpoints:
+
+- **Resolved routes.** `ApiEndpoint.Path` carries the resolved path (`[controller]` substituted, constraints stripped). `Route` keeps the verbatim template. Unresolvable templates leave `Path` null at low confidence instead of shipping a garbled path.
+- **Authorization honesty.** `Authenticated` is nullable and `null` means unknown — a `false` is only emitted when anonymous access is positively established (`[AllowAnonymous]`, `AuthorizationLevel.Anonymous`).
+- **Trust zones and boundaries.** `Services[].TrustZone` (`public`/`authenticated`/`internal`/`external`/`unknown`) and `CrossesTrustBoundary`, computed from the call graph only when a positive path exists from a public inbound service to an external outbound service.
+- **Data classification.** `Services[].Data[]` labels request/response data `pii`/`credential`/`financial`/`health`/`unknown` from DTO member names; every non-`unknown` entry names the triggering member.
+- **Taint seeding.** Framework entry-point parameters (route/query/body, rpc messages, queue payloads, hub arguments, MCP tool arguments, function triggers) are sources in `dataflows` — a plain `string id` on a controller action now produces source→sink slices.
+- **Built-in findings** (surfaced as service tags): anonymous HTTP triggers, `basicHttpBinding` without transport security, unauthenticated Hangfire dashboards, gRPC reflection exposure, MCP assembly-wide tool exposure, unrestricted MCP HTTP host headers, and MCP stdio clients that launch external processes (supply-chain).
+- **AI weakness rules.** The `ai` and `mcp` pattern packs detect prompt injection (CWE-1427): untrusted input reaching chat message construction or prompt invocations yields `PromptInjectionCandidate`; MCP tool arguments reaching dangerous sinks yields `McpToolInjectionCandidate`.

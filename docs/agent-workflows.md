@@ -182,3 +182,15 @@ Then validate graph edge integrity directly against `Nodes` and `Edges`, and app
 - Built-in data-flow pattern packs: `docs/pattern-packs.md`
 - Graph exports: `docs/graph-formats.md`
 - Crypto and CBOM: `docs/crypto-cbom.md`
+
+## New MCP tools (schema 4.0.0)
+
+The `dosai mcp` server exposes two additional tools for service and AI inventory:
+
+| Tool                  | Payload                                                                                                                                                               |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dosai.services`      | `Services[]` (inbound surfaces and outbound dependencies with resolved paths, confidence, trust zones, data classifications) plus `Frameworks[]` and `ApiEndpoints[]` |
+| `dosai.ai_components` | `AiComponents[]`: models (identifiers and hashed on-disk artifacts), MCP tools with JSON Schemas, redacted prompts, agents, embeddings                                |
+
+Both take the standard `path` argument. Use them after `dosai.methods` to answer "what does this
+app expose and to whom" without re-running the full slice.

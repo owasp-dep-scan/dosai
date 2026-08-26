@@ -107,3 +107,29 @@ CI runs dosai on PR/source
 ```
 
 Dosai should fail closed where feasible: preserve host safety, emit diagnostics, and avoid producing malformed output.
+
+## Prompt and AI inventory handling (schema 4.0.0)
+
+Dosai's AI inventory (`AiComponents[]`) records system prompts found in source. Prompts can
+contain secrets and proprietary IP, so the default output is redacted: a SHA-256 prefix and the
+first 200 characters only. Candidate prompts that look secret-shaped (connection strings,
+key/value credential pairs, PEM blocks, JWT/SAS/PAT token shapes) are withheld entirely and
+`--include-prompt-text` cannot override that. Full text for benign prompts is emitted solely
+under the explicit `--include-prompt-text` flag, and the MCP `dosai.ai_components` tool follows
+the same default (the flag is not reachable through MCP). On-disk model artifacts are hashed
+(SHA-256) without being uploaded anywhere; artifacts over 256 MB are inventoried with size but
+without a hash so a vendored multi-GB model does not stall every run. Hashes are stable across
+runs so BOM diffs are meaningful.
+
+## MCP server data exposure
+
+`dosai mcp` is a JSON-RPC server whose tools analyze **whatever path the client supplies**.
+Analysis output carries source-derived text: dataflow nodes embed literal code snippets
+(hardcoded secrets included), and endpoint/raw-URL lists. Treat the server as a read-capable
+channel into every directory the process can access:
+
+- Run `dosai mcp` only for clients you would trust with read access to those trees.
+- Use `mcp --mcp-root DIR` to confine every tool call (and the `input` file of `dosai.query`)
+  to paths under `DIR`. With confinement enabled, out-of-root paths fail the call instead of
+  being analyzed.
+- Prompt _text_ is not exposed through MCP regardless of flags (see above).

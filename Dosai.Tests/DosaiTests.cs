@@ -1971,7 +1971,8 @@ class OrdersController
         Assert.Contains("orders.write", endpoint.RequiredScopes);
         Assert.Contains("Internal", endpoint.CorsPolicies);
         Assert.True(endpoint.AntiForgeryRequired);
-        Assert.Contains(methodsSlice?.EntryPoints ?? [], entryPoint => entryPoint is { Route: "api/orders/{id}", AuthorizationRequired: true } && entryPoint.Roles.Contains("Admin"));
+        // Schema 4.0.0: entry-point Route carries the resolved path, not the verbatim template.
+        Assert.Contains(methodsSlice?.EntryPoints ?? [], entryPoint => entryPoint is { Route: "/api/orders/{id}", AuthorizationRequired: true } && entryPoint.Roles.Contains("Admin"));
     }
 
     [Fact]
@@ -2002,7 +2003,7 @@ class QueryFlow { static void Main(string[] args) { Process.Start(args[0]); } }
 
         using var input = new StringReader("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n");
         using var output = new StringWriter();
-        McpServer.Run(tempDirectory.Path, null, null, input, output);
+        McpServer.Run(tempDirectory.Path, null, null, null, input, output);
         Assert.Contains("dosai.dataflows", output.ToString());
     }
 
@@ -2065,7 +2066,7 @@ class CryptoWorkflow
 
 """);
         using var output = new StringWriter();
-        McpServer.Run(tempDirectory.Path, null, null, input, output);
+        McpServer.Run(tempDirectory.Path, null, null, null, input, output);
         Assert.Contains("CycloneDX", output.ToString());
         Assert.Contains("dosai:crypto:reachableFromEntryPoint", output.ToString());
 
@@ -2137,10 +2138,114 @@ class Program
         });
 
         Assert.NotNull(methodsSlice);
-        Assert.Contains(methodsSlice.ApiEndpoints ?? [], endpoint => endpoint is { HttpMethod: "GET", Route: "api/[controller]/{id}" } && endpoint.Urls.Contains("https://api.example.test/orders/"));
-        Assert.Contains(methodsSlice.ApiEndpoints ?? [], endpoint => endpoint is { HttpMethod: "POST", Route: "/upload", EndpointKind: "MinimalApi" });
+        // Schema 4.0.0: Route keeps the verbatim template while Path carries the resolved,
+        // normalized route (tokens substituted, constraints stripped) for CycloneDX consumers.
+        // This assertion previously locked in the %5Bcontroller%5D bug (cdxgen discussion #4333)
+        // by expecting the unresolved template as the only route value.
+        Assert.Contains(methodsSlice.ApiEndpoints ?? [], endpoint => endpoint is { HttpMethod: "GET", Route: "api/[controller]/{id}", Path: "/api/Orders/{id}", FilePath: "Endpoints.cs" } && endpoint.RawUrls.Contains("https://api.example.test/orders/"));
+        Assert.Contains(methodsSlice.ApiEndpoints ?? [], endpoint => endpoint is { HttpMethod: "POST", Route: "/upload", Path: "/upload", EndpointKind: "MinimalApi" });
         Assert.NotNull(methodsSlice.Metadata);
-        Assert.Contains(methodsSlice.EntryPoints ?? [], entryPoint => entryPoint is { Kind: "HttpEndpoint", Route: "api/[controller]/{id}" });
+        Assert.Equal("4.0.0", methodsSlice.Metadata.SchemaVersion);
+        Assert.Contains(methodsSlice.EntryPoints ?? [], entryPoint => entryPoint is { Kind: "HttpController", Route: "/api/Orders/{id}" });
+    }
+
+    /// <summary>
+    ///     Regression test for cdxgen discussion #4333: [Route("[controller]")] on
+    ///     WeatherForecastController must yield Path = "/api/WeatherForecast", not the unresolved
+    ///     template that cdxgen percent-encoded into %5Bcontroller%5D.
+    /// </summary>
+    [Fact]
+    public void GetMethods_ControllerRouteToken_ResolvesToConcretePath()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Weather.cs"), """
+namespace Api;
+
+public class RouteAttribute : System.Attribute { public RouteAttribute(string template) { } }
+public class HttpGetAttribute : System.Attribute { public HttpGetAttribute(string template) { } }
+
+[Route("api/[controller]")]
+public class WeatherForecastController
+{
+    [HttpGet("{id:int}")]
+    public object Get(int id) => null;
+}
+""");
+
+        var methodsSlice = ReadMethods(tempDirectory.Path);
+
+        var endpoint = Assert.Single(methodsSlice.ApiEndpoints ?? [], e => e.MethodName == "Get");
+        Assert.Equal("api/[controller]/{id:int}", endpoint.Route);
+        Assert.Equal("/api/WeatherForecast/{id}", endpoint.Path);
+        var parameter = Assert.Single(endpoint.RouteParameters);
+        Assert.Equal("id", parameter.Name);
+        Assert.Equal(["int"], parameter.Constraints);
+        Assert.Equal("medium", endpoint.Confidence);
+    }
+
+    [Fact]
+    public void GetMethods_AbsoluteMethodRoute_OverridesClassRoute()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Override.cs"), """
+namespace Api;
+
+public class RouteAttribute : System.Attribute { public RouteAttribute(string template) { } }
+public class HttpGetAttribute : System.Attribute { public HttpGetAttribute(string template) { } }
+
+[Route("api/[controller]")]
+public class OrdersController
+{
+    [HttpGet("/admin/orders/{id}")]
+    public object Get(int id) => null;
+}
+""");
+
+        var methodsSlice = ReadMethods(tempDirectory.Path);
+
+        Assert.Contains(methodsSlice.ApiEndpoints ?? [], endpoint => endpoint is { Path: "/admin/orders/{id}", Route: "/admin/orders/{id}" });
+    }
+
+    [Fact]
+    public void GetMethods_ActionNameAndAreaTokens_Resolve()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Tokens.cs"), """
+namespace MyApp.Areas.Admin.Controllers;
+
+public class RouteAttribute : System.Attribute { public RouteAttribute(string template) { } }
+public class HttpGetAttribute : System.Attribute { public HttpGetAttribute(string template) { } }
+public class AreaAttribute : System.Attribute { public AreaAttribute(string name) { } }
+public class ActionNameAttribute : System.Attribute { public ActionNameAttribute(string name) { } }
+
+[Area("admin")]
+[Route("[area]/[controller]/[action]")]
+public class UsersController
+{
+    [ActionName("detail")]
+    [HttpGet("{id?}")]
+    public object GetAsync(int id) => null;
+}
+""");
+
+        var methodsSlice = ReadMethods(tempDirectory.Path);
+
+        Assert.Contains(methodsSlice.ApiEndpoints ?? [], endpoint => endpoint is { Path: "/admin/Users/detail/{id}" });
+    }
+
+    [Fact]
+    public void GetMethods_DetectsFrameworks_FromUsingDirectives()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Program.cs"), """
+using MassTransit;
+
+class Program { static void Main() { } }
+""");
+
+        var methodsSlice = ReadMethods(tempDirectory.Path);
+
+        Assert.Contains(methodsSlice.Frameworks ?? [], framework => framework is { Id: "messaging", DetectionKind: "using", Confidence: "medium" });
     }
 
     [Fact]

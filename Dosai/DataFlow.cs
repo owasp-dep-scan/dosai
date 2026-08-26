@@ -224,7 +224,11 @@ public static partial class DataFlowAnalyzer
             "Dosai.DataFlow.VisualBasic",
             syntaxTrees: vbTrees,
             references: references,
-            options: new VisualBasicCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+            options: new VisualBasicCompilationOptions(Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary));
+
+        // Framework providers reuse these compilations; building them again would double the parse cost.
+        var frameworkContext = Frameworks.FrameworkContext.FromCompilations(path, csharpCompilation, vbCompilation, purlResolver);
+        var frameworkResult = Frameworks.FrameworkRegistry.Analyze(frameworkContext);
 
         var summaries = new Dictionary<string, DataFlowMethodSummary>(StringComparer.Ordinal);
 
@@ -244,18 +248,19 @@ public static partial class DataFlowAnalyzer
 
         var graph = new DataFlowGraphBuilder(result, purlResolver, path);
 
+        var frameworkSeeds = new FrameworkTaintSeedIndex(frameworkResult.TaintSeeds);
         foreach (var tree in csharpTrees)
         {
             var model = csharpCompilation.GetSemanticModel(tree);
             var root = tree.GetCompilationUnitRoot();
-            AnalyzeCompilationUnit(model, root, graph, patterns, summaries, path, tree.FilePath);
+            AnalyzeCompilationUnit(model, root, graph, patterns, summaries, path, tree.FilePath, frameworkSeeds);
         }
 
         foreach (var tree in vbTrees)
         {
             var model = vbCompilation.GetSemanticModel(tree);
             var root = tree.GetCompilationUnitRoot();
-            AnalyzeCompilationUnit(model, root, graph, patterns, summaries, path, tree.FilePath);
+            AnalyzeCompilationUnit(model, root, graph, patterns, summaries, path, tree.FilePath, frameworkSeeds);
         }
 
         AnalyzeLanguageFrontendDataFlows(path, sourcesToInspect, patterns, result);
@@ -275,8 +280,18 @@ public static partial class DataFlowAnalyzer
         result.Statistics.SourceCount = result.Nodes.Count(n => n.IsSource);
         result.Statistics.SinkCount = result.Nodes.Count(n => n.IsSink);
         result.Statistics.SliceCount = result.Slices.Count;
-        result.EntryPoints = TransparencyBuilder.BuildEntryPoints(ApiEndpointAnalyzer.GetApiEndpoints(path));
+        // Framework entry points carry stable ids (ep:op:...); analyzer/Cli entry points get
+        // sequential ids appended after them.
+        var frameworkEntryPoints = frameworkResult.EntryPoints
+            .Concat(TransparencyBuilder.BuildEntryPoints(frameworkResult.ApiEndpoints.Concat(ApiEndpointAnalyzer.GetApiEndpoints(path))));
         AddDataFlowEntryPoints(result);
+        var next = frameworkEntryPoints.Count();
+        foreach (var entryPoint in result.EntryPoints)
+        {
+            entryPoint.Id = $"ep{++next}";
+        }
+
+        result.EntryPoints.InsertRange(0, frameworkEntryPoints);
         result.PackageReachability = TransparencyBuilder.BuildPackageReachability(result);
         result.DangerousApiReachability = TransparencyBuilder.BuildDangerousApiReachability(result);
         result.WeaknessCandidates = TransparencyBuilder.BuildWeaknessCandidates(result, result.EntryPoints);
@@ -337,7 +352,7 @@ public static partial class DataFlowAnalyzer
         }
     }
 
-    private static void AnalyzeCompilationUnit(SemanticModel model, CSharpCompilationUnitSyntax root, DataFlowGraphBuilder graph, DataFlowPatternSet patterns, Dictionary<string, DataFlowMethodSummary> summaries, string basePath, string sourceFilePath)
+    private static void AnalyzeCompilationUnit(SemanticModel model, CSharpCompilationUnitSyntax root, DataFlowGraphBuilder graph, DataFlowPatternSet patterns, Dictionary<string, DataFlowMethodSummary> summaries, string basePath, string sourceFilePath, FrameworkTaintSeedIndex? frameworkSeeds = null)
     {
         var operationNodes = root.DescendantNodes()
             .Where(node => node is Microsoft.CodeAnalysis.CSharp.Syntax.BaseMethodDeclarationSyntax or Microsoft.CodeAnalysis.CSharp.Syntax.AccessorDeclarationSyntax or Microsoft.CodeAnalysis.CSharp.Syntax.LocalFunctionStatementSyntax);
@@ -346,12 +361,12 @@ public static partial class DataFlowAnalyzer
             var operation = model.GetOperation(node);
             if (operation is not null)
             {
-                new DataFlowOperationWalker(model, graph, patterns, summaries, basePath, sourceFilePath).Visit(operation);
+                new DataFlowOperationWalker(model, graph, patterns, summaries, basePath, sourceFilePath, frameworkSeeds).Visit(operation);
             }
         }
     }
 
-    private static void AnalyzeCompilationUnit(SemanticModel model, VisualBasicCompilationUnitSyntax root, DataFlowGraphBuilder graph, DataFlowPatternSet patterns, Dictionary<string, DataFlowMethodSummary> summaries, string basePath, string sourceFilePath)
+    private static void AnalyzeCompilationUnit(SemanticModel model, VisualBasicCompilationUnitSyntax root, DataFlowGraphBuilder graph, DataFlowPatternSet patterns, Dictionary<string, DataFlowMethodSummary> summaries, string basePath, string sourceFilePath, FrameworkTaintSeedIndex? frameworkSeeds = null)
     {
         var operationNodes = root.DescendantNodes()
             .Where(node => node is Microsoft.CodeAnalysis.VisualBasic.Syntax.MethodBlockSyntax or Microsoft.CodeAnalysis.VisualBasic.Syntax.AccessorBlockSyntax);
@@ -360,7 +375,7 @@ public static partial class DataFlowAnalyzer
             var operation = model.GetOperation(node);
             if (operation is not null)
             {
-                new DataFlowOperationWalker(model, graph, patterns, summaries, basePath, sourceFilePath).Visit(operation);
+                new DataFlowOperationWalker(model, graph, patterns, summaries, basePath, sourceFilePath, frameworkSeeds).Visit(operation);
             }
         }
     }
@@ -391,7 +406,7 @@ public static partial class DataFlowAnalyzer
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         if (requested.Count == 0 || requested.Contains("all"))
         {
-            requested = ["aspnet", "data", "filesystem", "serialization", "cloud", "rpc", "auth", "crypto"];
+            requested = ["aspnet", "data", "filesystem", "serialization", "cloud", "rpc", "auth", "crypto", "grpc", "messaging", "ai", "mcp"];
         }
         patterns.PatternPacks = requested.OrderBy(pack => pack, StringComparer.OrdinalIgnoreCase).ToList();
 
@@ -483,6 +498,60 @@ public static partial class DataFlowAnalyzer
             ]);
             patterns.Sanitizers.AddRange([
                 new() { Target = DataFlowPatternTarget.Sanitizer, Kind = DataFlowPatternKind.Method, Pattern = "System.Security.Cryptography.RandomNumberGenerator", Match = DataFlowMatchKind.Contains, Category = "secure-random", Description = "Cryptographically secure random source", RemovesTaintKinds = ["insecure-random"] }
+            ]);
+        }
+
+        if (requested.Contains("grpc"))
+        {
+            patterns.Sources.AddRange([
+                new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Type, Pattern = "Grpc.Core.ServerCallContext", Match = DataFlowMatchKind.Contains, Category = "rpc", Description = "gRPC server call context" }
+            ]);
+            patterns.Sinks.AddRange([
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "GrpcChannel.ForAddress", Match = DataFlowMatchKind.Contains, Category = "network", Description = "gRPC channel creation", TaintKinds = ["rpc"] },
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "Grpc.Net.Client.GrpcChannel", Match = DataFlowMatchKind.Contains, Category = "network", Description = "gRPC client channel", TaintKinds = ["rpc"] }
+            ]);
+        }
+
+        if (requested.Contains("messaging"))
+        {
+            patterns.Sources.AddRange([
+                new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Type, Pattern = "ConsumeContext", Match = DataFlowMatchKind.Contains, Category = "rpc", Description = "MassTransit consume context" }
+            ]);
+            patterns.Sinks.AddRange([
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "IPublishEndpoint.Publish", Match = DataFlowMatchKind.Contains, Category = "messaging", Description = "MassTransit publish", TaintKinds = ["rpc"] },
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "ISendEndpoint.Send", Match = DataFlowMatchKind.Contains, Category = "messaging", Description = "MassTransit send", TaintKinds = ["rpc"] },
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "DaprClient.InvokeMethodAsync", Match = DataFlowMatchKind.Contains, Category = "rpc", Description = "Dapr service invocation", TaintKinds = ["rpc"] }
+            ]);
+        }
+
+        if (requested.Contains("ai"))
+        {
+            patterns.Sources.AddRange([
+                // Qualified deliberately. A bare Contains on "ChatResponse"/"GetResponseAsync" matched
+                // System.Net.WebRequest.GetResponseAsync() and any ChatResponseDto, reporting every
+                // legacy WebRequest call site in a codebase as attacker-influenced LLM output — and the
+                // symbol IS resolved here, so per the AGENTS.md heuristic policy the qualified form is
+                // the correct one, matching the paired sink below.
+                new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Type, Pattern = "Microsoft.Extensions.AI.ChatResponse", Match = DataFlowMatchKind.Contains, Category = "llm-output", Description = "LLM model output (treated as attacker-influenced)", TaintKinds = ["llm"] },
+                new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Method, Pattern = "Microsoft.Extensions.AI.IChatClient.GetResponseAsync", Match = DataFlowMatchKind.Contains, Category = "llm-output", Description = "LLM response value", TaintKinds = ["llm"] },
+                new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Method, Pattern = "Microsoft.SemanticKernel.Kernel.InvokePromptAsync", Match = DataFlowMatchKind.Contains, Category = "llm-output", Description = "LLM response value", TaintKinds = ["llm"] }
+            ]);
+            patterns.Sinks.AddRange([
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "Microsoft.Extensions.AI.IChatClient.GetResponseAsync", Match = DataFlowMatchKind.Contains, Category = "prompt", Description = "Prompt flowing into a model call (prompt injection)", TaintKinds = ["prompt-injection"] },
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "Microsoft.SemanticKernel.Kernel.InvokePromptAsync", Match = DataFlowMatchKind.Contains, Category = "prompt", Description = "Semantic Kernel prompt invocation", TaintKinds = ["prompt-injection"] },
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Type, Pattern = @"^(?:[\w.]+\.)?ChatMessage$", Match = DataFlowMatchKind.Regex, Category = "prompt", Description = "Chat message construction (exact type; DTO/ViewModel variants excluded)", TaintKinds = ["prompt-injection"] },
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "OpenAI.Chat.ChatClient.CompleteChatAsync", Match = DataFlowMatchKind.Contains, Category = "prompt", Description = "OpenAI chat completion", TaintKinds = ["prompt-injection"] }
+            ]);
+        }
+
+        if (requested.Contains("mcp"))
+        {
+            patterns.Sources.AddRange([
+                new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Attribute, Pattern = "McpServerTool", Match = DataFlowMatchKind.Contains, Category = "mcp", Description = "MCP server tool parameter (attacker-controlled)", TaintKinds = ["mcp"] },
+                new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Attribute, Pattern = "McpServerPrompt", Match = DataFlowMatchKind.Contains, Category = "mcp", Description = "MCP server prompt argument", TaintKinds = ["mcp"] }
+            ]);
+            patterns.Sinks.AddRange([
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "McpClientFactory.CreateAsync", Match = DataFlowMatchKind.Contains, Category = "mcp-egress", Description = "Outbound MCP client connection", TaintKinds = ["rpc"] }
             ]);
         }
     }
@@ -1088,10 +1157,11 @@ public static partial class DataFlowAnalyzer
         }
     }
 
-    private sealed class DataFlowOperationWalker(SemanticModel model, DataFlowGraphBuilder graph, DataFlowPatternSet patterns, Dictionary<string, DataFlowMethodSummary> summaries, string basePath, string sourceFilePath) : OperationWalker
+    private sealed class DataFlowOperationWalker(SemanticModel model, DataFlowGraphBuilder graph, DataFlowPatternSet patterns, Dictionary<string, DataFlowMethodSummary> summaries, string basePath, string sourceFilePath, FrameworkTaintSeedIndex? frameworkSeeds = null) : OperationWalker
     {
         private readonly Dictionary<string, TaintTrace> _taintedSymbols = new(StringComparer.Ordinal);
         private readonly DataFlowPatternIndex _patternIndex = new(patterns);
+        private readonly FrameworkTaintSeedIndex? _frameworkSeeds = frameworkSeeds;
         private readonly Dictionary<SyntaxNode, string> _syntaxTextCache = new();
         private IMethodSymbol? _currentMethod;
 
@@ -1194,23 +1264,48 @@ public static partial class DataFlowAnalyzer
 
         private void SeedMethodParameters(IMethodSymbol methodSymbol, SyntaxNode syntax)
         {
+            // Lambda parameters are not framework entry-point parameters: binding them here made
+            // query lambdas (claims => ...) inherit the enclosing action's [HttpGet] attribute
+            // pattern and mint phantom sources. Their values arrive through the enclosing flow.
+            if (methodSymbol.MethodKind is MethodKind.LambdaMethod or MethodKind.AnonymousFunction)
+            {
+                return;
+            }
+
             foreach (var parameter in methodSymbol.Parameters)
             {
                 var matched = MatchParameterSource(parameter, methodSymbol).ToList();
-                if (matched.Count == 0)
+                if (matched.Count > 0)
+                {
+                    var node = graph.AddNode("Source", parameter.Name, syntax, model, basePath, sourceFilePath, methodSymbol,
+                        isSource: true,
+                        isSink: false,
+                        matchedPatterns: matched,
+                        category: matched.FirstOrDefault()?.Category,
+                        symbol: parameter.ToDisplayString(),
+                        typeName: Normalize(parameter.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)),
+                        code: parameter.Name);
+                    _taintedSymbols[SymbolKey(parameter)] = new TaintTrace([node.Id], matched.SelectMany(pattern => pattern.TaintKinds.Count > 0 ? pattern.TaintKinds : [pattern.Category ?? "user-input"]).Distinct(StringComparer.OrdinalIgnoreCase).ToList(), []);
+                    continue;
+                }
+
+                // Framework entry points taint their bound parameters: a controller action's plain
+                // string id, an rpc request message, a hub method argument. These are symbol-anchored
+                // seeds from the framework providers, not name matches.
+                if (_frameworkSeeds?.Find(Path.GetFileName(sourceFilePath), methodSymbol, parameter.Name) is not { } seed)
                 {
                     continue;
                 }
 
-                var node = graph.AddNode("Source", parameter.Name, syntax, model, basePath, sourceFilePath, methodSymbol,
+                var seedNode = graph.AddNode("Source", parameter.Name, syntax, model, basePath, sourceFilePath, methodSymbol,
                     isSource: true,
                     isSink: false,
-                    matchedPatterns: matched,
-                    category: matched.FirstOrDefault()?.Category,
+                    matchedPatterns: [],
+                    category: seed.TaintKind,
                     symbol: parameter.ToDisplayString(),
                     typeName: Normalize(parameter.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)),
                     code: parameter.Name);
-                _taintedSymbols[SymbolKey(parameter)] = new TaintTrace([node.Id], matched.SelectMany(pattern => pattern.TaintKinds.Count > 0 ? pattern.TaintKinds : [pattern.Category ?? "user-input"]).Distinct(StringComparer.OrdinalIgnoreCase).ToList(), []);
+                _taintedSymbols[SymbolKey(parameter)] = new TaintTrace([seedNode.Id], [seed.TaintKind, seed.BindingSource], []);
             }
         }
 
@@ -1678,9 +1773,16 @@ public static partial class DataFlowAnalyzer
 
             if (operation is IParameterReferenceOperation parameterReference)
             {
-                foreach (var pattern in MatchParameterSource(parameterReference.Parameter, _currentMethod ?? parameterReference.Parameter.ContainingSymbol as IMethodSymbol ?? throw new InvalidOperationException("Parameter without containing method")))
+                var ownerMethod = _currentMethod ?? parameterReference.Parameter.ContainingSymbol as IMethodSymbol ?? throw new InvalidOperationException("Parameter without containing method");
+                // A lambda parameter must not be matched against the enclosing method's routing
+                // attributes: `claims.Select(c => ...)` inside an [HttpGet] action made `c` a
+                // phantom http source through exactly this path.
+                if (SymbolEqualityComparer.Default.Equals(parameterReference.Parameter.ContainingSymbol, ownerMethod))
                 {
-                    yield return pattern;
+                    foreach (var pattern in MatchParameterSource(parameterReference.Parameter, ownerMethod))
+                    {
+                        yield return pattern;
+                    }
                 }
             }
 
@@ -2117,4 +2219,55 @@ public static partial class DataFlowAnalyzer
     private static string Normalize(string symbolName) => symbolName
         .Replace("global::", string.Empty, StringComparison.Ordinal)
         .Replace("Global.", string.Empty, StringComparison.Ordinal);
+}
+
+/// <summary>
+///     Symbol-anchored lookup for framework taint seeds: entry-point parameters bound to untrusted
+///     input (http-route/http-body/rpc-message/queue-message/mcp-tool-arg). Keyed once, O(1) per
+///     method so seeding never scans every seed per node.
+/// </summary>
+public sealed class FrameworkTaintSeedIndex
+{
+    private readonly Dictionary<string, List<Frameworks.FrameworkTaintSeed>> _byMethod = new(StringComparer.OrdinalIgnoreCase);
+
+    public FrameworkTaintSeedIndex(IEnumerable<Frameworks.FrameworkTaintSeed> seeds)
+    {
+        foreach (var seed in seeds)
+        {
+            var key = Key(seed.FileName, seed.MethodName);
+            if (!_byMethod.TryGetValue(key, out var list))
+            {
+                _byMethod[key] = list = [];
+            }
+
+            list.Add(seed);
+        }
+    }
+
+    /// <summary>
+    ///     Resolves the seed for one parameter of one method.
+    /// </summary>
+    /// <remarks>
+    ///     The method signature is the discriminator whenever the provider captured one. Matching on
+    ///     name plus class alone made overloads indistinguishable, so a <c>[NonAction]</c> or private
+    ///     <c>Get(string id, int page)</c> sitting beside a routed <c>Get(string id)</c> inherited the
+    ///     routed method's seeds and became a phantom untrusted source that no route can reach. Where a
+    ///     signature is unavailable, the previous name-and-class match is kept as a fallback rather
+    ///     than dropping the seed.
+    /// </remarks>
+    public Frameworks.FrameworkTaintSeed? Find(string? fileName, Microsoft.CodeAnalysis.IMethodSymbol method, string parameterName)
+    {
+        if (fileName is null || !_byMethod.TryGetValue(Key(fileName, method.Name), out var seeds))
+        {
+            return null;
+        }
+
+        var className = method.ContainingType?.Name;
+        var signature = Dosai.FormatMethodSignature(method);
+        var candidates = seeds.Where(seed => seed.ParameterName.Equals(parameterName, StringComparison.Ordinal)).ToList();
+        return candidates.FirstOrDefault(seed => seed.MethodSignature is not null && seed.MethodSignature == signature)
+               ?? candidates.FirstOrDefault(seed => seed.MethodSignature is null && (seed.ClassName is null || seed.ClassName == className));
+    }
+
+    private static string Key(string? fileName, string methodName) => $"{fileName}|{methodName}";
 }

@@ -12,19 +12,19 @@ dotnet run --project ./Dosai/Dosai.csproj -- dataflows \
 `--pattern-packs` defaults to `all`. `all` expands to:
 
 ```text
-aspnet,data,filesystem,serialization,cloud,rpc,auth,crypto
+aspnet,data,filesystem,serialization,cloud,rpc,auth,crypto,grpc,messaging,ai,mcp
 ```
 
 User patterns passed with `--patterns` are merged after the selected built-in packs. See [Data-flow custom patterns](./dataflow-patterns.md) for the custom pattern file format.
 
 ## Selection model
 
-| Input                         | Effective optional packs                                                          | Notes                                          |
-| ----------------------------- | --------------------------------------------------------------------------------- | ---------------------------------------------- |
-| omitted                       | `aspnet`, `data`, `filesystem`, `serialization`, `cloud`, `rpc`, `auth`, `crypto` | Default behavior.                              |
-| `--pattern-packs all`         | all optional packs                                                                | Same as omitted.                               |
-| `--pattern-packs aspnet,data` | `aspnet`, `data`                                                                  | Always-on defaults still apply.                |
-| `--pattern-packs crypto`      | `crypto`                                                                          | Adds crypto taint patterns on top of defaults. |
+| Input                         | Effective optional packs                                                                                            | Notes                                          |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| omitted                       | `aspnet`, `data`, `filesystem`, `serialization`, `cloud`, `rpc`, `auth`, `crypto`, `grpc`, `messaging`, `ai`, `mcp` | Default behavior.                              |
+| `--pattern-packs all`         | all optional packs                                                                                                  | Same as omitted.                               |
+| `--pattern-packs aspnet,data` | `aspnet`, `data`                                                                                                    | Always-on defaults still apply.                |
+| `--pattern-packs crypto`      | `crypto`                                                                                                            | Adds crypto taint patterns on top of defaults. |
 
 ## Always-on baseline patterns
 
@@ -221,3 +221,17 @@ dotnet run --project ./Dosai/Dosai.csproj -- dataflows \
   --print-sources-sinks \
   --o /tmp/dosai-dataflows.json
 ```
+
+## New packs (schema 4.0.0)
+
+| Pack        | Sources                                                                                     | Sinks                                                                                                                                                                                                               |
+| ----------- | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `grpc`      | `Grpc.Core.ServerCallContext` (rpc)                                                         | `GrpcChannel.ForAddress`, `Grpc.Net.Client.GrpcChannel` (network)                                                                                                                                                   |
+| `messaging` | `ConsumeContext` (rpc)                                                                      | `IPublishEndpoint.Publish`, `ISendEndpoint.Send`, `DaprClient.InvokeMethodAsync` (messaging)                                                                                                                        |
+| `ai`        | LLM model output (`ChatResponse`, `GetResponseAsync` — model output is attacker-influenced) | `IChatClient.GetResponseAsync`, `Kernel.InvokePromptAsync`, `ChatMessage` construction (exact type match — `ChatMessageDto` and other user DTOs are not prompts), `ChatClient.CompleteChatAsync` (prompt; CWE-1427) |
+| `mcp`       | `[McpServerTool]`/`[McpServerPrompt]` parameters (mcp)                                      | `McpClientFactory.CreateAsync` (mcp-egress)                                                                                                                                                                         |
+
+The `ai` pack is the prompt-injection rule set: untrusted input flowing into a chat message or
+prompt invocation yields `PromptInjectionCandidate` weaknesses (CWE-1427); MCP tool arguments
+yield `McpToolInjectionCandidate`. See [Framework semantics](./frameworks.md) for the provider
+side (taint seeding of framework entry points).

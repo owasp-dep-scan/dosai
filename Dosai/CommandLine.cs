@@ -123,12 +123,35 @@ public class CommandLine
         rootCommand.Options.Add(callGraphFormatOption);
         rootCommand.Options.Add(callGraphOutputFileOption);
 
+        var classifyDataOption = new Option<bool>("--classify-data")
+        {
+            Description = "Classify service request/response data (pii/credential/financial/health) from DTO members (default: on)",
+            DefaultValueFactory = _ => true
+        };
+        var includePromptTextOption = new Option<bool>("--include-prompt-text")
+        {
+            Description = "Emit full system prompt text in AiComponents (default: SHA-256 and first 200 characters only)"
+        };
+        var noClassifyDataOption = new Option<bool>("--no-classify-data")
+        {
+            Description = "Disable service request/response data classification (turns off --classify-data)"
+        };
+        var maxConventionalRoutesOption = new Option<int>("--max-conventional-routes")
+        {
+            Description = "Cap for conventional routing pattern expansion (MapControllerRoute cross-products) (default: 500)",
+            DefaultValueFactory = _ => 500
+        };
+
         var methodsCommand = new Command("methods", "Retrieve details about the methods")
         {
             pathOption,
             outputFileOption,
             callGraphFormatOption,
-            callGraphOutputFileOption
+            callGraphOutputFileOption,
+            classifyDataOption,
+            noClassifyDataOption,
+            maxConventionalRoutesOption,
+            includePromptTextOption
         };
 
         var dataFlowsCommand = new Command("dataflows", "Create data-flow slices from source patterns to sink patterns")
@@ -180,11 +203,16 @@ public class CommandLine
             queryOption
         };
 
+        var mcpRootOption = new Option<string?>("--mcp-root")
+        {
+            Description = "Restrict the MCP server to paths under this directory (recommended when the server is exposed to external MCP clients)"
+        };
         var mcpCommand = new Command("mcp", "Run an MCP-style JSON-RPC server over stdin/stdout")
         {
             pathOption,
             patternsFileOption,
-            patternPacksOption
+            patternPacksOption,
+            mcpRootOption
         };
 
         rootCommand.Subcommands.Add(methodsCommand);
@@ -202,6 +230,9 @@ public class CommandLine
                 var outputFile = parseResult.GetValue(outputFileOption);
                 var callGraphFormat = parseResult.GetValue(callGraphFormatOption);
                 var callGraphOutputFile = parseResult.GetValue(callGraphOutputFileOption);
+                var classifyData = parseResult.GetValue(classifyDataOption) && !parseResult.GetValue(noClassifyDataOption);
+                var maxConventionalRoutes = parseResult.GetValue(maxConventionalRoutesOption);
+                var includePromptText = parseResult.GetValue(includePromptTextOption);
 
                 // Stream the JSON straight to the output file and keep the built slice around so the call-graph
                 // exporter can reuse it. This avoids materialising the full JSON as a single string (which drove
@@ -214,7 +245,7 @@ public class CommandLine
                 }
                 else
                 {
-                    methodsSlice = Dosai.WriteMethods(path!, outputFile!);
+                    methodsSlice = Dosai.WriteMethods(path!, outputFile!, new Frameworks.FrameworkAnalysisOptions { ClassifyData = classifyData, MaxConventionalRoutes = maxConventionalRoutes, IncludePromptText = includePromptText });
                 }
 
                 if (!string.IsNullOrWhiteSpace(callGraphFormat))
@@ -360,7 +391,8 @@ public class CommandLine
             var path = parseResult.GetValue(pathOption);
             var patternsFile = parseResult.GetValue(patternsFileOption);
             var patternPacks = parseResult.GetValue(patternPacksOption);
-            return McpServer.Run(path, patternsFile, patternPacks);
+            var mcpRoot = parseResult.GetValue(mcpRootOption);
+            return McpServer.Run(path, patternsFile, patternPacks, mcpRoot);
         });
 
         return rootCommand.Parse(args).Invoke();

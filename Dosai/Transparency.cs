@@ -5,8 +5,8 @@ namespace Depscan;
 
 public sealed class AnalysisMetadata
 {
-    public string SchemaVersion { get; set; } = "3.3.0";
-    public string AnalyzerVersion { get; set; } = typeof(Dosai).Assembly.GetName().Version?.ToString() ?? "3.1.0";
+    public string SchemaVersion { get; set; } = "4.0.0";
+    public string AnalyzerVersion { get; set; } = typeof(Dosai).Assembly.GetName().Version?.ToString() ?? "4.0.0";
     public DateTimeOffset GeneratedAt { get; set; } = DateTimeOffset.UtcNow;
     public string? InputPath { get; set; }
     public string Tool { get; set; } = "Dosai";
@@ -35,7 +35,7 @@ public sealed class EntryPoint
     public List<string> RequiredScopes { get; set; } = [];
     public List<string> CorsPolicies { get; set; } = [];
     public bool? AntiForgeryRequired { get; set; }
-    public List<string> Urls { get; set; } = [];
+    public List<string> RawUrls { get; set; } = [];
     public List<string> InputNames { get; set; } = [];
 }
 
@@ -114,6 +114,30 @@ public static class TransparencyBuilder
 {
     public static AnalysisMetadata CreateMetadata(string inputPath) => new() { InputPath = inputPath };
 
+    /// <summary>
+    ///     Maps an endpoint kind (Attribute, MinimalApi, and the framework kinds added in schema
+    ///     4.0.0) onto the entry-point kind. HTTP entry points no longer use "HttpEndpoint";
+    ///     controllers are "HttpController".
+    /// </summary>
+    private static string EntryPointKindFor(ApiEndpoint endpoint) => endpoint.EndpointKind switch
+    {
+        "MinimalApi" => "HttpMinimalApi",
+        "Grpc" => "Grpc",
+        "SignalRHub" => "SignalRHub",
+        "Soap" => "Soap",
+        "GraphQL" => "GraphQL",
+        "OData" => "OData",
+        "RazorPage" => "HttpRazorPage",
+        "AzureFunction" => "AzureFunction",
+        "LambdaFunction" => "LambdaFunction",
+        "MessageConsumer" => "MessageConsumer",
+        "ScheduledJob" or "HostedService" => "HostedService",
+        "McpTool" => "McpTool",
+        "McpPrompt" => "McpPrompt",
+        "McpResource" => "McpResource",
+        _ => "HttpController"
+    };
+
     public static List<EntryPoint> BuildEntryPoints(IEnumerable<ApiEndpoint> apiEndpoints, IEnumerable<Method>? methods = null)
     {
         var entries = new List<EntryPoint>();
@@ -123,17 +147,17 @@ public static class TransparencyBuilder
             entries.Add(new EntryPoint
             {
                 Id = $"ep{++index}",
-                Kind = endpoint.EndpointKind == "MinimalApi" ? "HttpMinimalApi" : "HttpEndpoint",
+                Kind = EntryPointKindFor(endpoint),
                 MethodName = endpoint.MethodName,
                 ClassName = endpoint.ClassName,
                 Namespace = endpoint.Namespace,
                 FileName = endpoint.FileName,
-                Path = endpoint.Path,
+                Path = endpoint.FilePath ?? endpoint.Path,
                 LineNumber = endpoint.LineNumber,
                 ColumnNumber = endpoint.ColumnNumber,
                 HttpMethod = endpoint.HttpMethod,
-                Route = endpoint.Route,
-                Urls = endpoint.Urls,
+                Route = endpoint.Path ?? endpoint.Route,
+                RawUrls = endpoint.RawUrls,
                 AuthorizationRequired = endpoint.AuthorizationRequired,
                 AuthorizationPolicies = endpoint.AuthorizationPolicies,
                 Roles = endpoint.Roles,
@@ -571,6 +595,9 @@ public static class TransparencyBuilder
         "deserialization" => "UnsafeDeserializationCandidate",
         "reflection" => "UnsafeReflectionCandidate",
         "rpc" => "RpcDispatchReachabilityCandidate",
+        "prompt" => "PromptInjectionCandidate",
+        "mcp" => "McpToolInjectionCandidate",
+        "mcp-egress" => "McpEgressCandidate",
         _ => "DangerousDataFlowCandidate"
     };
 
@@ -583,6 +610,8 @@ public static class TransparencyBuilder
         "OpenRedirectCandidate" => "CWE-601",
         "UnsafeDeserializationCandidate" => "CWE-502",
         "UnsafeReflectionCandidate" => "CWE-470",
+        "PromptInjectionCandidate" => "CWE-1427",
+        "McpToolInjectionCandidate" => "CWE-1427",
         _ => null
     };
 
