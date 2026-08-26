@@ -1,0 +1,85 @@
+Dosai/Frameworks/Providers/RazorBlazorProvider.cs
+  s_e274b9ff27fe7b::t_ee6288a500c35d 35-39,41,46-48
+  s_e274b9ff27fe7b::t_bd128145734129 258-286
+  s_e274b9ff27fe7b::t_59072a94ef12fe 293-294
+  s_e274b9ff27fe7b::t_f881589c274745 321-326,329-335
+  s_71fcf4934b4bcf::t_72dbe2d9158d57 49
+Dosai/Frameworks/FrameworkDetection.cs
+  s_e274b9ff27fe7b::t_f1e64ac80e2988 73-99
+  s_e274b9ff27fe7b::t_fd9c38a8eba226 55
+Dosai.Tests/Frameworks/TaintAndClassificationTests.cs
+  s_e274b9ff27fe7b::t_17ac8ff76fd4ad 229-233,235
+Dosai/Frameworks/ProviderHelpers.cs
+  s_e274b9ff27fe7b::t_306015e554be66 20-23,25-32,35-37
+Dosai/DataFlow.cs
+  s_e274b9ff27fe7b::t_40b96a1eed4949 530-537
+  s_e274b9ff27fe7b::t_1a16431b350be5 2232-2242,2251-2254
+Dosai/Frameworks/IFrameworkProvider.cs
+  s_e274b9ff27fe7b::t_bd5b454ecabe34 42-43,45-49
+Dosai/Frameworks/FrameworkContext.cs
+  s_e274b9ff27fe7b::t_98432fe87b1f50 221-240,242,244-260
+  s_e274b9ff27fe7b::t_fcf28c8d141816 241,243
+Dosai/Frameworks/Providers/LlmSdkProvider.cs
+  s_e274b9ff27fe7b::t_0db8eaa613f1ab 208-234,236-239
+  s_e274b9ff27fe7b::t_2bc74ecaf736f9 317
+  s_e274b9ff27fe7b::t_c86303e8be1866 324-328
+  s_e274b9ff27fe7b::t_079ea7393cb993 18-21
+  s_e274b9ff27fe7b::t_80a92d3d9d14b9 280-295
+  s_e274b9ff27fe7b::t_5f0e2e39568260 305-308,310
+  s_e274b9ff27fe7b::t_5e7754b7291120 52-56
+Dosai.Tests/Frameworks/RegressionTests.cs
+  s_e274b9ff27fe7b::t_2f379583f240a3 1-244
+Dosai/Frameworks/Providers/McpProvider.cs
+  s_e274b9ff27fe7b::t_e2eb21f0e553b7 257
+  s_e274b9ff27fe7b::t_ab0e86a767a25a 407-427
+  s_e274b9ff27fe7b::t_1e97ed709197a2 453-464
+  s_e274b9ff27fe7b::t_c97826e5e7a1bd 435
+  s_e274b9ff27fe7b::t_620d552b69e781 182-187
+Dosai/Frameworks/DataClassifier.cs
+  s_e274b9ff27fe7b::t_77136252e6fae6 174,177
+  s_e274b9ff27fe7b::t_6a51875888eb34 37-91
+  s_e274b9ff27fe7b::t_01feb428b34565 13-26,29-32,35
+  s_71fcf4934b4bcf::t_ca3768d04eb460 36
+Dosai/Dosai.cs
+  s_e274b9ff27fe7b::t_ae4e466812e607 162-166,169
+  s_e274b9ff27fe7b::t_35ca385a571b8b 197-200,205-206,208-217,221-230
+  s_e274b9ff27fe7b::t_0443fa434f3987 231-232
+Dosai/Frameworks/Providers/AspNetCoreMvcProvider.cs
+  s_e274b9ff27fe7b::t_568b3005281cb7 387-403
+  s_e274b9ff27fe7b::t_aa1508ea5d0300 99-108
+  s_e274b9ff27fe7b::t_33df25f939d9f0 98,109-114,116,118-122,127-130,132,135-136
+  s_e274b9ff27fe7b::t_35fe85b818e868 189-193
+  s_e274b9ff27fe7b::t_f3760c5dc0baac 256-261
+  s_e274b9ff27fe7b::t_bb85bf099a18fb 137
+Dosai/Frameworks/Providers/LegacyDotNetWebProvider.cs
+  s_e274b9ff27fe7b::t_6e0606a1d1a6d5 79-88,103-105
+Dosai/Frameworks/FrameworkRegistry.cs
+  s_e274b9ff27fe7b::t_ab258435e1cf2f 106-107,112-172
+  s_e274b9ff27fe7b::t_d5f7d451704ed3 188-195
+  s_e274b9ff27fe7b::t_3113bd6da9339f 198-201,203
+  s_71fcf4934b4bcf::t_fc65d10744feb2 173
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d08658a31e876c5a94be509c3835dfde2ac39bc4",
+  "prompts": {},
+  "sessions": {
+    "s_71fcf4934b4bcf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e1d73403-6662-49ed-aaf2-027327b62436",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    },
+    "s_e274b9ff27fe7b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c8067528-3215-4987-8ddf-7379117b2c68",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
