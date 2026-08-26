@@ -1,0 +1,21 @@
+Dosai/Frameworks/Providers/CommunityHttpProvider.cs
+  s_1246da50fbe044::t_09b9fada37e1a0 46-48
+Dosai/Frameworks/Providers/LegacyDotNetWebProvider.cs
+  s_1246da50fbe044::t_f6bc71cbd9476b 122-124,128-130
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "819f1db5d149ded9e80dc288d4ffbaee826c1c05",
+  "prompts": {},
+  "sessions": {
+    "s_1246da50fbe044": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bd1711ba-4707-4f06-9ddb-30649cd0126e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
