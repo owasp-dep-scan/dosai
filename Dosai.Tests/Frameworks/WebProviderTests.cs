@@ -106,6 +106,76 @@ public static class UrlBuilder
     }
 
     [Fact]
+    public void ControllerTokenRoute_ResolvesToConcreteControllerPath()
+    {
+        // Regression for the cdxgen deep-analysis report where the raw template token shipped
+        // as the endpoint ("%5Bcontroller%5D"): [controller] must resolve to the controller name.
+        var slice = Run(("Weather.cs", MvcStubs + """
+
+[Route("[controller]")]
+public class WeatherForecastController : Microsoft.AspNetCore.Mvc.ControllerBase
+{
+    [HttpGet]
+    public object Get() => null;
+}
+"""));
+
+        var service = Assert.Single(slice.Services ?? [], s => s.Name == "WeatherForecast");
+        Assert.Equal(["/WeatherForecast"], service.Endpoints);
+        var endpoint = Assert.Single(slice.ApiEndpoints ?? []);
+        Assert.Equal("/WeatherForecast", endpoint.Path);
+        Assert.Equal("[controller]", endpoint.Route);
+    }
+
+    [Fact]
+    public void SegmentVersionedRoute_ExpandsToOneConcreteEndpointPerDeclaredApiVersion()
+    {
+        // Regression for URL-path API versioning ("v{version:apiVersion}/[controller]"): the
+        // constraint's value domain is known from [ApiVersion], so the endpoint paths must be
+        // concrete versions, never a path still containing "apiVersion".
+        var slice = Run(("Versioned.cs", MvcStubs + """
+
+namespace Asp.Versioning
+{
+    public class ApiVersionAttribute : System.Attribute { public ApiVersionAttribute(string version) { } }
+    public class MapToApiVersionAttribute : System.Attribute { public MapToApiVersionAttribute(string version) { } }
+}
+
+[Route("v{version:apiVersion}/[controller]")]
+[Asp.Versioning.ApiVersion("1.0")]
+[Asp.Versioning.ApiVersion("2.0")]
+public class OrdersController : Microsoft.AspNetCore.Mvc.ControllerBase
+{
+    [HttpGet]
+    public object List() => null;
+
+    [HttpGet("{id:int}")]
+    public object Get(int id) => null;
+
+    [HttpPost]
+    [Asp.Versioning.MapToApiVersion("2.0")]
+    public object Create(object order) => null;
+}
+"""));
+
+        var service = Assert.Single(slice.Services ?? [], s => s.Name == "Orders");
+        // List/Get serve both declared versions; Create is pinned to 2.0 by [MapToApiVersion].
+        Assert.Equal(
+        [
+            "/v1.0/Orders", "/v2.0/Orders",
+            "/v1.0/Orders/{id}", "/v2.0/Orders/{id}"
+        ], service.Endpoints);
+        Assert.Equal(5, service.Operations.Count);
+        Assert.Contains(service.Operations, op => op is { HttpMethod: "POST", Path: "/v2.0/Orders" } && op.Properties.TryGetValue("apiVersion", out var v) && v == "2.0");
+        Assert.DoesNotContain(service.Operations, op => op is { HttpMethod: "POST", Path: "/v1.0/Orders" });
+        var endpoint = Assert.Single(slice.ApiEndpoints ?? [], e => e is { MethodName: "Get", Path: "/v2.0/Orders/{id}" });
+        // The verbatim template stays on Route for humans and diffing.
+        Assert.Equal("v{version:apiVersion}/[controller]/{id:int}", endpoint.Route);
+        Assert.All(slice.ApiEndpoints ?? [], e => Assert.DoesNotContain("apiVersion", e.Path));
+        Assert.All(slice.ApiEndpoints ?? [], e => Assert.DoesNotContain("[controller]", e.Path));
+    }
+
+    [Fact]
     public void MultipleClassLevelRoutes_EmitOneEndpointPerTemplate()
     {
         var slice = Run(("MultiRoute.cs", MvcStubs + """

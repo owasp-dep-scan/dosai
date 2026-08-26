@@ -36,6 +36,11 @@ is byte-reproducible across runs and machines; when the same namespace + class n
 several projects, the service group carries the relative source directory to keep ids unique.
 See [migration to 4.0.0](./migration-4.0.md) for every output-visible change.
 
+Segment-versioned attribute routes (`v{version:apiVersion}/[controller]`) have a statically known
+value domain: one concrete endpoint is emitted per declared `[ApiVersion]` (with `[MapToApiVersion]`
+pinning an action to specific versions), e.g. `/v1.0/Orders` and `/v2.0/Orders`. The verbatim
+template always stays on `ApiEndpoint.Route`.
+
 ## Performance expectations
 
 Framework analysis adds work proportional to the number of routed surfaces: keyword-gated

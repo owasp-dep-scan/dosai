@@ -351,4 +351,60 @@ public class RouteTemplateResolverTests
         Assert.Equal(first.Path, second.Path);
         Assert.Equal(first.Parameters.Count, second.Parameters.Count);
     }
+
+    [Fact]
+    public void Resolve_LiteralPrefixedParameter_StripsConstraintAndRecordsParameter()
+    {
+        // URL segment versioning: "v{version:apiVersion}" is a literal plus a constrained
+        // parameter, not a malformed segment.
+        var resolved = RouteTemplateResolver.Resolve("v{version:apiVersion}/[controller]", Tokens(controller: "Orders"));
+        Assert.Equal("/v{version}/Orders", resolved.Path);
+        Assert.Equal("v{version}/Orders", resolved.NormalizedTemplate);
+        var parameter = Assert.Single(resolved.Parameters);
+        Assert.Equal("version", parameter.Name);
+        Assert.Equal(["apiVersion"], parameter.Constraints);
+        Assert.Equal(["controller"], resolved.Tokens);
+        Assert.False(resolved.HasMalformedSegment);
+        Assert.Equal("high", resolved.Confidence);
+    }
+
+    [Fact]
+    public void Resolve_MultipleEmbeddedParameters_AreEachNormalized()
+    {
+        var resolved = RouteTemplateResolver.Resolve("{language}-{culture}/items");
+        Assert.Equal("/{language}-{culture}/items", resolved.Path);
+        Assert.Equal(2, resolved.Parameters.Count);
+        Assert.Contains(resolved.Parameters, parameter => parameter.Name == "language");
+        Assert.Contains(resolved.Parameters, parameter => parameter.Name == "culture");
+    }
+
+    [Fact]
+    public void Resolve_UnbalancedEmbeddedParameter_StaysVerbatimAndFlagsMalformed()
+    {
+        var resolved = RouteTemplateResolver.Resolve("v{version/orders");
+        Assert.Equal("/v{version/orders", resolved.Path);
+        Assert.True(resolved.HasMalformedSegment);
+        Assert.Equal("medium", resolved.Confidence);
+    }
+
+    [Fact]
+    public void SubstituteParameter_ReplacesValueAndDropsParameter()
+    {
+        var resolved = RouteTemplateResolver.Resolve("v{version:apiVersion}/[controller]", Tokens(controller: "Orders"));
+        var substituted = RouteTemplateResolver.SubstituteParameter(resolved, "version", "2.0");
+        Assert.Equal("/v2.0/Orders", substituted.Path);
+        Assert.Equal("v2.0/Orders", substituted.NormalizedTemplate);
+        Assert.Empty(substituted.Parameters);
+        // The original resolved template is untouched.
+        Assert.Equal("/v{version}/Orders", resolved.Path);
+    }
+
+    [Fact]
+    public void SubstituteParameter_UnknownParameter_IsNoOp()
+    {
+        var resolved = RouteTemplateResolver.Resolve("orders/{id}", Tokens(controller: "Orders"));
+        var substituted = RouteTemplateResolver.SubstituteParameter(resolved, "version", "2.0");
+        Assert.Equal(resolved.Path, substituted.Path);
+        Assert.Single(substituted.Parameters);
+    }
 }

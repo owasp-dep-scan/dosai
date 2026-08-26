@@ -311,141 +311,171 @@ public sealed class AspNetCoreMvcProvider : IFrameworkProvider
             Area = area
         };
         var verbatim = RouteTemplateResolver.Combine(classRoute, template.Text);
-        var resolved = template.Resolvable ? RouteTemplateResolver.Resolve(verbatim, tokens) : new ResolvedRouteTemplate { NormalizedTemplate = verbatim ?? string.Empty };
+        var baseTemplate = template.Resolvable ? RouteTemplateResolver.Resolve(verbatim, tokens) : new ResolvedRouteTemplate { NormalizedTemplate = verbatim ?? string.Empty };
         var lineSpan = method.GetLocation().GetLineSpan().StartLinePosition;
         var methodSymbol = model.GetDeclaredSymbol(method);
         var methodId = methodSymbol is null ? null : Depscan.Dosai.FormatMethodSignature(methodSymbol);
-        var operationId = FrameworkIds.Operation(service.Id, httpMethod, resolved.Path, method.Identifier.Text);
-        var endpointConfidence = resolved.Path is null ? "low" : controller.Confidence;
+        var controllerAttributes = classAttributes(controller);
+        var apiVersions = EffectiveApiVersions(methodAttributes, controllerAttributes);
 
-        var endpoint = new ApiEndpoint
+        // "{version:apiVersion}" has a statically known value domain: emit one concrete endpoint
+        // per declared API version instead of shipping the constraint inside the path.
+        var versionParameter = baseTemplate.Parameters.FirstOrDefault(parameter => parameter.Constraints.Any(constraint => constraint.Equals("apiVersion", StringComparison.OrdinalIgnoreCase)));
+        List<(string? ApiVersion, ResolvedRouteTemplate Template)> expansions;
+        if (versionParameter is not null && apiVersions.Count > 0)
         {
-            Path = resolved.Path,
-            FilePath = CodeLocation.From(ctx.BasePath, controller.FilePath).Path,
-            FileName = Path.GetFileName(controller.FilePath),
-            Namespace = namespaceName,
-            ClassName = controller.Type.Identifier.Text,
-            MethodName = method.Identifier.Text,
-            HttpMethod = httpMethod,
-            Route = verbatim,
-            EndpointKind = "Attribute",
-            RoutingKind = "Attribute",
-            Framework = "aspnetcore-mvc",
-            ServiceId = service.Id,
-            OperationId = operationId,
-            Confidence = endpointConfidence,
-            LineNumber = lineSpan.Line + 1,
-            ColumnNumber = lineSpan.Character + 1,
-            RawUrls = controller.RawUrls,
-            Evidence = new AnalysisEvidence
+            expansions = apiVersions
+                .Select(version => ((string?)version, RouteTemplateResolver.SubstituteParameter(baseTemplate, versionParameter.Name, version)))
+                .ToList();
+        }
+        else
+        {
+            expansions = [((string?)null, baseTemplate)];
+        }
+
+        var seedTaint = true;
+        foreach (var (apiVersion, resolved) in expansions)
+        {
+            var declaredVersion = apiVersion ?? (apiVersions.Count == 1 ? apiVersions[0] : null);
+            var operationId = FrameworkIds.Operation(service.Id, httpMethod, resolved.Path, method.Identifier.Text);
+            var endpointConfidence = resolved.Path is null ? "low" : controller.Confidence;
+
+            var endpoint = new ApiEndpoint
             {
-                Kind = AnalysisEvidenceKind.FrameworkModel,
-                Source = "aspnetcore-mvc",
-                Description = resolved.Path is null ? "Route template could not be resolved to a path." : "Attribute-routed controller action.",
-                Confidence = endpointConfidence,
+                Path = resolved.Path,
+                FilePath = CodeLocation.From(ctx.BasePath, controller.FilePath).Path,
                 FileName = Path.GetFileName(controller.FilePath),
+                Namespace = namespaceName,
+                ClassName = controller.Type.Identifier.Text,
+                MethodName = method.Identifier.Text,
+                HttpMethod = httpMethod,
+                Route = verbatim,
+                EndpointKind = "Attribute",
+                RoutingKind = "Attribute",
+                Framework = "aspnetcore-mvc",
+                ServiceId = service.Id,
+                OperationId = operationId,
+                ApiVersion = declaredVersion,
+                Confidence = endpointConfidence,
                 LineNumber = lineSpan.Line + 1,
-                ColumnNumber = lineSpan.Character + 1
-            }
-        };
-        BindRouteParameters(endpoint, resolved.Parameters, method, methodAttributes, model);
-        ApplyContentTypesAndVersion(endpoint, methodAttributes, classAttributes(controller));
-        ProviderHelpers.ApplyAuthorizationMetadata(endpoint, classAttributes(controller).Concat(methodAttributes));
-        results.ApiEndpoints.Add(endpoint);
+                ColumnNumber = lineSpan.Character + 1,
+                RawUrls = controller.RawUrls,
+                Evidence = new AnalysisEvidence
+                {
+                    Kind = AnalysisEvidenceKind.FrameworkModel,
+                    Source = "aspnetcore-mvc",
+                    Description = resolved.Path is null
+                        ? "Route template could not be resolved to a path."
+                        : apiVersion is null ? "Attribute-routed controller action." : $"Attribute-routed controller action (API version {apiVersion}).",
+                    Confidence = endpointConfidence,
+                    FileName = Path.GetFileName(controller.FilePath),
+                    LineNumber = lineSpan.Line + 1,
+                    ColumnNumber = lineSpan.Character + 1
+                }
+            };
+            BindRouteParameters(endpoint, resolved.Parameters, method, methodAttributes, model);
+            ApplyContentTypesAndVersion(endpoint, methodAttributes, controllerAttributes);
+            ProviderHelpers.ApplyAuthorizationMetadata(endpoint, controllerAttributes.Concat(methodAttributes));
+            results.ApiEndpoints.Add(endpoint);
 
-        var operation = new ServiceOperation
-        {
-            Id = operationId,
-            Name = ActionNameFrom(methodAttributes, method.Identifier.Text),
-            HttpMethod = httpMethod,
-            Path = resolved.Path,
-            RouteTemplate = verbatim,
-            RouteParameters = endpoint.RouteParameters,
-            RequestType = RequestTypeOf(methodSymbol),
-            ResponseType = methodSymbol?.ReturnType?.ToDisplayString(),
-            ContentTypes = endpoint.ContentTypes,
-            MethodId = methodId,
-            Authenticated = endpoint.AuthorizationRequired,
-            Confidence = endpoint.Confidence,
-            Location = CodeLocation.From(ctx.BasePath, controller.FilePath, lineSpan.Line + 1, lineSpan.Character + 1)
-        };
-        if (!string.IsNullOrWhiteSpace(endpoint.ApiVersion))
-        {
-            operation.Properties["apiVersion"] = endpoint.ApiVersion;
-        }
-
-        if (ctx.ClassifyData && methodSymbol is not null)
-        {
-            // Classify request/response DTOs from their members; every non-unknown
-            // classification names the triggering member (auditable).
-            var requestSymbol = methodSymbol.Parameters.FirstOrDefault(parameter => parameter.Type is { SpecialType: SpecialType.None, TypeKind: not TypeKind.Error } && !parameter.Type.Name.Contains("CancellationToken", StringComparison.Ordinal))?.Type;
-            if (requestSymbol is not null)
+            var operation = new ServiceOperation
             {
-                service.Data.AddRange(DataClassifier.Describe(requestSymbol, ServiceDirections.Inbound, service.Id, "inbound"));
-            }
-
-            if (methodSymbol.ReturnType is { SpecialType: SpecialType.None, TypeKind: not TypeKind.Error })
+                Id = operationId,
+                Name = ActionNameFrom(methodAttributes, method.Identifier.Text),
+                HttpMethod = httpMethod,
+                Path = resolved.Path,
+                RouteTemplate = verbatim,
+                RouteParameters = endpoint.RouteParameters,
+                RequestType = RequestTypeOf(methodSymbol),
+                ResponseType = methodSymbol?.ReturnType?.ToDisplayString(),
+                ContentTypes = endpoint.ContentTypes,
+                MethodId = methodId,
+                Authenticated = endpoint.AuthorizationRequired,
+                Confidence = endpoint.Confidence,
+                Location = CodeLocation.From(ctx.BasePath, controller.FilePath, lineSpan.Line + 1, lineSpan.Character + 1)
+            };
+            if (!string.IsNullOrWhiteSpace(declaredVersion))
             {
-                service.Data.AddRange(DataClassifier.Describe(methodSymbol.ReturnType, ServiceDirections.Outbound, service.Id, "outbound"));
+                operation.Properties["apiVersion"] = declaredVersion;
+            }
+
+            if (ctx.ClassifyData && methodSymbol is not null)
+            {
+                // Classify request/response DTOs from their members; every non-unknown
+                // classification names the triggering member (auditable).
+                var requestSymbol = methodSymbol.Parameters.FirstOrDefault(parameter => parameter.Type is { SpecialType: SpecialType.None, TypeKind: not TypeKind.Error } && !parameter.Type.Name.Contains("CancellationToken", StringComparison.Ordinal))?.Type;
+                if (requestSymbol is not null)
+                {
+                    service.Data.AddRange(DataClassifier.Describe(requestSymbol, ServiceDirections.Inbound, service.Id, "inbound"));
+                }
+
+                if (methodSymbol.ReturnType is { SpecialType: SpecialType.None, TypeKind: not TypeKind.Error })
+                {
+                    service.Data.AddRange(DataClassifier.Describe(methodSymbol.ReturnType, ServiceDirections.Outbound, service.Id, "outbound"));
+                }
+            }
+
+            service.Operations.Add(operation);
+            if (resolved.Path is not null && !service.Endpoints.Contains(resolved.Path, StringComparer.Ordinal))
+            {
+                service.Endpoints.Add(resolved.Path);
+            }
+
+            if (methodId is not null && !service.MethodIds.Contains(methodId, StringComparer.Ordinal))
+            {
+                service.MethodIds.Add(methodId);
+            }
+
+            // Authorization is aggregated across the controller's actions, never assigned from whichever
+            // action happened to be visited last. A single [AllowAnonymous] action on an [Authorize]d
+            // controller makes the controller anonymously reachable — that is the fact a reviewer needs —
+            // while "authenticated" may only be claimed when every action requires authorization.
+            operation.Authenticated = endpoint.AllowAnonymous ? false : endpoint.AuthorizationRequired;
+            foreach (var scheme in endpoint.AuthenticationSchemes) ProviderHelpers.AddDistinct(service.AuthenticationSchemes, scheme);
+            foreach (var policy in endpoint.AuthorizationPolicies) ProviderHelpers.AddDistinct(service.AuthorizationPolicies, policy);
+            foreach (var role in endpoint.Roles) ProviderHelpers.AddDistinct(service.Roles, role);
+
+            var anyAnonymous = service.Operations.Any(op => op.Authenticated == false);
+            service.AllowAnonymous = anyAnonymous ? true : null;
+            service.Authenticated = anyAnonymous
+                ? false
+                : service.Operations.All(op => op.Authenticated == true) ? true : null;
+            service.TrustZone = anyAnonymous
+                ? TrustZones.Public
+                : service.Authenticated == true ? TrustZones.Authenticated : TrustZones.Unknown;
+
+            results.EntryPoints.Add(new EntryPoint
+            {
+                Id = $"ep:{operationId}",
+                Kind = "HttpController",
+                MethodId = methodId,
+                MethodName = method.Identifier.Text,
+                ClassName = controller.Type.Identifier.Text,
+                Namespace = namespaceName,
+                FileName = endpoint.FileName,
+                Path = endpoint.FilePath,
+                LineNumber = endpoint.LineNumber,
+                ColumnNumber = endpoint.ColumnNumber,
+                HttpMethod = httpMethod,
+                Route = resolved.Path ?? verbatim,
+                AuthorizationRequired = endpoint.AuthorizationRequired,
+                AuthorizationPolicies = endpoint.AuthorizationPolicies,
+                Roles = endpoint.Roles,
+                AllowAnonymous = endpoint.AllowAnonymous,
+                AuthenticationSchemes = endpoint.AuthenticationSchemes,
+                RequiredClaims = endpoint.RequiredClaims,
+                RequiredScopes = endpoint.RequiredScopes,
+                CorsPolicies = endpoint.CorsPolicies,
+                AntiForgeryRequired = endpoint.AntiForgeryRequired,
+                RawUrls = endpoint.RawUrls
+            });
+
+            if (seedTaint)
+            {
+                AddTaintSeeds(results, endpoint, method, methodAttributes, model, controller.FilePath, namespaceName, controller.Type.Identifier.Text, methodId);
+                seedTaint = false;
             }
         }
-
-        service.Operations.Add(operation);
-        if (resolved.Path is not null && !service.Endpoints.Contains(resolved.Path, StringComparer.Ordinal))
-        {
-            service.Endpoints.Add(resolved.Path);
-        }
-
-        if (methodId is not null && !service.MethodIds.Contains(methodId, StringComparer.Ordinal))
-        {
-            service.MethodIds.Add(methodId);
-        }
-
-        // Authorization is aggregated across the controller's actions, never assigned from whichever
-        // action happened to be visited last. A single [AllowAnonymous] action on an [Authorize]d
-        // controller makes the controller anonymously reachable — that is the fact a reviewer needs —
-        // while "authenticated" may only be claimed when every action requires authorization.
-        operation.Authenticated = endpoint.AllowAnonymous ? false : endpoint.AuthorizationRequired;
-        foreach (var scheme in endpoint.AuthenticationSchemes) ProviderHelpers.AddDistinct(service.AuthenticationSchemes, scheme);
-        foreach (var policy in endpoint.AuthorizationPolicies) ProviderHelpers.AddDistinct(service.AuthorizationPolicies, policy);
-        foreach (var role in endpoint.Roles) ProviderHelpers.AddDistinct(service.Roles, role);
-
-        var anyAnonymous = service.Operations.Any(op => op.Authenticated == false);
-        service.AllowAnonymous = anyAnonymous ? true : null;
-        service.Authenticated = anyAnonymous
-            ? false
-            : service.Operations.All(op => op.Authenticated == true) ? true : null;
-        service.TrustZone = anyAnonymous
-            ? TrustZones.Public
-            : service.Authenticated == true ? TrustZones.Authenticated : TrustZones.Unknown;
-
-        results.EntryPoints.Add(new EntryPoint
-        {
-            Id = $"ep:{operationId}",
-            Kind = "HttpController",
-            MethodId = methodId,
-            MethodName = method.Identifier.Text,
-            ClassName = controller.Type.Identifier.Text,
-            Namespace = namespaceName,
-            FileName = endpoint.FileName,
-            Path = endpoint.FilePath,
-            LineNumber = endpoint.LineNumber,
-            ColumnNumber = endpoint.ColumnNumber,
-            HttpMethod = httpMethod,
-            Route = resolved.Path ?? verbatim,
-            AuthorizationRequired = endpoint.AuthorizationRequired,
-            AuthorizationPolicies = endpoint.AuthorizationPolicies,
-            Roles = endpoint.Roles,
-            AllowAnonymous = endpoint.AllowAnonymous,
-            AuthenticationSchemes = endpoint.AuthenticationSchemes,
-            RequiredClaims = endpoint.RequiredClaims,
-            RequiredScopes = endpoint.RequiredScopes,
-            CorsPolicies = endpoint.CorsPolicies,
-            AntiForgeryRequired = endpoint.AntiForgeryRequired,
-            RawUrls = endpoint.RawUrls
-        });
-
-        AddTaintSeeds(results, endpoint, method, methodAttributes, model, controller.FilePath, namespaceName, controller.Type.Identifier.Text, methodId);
     }
 
     private static void AddTaintSeeds(FrameworkResults results, ApiEndpoint endpoint, MethodDeclarationSyntax method, List<AttributeSyntax> methodAttributes, SemanticModel model, string filePath, string? namespaceName, string className, string? methodId)
@@ -549,15 +579,42 @@ public sealed class AspNetCoreMvcProvider : IFrameworkProvider
             {
                 foreach (var value in ProviderHelpers.AttributeStringArguments(attribute)) ProviderHelpers.AddDistinct(endpoint.ContentTypes, value);
             }
-            else if (name.Equals("ApiVersion", StringComparison.OrdinalIgnoreCase) || name.Equals("MapToApiVersion", StringComparison.OrdinalIgnoreCase))
+        }
+    }
+
+    /// <summary>
+    ///     API versions an action serves: [MapToApiVersion] pins an action to specific versions;
+    ///     otherwise every controller-level (plus any action-level) [ApiVersion] applies.
+    /// </summary>
+    private static List<string> EffectiveApiVersions(List<AttributeSyntax> methodAttributes, List<AttributeSyntax> classAttributes)
+    {
+        var mapped = VersionArguments(methodAttributes, "MapToApiVersion");
+        if (mapped.Count > 0)
+        {
+            return mapped;
+        }
+
+        var versions = VersionArguments(classAttributes, "ApiVersion");
+        foreach (var version in VersionArguments(methodAttributes, "ApiVersion"))
+        {
+            ProviderHelpers.AddDistinct(versions, version);
+        }
+
+        return versions;
+    }
+
+    private static List<string> VersionArguments(List<AttributeSyntax> attributes, string name)
+    {
+        var versions = new List<string>();
+        foreach (var attribute in attributes.Where(attribute => ProviderHelpers.IsNamed(attribute, name)))
+        {
+            foreach (var version in ProviderHelpers.AttributeStringArguments(attribute))
             {
-                var version = ProviderHelpers.AttributeStringArguments(attribute).FirstOrDefault();
-                if (!string.IsNullOrWhiteSpace(version))
-                {
-                    endpoint.ApiVersion = version;
-                }
+                ProviderHelpers.AddDistinct(versions, version);
             }
         }
+
+        return versions;
     }
 
     private static List<AttributeSyntax> classAttributes(ControllerCandidate controller) => ProviderHelpers.AttributesOf(controller.Type.AttributeLists).ToList();

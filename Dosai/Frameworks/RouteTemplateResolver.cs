@@ -1,3 +1,5 @@
+using System.Text;
+
 namespace Depscan.Frameworks;
 
 /// <summary>
@@ -105,6 +107,10 @@ public static class RouteTemplateResolver
                 parameters.Add(parameter);
                 normalizedSegments.Add(normalized);
             }
+            else if (TryNormalizeEmbeddedParameters(segment, parameters, out normalized))
+            {
+                normalizedSegments.Add(normalized);
+            }
             else
             {
                 if (segment.Contains('{') || segment.EndsWith('}'))
@@ -139,6 +145,28 @@ public static class RouteTemplateResolver
             Tokens = foundTokens,
             HasUnresolvedTokens = unresolved,
             HasMalformedSegment = malformed
+        };
+    }
+
+    /// <summary>
+    ///     Replaces a resolved parameter (e.g. "{version}") with a concrete value in Path and
+    ///     NormalizedTemplate and drops it from Parameters. Used to expand segment-versioned
+    ///     routes ("v{version:apiVersion}") into concrete paths ("/v1.0/Orders") once the
+    ///     declared API versions are known. A no-op when the parameter is not present.
+    /// </summary>
+    public static ResolvedRouteTemplate SubstituteParameter(ResolvedRouteTemplate resolved, string parameterName, string value)
+    {
+        if (resolved.Parameters.All(parameter => !parameter.Name.Equals(parameterName, StringComparison.Ordinal)))
+        {
+            return resolved;
+        }
+
+        var token = $"{{{parameterName}}}";
+        return resolved with
+        {
+            Path = resolved.Path?.Replace(token, value, StringComparison.Ordinal),
+            NormalizedTemplate = resolved.NormalizedTemplate.Replace(token, value, StringComparison.Ordinal),
+            Parameters = resolved.Parameters.Where(parameter => !parameter.Name.Equals(parameterName, StringComparison.Ordinal)).ToList()
         };
     }
 
@@ -296,7 +324,109 @@ public static class RouteTemplateResolver
             return false;
         }
 
-        var content = body[1..^1];
+        // A multi-parameter segment such as "{a}-{b}" also starts with '{' and ends with '}':
+        // the single-parameter fast path applies only when the first brace-balanced close (outside
+        // parentheses, so regex constraints keep their braces) is the segment's final character.
+        if (FindParameterEnd(body, 0) != body.Length - 1)
+        {
+            return false;
+        }
+
+        if (!TryParseParameterContent(body[1..^1], out parameter))
+        {
+            return false;
+        }
+
+        normalized = $"{{{parameter.Name}}}";
+        return true;
+    }
+
+    /// <summary>
+    ///     Normalizes a segment that mixes literals with one or more parameters, such as
+    ///     "v{version:apiVersion}" or "{language}-{culture}". Every parameter region is
+    ///     constraint-stripped and recorded, the literals stay verbatim. All-or-nothing: any
+    ///     unbalanced or unparseable region leaves the whole segment untouched (caller flags it).
+    /// </summary>
+    private static bool TryNormalizeEmbeddedParameters(string segment, List<RouteParameter> parameters, out string normalized)
+    {
+        normalized = segment;
+        if (!segment.Contains('{'))
+        {
+            return false;
+        }
+
+        var result = new StringBuilder();
+        var index = 0;
+        var found = 0;
+        while (index < segment.Length)
+        {
+            if (segment[index] != '{')
+            {
+                result.Append(segment[index]);
+                index++;
+                continue;
+            }
+
+            var end = FindParameterEnd(segment, index);
+            if (end < 0 || !TryParseParameterContent(segment[(index + 1)..end], out var parameter))
+            {
+                return false;
+            }
+
+            result.Append('{').Append(parameter.Name).Append('}');
+            parameters.Add(parameter);
+            found++;
+            index = end + 1;
+        }
+
+        if (found == 0)
+        {
+            return false;
+        }
+
+        normalized = result.ToString();
+        return true;
+    }
+
+    /// <summary>
+    ///     Index of the '}' closing the parameter opened at <paramref name="openIndex" />, skipping
+    ///     braces inside parentheses (regex constraints) and rejecting nested parameter braces.
+    /// </summary>
+    private static int FindParameterEnd(string segment, int openIndex)
+    {
+        var parenDepth = 0;
+        for (var i = openIndex + 1; i < segment.Length; i++)
+        {
+            var c = segment[i];
+            if (c == '(')
+            {
+                parenDepth++;
+            }
+            else if (c == ')')
+            {
+                parenDepth = Math.Max(0, parenDepth - 1);
+            }
+            else if (parenDepth == 0)
+            {
+                if (c == '}')
+                {
+                    return i;
+                }
+
+                if (c == '{')
+                {
+                    return -1;
+                }
+            }
+        }
+
+        return -1;
+    }
+
+    /// <summary>Parses the inside of a parameter's braces: catch-all marker, name, constraints, default.</summary>
+    private static bool TryParseParameterContent(string content, out RouteParameter parameter)
+    {
+        parameter = new RouteParameter();
 
         var isCatchAll = false;
         if (content.StartsWith("**", StringComparison.Ordinal))
@@ -411,7 +541,6 @@ public static class RouteTemplateResolver
             DefaultValue = defaultValue,
             CatchAll = isCatchAll
         };
-        normalized = $"{{{parameterName}}}";
         return true;
     }
 
