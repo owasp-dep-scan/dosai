@@ -87,8 +87,11 @@ When adding a new source/sink:
 
 ## Documentation locations
 
+The `docs` directory doubles as a Docsify site (see `docs/index.html`, `docs/_sidebar.md`, and `docs/_coverpage.md`), published to GitHub Pages by `.github/workflows/docs-pages.yml`.
+
 - Command reference: `docs/commands.md`
 - Compiler internals: `docs/compiler-engineering.md`
+- Architecture overview: `docs/ARCHITECTURE.md`
 - Security analyst guide: `docs/security-analysis.md`
 - Cryptography and CBOM: `docs/crypto-cbom.md`
 - AI-agent and automation workflows: `docs/agent-workflows.md`
@@ -99,5 +102,10 @@ When adding a new source/sink:
 - Built-in data-flow pattern packs: `docs/pattern-packs.md`
 - PURL/supply-chain details: `docs/supply-chain-purl.md`
 - Graph exports: `docs/graph-formats.md`
-- Threat model: `THREAT_MODEL.md`
+- Compliance and audit: `docs/compliance.md`
+- Use case catalog: `docs/USE_CASES.md`
+- Tutorials: `docs/LESSON1.md` through `docs/LESSON10.md`
+- Threat model: `docs/THREAT_MODEL.md`
+- blint integration: `docs/BLINT-INTEGRATION.md`
+- YARA usage: `docs/YARA-USAGE.md`
 - Security reporting: `SECURITY.md`

@@ -20,7 +20,7 @@ key on `epN` ids must treat ids as opaque strings, not indexes.
 
 - `ApiEndpoint.Path` is now the **resolved route** (`/api/WeatherForecast/{id}`) with
   `[controller]`/`[action]`/`[area]` tokens substituted; `ApiEndpoint.Route` keeps the verbatim
-  template. In 3.3.0 `Path` held the source file path — consumers must not read it as a location.
+  template. In 3.3.0 `Path` held the source file path, consumers must not read it as a location.
 - Conventional routing (`MapControllerRoute`, `MapDefaultControllerRoute`) expands per action:
   `{controller=Home}/{action=Index}/{id?}` for `GrantsController.Index` yields `/Grants/Index`.
   Optional segments without defaults (`{id?}`) are omitted from the path and recorded in
@@ -64,7 +64,7 @@ key on `epN` ids must treat ids as opaque strings, not indexes.
 ## cdxgen consumers
 
 - Prefer `ApiEndpoint.Path` (resolved route) over `Route` **only when `SchemaVersion >= 4.0.0`**
-  — in 3.3.0 `Path` is a file path.
+  , in 3.3.0 `Path` is a file path.
 - Services map to CycloneDX 1.7 `services[]` with `bom-ref` = `svc:` id, `trustZone`, `data[]`
   classifications, and endpoint evidence.
 

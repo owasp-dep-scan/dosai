@@ -4,15 +4,15 @@ Dosai inspects source code, assemblies, and NuGet packages. It extracts methods,
 
 ## Documentation
 
-The full documentation set lives in the `docs` directory. The paragraphs below group it by the role you are most likely to have when you arrive here.
+A rendered documentation site with guides, architecture notes, use cases, and step-by-step lessons is published from the `docs` directory at [owasp-dep-scan.github.io/dosai](https://owasp-dep-scan.github.io/dosai/). The same Markdown lives in `docs`, and the paragraphs below group it by the role you are most likely to have when you arrive here.
 
 If you review code for security problems, start with the [security analyst guide](./docs/security-analysis.md). It walks through the `methods`, `dataflows`, and `crypto` outputs with triage workflows, the built-in source and sink categories, and weakness candidates with their CWE mappings. From there you can go deeper on [custom data-flow patterns](./docs/dataflow-patterns.md), the [built-in pattern pack catalog](./docs/pattern-packs.md), and the [query language](./docs/query-language.md) for filtering large JSON outputs. The [crypto and CBOM evidence](./docs/crypto-cbom.md) and [supply-chain PURL enrichment](./docs/supply-chain-purl.md) guides cover cryptographic findings and tracing results to NuGet packages, and [AI-agent and automation workflows](./docs/agent-workflows.md) describes the agent-context, MCP, report, and diff loops for review automation.
 
-If you maintain or extend the analyzer itself, the [compiler engineering notes](./docs/compiler-engineering.md) describe the Roslyn operation walkers, stable method identities, IL-based reconstruction, and the performance constraints of the pipeline. The [framework semantics](./docs/frameworks.md) guide documents the provider model that detects ASP.NET Core, WCF, gRPC, messaging, serverless, and AI frameworks, including confidence tiers, trust zones, and taint seeding. The [graph export formats](./docs/graph-formats.md) reference covers the Mermaid, GraphML, and GEXF outputs, and the [schema 4.0.0 migration guide](./docs/migration-4.0.md) lists every output-visible change for consumers of the JSON.
+If you maintain or extend the analyzer itself, the [architecture overview](./docs/ARCHITECTURE.md) is the entry point, and the [compiler engineering notes](./docs/compiler-engineering.md) describe the Roslyn operation walkers, stable method identities, IL-based reconstruction, and the performance constraints of the pipeline. The [framework semantics](./docs/frameworks.md) guide documents the provider model that detects ASP.NET Core, WCF, gRPC, messaging, serverless, and AI frameworks, including confidence tiers, trust zones, and taint seeding. The [graph export formats](./docs/graph-formats.md) reference covers the Mermaid, GraphML, and GEXF outputs, and the [schema 4.0.0 migration guide](./docs/migration-4.0.md) lists every output-visible change for consumers of the JSON.
 
 If your work is compliance, audit, or bills of materials, see the [compliance and audit guide](./docs/compliance.md). It explains how to produce a CycloneDX-style CBOM, NuGet PURL occurrence evidence, service trust zones, data classification labels, and an AI component inventory, and it states plainly what that evidence does and does not prove.
 
-The [command reference](./docs/commands.md) documents every command with inputs, outputs, algorithms, strengths, and limitations, and it is useful regardless of role. The [threat model](./THREAT_MODEL.md) explains how Dosai handles untrusted input, and [SECURITY.md](./SECURITY.md) covers reporting security issues. [SKILL.md](./SKILL.md) packages the common workflows as an AI agent skill, and the [blint integration](./BLINT-INTEGRATION.md) and [YARA usage](./YARA-USAGE.md) notes cover complementary binary and rule-based analysis.
+The [command reference](./docs/commands.md) documents every command with inputs, outputs, algorithms, strengths, and limitations, and it is useful regardless of role. The [threat model](./docs/THREAT_MODEL.md) explains how Dosai handles untrusted input, and [SECURITY.md](./SECURITY.md) covers reporting security issues. [SKILL.md](./SKILL.md) packages the common workflows as an AI agent skill, and the [blint integration](./docs/BLINT-INTEGRATION.md) and [YARA usage](./docs/YARA-USAGE.md) notes cover complementary binary and rule-based analysis. The [lessons](./docs/LESSON1.md) walk the common workflows end to end with runnable examples.
 
 ## Usage
 
@@ -164,7 +164,7 @@ The [scripts README](./scripts/README.md) documents a focused performance and pr
 
 Dosai uses the Microsoft.CodeAnalysis (Roslyn) API and .NET Reflection to extract metadata from source code and compiled assemblies. It provides a unified view of code structure and dependencies across different .NET compilation outputs.
 
-For implementation notes, algorithms, strengths, and limitations, see [Dosai compiler engineering notes](./docs/compiler-engineering.md). For a review-oriented walkthrough of the findings Dosai produces, see the [security analyst guide](./docs/security-analysis.md).
+For implementation notes, algorithms, strengths, and limitations, see [Dosai compiler engineering notes](./docs/compiler-engineering.md), and for a component-level tour of the pipeline, see the [architecture overview](./docs/ARCHITECTURE.md). For a review-oriented walkthrough of the findings Dosai produces, see the [security analyst guide](./docs/security-analysis.md).
 
 ### Core Components
 
@@ -193,43 +193,17 @@ For implementation notes, algorithms, strengths, and limitations, see [Dosai com
                         └─────────────────┘
 ```
 
-- **`GetSourceMethods`**: Uses Roslyn's `SyntaxTree`, `SemanticModel`, and symbol analysis (`IMethodSymbol`, `INamespaceSymbol`, etc.) for C# and VB source. F#, R, and VC++/C/C++ use dedicated language frontends. The method pipeline extracts signatures, dependencies, property/field/event declarations, endpoint metadata, and call graph information.
-- **`GetAssemblyMethods`**: Uses .NET Reflection (`Assembly.LoadFrom`, `Type.GetMethods`, etc.) to load compiled assemblies (.dll, .exe) and extract method metadata, including signatures, attributes, and inheritance details.
-- **`GetAssemblyInformation`**: Uses Reflection and `FileVersionInfo` to gather metadata about assemblies such as version, location, dependencies, and target framework.
-- **`GetMethodsFromNupkg`**: Extracts the .nupkg archive (ZIP format) to a temporary directory, filters relevant assemblies and source files, then delegates analysis to the existing `GetMethods` logic.
-- **`DataFlowAnalyzer`**: Builds source-to-sink slices with pattern packs, sanitizer handling, validator guard suppression, method summaries, field-sensitive taint keys, graph exports, package reachability, and weakness candidates.
-- **`CryptoAnalyzer`**: Detects cryptographic assets, operations, materials, weak crypto, TLS validation bypasses, low PBKDF2 iterations, and CBOM evidence with best-effort reachability.
+`GetSourceMethods` uses Roslyn's `SyntaxTree`, `SemanticModel`, and symbol analysis for C# and VB source, with dedicated language frontends for F#, R, and VC++/C/C++. `GetAssemblyMethods` loads compiled assemblies with .NET Reflection and extracts method metadata including signatures, attributes, and inheritance details. `GetMethodsFromNupkg` extracts a `.nupkg` archive to a temporary directory, filters relevant assemblies and source files, and delegates to the standard analysis pipeline before cleaning up. On top of these, `DataFlowAnalyzer` builds source-to-sink slices with pattern packs, sanitizer handling, method summaries, field-sensitive taint keys, graph exports, package reachability, and weakness candidates, and `CryptoAnalyzer` detects cryptographic assets, operations, materials, weak crypto findings, and CBOM evidence with best-effort reachability.
 
-### Output Schema
-
-The output is a JSON object conforming to the `MethodsSlice` class structure, containing:
-
-- **`Dependencies`**: List of external namespaces/libraries used.
-- **`Methods`**: List of `Method` objects detailing signatures, locations, parameters, return types, etc.
-- **`MethodCalls`**: List of `MethodCalls` objects representing invocations found in source code.
-- **`Properties`, `Fields`, `Events`, `Constructors`**: Lists of corresponding member types found in source.
-- **`CallGraph`**: List of `MethodCallEdge` objects defining the call graph structure.
-- **`AssemblyInformation`**: List of `AssemblyInfo` objects detailing the inspected assemblies.
-- **`SourceAssemblyMapping`**: List of `SourceAssemblyMapping` objects linking source locations to assembly definitions.
-
-### NuGet Package (.nupkg) Handling
-
-`.nupkg` files are ZIP archives. `GetMethodsFromNupkg` performs the following steps:
-
-1.  Creates a temporary directory.
-2.  Uses `System.IO.Compression.ZipFile.OpenRead` to read the .nupkg.
-3.  Enumerates entries, skipping metadata files (`.nuspec`, `package/`, etc.).
-4.  Extracts files with relevant extensions (`.dll`, `.exe`, `.cs`, `.vb`, `.fs`).
-5.  Calls the standard `GetMethods` on the temporary directory.
-6.  Cleans up the temporary directory after analysis.
+The output is a JSON object conforming to the `MethodsSlice` structure, with collections for dependencies, methods, method calls, members, the call graph, API endpoints, assembly information, source-assembly mappings, services, frameworks, and AI components. Field meanings and identifiers are versioned through `Metadata.SchemaVersion`, and every output-visible change is documented in the [migration guide](./docs/migration-4.0.md).
 
 ## Complementary Analysis with OWASP blint
 
-See [this document](./BLINT-INTEGRATION.md) for integration ideas.
+See [this document](./docs/BLINT-INTEGRATION.md) for integration ideas.
 
 ## Integration with YARA cli
 
-See [Yara Usage docs](./YARA-USAGE.md)
+See [Yara Usage docs](./docs/YARA-USAGE.md)
 
 ## License
 
