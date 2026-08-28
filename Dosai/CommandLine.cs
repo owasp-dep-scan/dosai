@@ -418,8 +418,8 @@ public class CommandLine
 
     public static void WriteDataFlowTreeReport(TextWriter writer, DataFlowResult result, string outputFile)
     {
-        var nodesById = result.Nodes.ToDictionary(node => node.Id, StringComparer.Ordinal);
-        var edgesById = result.Edges.ToDictionary(edge => edge.Id, StringComparer.Ordinal);
+        var nodesById = result.Nodes.ToDictionaryFirstWins(node => node.Id, StringComparer.Ordinal);
+        var edgesById = result.Edges.ToDictionaryFirstWins(edge => edge.Id, StringComparer.Ordinal);
         var weaknessesBySliceId = result.WeaknessCandidates
             .Where(weakness => !string.IsNullOrWhiteSpace(weakness.SliceId))
             .GroupBy(weakness => weakness.SliceId!, StringComparer.Ordinal)

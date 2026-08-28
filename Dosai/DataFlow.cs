@@ -208,11 +208,17 @@ public static partial class DataFlowAnalyzer
         var references = GetMetadataReferences(path, result.Diagnostics);
         var csharpTrees = sourcesToInspect
             .Where(source => Path.GetExtension(source).Equals(Constants.CSharpSourceExtension, StringComparison.OrdinalIgnoreCase))
-            .Select(source => (CSharpSyntaxTree)CSharpSyntaxTree.ParseText(File.ReadAllText(source), path: source))
+            .Select(source => SafeFileRead.TryReadAllText(source, out var content)
+                ? (CSharpSyntaxTree)CSharpSyntaxTree.ParseText(content, path: source)
+                : null)
+            .OfType<CSharpSyntaxTree>()
             .ToList();
         var vbTrees = sourcesToInspect
             .Where(source => Path.GetExtension(source).Equals(Constants.VBSourceExtension, StringComparison.OrdinalIgnoreCase))
-            .Select(source => (VisualBasicSyntaxTree)VisualBasicSyntaxTree.ParseText(File.ReadAllText(source), path: source))
+            .Select(source => SafeFileRead.TryReadAllText(source, out var content)
+                ? (VisualBasicSyntaxTree)VisualBasicSyntaxTree.ParseText(content, path: source)
+                : null)
+            .OfType<VisualBasicSyntaxTree>()
             .ToList();
 
         var csharpCompilation = CSharpCompilation.Create(
@@ -694,7 +700,11 @@ public static partial class DataFlowAnalyzer
         {
             var language = DetectLanguageFrontend(file);
             var tainted = new Dictionary<string, DataFlowNode>(StringComparer.OrdinalIgnoreCase);
-            var lines = File.ReadAllLines(file);
+            var lines = SafeFileRead.TryReadAllLines(file);
+            if (lines is null)
+            {
+                continue;
+            }
             string? currentMethod = null;
             string? currentClass = Path.GetFileNameWithoutExtension(file);
             string? currentNamespace = language;
@@ -949,7 +959,42 @@ public static partial class DataFlowAnalyzer
         }
     }
 
-    private sealed class DataFlowSummaryCollector(SemanticModel model, Dictionary<string, DataFlowMethodSummary> summaries, DataFlowPatternSet patterns) : OperationWalker
+    // Machine-generated code can nest expressions thousands of levels deep; a recursive
+    // Roslyn operation walk past that depth terminates the process with an unrecoverable
+    // stack overflow. Descendants stop descending past MaxAnalysisDepth so analysis of
+    // pathological members degrades gracefully instead of crashing the whole scan.
+    internal abstract class DepthBoundedOperationWalker : OperationWalker
+    {
+        protected const int MaxAnalysisDepth = 200;
+
+        private int _depth;
+
+        protected bool MaxDepthReached => _depth >= MaxAnalysisDepth;
+
+        protected void EnterDepth() => _depth++;
+
+        protected void ExitDepth() => _depth--;
+
+        public override void Visit(IOperation? operation)
+        {
+            if (MaxDepthReached)
+            {
+                return;
+            }
+
+            EnterDepth();
+            try
+            {
+                base.Visit(operation);
+            }
+            finally
+            {
+                ExitDepth();
+            }
+        }
+    }
+
+    private sealed class DataFlowSummaryCollector(SemanticModel model, Dictionary<string, DataFlowMethodSummary> summaries, DataFlowPatternSet patterns) : DepthBoundedOperationWalker
     {
         private IMethodSymbol? _currentMethod;
 
@@ -1003,7 +1048,7 @@ public static partial class DataFlowAnalyzer
                 return;
             }
 
-            var sinkPatterns = MatchSymbol(targetMethod, operation.Syntax, patterns.Sinks).Concat(MatchCode(operation.Syntax.ToString(), patterns.Sinks)).ToList();
+            var sinkPatterns = MatchSymbol(targetMethod, operation.Syntax, patterns.Sinks).Concat(MatchCode(SafeSyntaxText.Text(operation.Syntax), patterns.Sinks)).ToList();
             if (sinkPatterns.Count == 0)
             {
                 return;
@@ -1053,23 +1098,29 @@ public static partial class DataFlowAnalyzer
 
         private static IEnumerable<int> FindParameterIndexes(IOperation operation, IMethodSymbol method)
         {
-            operation = Strip(operation);
-            if (operation is IParameterReferenceOperation parameterReference)
+            var indexes = new List<int>();
+            var pending = new Stack<IOperation>();
+            pending.Push(operation);
+            while (pending.Count > 0)
             {
-                var index = method.Parameters.IndexOf(parameterReference.Parameter);
-                if (index >= 0)
+                var current = Strip(pending.Pop());
+                if (current is IParameterReferenceOperation parameterReference)
                 {
-                    yield return index;
+                    var index = method.Parameters.IndexOf(parameterReference.Parameter);
+                    if (index >= 0)
+                    {
+                        indexes.Add(index);
+                    }
+                }
+
+                var children = current.ChildOperations.ToList();
+                for (var i = children.Count - 1; i >= 0; i--)
+                {
+                    pending.Push(children[i]);
                 }
             }
 
-            foreach (var child in operation.ChildOperations)
-            {
-                foreach (var index in FindParameterIndexes(child, method))
-                {
-                    yield return index;
-                }
-            }
+            return indexes;
         }
 
         private static void AddUnique(List<int> values, int value)
@@ -1157,7 +1208,7 @@ public static partial class DataFlowAnalyzer
         }
     }
 
-    private sealed class DataFlowOperationWalker(SemanticModel model, DataFlowGraphBuilder graph, DataFlowPatternSet patterns, Dictionary<string, DataFlowMethodSummary> summaries, string basePath, string sourceFilePath, FrameworkTaintSeedIndex? frameworkSeeds = null) : OperationWalker
+    private sealed class DataFlowOperationWalker(SemanticModel model, DataFlowGraphBuilder graph, DataFlowPatternSet patterns, Dictionary<string, DataFlowMethodSummary> summaries, string basePath, string sourceFilePath, FrameworkTaintSeedIndex? frameworkSeeds = null) : DepthBoundedOperationWalker
     {
         private readonly Dictionary<string, TaintTrace> _taintedSymbols = new(StringComparer.Ordinal);
         private readonly DataFlowPatternIndex _patternIndex = new(patterns);
@@ -1678,11 +1729,24 @@ public static partial class DataFlowAnalyzer
 
         private TaintTrace? GetTaint(IOperation? operation)
         {
-            if (operation is null)
+            if (operation is null || MaxDepthReached)
             {
                 return null;
             }
 
+            EnterDepth();
+            try
+            {
+                return GetTaintCore(operation);
+            }
+            finally
+            {
+                ExitDepth();
+            }
+        }
+
+        private TaintTrace? GetTaintCore(IOperation operation)
+        {
             operation = Strip(operation);
             if (IsSanitized(operation))
             {
@@ -1929,7 +1993,7 @@ public static partial class DataFlowAnalyzer
                 return text;
             }
 
-            text = syntax.ToString();
+            text = SafeSyntaxText.Text(syntax);
             _syntaxTextCache[syntax] = text;
             return text;
         }

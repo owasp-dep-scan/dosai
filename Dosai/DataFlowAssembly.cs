@@ -246,7 +246,9 @@ public static partial class DataFlowAnalyzer
             return;
         }
 
-        var instructionIndexByOffset = instructions.Select((instruction, index) => (instruction.Offset, index)).ToDictionary(item => item.Offset, item => item.index);
+        var instructionIndexByOffset = instructions.Select((instruction, index) => (instruction.Offset, index))
+            .GroupBy(item => item.Offset)
+            .ToDictionary(group => group.Key, group => group.First().index);
         var exceptionRegions = body.ExceptionRegions.ToList();
         var isStatic = (method.Attributes & MethodAttributes.Static) != 0;
         var initialState = new AssemblyMethodState([], [], SeedAssemblyParameters(reader, method, methodInfo, isStatic, context));
@@ -577,7 +579,9 @@ public static partial class DataFlowAnalyzer
             return summary;
         }
 
-        var instructionIndexByOffset = instructions.Select((instruction, index) => (instruction.Offset, index)).ToDictionary(item => item.Offset, item => item.index);
+        var instructionIndexByOffset = instructions.Select((instruction, index) => (instruction.Offset, index))
+            .GroupBy(item => item.Offset)
+            .ToDictionary(group => group.Key, group => group.First().index);
         var exceptionRegions = body.ExceptionRegions.ToList();
         var isStatic = (method.Attributes & MethodAttributes.Static) != 0;
         var argumentTaints = new Dictionary<int, AssemblySummaryTaint?>();
@@ -1482,7 +1486,7 @@ public static partial class DataFlowAnalyzer
         private int _nodeCounter = result.Nodes.Count;
         private int _edgeCounter = result.Edges.Count;
         private int _sliceCounter = result.Slices.Count;
-        private readonly Dictionary<string, DataFlowNode> _nodesById = result.Nodes.ToDictionary(node => node.Id, StringComparer.Ordinal);
+        private readonly Dictionary<string, DataFlowNode> _nodesById = result.Nodes.ToDictionaryFirstWins(node => node.Id, StringComparer.Ordinal);
         private readonly Dictionary<string, DataFlowNode> _nodesByKey = new(StringComparer.Ordinal);
         private readonly HashSet<string> _edgeKeys = result.Edges.Select(edge => $"{edge.SourceId}\u001f{edge.TargetId}\u001f{edge.Kind}\u001f{edge.Label}").ToHashSet(StringComparer.Ordinal);
         private readonly HashSet<string> _sliceKeys = result.Slices.Select(slice => $"{slice.SourceId}\u001f{slice.SinkId}\u001f{slice.SinkArgumentIndex}\u001f{slice.SinkArgument}").ToHashSet(StringComparer.Ordinal);

@@ -1304,7 +1304,10 @@ public static class Dosai
         var referenceList = metadataReferences.Values.ToList();
         var csharpTrees = sourcesToInspect
             .Where(source => Path.GetExtension(source).Equals(Constants.CSharpSourceExtension, StringComparison.OrdinalIgnoreCase))
-            .Select(source => (CSharpSyntaxTree)CSharpSyntaxTree.ParseText(File.ReadAllText(source), path: source))
+            .Select(source => SafeFileRead.TryReadAllText(source, out var content)
+                ? (CSharpSyntaxTree)CSharpSyntaxTree.ParseText(content, path: source)
+                : null)
+            .OfType<CSharpSyntaxTree>()
             .ToList();
         var csharpCompilation = CSharpCompilation.Create(
             "Dosai.SourceAnalysis.CSharp",
@@ -1313,7 +1316,10 @@ public static class Dosai
             options: new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
         var vbTrees = sourcesToInspect
             .Where(source => Path.GetExtension(source).Equals(Constants.VBSourceExtension, StringComparison.OrdinalIgnoreCase))
-            .Select(source => (VisualBasicSyntaxTree)VisualBasicSyntaxTree.ParseText(File.ReadAllText(source), path: source))
+            .Select(source => SafeFileRead.TryReadAllText(source, out var content)
+                ? (VisualBasicSyntaxTree)VisualBasicSyntaxTree.ParseText(content, path: source)
+                : null)
+            .OfType<VisualBasicSyntaxTree>()
             .ToList();
         var vbCompilation = VisualBasicCompilation.Create(
             "Dosai.SourceAnalysis.VisualBasic",
@@ -1331,13 +1337,21 @@ public static class Dosai
 
             if (extn.Equals(Constants.CSharpSourceExtension))
             {
-                var tree = csharpTrees.First(t => t.FilePath == sourceFilePath);
+                var tree = csharpTrees.FirstOrDefault(t => t.FilePath == sourceFilePath);
+                if (tree is null)
+                {
+                    continue;
+                }
                 csRoot = tree.GetCompilationUnitRoot();
                 model = csharpCompilation.GetSemanticModel(tree);
             }
             else if (extn.Equals(Constants.VBSourceExtension))
             {
-                var tree = vbTrees.First(t => t.FilePath == sourceFilePath);
+                var tree = vbTrees.FirstOrDefault(t => t.FilePath == sourceFilePath);
+                if (tree is null)
+                {
+                    continue;
+                }
                 vbRoot = tree.GetCompilationUnitRoot();
                 model = vbCompilation.GetSemanticModel(tree);
             }
@@ -2055,17 +2069,7 @@ public static class Dosai
 
                     if (usingDirective.Name is not null)
                     {
-                        var nameInfo = model.GetSymbolInfo(usingDirective.Name);
-                        INamespaceSymbol? nsSymbol = null;
-
-                        if (nameInfo.Symbol is not null and INamespaceSymbol)
-                        {
-                            nsSymbol = (INamespaceSymbol)nameInfo.Symbol;
-                        }
-                        else if (nameInfo.CandidateSymbols.Length > 0)
-                        {
-                            nsSymbol = (INamespaceSymbol)nameInfo.CandidateSymbols.First();
-                        }
+                        var nsSymbol = ResolveNamespaceSymbol(model.GetSymbolInfo(usingDirective.Name));
 
                         if (nsSymbol is not null)
                         {
@@ -2108,16 +2112,7 @@ public static class Dosai
 
                     if (importDirective.Name is not null)
                     {
-                        var nameInfo = model.GetSymbolInfo(importDirective.Name);
-                        INamespaceSymbol? nsSymbol = null;
-                        if (nameInfo.Symbol is not null and INamespaceSymbol)
-                        {
-                            nsSymbol = (INamespaceSymbol)nameInfo.Symbol;
-                        }
-                        else if (nameInfo.CandidateSymbols.Length > 0)
-                        {
-                            nsSymbol = (INamespaceSymbol)nameInfo.CandidateSymbols.First();
-                        }
+                        var nsSymbol = ResolveNamespaceSymbol(model.GetSymbolInfo(importDirective.Name));
                         if (nsSymbol is not null)
                         {
                             var nsMembers = nsSymbol.GetNamespaceMembers();
@@ -2495,6 +2490,19 @@ public static class Dosai
         }
     }
 
+    // Using/imports alias targets may resolve to a type, or ambiguously to several
+    // candidate types (e.g. the same qualified name shipped by multiple assemblies in
+    // the scan directory); only namespace symbols qualify for member enrichment.
+    private static INamespaceSymbol? ResolveNamespaceSymbol(SymbolInfo symbolInfo)
+    {
+        if (symbolInfo.Symbol is INamespaceSymbol namespaceSymbol)
+        {
+            return namespaceSymbol;
+        }
+
+        return symbolInfo.CandidateSymbols.OfType<INamespaceSymbol>().FirstOrDefault();
+    }
+
     private static string GetContainingTypeName(MemberDeclarationSyntax member)
     {
         var parent = member.Parent;
@@ -2509,7 +2517,7 @@ public static class Dosai
         return "";
     }
 
-    private sealed class MethodCallOperationWalker(SemanticModel model, DispatchResolver.SourceIndex dispatchIndex, List<MethodCalls> methodCalls, string basePath, string sourceFilePath, string fileName) : OperationWalker
+    private sealed class MethodCallOperationWalker(SemanticModel model, DispatchResolver.SourceIndex dispatchIndex, List<MethodCalls> methodCalls, string basePath, string sourceFilePath, string fileName) : DataFlowAnalyzer.DepthBoundedOperationWalker
     {
         public override void VisitInvocation(IInvocationOperation operation)
         {
@@ -2568,7 +2576,7 @@ public static class Dosai
             }
 
             var argumentList = arguments.Select(argument => NormalizeSymbolName(argument.Parameter?.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? argument.Value.Type?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty)).ToList();
-            var argumentExpressions = arguments.Select(argument => argument.Value.Syntax.ToString()).ToList();
+            var argumentExpressions = arguments.Select(argument => SafeSyntaxText.Text(argument.Value.Syntax)).ToList();
             var targetLocations = targetMethod.Locations;
             var isInMetadata = targetLocations.Any(locationInfo => locationInfo.IsInMetadata);
             var isInSource = targetLocations.Any(locationInfo => locationInfo.IsInSource);
@@ -2930,7 +2938,7 @@ public static class Dosai
             var argType = model.GetTypeInfo(arg.Expression).Type;
             // Fallback to expression type if we can't get the type info
             callArgsTypes.Add(argType is not null ? argType.ToDisplayString() : arg.Expression.GetType().Name);
-            callArgExpressions.Add(arg.Expression.ToFullString());
+            callArgExpressions.Add(SafeSyntaxText.Text(arg.Expression));
         }
         var exprInfo = model.GetSymbolInfo(callExpression);
         var calledMethod = string.Empty;
@@ -3024,8 +3032,8 @@ public static class Dosai
         var location = methodCall.GetLocation().GetLineSpan().StartLinePosition;
         var lineNumber = location.Line + 1;
         var columnNumber = location.Character + 1;
-        var fullName = callExpression.ToFullString();
-        var callArgsTypes = callArguments?.Arguments.Select(a => a.ToFullString()).ToList();
+        var fullName = SafeSyntaxText.Text(callExpression);
+        var callArgsTypes = callArguments?.Arguments.Select(a => SafeSyntaxText.Text(a)).ToList();
         var exprInfo = model.GetSymbolInfo(callExpression);
         var calledMethod = string.Empty;
         var isInMetadata = false;

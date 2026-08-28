@@ -60,7 +60,8 @@ public static class CallGraphExporter
         var mermaidIds = callGraph.Nodes
             .OrderBy(n => n.Id, StringComparer.Ordinal)
             .Select((node, index) => new { node, id = $"n{index + 1}" })
-            .ToDictionary(x => x.node.Id, x => x.id, StringComparer.Ordinal);
+            .GroupBy(x => x.node.Id, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.First().id, StringComparer.Ordinal);
 
         foreach (var node in callGraph.Nodes.OrderBy(n => n.Id, StringComparer.Ordinal))
         {

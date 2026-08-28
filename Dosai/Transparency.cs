@@ -485,7 +485,7 @@ public static class TransparencyBuilder
 
     public static List<WeaknessCandidate> BuildWeaknessCandidates(DataFlowResult result, IEnumerable<EntryPoint>? entryPoints = null)
     {
-        var nodes = result.Nodes.ToDictionary(n => n.Id, StringComparer.Ordinal);
+        var nodes = result.Nodes.ToDictionaryFirstWins(n => n.Id, StringComparer.Ordinal);
         var entryPointList = entryPoints?.ToList() ?? [];
         var candidates = new List<WeaknessCandidate>();
         var index = 0;

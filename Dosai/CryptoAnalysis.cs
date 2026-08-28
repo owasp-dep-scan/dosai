@@ -224,9 +224,15 @@ public static class CryptoAnalyzer
     {
         var references = GetMetadataReferences(basePath, result.Diagnostics);
         var csharpTrees = files.Where(file => Path.GetExtension(file).Equals(Constants.CSharpSourceExtension, StringComparison.OrdinalIgnoreCase))
-            .Select(file => (CSharpSyntaxTree)CSharpSyntaxTree.ParseText(File.ReadAllText(file), path: file)).ToList();
+            .Select(file => SafeFileRead.TryReadAllText(file, out var content)
+                ? (CSharpSyntaxTree)CSharpSyntaxTree.ParseText(content, path: file)
+                : null)
+            .OfType<CSharpSyntaxTree>().ToList();
         var vbTrees = files.Where(file => Path.GetExtension(file).Equals(Constants.VBSourceExtension, StringComparison.OrdinalIgnoreCase))
-            .Select(file => (VisualBasicSyntaxTree)VisualBasicSyntaxTree.ParseText(File.ReadAllText(file), path: file)).ToList();
+            .Select(file => SafeFileRead.TryReadAllText(file, out var content)
+                ? (VisualBasicSyntaxTree)VisualBasicSyntaxTree.ParseText(content, path: file)
+                : null)
+            .OfType<VisualBasicSyntaxTree>().ToList();
 
         var csharpCompilation = CSharpCompilation.Create("Dosai.Crypto.CSharp", csharpTrees, references, new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
         var vbCompilation = VisualBasicCompilation.Create("Dosai.Crypto.VisualBasic", vbTrees, references, new VisualBasicCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
@@ -238,7 +244,10 @@ public static class CryptoAnalyzer
             {
                 new CryptoOperationWalker(model, basePath, tree.FilePath, reachability, result).Visit(operation);
             }
-            AnalyzeLineFallback(basePath, tree.FilePath, File.ReadAllLines(tree.FilePath), reachability, result, language: "csharp");
+            if (SafeFileRead.TryReadAllLines(tree.FilePath) is { } csharpLines)
+            {
+                AnalyzeLineFallback(basePath, tree.FilePath, csharpLines, reachability, result, language: "csharp");
+            }
         }
 
         foreach (var tree in vbTrees)
@@ -248,7 +257,10 @@ public static class CryptoAnalyzer
             {
                 new CryptoOperationWalker(model, basePath, tree.FilePath, reachability, result).Visit(operation);
             }
-            AnalyzeLineFallback(basePath, tree.FilePath, File.ReadAllLines(tree.FilePath), reachability, result, language: "vb");
+            if (SafeFileRead.TryReadAllLines(tree.FilePath) is { } vbLines)
+            {
+                AnalyzeLineFallback(basePath, tree.FilePath, vbLines, reachability, result, language: "vb");
+            }
         }
     }
 
@@ -297,7 +309,10 @@ public static class CryptoAnalyzer
     {
         foreach (var file in files.Where(file => !Path.GetExtension(file).Equals(Constants.CSharpSourceExtension, StringComparison.OrdinalIgnoreCase) && !Path.GetExtension(file).Equals(Constants.VBSourceExtension, StringComparison.OrdinalIgnoreCase)))
         {
-            AnalyzeLineFallback(basePath, file, File.ReadAllLines(file), reachability, result, DetectLanguage(file));
+            if (SafeFileRead.TryReadAllLines(file) is { } lines)
+            {
+                AnalyzeLineFallback(basePath, file, lines, reachability, result, DetectLanguage(file));
+            }
         }
     }
 
@@ -898,23 +913,23 @@ public static class CryptoAnalyzer
         }
     }
 
-    private sealed class CryptoOperationWalker(SemanticModel model, string basePath, string sourceFilePath, CryptoReachability reachability, CryptoAnalysisResult result) : OperationWalker
+    private sealed class CryptoOperationWalker(SemanticModel model, string basePath, string sourceFilePath, CryptoReachability reachability, CryptoAnalysisResult result) : DataFlowAnalyzer.DepthBoundedOperationWalker
     {
         public override void VisitInvocation(IInvocationOperation operation)
         {
-            Record(operation, operation.TargetMethod, operation.Syntax.ToString());
+            Record(operation, operation.TargetMethod, SafeSyntaxText.Text(operation.Syntax));
             base.VisitInvocation(operation);
         }
 
         public override void VisitObjectCreation(IObjectCreationOperation operation)
         {
-            Record(operation, operation.Constructor, operation.Syntax.ToString());
+            Record(operation, operation.Constructor, SafeSyntaxText.Text(operation.Syntax));
             base.VisitObjectCreation(operation);
         }
 
         public override void VisitSimpleAssignment(ISimpleAssignmentOperation operation)
         {
-            var code = operation.Syntax.ToString();
+            var code = SafeSyntaxText.Text(operation.Syntax);
             if (code.Contains("CipherMode.ECB", StringComparison.OrdinalIgnoreCase) || code.Contains("ServerCertificateCustomValidationCallback", StringComparison.OrdinalIgnoreCase))
             {
                 var method = model.GetEnclosingSymbol(operation.Syntax.SpanStart) as IMethodSymbol;
@@ -928,7 +943,7 @@ public static class CryptoAnalyzer
             if (operation.ConstantValue is { HasValue: true, Value: string })
             {
                 var method = model.GetEnclosingSymbol(operation.Syntax.SpanStart) as IMethodSymbol;
-                var line = operation.Syntax.Parent?.ToString() ?? operation.Syntax.ToString();
+                var line = operation.Syntax.Parent is null ? SafeSyntaxText.Text(operation.Syntax) : SafeSyntaxText.Text(operation.Syntax.Parent);
                 DetectLiteralMaterial(line, basePath, sourceFilePath, operation.Syntax.GetLocation().GetLineSpan().StartLinePosition.Line + 1, method?.ContainingNamespace?.ToDisplayString(), method?.ContainingType?.Name, method?.Name, reachability, result);
             }
             base.VisitLiteral(operation);
@@ -973,8 +988,8 @@ public static class CryptoAnalyzer
                 MergeUnique(operation.DataFlowSliceIds, index.FindOperationSliceIds(operation));
                 if (operation.DataFlowSliceIds.Count > 0) operation.Properties["dataFlowSliceIds"] = string.Join(",", operation.DataFlowSliceIds);
             }
-            var materialsById = result.Materials.ToDictionary(material => material.Id, StringComparer.Ordinal);
-            var operationsById = result.Operations.ToDictionary(operation => operation.Id, StringComparer.Ordinal);
+            var materialsById = result.Materials.ToDictionaryFirstWins(material => material.Id, StringComparer.Ordinal);
+            var operationsById = result.Operations.ToDictionaryFirstWins(operation => operation.Id, StringComparer.Ordinal);
             var materialIdsBySliceId = BuildEvidenceIdsBySlice(result.Materials, material => material.DataFlowSliceIds, material => material.Id);
             var operationIdsBySliceId = BuildEvidenceIdsBySlice(result.Operations, operation => operation.DataFlowSliceIds, operation => operation.Id);
             var materialIdsByLocation = BuildEvidenceIdsByLocation(result.Materials, material => material.Location, material => material.Id);
@@ -1061,8 +1076,8 @@ public static class CryptoAnalyzer
             }
             public static SliceIndex Create(DataFlowResult dataFlows)
             {
-                var nodesById = dataFlows.Nodes.ToDictionary(node => node.Id, StringComparer.Ordinal);
-                var slicesById = dataFlows.Slices.ToDictionary(slice => slice.Id, StringComparer.Ordinal);
+                var nodesById = dataFlows.Nodes.ToDictionaryFirstWins(node => node.Id, StringComparer.Ordinal);
+                var slicesById = dataFlows.Slices.ToDictionaryFirstWins(slice => slice.Id, StringComparer.Ordinal);
                 var sliceIdsByLocation = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
                 var sourceSliceIdsByLocation = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
                 var sinkSliceIdsByLocation = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);

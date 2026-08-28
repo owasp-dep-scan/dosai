@@ -89,7 +89,10 @@ public static partial class ApiEndpointAnalyzer
         var endpoints = new List<ApiEndpoint>();
         foreach (var sourceFile in GetVisualBasicFiles(path))
         {
-            AnalyzeVisualBasic(path, sourceFile, File.ReadAllText(sourceFile), endpoints);
+            if (SafeFileRead.TryReadAllText(sourceFile, out var sourceContent))
+            {
+                AnalyzeVisualBasic(path, sourceFile, sourceContent, endpoints);
+            }
         }
 
         return endpoints

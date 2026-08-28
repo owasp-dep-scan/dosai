@@ -67,7 +67,11 @@ public static partial class LanguageFrontendAnalyzer
     private static void AnalyzeFSharp(string basePath, string file, List<Method> methods, List<Dependency> dependencies, List<MethodCalls> calls)
     {
         const string moduleName = FrontendModule;
-        var lines = File.ReadAllLines(file);
+        var lines = SafeFileRead.TryReadAllLines(file);
+        if (lines is null)
+        {
+            return;
+        }
         var namespaceName = "Global";
         var className = "Module";
         string? currentSourceId = null;
@@ -129,7 +133,11 @@ public static partial class LanguageFrontendAnalyzer
             return;
         }
 
-        var lines = File.ReadAllLines(file);
+        var lines = SafeFileRead.TryReadAllLines(file);
+        if (lines is null)
+        {
+            return;
+        }
         var currentFunction = "script";
         var currentSourceId = CreateId("R", Path.GetFileNameWithoutExtension(file), currentFunction, file, 1);
         methods.Add(CreateMethod(basePath, file, "R", Path.GetFileNameWithoutExtension(file), currentFunction, FrontendModule, currentSourceId, 1, 1));
@@ -160,7 +168,11 @@ public static partial class LanguageFrontendAnalyzer
 
     private static void AnalyzeCpp(string basePath, string file, List<Method> methods, List<Dependency> dependencies, List<MethodCalls> calls)
     {
-        var lines = File.ReadAllLines(file);
+        var lines = SafeFileRead.TryReadAllLines(file);
+        if (lines is null)
+        {
+            return;
+        }
         var className = Path.GetFileNameWithoutExtension(file);
         var currentFunction = "translation_unit";
         var currentSourceId = CreateId("C++", className, currentFunction, file, 1);

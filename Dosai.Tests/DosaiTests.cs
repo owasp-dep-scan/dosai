@@ -754,6 +754,124 @@ class CallbackEntry
     }
 
     [Fact]
+    public void GetMethods_CSharpSource_AmbiguousUsingAliasType_DoesNotThrowAndKeepsNamespaceAliases()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var scanDirectory = Path.Combine(tempDirectory.Path, "scan");
+        Directory.CreateDirectory(scanDirectory);
+        File.WriteAllText(Path.Combine(scanDirectory, "Program.cs"), """
+using System;
+using Collections = System.Collections;
+using Project = PC.MyCompany.Project;
+
+namespace AliasSource
+{
+    public class Program
+    {
+        public static void Main()
+        {
+            System.Console.WriteLine("hello");
+        }
+    }
+}
+""");
+
+        // The alias target type ships in two assemblies under the scan directory, so the
+        // alias target resolves to candidate type symbols instead of a single namespace.
+        var ambiguousOne = BuildTemporaryProject(tempDirectory.Path, "AmbiguousAliasOne", "namespace PC.MyCompany { public class Project { public static void Main() { } } }");
+        var ambiguousTwo = BuildTemporaryProject(tempDirectory.Path, "AmbiguousAliasTwo", "namespace PC.MyCompany { public class Project { public static void Main() { } } }");
+        File.Copy(Path.Combine(ambiguousOne, "AmbiguousAliasOne.dll"), Path.Combine(scanDirectory, "AmbiguousAliasOne.dll"));
+        File.Copy(Path.Combine(ambiguousTwo, "AmbiguousAliasTwo.dll"), Path.Combine(scanDirectory, "AmbiguousAliasTwo.dll"));
+
+        var methodsSlice = ReadMethods(scanDirectory);
+
+        var dependencies = methodsSlice.Dependencies ?? [];
+        var ambiguousAlias = dependencies.Single(dependency => dependency.Name == "PC.MyCompany.Project");
+        Assert.Equal("PC.MyCompany.Project", ambiguousAlias.Namespace);
+        Assert.Empty(ambiguousAlias.NamespaceMembers ?? []);
+        var namespaceAlias = dependencies.Single(dependency => dependency.Name == "System.Collections");
+        Assert.Equal("System", namespaceAlias.Namespace);
+        Assert.Contains("Generic", namespaceAlias.NamespaceMembers ?? []);
+    }
+
+    [Fact]
+    public void GetMethods_VBSource_AmbiguousImportsAliasType_DoesNotThrowAndKeepsNamespaceAliases()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var scanDirectory = Path.Combine(tempDirectory.Path, "scan");
+        Directory.CreateDirectory(scanDirectory);
+        File.WriteAllText(Path.Combine(scanDirectory, "Program.vb"), """
+Imports Collections = System.Collections
+Imports Project = PC.MyCompany.Project
+
+Namespace AliasSource
+    Public Class Program
+        Public Shared Sub Main()
+            System.Console.WriteLine("hello")
+        End Sub
+    End Class
+End Namespace
+""");
+
+        var ambiguousOne = BuildTemporaryProject(tempDirectory.Path, "AmbiguousAliasOne", "namespace PC.MyCompany { public class Project { public static void Main() { } } }");
+        var ambiguousTwo = BuildTemporaryProject(tempDirectory.Path, "AmbiguousAliasTwo", "namespace PC.MyCompany { public class Project { public static void Main() { } } }");
+        File.Copy(Path.Combine(ambiguousOne, "AmbiguousAliasOne.dll"), Path.Combine(scanDirectory, "AmbiguousAliasOne.dll"));
+        File.Copy(Path.Combine(ambiguousTwo, "AmbiguousAliasTwo.dll"), Path.Combine(scanDirectory, "AmbiguousAliasTwo.dll"));
+
+        var methodsSlice = ReadMethods(scanDirectory);
+
+        var dependencies = methodsSlice.Dependencies ?? [];
+        var ambiguousAlias = dependencies.Single(dependency => dependency.Name == "PC.MyCompany.Project");
+        Assert.Empty(ambiguousAlias.NamespaceMembers ?? []);
+        var namespaceAlias = dependencies.Single(dependency => dependency.Name == "System.Collections");
+        Assert.Contains("Generic", namespaceAlias.NamespaceMembers ?? []);
+    }
+
+    [Fact]
+    public void Analysis_DeeplyNestedExpressions_CompleteWithoutStackOverflow()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        const int nestingDepth = 5000;
+        var expression = "1" + string.Concat(Enumerable.Repeat(" + 1", nestingDepth));
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Deep.cs"), $$"""
+namespace DeepNest
+{
+    public class Calculator
+    {
+        public int Calculate()
+        {
+            return {{expression}};
+        }
+    }
+}
+""");
+
+        // A dedicated thread with a known stack size makes the regression deterministic:
+        // unbounded walker recursion reliably overflows this stack instead of depending
+        // on the host's default thread stack. A stack overflow kills the test process,
+        // which is the loud failure mode this guard exists to prevent.
+        string? failure = null;
+        var worker = new Thread(() =>
+        {
+            try
+            {
+                var dataFlows = ReadDataFlows(tempDirectory.Path);
+                Assert.True(dataFlows.Statistics.FilesAnalyzed >= 1);
+                Assert.NotNull(CryptoAnalyzer.GetCryptoAnalysis(tempDirectory.Path));
+                Assert.Contains(ReadMethods(tempDirectory.Path).Methods ?? [], method => method.Name == "Calculate");
+            }
+            catch (Exception ex)
+            {
+                failure = ex.ToString();
+            }
+        }, maxStackSize: 8 * 1024 * 1024);
+        worker.Start();
+        worker.Join();
+
+        Assert.Null(failure);
+    }
+
+    [Fact]
     public void GetMethods_CSharpSource_AddsFrameworkDiAndReflectionHeuristicEdges()
     {
         using var tempDirectory = new TemporaryDirectory();
