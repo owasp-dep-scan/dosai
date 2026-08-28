@@ -20,15 +20,15 @@ Providers never silently promote a heuristic match to high confidence. Consumers
 
 ## Output surface
 
-| Field                           | Content                                                                         |
-| ------------------------------- | ------------------------------------------------------------------------------- |
-| `MethodsSlice.Services[]`       | First-class service inventory (inbound surfaces and outbound dependencies)      |
-| `MethodsSlice.AiComponents[]`   | Models, MCP tools with JSON Schemas, prompts, agents, embeddings                |
-| `MethodsSlice.Frameworks[]`     | Detected frameworks with version/purl/confidence                                |
-| `ApiEndpoint.Path`              | Resolved route path (leading `/`, tokens substituted) — what CycloneDX consumes |
-| `ApiEndpoint.Route`             | Verbatim route template, preserved for humans and diffing                       |
-| `ApiEndpoint.RouteParameters[]` | Parameters with constraints, defaults, optionality, binding source              |
-| `ApiEndpoint.RawUrls[]`         | File-scope absolute URLs (heuristic evidence; renamed from `Urls`)              |
+| Field                           | Content                                                                        |
+| ------------------------------- | ------------------------------------------------------------------------------ |
+| `MethodsSlice.Services[]`       | First-class service inventory (inbound surfaces and outbound dependencies)     |
+| `MethodsSlice.AiComponents[]`   | Models, MCP tools with JSON Schemas, prompts, agents, embeddings               |
+| `MethodsSlice.Frameworks[]`     | Detected frameworks with version/purl/confidence                               |
+| `ApiEndpoint.Path`              | Resolved route path (leading `/`, tokens substituted), what CycloneDX consumes |
+| `ApiEndpoint.Route`             | Verbatim route template, preserved for humans and diffing                      |
+| `ApiEndpoint.RouteParameters[]` | Parameters with constraints, defaults, optionality, binding source             |
+| `ApiEndpoint.RawUrls[]`         | File-scope absolute URLs (heuristic evidence; renamed from `Urls`)             |
 
 Stable bom-refs: `svc:<framework>:<group>/<name>`, `op:<serviceId>#<verb>:<path>`,
 `ai:<kind>:<provider>/<name>`. Ids never contain absolute paths, lines, or timestamps, so output
@@ -54,7 +54,7 @@ files from disk, and model artifacts over 256 MB skip hashing (see THREAT_MODEL.
 
 ## Supported frameworks
 
-### Tier 1 — Web/HTTP
+### Tier 1, Web/HTTP
 
 | Framework (provider id)                                     | Detected                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | Service kind / entry kind                   | Confidence      |
 | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- | --------------- |
@@ -64,7 +64,7 @@ files from disk, and model artifacts over 256 MB skip hashing (see THREAT_MODEL.
 | Razor Pages / Blazor (`razor-blazor`)                       | `.cshtml`/`.razor` `@page` directives, `On{Verb}` handlers incl. named handlers, `@attribute [Authorize]`, Blazor `[Route]` components, interactive render modes (SignalR circuit dependency)                                                                                                                                                                                                                                                                                                        | `http` / `HttpRazorPage`, `BlazorComponent` | low             |
 | Community HTTP (`community-http`)                           | FastEndpoints (`Endpoint<TReq,TRes>` + `Configure()`), ServiceStack `[Route]` DTOs, Nancy module registrations, Carter modules                                                                                                                                                                                                                                                                                                                                                                       | `http` / `HttpController`                   | medium          |
 
-### Tier 2 — RPC & serialization
+### Tier 2, RPC & serialization
 
 | Framework (provider id)       | Detected                                                                                                                                                                                                                                                         | Service kind / entry kind  | Confidence  |
 | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- | ----------- |
@@ -72,7 +72,7 @@ files from disk, and model artifacts over 256 MB skip hashing (see THREAT_MODEL.
 | Protocol Buffers (`protobuf`) | `.proto` files parsed directly (service/rpc/message, `google.api.http` annotations, streaming) with a brace-balancing scanner; csproj `<Protobuf GrpcServices=...>` metadata; protobuf-net/MessagePack via detection                                             | `grpc` (from IDL)          | low         |
 | SignalR (`signalr`)           | `Hub`/`Hub<T>` subclasses, `[HubMethodName]`, hub-method auth, `MapHub` mount association, `HubConnectionBuilder.WithUrl` clients (outbound), `IHubContext<T>` usage                                                                                             | `websocket` / `SignalRHub` | high/medium |
 
-### Tier 3 — Serverless, messaging, jobs
+### Tier 3, Serverless, messaging, jobs
 
 | Framework (provider id)             | Detected                                                                                                                                                                                                                                                                          | Service kind / entry kind                     | Confidence  |
 | ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- | ----------- |
@@ -81,13 +81,13 @@ files from disk, and model artifacts over 256 MB skip hashing (see THREAT_MODEL.
 | Messaging (`messaging`)             | MassTransit `IConsumer<T>`, NServiceBus `IHandleMessages<T>`, MediatR `IRequestHandler<,>`/`INotificationHandler<T>`, Rebus, Dapr, publishers (`Publish`/`Send`/`InvokeMethodAsync`), raw Kafka/RabbitMQ/Service Bus clients with entity names                                    | `queue`/`pubsub` / `MessageConsumer`          | high/medium |
 | Background jobs (`background-jobs`) | `IHostedService`/`BackgroundService` with `AddHostedService<T>` registration detection, Hangfire `RecurringJob.AddOrUpdate` (cron + humanized schedule) and dashboard authorization (unauthenticated dashboard is a finding), Quartz `IJob`, Coravel `IInvocable`                 | `scheduled` / `ScheduledJob`, `HostedService` | high/medium |
 
-### Tier 4 — AI, agents, MCP
+### Tier 4, AI, agents, MCP
 
 | Framework (provider id)        | Detected                                                                                                                                                                                                                                                                                                                                                                                                                                       | Service kind / entry kind                     | Confidence  |
 | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- | ----------- |
 | Model Context Protocol (`mcp`) | Server: `[McpServerToolType]`/`[McpServerTool]` (including tools on ordinary classes), prompts, resources, per-tool JSON Schemas ([Description] carried, `CancellationToken`/`IProgress` excluded), transport (stdio/http), stateless mode, `WithToolsFromAssembly` breadth (finding), HTTP host-header restriction (finding). Client: `McpClientFactory` transports; `StdioClientTransport` command/arguments captured as a supply-chain fact | `mcp` / `McpTool`, `McpPrompt`, `McpResource` | high/medium |
-| LLM SDKs (`llm`)               | Model identifiers in chat/embedding calls (provider inferred: openai/azure/anthropic/google/huggingface), inference endpoints as outbound services, tools exposed to models, agents, system prompts (redacted by default; `--include-prompt-text` for full text)                                                                                                                                                                               | `ai-inference` / —                            | medium      |
-| ML runtimes (`ml-runtime`)     | ML.NET trainers (task/architecture family), `InferenceSession`/`Model.Load` references, on-disk artifacts (`.onnx`, `.gguf`, `.safetensors`, `.pt`) hashed with SHA-256, HuggingFace repo ids                                                                                                                                                                                                                                                  | — (AI components)                             | medium/low  |
+| LLM SDKs (`llm`)               | Model identifiers in chat/embedding calls (provider inferred: openai/azure/anthropic/google/huggingface), inference endpoints as outbound services, tools exposed to models, agents, system prompts (redacted by default; `--include-prompt-text` for full text)                                                                                                                                                                               | `ai-inference` /,                             | medium      |
+| ML runtimes (`ml-runtime`)     | ML.NET trainers (task/architecture family), `InferenceSession`/`Model.Load` references, on-disk artifacts (`.onnx`, `.gguf`, `.safetensors`, `.pt`) hashed with SHA-256, HuggingFace repo ids                                                                                                                                                                                                                                                  | , (AI components)                             | medium/low  |
 | Vector stores (`vector-store`) | Qdrant, Pinecone, Milvus, Weaviate, Chroma, pgvector, Azure AI Search, Elasticsearch, Redis vector clients with collection metadata                                                                                                                                                                                                                                                                                                            | `vector-store` (outbound)                     | medium      |
 
 ## Data classification and trust zones
@@ -98,7 +98,7 @@ names the member that triggered it in `Description`. Disable with `--classify-da
 
 `TrustZone`: `public` (anonymous inbound), `authenticated`, `internal` (loopback/queue),
 `external` (outbound to non-loopback hosts), `unknown`. `CrossesTrustBoundary` is computed from
-the call graph — it is only set when a positive path exists from a public inbound service to an
+the call graph, it is only set when a positive path exists from a public inbound service to an
 external outbound service's methods, never guessed.
 
 ## Taint seeding
@@ -114,7 +114,7 @@ real source→sink slice. Weakness kinds include `PromptInjectionCandidate` and
 - VB.NET endpoint extraction remains syntax-only (`ApiEndpointAnalyzer`); C# is fully
   provider-driven.
 - Route templates that cannot be resolved (non-constant expressions) keep the verbatim template
-  in `Route` and leave `Path` null at low confidence — never a garbled path.
+  in `Route` and leave `Path` null at low confidence, never a garbled path.
 - Razor/Blazor parsing is textual by design (the templates are not C# compilations).
 
 ## CLI
