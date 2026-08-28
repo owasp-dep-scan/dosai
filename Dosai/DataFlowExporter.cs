@@ -58,7 +58,8 @@ public static class DataFlowExporter
         var ids = result.Nodes
             .OrderBy(n => n.Id, StringComparer.Ordinal)
             .Select((node, index) => new { node.Id, MermaidId = $"df{index + 1}" })
-            .ToDictionary(item => item.Id, item => item.MermaidId, StringComparer.Ordinal);
+            .GroupBy(item => item.Id, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.First().MermaidId, StringComparer.Ordinal);
 
         foreach (var node in result.Nodes.OrderBy(n => n.Id, StringComparer.Ordinal))
         {
