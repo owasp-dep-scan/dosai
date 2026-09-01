@@ -2,13 +2,13 @@
 
 Schema 4.0.0 (branch `framework-semantics-4.0.0`) replaces name-matching endpoint extraction
 with framework providers. The changes below are output-visible. Anything not listed here is
-unchanged from 3.3.0.
+unchanged from 3.0.x.
 
 ## Metadata and entry points
 
-| Change                   | 3.3.0                                     | 4.0.0                                                                                                                                                                                                                                                            |
+| Change                   | 3.0.x                                     | 4.0.0                                                                                                                                                                                                                                                            |
 | ------------------------ | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Metadata.SchemaVersion` | `3.3.0`                                   | `4.0.0`                                                                                                                                                                                                                                                          |
+| `Metadata.SchemaVersion` | `3.0.x`                                   | `4.0.0`                                                                                                                                                                                                                                                          |
 | `EntryPoint.Urls`        | file-scope absolute URLs                  | renamed to **`EntryPoint.RawUrls`**                                                                                                                                                                                                                              |
 | `EntryPoint.Id`          | sequential `ep1`, `ep2`, …                | framework entry points use stable ids `ep:op:svc:<framework>:<group>/<name>#<verb>:<path>`; analyzer/Cli entry points keep sequential ids but are numbered **after** the framework ones, so every `epN` index shifts                                             |
 | `EntryPoint.Kind`        | `HttpEndpoint` / `HttpMinimalApi` / `Cli` | `HttpController`, `HttpMinimalApi`, `HttpRazorPage`, `Grpc`, `SignalRHub`, `Soap`, `GraphQL`, `OData`, `AzureFunction`, `LambdaFunction`, `MessageConsumer`, `HostedService`, `McpTool`, `McpPrompt`, `McpResource`, `Cli`. **`HttpEndpoint` no longer exists.** |
@@ -20,7 +20,7 @@ key on `epN` ids must treat ids as opaque strings, not indexes.
 
 - `ApiEndpoint.Path` is now the **resolved route** (`/api/WeatherForecast/{id}`) with
   `[controller]`/`[action]`/`[area]` tokens substituted; `ApiEndpoint.Route` keeps the verbatim
-  template. In 3.3.0 `Path` held the source file path, consumers must not read it as a location.
+  template. In 3.0.x `Path` held the source file path, consumers must not read it as a location.
 - Conventional routing (`MapControllerRoute`, `MapDefaultControllerRoute`) expands per action:
   `{controller=Home}/{action=Index}/{id?}` for `GrantsController.Index` yields `/Grants/Index`.
   Optional segments without defaults (`{id?}`) are omitted from the path and recorded in
@@ -39,7 +39,7 @@ key on `epN` ids must treat ids as opaque strings, not indexes.
   `llm-output`, `prompt`, `mcp`) and new weakness kinds (`PromptInjectionCandidate` CWE-1427,
   `McpToolInjectionCandidate`) without any flag changes. Pass
   `--pattern-packs aspnet,data,filesystem,serialization,cloud,rpc,auth,crypto` to restore the
-  3.3.0 pattern set exactly.
+  3.0.x pattern set exactly.
 - Framework entry-point parameters are seeded as taint sources (http/rpc/queue/websocket/mcp),
   so `dataflows` on the same code now reports more sources. DI-injected parameters
   (`[FromServices]`, interfaces, `DbContext`-style services, `HttpContext`,
@@ -64,7 +64,7 @@ key on `epN` ids must treat ids as opaque strings, not indexes.
 ## cdxgen consumers
 
 - Prefer `ApiEndpoint.Path` (resolved route) over `Route` **only when `SchemaVersion >= 4.0.0`**
-  , in 3.3.0 `Path` is a file path.
+  , in 3.0.x `Path` is a file path.
 - Services map to CycloneDX 1.7 `services[]` with `bom-ref` = `svc:` id, `trustZone`, `data[]`
   classifications, and endpoint evidence.
 

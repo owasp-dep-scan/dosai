@@ -90,7 +90,7 @@ Two properties make Dosai output usable as audit evidence.
 
 First, output is deterministic. Identifiers never contain absolute paths, line numbers, or timestamps, so the same tree analyzed on two machines produces byte-identical ids. A finding re-analyzed after a review should produce the same id, which makes diffing between runs meaningful.
 
-Second, the output schema is versioned in `Metadata.SchemaVersion`. Output-visible changes are documented per version in the [migration guide](./migration-4.0.md). Consumers that integrate Dosai JSON into pipelines should pin to a schema version and check `Metadata.SchemaVersion` before reading fields, because field meaning can change between versions: in 3.3.0 `ApiEndpoint.Path` held a source file path, while from 4.0.0 it holds the resolved route and `ApiEndpoint.Route` keeps the verbatim template.
+Second, the output schema is versioned in `Metadata.SchemaVersion`. Output-visible changes are documented per version in the [migration guide](./migration-4.0.md). Consumers that integrate Dosai JSON into pipelines should pin to a schema version and check `Metadata.SchemaVersion` before reading fields, because field meaning can change between versions: in 3.0.x `ApiEndpoint.Path` held a source file path, while from 4.0.0 it holds the resolved route and `ApiEndpoint.Route` keeps the verbatim template.
 
 Use the `diff` command to compare a current run against a reviewed baseline, so an audit can be scoped to what changed:
 
