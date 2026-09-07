@@ -164,7 +164,57 @@ public static class CryptoAnalyzer
 
     public static string Export(CryptoAnalysisResult result, string? format = null) => CryptoBomExporter.Export(result, ParseFormat(format));
 
+    /// <summary>
+    ///     W6: crypto misuse findings as WeaknessCandidate-shaped entries so dataflows and crypto
+    ///     converge on one weakness list (agent-context and downstream consumers get a single
+    ///     CWE-stamped queue). Ids are prefixed `wcc` to never collide with dataflow `wc` ids.
+    /// </summary>
+    public static List<WeaknessCandidate> BuildWeaknessCandidates(CryptoAnalysisResult result) => result.Findings
+        .Select((finding, index) =>
+        {
+            var evidence = new List<string> { finding.Summary, $"Rule {finding.RuleId}" };
+            if (finding.Recommendation is not null)
+            {
+                evidence.Add($"Recommendation: {finding.Recommendation}");
+            }
+
+            return new WeaknessCandidate
+            {
+                Id = $"wcc{index + 1}",
+                Kind = "InsecureCryptoUsageCandidate",
+                Cwe = finding.Cwe ?? CweForRule(finding.RuleId),
+                Confidence = finding.ReachableFromEntryPoint ? "High" : finding.Confidence,
+                Severity = finding.Severity.ToLowerInvariant(),
+                ConfidenceReasons = finding.ReachableFromEntryPoint
+                    ? [$"Crypto misuse is reachable from entry point(s) {string.Join(", ", finding.EntryPointIds.Take(3))}."]
+                    : ["Crypto misuse detected statically; no entry-point reachability established."],
+                SourceLocation = $"{finding.Location.FileName}:{finding.Location.LineNumber}:{finding.Location.ColumnNumber}",
+                SinkLocation = $"{finding.Location.FileName}:{finding.Location.LineNumber}:{finding.Location.ColumnNumber}",
+                SinkCategory = "crypto",
+                Route = finding.RuleId,
+                Purls = [],
+                Evidence = evidence,
+                Summary = finding.Summary
+            };
+        })
+        .ToList();
+
+    private static string CweForRule(string? ruleId) => ruleId switch
+    {
+        "DOSAI-CRYPTO-HARDCODED-MATERIAL" => "CWE-798",
+        "DOSAI-CRYPTO-STATIC-IV" => "CWE-1204",
+        "DOSAI-CRYPTO-LOW-PBKDF2-ITERATIONS" => "CWE-916",
+        _ => "CWE-327"
+    };
+
     public static CryptoAnalysisResult Analyze(string path)
+        => Analyze(path, methodsSlice: null);
+
+    /// <summary>
+    ///     R9: callers that already hold a <see cref="MethodsSlice"/> (or its R1 reachability index)
+    ///     pass it here instead of forcing a second full methods-pipeline run and a JSON round trip.
+    /// </summary>
+    public static CryptoAnalysisResult Analyze(string path, MethodsSlice? methodsSlice)
     {
         if (!File.Exists(path) && !Directory.Exists(path))
         {
@@ -173,7 +223,9 @@ public static class CryptoAnalyzer
 
         var files = GetSourceFiles(path);
         var result = new CryptoAnalysisResult { Metadata = TransparencyBuilder.CreateMetadata(path) };
-        var reachability = BuildReachability(path, result.Diagnostics);
+        var reachability = methodsSlice is null
+            ? BuildReachability(path, result.Diagnostics)
+            : CryptoReachability.From(methodsSlice, result.Diagnostics);
         result.Statistics.FilesAnalyzed = files.Count;
 
         AnalyzeDotNetSources(path, files, reachability, result);
@@ -902,9 +954,9 @@ public static class CryptoAnalyzer
     {
         try
         {
-            var methodsJson = Dosai.GetMethods(path);
-            var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(methodsJson, JsonOptions);
-            return CryptoReachability.From(methodsSlice);
+            // R9: reuse the slice object directly — the previous GetMethods() + serialize +
+            // deserialize round trip doubled the whole methods pipeline for every crypto scan.
+            return CryptoReachability.From(Dosai.GetMethodsSlice(path), diagnostics);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or BadImageFormatException or JsonException or InvalidOperationException)
         {
@@ -1153,23 +1205,30 @@ public static class CryptoAnalyzer
 
     private sealed class CryptoReachability
     {
-        public static CryptoReachability Empty { get; } = new([], [], [], []);
+        public static CryptoReachability Empty { get; } = new([], [], [], [], []);
+
+        private const int ReverseWalkBudget = 4096;
+        private const int ForwardWalkBudget = 100_000;
 
         private readonly Dictionary<string, string> _methodIdsByLooseKey;
         private readonly Dictionary<string, List<string>> _entryPointsByMethodId;
         private readonly Dictionary<string, List<string>> _entryPointsByFile;
         private readonly List<EntryPoint> _entryPoints;
+        private readonly List<string> _diagnostics;
+        private readonly HashSet<string> _fileFallbackReported = new(StringComparer.OrdinalIgnoreCase);
 
-        private CryptoReachability(Dictionary<string, string> methodIdsByLooseKey, Dictionary<string, List<string>> entryPointsByMethodId, Dictionary<string, List<string>> entryPointsByFile, List<EntryPoint> entryPoints)
+        private CryptoReachability(Dictionary<string, string> methodIdsByLooseKey, Dictionary<string, List<string>> entryPointsByMethodId, Dictionary<string, List<string>> entryPointsByFile, List<EntryPoint> entryPoints, List<string> diagnostics)
         {
             _methodIdsByLooseKey = methodIdsByLooseKey;
             _entryPointsByMethodId = entryPointsByMethodId;
             _entryPointsByFile = entryPointsByFile;
             _entryPoints = entryPoints;
+            _diagnostics = diagnostics;
         }
 
-        public static CryptoReachability From(MethodsSlice? slice)
+        public static CryptoReachability From(MethodsSlice? slice, List<string>? diagnostics = null)
         {
+            diagnostics ??= [];
             if (slice is null) return Empty;
             var methods = slice.Methods ?? [];
             var callGraph = slice.CallGraph ?? new CallGraph();
@@ -1186,14 +1245,37 @@ public static class CryptoAnalyzer
                 AddKey(methodIdsByLooseKey, id, method.FileName, null, null, method.Name);
             }
 
-            var adjacency = callGraph.Edges.GroupBy(edge => edge.SourceId, StringComparer.Ordinal).ToDictionary(group => group.Key, group => group.Select(edge => edge.TargetId).Distinct(StringComparer.Ordinal).ToList(), StringComparer.Ordinal);
-            var reverseAdjacency = callGraph.Edges.GroupBy(edge => edge.TargetId, StringComparer.Ordinal).ToDictionary(group => group.Key, group => group.Select(edge => edge.SourceId).Distinct(StringComparer.Ordinal).ToList(), StringComparer.Ordinal);
+            // R1: when the methods slice carries the precomputed reachability index, per-node entry
+            // points are exact graph facts — no re-walk, no caps, no file-level guessing.
             var byMethod = new Dictionary<string, List<string>>(StringComparer.Ordinal);
             var byFile = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
             foreach (var entry in entryPoints)
             {
+                if (!string.IsNullOrWhiteSpace(entry.FileName))
+                {
+                    AddEntry(byFile, entry.FileName!, entry.Id);
+                }
+            }
+
+            if (slice.Reachability is { Count: > 0 })
+            {
+                foreach (var nodeReachability in slice.Reachability)
+                {
+                    foreach (var entryPointId in nodeReachability.ReachableEntryPoints)
+                    {
+                        AddEntry(byMethod, nodeReachability.NodeId, entryPointId);
+                    }
+                }
+
+                return new CryptoReachability(methodIdsByLooseKey, byMethod, byFile, entryPoints, diagnostics);
+            }
+
+            var adjacency = callGraph.Edges.GroupBy(edge => edge.SourceId, StringComparer.Ordinal).ToDictionary(group => group.Key, group => group.Select(edge => edge.TargetId).Distinct(StringComparer.Ordinal).ToList(), StringComparer.Ordinal);
+            var reverseAdjacency = callGraph.Edges.GroupBy(edge => edge.TargetId, StringComparer.Ordinal).ToDictionary(group => group.Key, group => group.Select(edge => edge.SourceId).Distinct(StringComparer.Ordinal).ToList(), StringComparer.Ordinal);
+            foreach (var entry in entryPoints)
+            {
                 var startIds = new HashSet<string>(StringComparer.Ordinal);
-                if (!string.IsNullOrWhiteSpace(entry.MethodId)) startIds.Add(entry.MethodId);
+                if (!string.IsNullOrWhiteSpace(entry.MethodId)) startIds.Add(entry.MethodId!);
                 if (methodIdsByLooseKey.TryGetValue(LooseKey(entry.FileName, entry.Namespace, entry.ClassName, entry.MethodName), out var looseId)) startIds.Add(looseId);
                 if (methodIdsByLooseKey.TryGetValue(LooseKey(entry.FileName, null, entry.ClassName, entry.MethodName), out var fileClassId)) startIds.Add(fileClassId);
                 if (methodIdsByLooseKey.TryGetValue(LooseKey(null, null, entry.ClassName, entry.MethodName), out var classId)) startIds.Add(classId);
@@ -1202,17 +1284,13 @@ public static class CryptoAnalyzer
                     if (!string.IsNullOrWhiteSpace(method.SourceSignature)) startIds.Add(method.SourceSignature!);
                 }
 
-                if (!string.IsNullOrWhiteSpace(entry.FileName))
-                {
-                    AddEntry(byFile, entry.FileName!, entry.Id);
-                }
-
-                foreach (var reachable in Walk(startIds, adjacency).Concat(Walk(startIds, reverseAdjacency).Take(64)).Distinct(StringComparer.Ordinal))
+                foreach (var reachable in Walk(startIds, adjacency, ForwardWalkBudget).Concat(Walk(startIds, reverseAdjacency, ReverseWalkBudget)).Distinct(StringComparer.Ordinal))
                 {
                     AddEntry(byMethod, reachable, entry.Id);
                 }
             }
-            return new CryptoReachability(methodIdsByLooseKey, byMethod, byFile, entryPoints);
+
+            return new CryptoReachability(methodIdsByLooseKey, byMethod, byFile, entryPoints, diagnostics);
         }
 
         public string? ResolveMethodId(string file, string? namespaceName, string? className, string? methodName)
@@ -1232,17 +1310,49 @@ public static class CryptoAnalyzer
             return null;
         }
 
-        public List<string> EntryPointsFor(string? methodId, string file, string? methodName)
+        public List<string> EntryPointsFor(string? methodId, string file, string? methodName) =>
+            EntryPointsFor(methodId, file, methodName, out _);
+
+        /// <summary>
+        ///     R9: the file-level fallback used to silently mark every crypto usage in an
+        ///     endpoint-bearing file as reachable — a guess that fed CycloneDX
+        ///     reachableFromEntryPoint properties with High-confidence claims. It is now gated off
+        ///     (returns no entry points) with a per-file diagnostic carrying the reason; reachability
+        ///     claims must come from a graph path or an exact method match.
+        /// </summary>
+        public List<string> EntryPointsFor(string? methodId, string file, string? methodName, out bool fileLevelFallback)
         {
-            if (!string.IsNullOrWhiteSpace(methodId) && _entryPointsByMethodId.TryGetValue(methodId, out var entries)) return entries.ToList();
+            if (!string.IsNullOrWhiteSpace(methodId) && _entryPointsByMethodId.TryGetValue(methodId, out var entries))
+            {
+                fileLevelFallback = false;
+                return entries.ToList();
+            }
+
             var fileName = Path.GetFileName(file);
             var direct = _entryPoints
-                .Where(entry => string.Equals(entry.FileName, Path.GetFileName(file), StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(methodName) && string.Equals(entry.MethodName, methodName, StringComparison.OrdinalIgnoreCase))
+                .Where(entry => string.Equals(entry.FileName, fileName, StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(methodName) && string.Equals(entry.MethodName, methodName, StringComparison.OrdinalIgnoreCase))
                 .Select(entry => entry.Id)
                 .Distinct(StringComparer.Ordinal)
                 .ToList();
-            if (direct.Count > 0) return direct;
-            return _entryPointsByFile.TryGetValue(fileName, out var fileEntries) ? fileEntries.ToList() : [];
+            if (direct.Count > 0)
+            {
+                fileLevelFallback = false;
+                return direct;
+            }
+
+            if (_entryPointsByFile.TryGetValue(fileName, out var fileEntries))
+            {
+                fileLevelFallback = true;
+                if (_fileFallbackReported.Add(fileName))
+                {
+                    _diagnostics.Add($"Crypto reachability for {fileName} matched only at file level (no graph path from an entry point); file-level reachability is no longer asserted. Confirm with a methods run.");
+                }
+
+                return [];
+            }
+
+            fileLevelFallback = false;
+            return [];
         }
 
         private static void AddKey(Dictionary<string, string> index, string id, string? fileName, string? namespaceName, string? className, string? methodName)
@@ -1260,11 +1370,11 @@ public static class CryptoAnalyzer
             if (!entries.Contains(entryId, StringComparer.Ordinal)) entries.Add(entryId);
         }
 
-        private static IEnumerable<string> Walk(IEnumerable<string> starts, Dictionary<string, List<string>> adjacency)
+        private static IEnumerable<string> Walk(IEnumerable<string> starts, Dictionary<string, List<string>> adjacency, int visitedBudget)
         {
             var seen = new HashSet<string>(StringComparer.Ordinal);
             var queue = new Queue<string>(starts.Where(start => !string.IsNullOrWhiteSpace(start)).Distinct(StringComparer.Ordinal));
-            while (queue.Count > 0)
+            while (queue.Count > 0 && seen.Count < visitedBudget)
             {
                 var current = queue.Dequeue();
                 if (!seen.Add(current)) continue;

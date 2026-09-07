@@ -254,6 +254,7 @@ public static partial class DataFlowAnalyzer
         var initialState = new AssemblyMethodState([], [], SeedAssemblyParameters(reader, method, methodInfo, isStatic, context));
         var worklist = new Queue<(int Index, AssemblyMethodState State)>();
         var visitCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+        var budgetReported = false;
         worklist.Enqueue((0, initialState));
 
         while (worklist.Count > 0)
@@ -266,6 +267,15 @@ public static partial class DataFlowAnalyzer
 
             var visitKey = $"{instructionIndex}:{state.Signature()}";
             visitCounts.TryGetValue(visitKey, out var visitCount);
+            // T11: silent truncation understates results; the state budget is reported once per
+            // method so a missing flow can be told apart from a clean one. The per-state 2-visit
+            // limit is by-design loop convergence, not a budget.
+            if (!budgetReported && visitCounts.Count > 20000)
+            {
+                budgetReported = true;
+                context.RecordDiagnostic($"IL interpreter hit the 20000-state budget in {methodInfo.Symbol}; results for this method are incomplete.");
+            }
+
             if (visitCount >= 2 || visitCounts.Count > 20000)
             {
                 continue;
@@ -394,6 +404,51 @@ public static partial class DataFlowAnalyzer
             if (opCode == OpCodes.Call || opCode == OpCodes.Callvirt || opCode == OpCodes.Newobj)
             {
                 ProcessAssemblyCall(reader, instruction, opCode, methodInfo, assemblyPath, context, state, summaries);
+
+                // T8: sanitizer-guard reasoning. `call Validator(x); brtrue.s L` — the true edge of a
+                // conditional branch on a sanitizer's result is the validated path; the argument
+                // slots that fed the validator are suppressed along that edge only. The guard is
+                // applied atomically here (successors of the *branch* are enqueued with validation)
+                // so the worklist's interleaved states never observe stale guard data. Debug builds
+                // forward the result through a local (stloc/ldloc) before branching — accepted too.
+                if (FindSanitizerGuardBranch(instructions, instructionIndex) is { } branchIndex &&
+                    TryDetectSanitizerGuardSlots(reader, instruction, instructions, instructionIndex, context) is { Count: > 0 } guardSlots)
+                {
+                    _ = state.Pop(); // the validator's result feeds the branch (directly or via a local)
+                    var branchInstruction = instructions[branchIndex];
+                    var branchOnTrue = branchInstruction.OpCode == OpCodes.Brtrue || branchInstruction.OpCode == OpCodes.Brtrue_S;
+                    foreach (var successor in GetSuccessorIndexes(branchIndex, branchInstruction, instructions, instructionIndexByOffset, exceptionRegions))
+                    {
+                        if (successor.IsExceptionHandler)
+                        {
+                            worklist.Enqueue((successor.Index, state.Clone()));
+                            continue;
+                        }
+
+                        var fallsThrough = successor.Index == branchIndex + 1;
+                        var isValidatedPath = branchOnTrue ? !fallsThrough : fallsThrough;
+                        var successorState = state.Clone();
+                        if (isValidatedPath)
+                        {
+                            foreach (var (isArgument, slotIndex) in guardSlots)
+                            {
+                                if (isArgument)
+                                {
+                                    successorState.Arguments[slotIndex] = null;
+                                }
+                                else
+                                {
+                                    successorState.Locals[slotIndex] = null;
+                                }
+                            }
+                        }
+
+                        worklist.Enqueue((successor.Index, successorState));
+                    }
+
+                    continue;
+                }
+
                 EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
                 continue;
             }
@@ -595,6 +650,7 @@ public static partial class DataFlowAnalyzer
 
         var worklist = new Queue<(int Index, AssemblySummaryState State)>();
         var visits = new Dictionary<string, int>(StringComparer.Ordinal);
+        var budgetReported = false;
         worklist.Enqueue((0, new AssemblySummaryState([], [], argumentTaints)));
         while (worklist.Count > 0)
         {
@@ -602,6 +658,14 @@ public static partial class DataFlowAnalyzer
             if (instructionIndex < 0 || instructionIndex >= instructions.Count) continue;
             var visitKey = $"{instructionIndex}:{state.Signature()}";
             visits.TryGetValue(visitKey, out var visitCount);
+            // T11: the summary-state budget truncates silently today; report it so a shallow
+            // summary is visible instead of looking like a small method.
+            if (!budgetReported && visits.Count > 10000)
+            {
+                budgetReported = true;
+                context.RecordDiagnostic($"IL summary interpreter hit the 10000-state budget in {methodInfo.Symbol}; the summary for this method may be incomplete.");
+            }
+
             if (visitCount >= 2 || visits.Count > 10000) continue;
             visits[visitKey] = visitCount + 1;
 
@@ -1136,6 +1200,153 @@ public static partial class DataFlowAnalyzer
         }
     }
 
+
+    private static bool IsConditionalBranch(OpCode opCode) =>
+        opCode == OpCodes.Brtrue || opCode == OpCodes.Brtrue_S || opCode == OpCodes.Brfalse || opCode == OpCodes.Brfalse_S;
+
+    /// <summary>
+    ///     Finds the conditional branch that consumes a sanitizer call's result: directly
+    ///     (`call; brXX`) or through a Debug-build local forward (`call; stloc.X; ldloc.X; brXX`).
+    ///     Returns the branch's instruction index, or null when the result is not branch-consumed.
+    /// </summary>
+    private static int? FindSanitizerGuardBranch(IReadOnlyList<AssemblyInstruction> instructions, int callIndex)
+    {
+        if (callIndex + 1 >= instructions.Count)
+        {
+            return null;
+        }
+
+        if (IsConditionalBranch(instructions[callIndex + 1].OpCode))
+        {
+            return callIndex + 1;
+        }
+
+        if (callIndex + 3 < instructions.Count &&
+            TryGetStlocIndex(instructions[callIndex + 1].OpCode, instructions[callIndex + 1].Operand, out var storedIndex) &&
+            TryGetLdlocIndex(instructions[callIndex + 2].OpCode, instructions[callIndex + 2].Operand, out var loadedIndex) &&
+            storedIndex == loadedIndex &&
+            IsConditionalBranch(instructions[callIndex + 3].OpCode))
+        {
+            return callIndex + 3;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    ///     T8: when a call's target matches a sanitizer pattern and the call result is consumed by an
+    ///     immediately following conditional branch, recover which local/argument slots fed the
+    ///     validator. A bounded forward stack simulation over the instructions before the call; any
+    ///     opcode outside the whitelist yields no guard rather than a wrong one.
+    /// </summary>
+    private static List<(bool IsArgument, int SlotIndex)>? TryDetectSanitizerGuardSlots(MetadataReader reader, AssemblyInstruction instruction, IReadOnlyList<AssemblyInstruction> instructions, int instructionIndex, AssemblyDataFlowContext context)
+    {
+        if (instruction.Operand is not int token || ResolveMember(reader, token) is not { } member)
+        {
+            return null;
+        }
+
+        if (!context.MatchSanitizer(member).Any())
+        {
+            return null;
+        }
+
+        // Simulate up to 16 preceding instructions — enough for guarded validator calls on
+        // locals, arguments, and array/collection elements without modeling whole methods.
+        var windowStart = Math.Max(0, instructionIndex - 16);
+        var stack = new List<string?>(); // "a:<index>" argument slot, "l:<index>" local slot, "lit" literal, null unknown
+        for (var index = windowStart; index < instructionIndex; index++)
+        {
+            var pusher = instructions[index];
+            var opCode = pusher.OpCode;
+            if (TryGetLdargIndex(opCode, pusher.Operand, out var argIndex))
+            {
+                Push(stack, $"a:{argIndex}");
+                continue;
+            }
+
+            if (TryGetLdlocIndex(opCode, pusher.Operand, out var localIndex))
+            {
+                Push(stack, $"l:{localIndex}");
+                continue;
+            }
+
+            if (opCode == OpCodes.Ldstr || opCode == OpCodes.Ldnull || opCode == OpCodes.Ldc_I4 || opCode == OpCodes.Ldc_I8 || opCode == OpCodes.Ldc_R4 || opCode == OpCodes.Ldc_R8 || opCode == OpCodes.Ldc_I4_S || opCode == OpCodes.Ldc_I4_0 || opCode == OpCodes.Ldc_I4_1 || opCode == OpCodes.Ldc_I4_2 || opCode == OpCodes.Ldc_I4_3 || opCode == OpCodes.Ldc_I4_4 || opCode == OpCodes.Ldc_I4_5 || opCode == OpCodes.Ldc_I4_6 || opCode == OpCodes.Ldc_I4_7 || opCode == OpCodes.Ldc_I4_M1)
+            {
+                Push(stack, "lit");
+                continue;
+            }
+
+            if (opCode == OpCodes.Ldelem || opCode == OpCodes.Ldelem_I || opCode == OpCodes.Ldelem_I1 || opCode == OpCodes.Ldelem_I2 || opCode == OpCodes.Ldelem_I4 || opCode == OpCodes.Ldelem_I8 || opCode == OpCodes.Ldelem_R4 || opCode == OpCodes.Ldelem_R8 || opCode == OpCodes.Ldelem_Ref || opCode == OpCodes.Ldelem_U1 || opCode == OpCodes.Ldelem_U2 || opCode == OpCodes.Ldelem_U4)
+            {
+                // Pops (index, array) and pushes the array element: the element's taint is the
+                // array's taint, so the surviving marker is the array's slot.
+                if (stack.Count < 2)
+                {
+                    return null;
+                }
+
+                var arrayMarker = stack[^2];
+                stack.RemoveRange(stack.Count - 2, 2);
+                Push(stack, arrayMarker);
+                continue;
+            }
+
+            if (opCode == OpCodes.Nop)
+            {
+                continue;
+            }
+
+            if (opCode == OpCodes.Dup)
+            {
+                if (stack.Count > 0)
+                {
+                    Push(stack, stack[^1]);
+                }
+
+                continue;
+            }
+
+            // Anything else (calls, arithmetic, conversions on the guard path) makes the slot
+            // attribution ambiguous — bail out with no guard.
+            return null;
+        }
+
+        if (stack.Count < member.ParameterCount + (member.HasThis ? 1 : 0))
+        {
+            return null;
+        }
+
+        var argumentWindow = stack.Skip(stack.Count - (member.ParameterCount + (member.HasThis ? 1 : 0))).ToList();
+        var slots = new List<(bool IsArgument, int SlotIndex)>();
+        foreach (var marker in argumentWindow)
+        {
+            if (marker is null || marker == "lit")
+            {
+                continue;
+            }
+
+            var separator = marker.IndexOf(':');
+            if (!int.TryParse(marker[(separator + 1)..], out var slotIndex))
+            {
+                continue;
+            }
+
+            slots.Add((marker[..separator] == "a", slotIndex));
+        }
+
+        return slots.Count > 0 ? slots : null;
+
+        static void Push(List<string?> stack, string? marker)
+        {
+            stack.Add(marker);
+            if (stack.Count > 32)
+            {
+                stack.RemoveAt(0); // bounded: the guard path is short; deep stacks are ambiguous
+            }
+        }
+    }
+
     private static void EnqueueExceptionSuccessors(AssemblyInstruction instruction, IReadOnlyDictionary<int, int> instructionIndexByOffset, IReadOnlyList<ExceptionRegion> exceptionRegions, AssemblyMethodState state, Queue<(int Index, AssemblyMethodState State)> worklist, AssemblyTaint? thrownTaint)
     {
         foreach (var successor in GetExceptionSuccessorIndexes(instruction, instructionIndexByOffset, exceptionRegions))
@@ -1483,6 +1694,14 @@ public static partial class DataFlowAnalyzer
 
     private sealed class AssemblyDataFlowContext(DataFlowResult result, DataFlowPatternSet patterns, string basePath)
     {
+        /// <summary>
+        ///     Sink categories whose exploitability hinges on a guard only the source walker can
+        ///     observe (XXE parser hardening: the <c>xxe-hardening</c> markers plus the walker's
+        ///     hardened-symbol map). IL analysis sees the parse call but not the hardening, so these
+        ///     slices are reported as Low-confidence, unconfirmed flows.
+        /// </summary>
+        private static readonly HashSet<string> GuardDependentCategories = new(StringComparer.OrdinalIgnoreCase) { "xxe" };
+
         private int _nodeCounter = result.Nodes.Count;
         private int _edgeCounter = result.Edges.Count;
         private int _sliceCounter = result.Slices.Count;
@@ -1518,6 +1737,14 @@ public static partial class DataFlowAnalyzer
         public IEnumerable<DataFlowPattern> MatchPassthrough(AssemblyMemberInfo member) => MatchMember(member, _patternIndex.Passthroughs);
         public IEnumerable<DataFlowPattern> MatchSourceCode(string code) => _patternIndex.SourceCode.Where(pattern => AssemblyPatternMatches(code, pattern));
         public IEnumerable<DataFlowPattern> MatchAttributeSource(IEnumerable<string> attributes) => _patternIndex.SourceAttributes.Where(pattern => attributes.Any(attribute => AssemblyPatternMatches(attribute, pattern)));
+
+        public void RecordDiagnostic(string message)
+        {
+            if (!result.Diagnostics.Contains(message, StringComparer.Ordinal))
+            {
+                result.Diagnostics.Add(message);
+            }
+        }
 
         public void RecordFieldTaint(string fieldSymbol, AssemblyTaint taint)
         {
@@ -1676,6 +1903,17 @@ public static partial class DataFlowAnalyzer
             _nodesById.TryGetValue(firstSource, out var sourceNode);
             var sliceNodes = nodeIds.Select(nodeId => _nodesById.TryGetValue(nodeId, out var node) ? node : null).Where(node => node is not null).ToList();
             var patternPurls = new[] { sinkPattern?.Purl, sourceNode?.Purl, sinkNode.Purl }.Where(purl => !string.IsNullOrWhiteSpace(purl));
+
+            // Categories whose safety depends on a guard the IL interpreter cannot see (the XXE
+            // hardening markers and hardened-symbol map are source-mode only). Reporting them at
+            // the source-mode confidence would assert hardening knowledge this mode lacks, so the
+            // slice is downgraded to Low (which also demotes its severity one rank) and says why.
+            var sliceCategory = sinkPattern?.Category ?? sinkNode.Category;
+            var guardDependent = sliceCategory is not null && GuardDependentCategories.Contains(sliceCategory);
+            var effectiveConfidence = guardDependent ? "Low" : sinkPattern?.Confidence ?? "Medium";
+            var guardDependentNote = guardDependent
+                ? "; parser hardening is not observable in IL, so this flow is unconfirmed"
+                : string.Empty;
             result.Slices.Add(new DataFlowSlice
             {
                 Id = $"dfs{++_sliceCounter}",
@@ -1692,8 +1930,9 @@ public static partial class DataFlowAnalyzer
                 SinkArgumentIndex = sinkArgumentIndex,
                 TaintKinds = trace.TaintKinds.Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
                 FieldPaths = trace.FieldPaths.Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
-                Confidence = sinkPattern?.Confidence ?? "Medium",
-                Summary = $"Assembly IL data flows from {firstSource} to {sinkNode.Name} argument {sinkArgumentIndex}."
+                Confidence = effectiveConfidence,
+                Severity = TransparencyBuilder.SeverityForPattern(sliceCategory, sinkPattern?.Severity, effectiveConfidence),
+                Summary = $"Assembly IL data flows from {firstSource} to {sinkNode.Name} argument {sinkArgumentIndex}{guardDependentNote}."
             });
         }
 

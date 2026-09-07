@@ -244,7 +244,7 @@ Example:
   "EndpointKind": "Attribute",
   "FileName": "OrdersController.cs",
   "LineNumber": 12,
-  "Urls": ["https://api.example.test/orders/"]
+  "RawUrls": ["https://api.example.test/orders/"]
 }
 ```
 

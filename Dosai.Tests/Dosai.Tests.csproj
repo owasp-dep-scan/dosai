@@ -20,24 +20,15 @@
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
+    <PackageReference Include="Xunit.SkippableFact" Version="1.5.85" />
   </ItemGroup>
 
   <ItemGroup>
-  <None
-     Include="./../Dosai.TestData/FooBar.cs"
-     CopyToOutputDirectory="PreserveNewest" />
-  <None
-     Include="./../Dosai.TestData/HelloWorld.cs"
-     CopyToOutputDirectory="PreserveNewest" />
-  <None
-     Include="./../Dosai.TestData/FooBar.vb"
-     CopyToOutputDirectory="PreserveNewest" />
-  <None
-     Include="./../Dosai.TestData/HelloWorld.vb"
-     CopyToOutputDirectory="PreserveNewest" />
-  <None
-     Include="./../Dosai.TestData/HelloWorld.fs"
-     CopyToOutputDirectory="PreserveNewest" />
+  <None Include="./../Dosai.TestData/FooBar.cs" CopyToOutputDirectory="PreserveNewest" />
+  <None Include="./../Dosai.TestData/HelloWorld.cs" CopyToOutputDirectory="PreserveNewest" />
+  <None Include="./../Dosai.TestData/FooBar.vb" CopyToOutputDirectory="PreserveNewest" />
+  <None Include="./../Dosai.TestData/HelloWorld.vb" CopyToOutputDirectory="PreserveNewest" />
+  <None Include="./../Dosai.TestData/HelloWorld.fs" CopyToOutputDirectory="PreserveNewest" />
 
   </ItemGroup>
 

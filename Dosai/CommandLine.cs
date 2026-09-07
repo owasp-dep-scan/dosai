@@ -46,7 +46,13 @@ public class CommandLine
 
         var patternPacksOption = new Option<string?>("--pattern-packs")
         {
-            Description = "Comma-separated built-in data-flow pattern packs to enable: all, aspnet, data, filesystem, serialization, cloud, rpc, auth, crypto. Defaults to all.",
+            Description = $"Comma-separated built-in data-flow pattern packs to enable: all, {string.Join(", ", DataFlowAnalyzer.DefaultPatternPackNames)}. Defaults to all.",
+            Arity = ArgumentArity.ExactlyOne
+        };
+
+        var suppressionsFileOption = new Option<string?>("--suppress")
+        {
+            Description = "Optional suppressions JSON file (file+line, sliceKey, weaknessId, or category entries, each with an optional expiry). Matching, non-expired suppressions remove slices and weakness candidates.",
             Arity = ArgumentArity.ExactlyOne
         };
 
@@ -141,6 +147,11 @@ public class CommandLine
             Description = "Cap for conventional routing pattern expansion (MapControllerRoute cross-products) (default: 500)",
             DefaultValueFactory = _ => 500
         };
+        var mcpAllowlistOption = new Option<string?>("--mcp-allowlist")
+        {
+            Description = "Optional file of policy-approved MCP stdio transport commands (one per line); commands listed here are not flagged by the MCP transport security assessment",
+            Arity = ArgumentArity.ExactlyOne
+        };
 
         var methodsCommand = new Command("methods", "Retrieve details about the methods")
         {
@@ -151,7 +162,8 @@ public class CommandLine
             classifyDataOption,
             noClassifyDataOption,
             maxConventionalRoutesOption,
-            includePromptTextOption
+            includePromptTextOption,
+            mcpAllowlistOption
         };
 
         var dataFlowsCommand = new Command("dataflows", "Create data-flow slices from source patterns to sink patterns")
@@ -163,7 +175,8 @@ public class CommandLine
             dataFlowFormatOption,
             dataFlowGraphOutputFileOption,
             printDataFlowsOption,
-            printSourcesSinksOption
+            printSourcesSinksOption,
+            suppressionsFileOption
         };
 
         var cryptoCommand = new Command("crypto", "Detect cryptographic assets, operations, materials, misuse, and CBOM evidence")
@@ -180,7 +193,8 @@ public class CommandLine
             pathOption,
             outputFileOption,
             patternsFileOption,
-            patternPacksOption
+            patternPacksOption,
+            suppressionsFileOption
         };
 
         var reportCommand = new Command("report", "Generate a Markdown report from data-flow JSON")
@@ -233,6 +247,7 @@ public class CommandLine
                 var classifyData = parseResult.GetValue(classifyDataOption) && !parseResult.GetValue(noClassifyDataOption);
                 var maxConventionalRoutes = parseResult.GetValue(maxConventionalRoutesOption);
                 var includePromptText = parseResult.GetValue(includePromptTextOption);
+                var mcpAllowlist = parseResult.GetValue(mcpAllowlistOption);
 
                 // Stream the JSON straight to the output file and keep the built slice around so the call-graph
                 // exporter can reuse it. This avoids materialising the full JSON as a single string (which drove
@@ -245,7 +260,7 @@ public class CommandLine
                 }
                 else
                 {
-                    methodsSlice = Dosai.WriteMethods(path!, outputFile!, new Frameworks.FrameworkAnalysisOptions { ClassifyData = classifyData, MaxConventionalRoutes = maxConventionalRoutes, IncludePromptText = includePromptText });
+                    methodsSlice = Dosai.WriteMethods(path!, outputFile!, new Frameworks.FrameworkAnalysisOptions { ClassifyData = classifyData, MaxConventionalRoutes = maxConventionalRoutes, IncludePromptText = includePromptText, McpAllowlist = LoadMcpAllowlist(mcpAllowlist) });
                 }
 
                 if (!string.IsNullOrWhiteSpace(callGraphFormat))
@@ -262,8 +277,10 @@ public class CommandLine
                         return 1;
                     }
 
+                    // R1/R7: node reachability facts and fan-in/out ride along as graph attributes.
+                    var reachabilityByNode = methodsSlice.Reachability?.ToDictionary(facts => facts.NodeId, StringComparer.Ordinal);
                     callGraphOutputFile ??= Path.ChangeExtension(outputFile!, CallGraphExporter.GetDefaultExtension(format));
-                    File.WriteAllText(callGraphOutputFile, CallGraphExporter.Export(methodsSlice.CallGraph, format));
+                    File.WriteAllText(callGraphOutputFile, CallGraphExporter.Export(methodsSlice.CallGraph, format, reachabilityByNode));
                 }
 
                 return 0;
@@ -279,11 +296,12 @@ public class CommandLine
             var graphOutputFile = parseResult.GetValue(dataFlowGraphOutputFileOption);
             var printDataFlows = parseResult.GetValue(printDataFlowsOption);
             var printSourcesSinks = parseResult.GetValue(printSourcesSinksOption);
+            var suppressionsFile = parseResult.GetValue(suppressionsFileOption);
 
             // Stream the JSON straight to the output file and keep the result around for printing and graph
             // export. This avoids materialising the full JSON as a single string and the serialize-then-
             // deserialize round trip, both of which drive peak memory on large trees.
-            var dataFlowResult = DataFlowAnalyzer.WriteDataFlows(path!, outputFile!, patternsFile, patternPacks);
+            var dataFlowResult = DataFlowAnalyzer.WriteDataFlows(path!, outputFile!, patternsFile, patternPacks, suppressionsFile);
 
             if (printDataFlows)
             {
@@ -341,7 +359,23 @@ public class CommandLine
             var outputFile = parseResult.GetValue(outputFileOption)!;
             var patternsFile = parseResult.GetValue(patternsFileOption);
             var patternPacks = parseResult.GetValue(patternPacksOption);
-            var result = DataFlowAnalyzer.Analyze(path, patternsFile, patternPacks);
+            var suppressionsFile = parseResult.GetValue(suppressionsFileOption);
+            var result = DataFlowAnalyzer.Analyze(path, patternsFile, patternPacks, suppressionsFile);
+            // W6: converge crypto misuse findings into the weakness queue so agent-context carries
+            // one CWE-stamped list; crypto analysis is best-effort and never blocks the context.
+            try
+            {
+                var cryptoWeaknesses = CryptoAnalyzer.BuildWeaknessCandidates(CryptoAnalyzer.Analyze(path));
+                if (cryptoWeaknesses.Count > 0)
+                {
+                    result.WeaknessCandidates.AddRange(cryptoWeaknesses);
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+            {
+                Console.Error.WriteLine($"Crypto weakness merge skipped: {ex.Message}");
+            }
+
             var context = TransparencyBuilder.BuildAgentContext(result, path);
             File.WriteAllText(outputFile, JsonSerializer.Serialize(context, JsonOptions()));
             return 0;
@@ -403,6 +437,29 @@ public class CommandLine
         WriteIndented = true,
         Converters = { new JsonStringEnumConverter() }
     };
+
+    /// <summary>S2: loads the --mcp-allowlist policy file (one command per line); missing file disables the allowlist.</summary>
+    private static IReadOnlySet<string>? LoadMcpAllowlist(string? mcpAllowlistPath)
+    {
+        if (string.IsNullOrWhiteSpace(mcpAllowlistPath))
+        {
+            return null;
+        }
+
+        try
+        {
+            var commands = File.ReadAllLines(mcpAllowlistPath)
+                .Select(line => line.Trim())
+                .Where(line => line.Length > 0 && !line.StartsWith('#'))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            return commands.Count > 0 ? commands : null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Console.Error.WriteLine($"Could not read MCP allowlist {mcpAllowlistPath}: {ex.Message}");
+            return null;
+        }
+    }
 
     private static void PrintDataFlowTree(DataFlowResult result, string outputFile)
     {

@@ -124,6 +124,12 @@ public sealed class FrameworkContext
     public bool IncludePromptText { get; internal set; }
 
     /// <summary>
+    ///     CI-policy allowlist (--mcp-allowlist) of MCP stdio transport commands whose launches are
+    ///     approved; null disables allowlist suppression (S2).
+    /// </summary>
+    public IReadOnlySet<string>? McpAllowlist { get; internal set; }
+
+    /// <summary>
     ///     Builds a context that reuses compilations Dosai already constructed for methods/call-graph
     ///     extraction, avoiding a second parse of every source file.
     /// </summary>

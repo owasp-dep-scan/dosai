@@ -12,19 +12,19 @@ dotnet run --project ./Dosai/Dosai.csproj -- dataflows \
 `--pattern-packs` defaults to `all`. `all` expands to:
 
 ```text
-aspnet,data,filesystem,serialization,cloud,rpc,auth,crypto,grpc,messaging,ai,mcp
+aspnet,data,filesystem,serialization,cloud,rpc,auth,crypto,grpc,messaging,ai,mcp,xss,xxe,injection,log,redos,template
 ```
 
 User patterns passed with `--patterns` are merged after the selected built-in packs. See [Data-flow custom patterns](./dataflow-patterns.md) for the custom pattern file format.
 
 ## Selection model
 
-| Input                         | Effective optional packs                                                                                            | Notes                                          |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
-| omitted                       | `aspnet`, `data`, `filesystem`, `serialization`, `cloud`, `rpc`, `auth`, `crypto`, `grpc`, `messaging`, `ai`, `mcp` | Default behavior.                              |
-| `--pattern-packs all`         | all optional packs                                                                                                  | Same as omitted.                               |
-| `--pattern-packs aspnet,data` | `aspnet`, `data`                                                                                                    | Always-on defaults still apply.                |
-| `--pattern-packs crypto`      | `crypto`                                                                                                            | Adds crypto taint patterns on top of defaults. |
+| Input                         | Effective optional packs                                                                                                                                                   | Notes                                          |
+| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| omitted                       | `aspnet`, `data`, `filesystem`, `serialization`, `cloud`, `rpc`, `auth`, `crypto`, `grpc`, `messaging`, `ai`, `mcp`, `xss`, `xxe`, `injection`, `log`, `redos`, `template` | Default behavior.                              |
+| `--pattern-packs all`         | all optional packs                                                                                                                                                         | Same as omitted.                               |
+| `--pattern-packs aspnet,data` | `aspnet`, `data`                                                                                                                                                           | Always-on defaults still apply.                |
+| `--pattern-packs crypto`      | `crypto`                                                                                                                                                                   | Adds crypto taint patterns on top of defaults. |
 
 ## Always-on baseline patterns
 
@@ -235,3 +235,40 @@ The `ai` pack is the prompt-injection rule set: untrusted input flowing into a c
 prompt invocation yields `PromptInjectionCandidate` weaknesses (CWE-1427); MCP tool arguments
 yield `McpToolInjectionCandidate`. See [Framework semantics](./frameworks.md) for the provider
 side (taint seeding of framework entry points).
+
+## New packs (schema 4.0.1)
+
+Six additional weakness-class packs ship enabled by default. Slices from these packs carry
+severity (`Severity` on `DataFlowSlice` and `WeaknessCandidate`), and every mapped category
+produces a CWE-stamped `WeaknessCandidate` kind (see [security analysis](./security-analysis.md)).
+
+| Pack        | Sinks (category → weakness, CWE)                                                                                                                                                                                                                                                                                           | Paired mitigations                                                                                                                                                                                                                                                                                                                    |
+| ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `xss`       | `IHtmlHelper.Raw`/`HtmlHelper.Raw`, legacy `HttpResponse.Write`/`WriteLiteral`, Blazor `MarkupString` construction, `.cshtml` `Html.Raw(`/`.InnerHtml =` code fallbacks (xss → XssCandidate, CWE-79)                                                                                                                       | `HtmlEncoder.Encode` / `WebUtility.HtmlEncode` (always-on sanitizers); suppressed flows appear in `SanitizedFlows`                                                                                                                                                                                                                    |
+| `xxe`       | `XmlDocument.Load*`, `XmlTextReader`, `XmlReader.Create`, `XDocument.Load`, `XPathDocument` (xxe → XxeCandidate, CWE-611)                                                                                                                                                                                                  | Hardening markers, inline or prepared in an earlier statement: `XmlResolver = null`, `DtdProcessing.Prohibit`/`Ignore`, `XmlSecureResolver`. Source mode only — IL analysis sees the parse call but not the hardening, so IL-mode `xxe` slices are reported at `Low` confidence (severity demoted one rank) and say so in the summary |
+| `injection` | LDAP: `DirectoryEntry`, `DirectorySearcher`, `SearchRequest`, `Novell.Directory.Ldap` (CWE-90); XPath: `SelectNodes`/`SelectSingleNode`, `XPathNavigator.*`, `XPathExpression.Compile` (CWE-643); NoSQL: `BsonDocument.Parse`, `FilterDefinitionBuilder.Where`, `RunCommand`, Redis `ScriptEvaluate`/`LuaScript` (CWE-943) | —                                                                                                                                                                                                                                                                                                                                     |
+| `log`       | `ILogger`/`Serilog`/`NLog`/`log4net`/`Console` message bodies (log → CWE-117, Low severity); `IHeaderDictionary.Append/Add`, `AppendHeader` response headers (header → CWE-113)                                                                                                                                            | `UrlEncoder.Encode`/`WebUtility.UrlEncode`, newline-strip `Replace` calls (crlf-strip)                                                                                                                                                                                                                                                |
+| `redos`     | `new Regex(tainted)` (Medium), `Regex.IsMatch`/`Regex.Match` with a tainted pattern (Low) (CWE-1333); catastrophically-backtracking `new Regex("literal")` patterns are additionally flagged statically in `Diagnostics`                                                                                                   | —                                                                                                                                                                                                                                                                                                                                     |
+| `template`  | Fluid, Scriban, Handlebars.NET, RazorEngine, DotLiquid parse/render of tainted template source (CWE-1336)                                                                                                                                                                                                                  | —                                                                                                                                                                                                                                                                                                                                     |
+
+### Hygiene fixes in 4.0.1
+
+- The `data` pack's bare `Add` sanitizer is gone: only provider parameter collections
+  (`SqlParameterCollection.Add`, `NpgsqlParameterCollection.Add`, `NpgsqlParameter`/`SqlParameter`
+  construction) sanitize. `List<T>.Add` no longer masks SQL flows, and storing a tainted value
+  into a collection now taints the collection so read-backs still reach sinks.
+- The crypto `key`/`secret` sources require compound identifiers: bare `key`/`keys` names (every
+  `KeyValuePair` iteration, every cache dictionary) mint nothing, and `Monkey`/`secretaryNote`
+  never matched. `apiKey`, `client_secret`, `session_key`, and `hmacKey` still do.
+- The IL-mode short-pattern noise filter (bare `Name`/`Contains` patterns under four characters)
+  now applies in source mode too, so both modes agree.
+
+## Severity (schema 4.0.1)
+
+Every slice and weakness candidate carries `Severity` (`info|low|medium|high`), defaulting by sink
+category — injection primitives (command/sql/file/xss/xxe/ldap/xpath/nosql/template/crypto family)
+are `high`; exposure classes (redirect/header/prompt/rpc) are `medium`; log/redos are `low`.
+Pattern authors can override with the pattern's optional `Severity` field. A match from a
+Low-confidence pattern is demoted one severity rank, so heuristic fallbacks (Razor `Html.Raw(`
+code text, logger extension heuristics) never trip a `NewHighSeveritySlices` CI gate on their own.
+The `diff` command is severity-aware and reports a `RiskDelta` including `NewHighSeveritySlices`.

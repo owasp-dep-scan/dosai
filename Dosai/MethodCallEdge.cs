@@ -24,9 +24,13 @@ public class MethodCallEdge
     public string? SourcePurl { get; set; }
     public string? TargetPurl { get; set; }
 
-    public List<string>? Arguments { get; set; } 
+    public List<string>? Arguments { get; set; }
     public List<string>? ArgumentExpressions { get; set; }
     public CallType CallType { get; set; } = CallType.Unknown;
     public AnalysisEvidenceKind EvidenceKind { get; set; } = AnalysisEvidenceKind.Unknown;
     public List<AnalysisEvidence> Evidence { get; set; } = [];
+    /// <summary>Distinct call sites (file:line:col) for this (source, target, callType, evidence) pair after same-pair collapsing (R7).</summary>
+    public int CallSiteCount { get; set; } = 1;
+    /// <summary>Dispatch resolution tier for inferred virtual/interface edges: exact / rta-candidate / cha-candidate (R4).</summary>
+    public string? DispatchConfidence { get; set; }
 }

@@ -13,11 +13,11 @@ public enum CallGraphExportFormat
 
 public static class CallGraphExporter
 {
-    public static string Export(CallGraph callGraph, CallGraphExportFormat format) => format switch
+    public static string Export(CallGraph callGraph, CallGraphExportFormat format, IReadOnlyDictionary<string, NodeReachability>? reachability = null) => format switch
     {
         CallGraphExportFormat.Mermaid => ToMermaid(callGraph),
-        CallGraphExportFormat.GraphMl => ToGraphMl(callGraph),
-        CallGraphExportFormat.Gexf => ToGexf(callGraph),
+        CallGraphExportFormat.GraphMl => ToGraphMl(callGraph, reachability),
+        CallGraphExportFormat.Gexf => ToGexf(callGraph, reachability),
         _ => throw new ArgumentOutOfRangeException(nameof(format), format, "Unsupported call graph export format")
     };
 
@@ -90,7 +90,7 @@ public static class CallGraphExporter
         return builder.ToString();
     }
 
-    private static string ToGraphMl(CallGraph callGraph)
+    private static string ToGraphMl(CallGraph callGraph, IReadOnlyDictionary<string, NodeReachability>? reachability)
     {
         var builder = new StringBuilder();
         builder.AppendLine("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
@@ -100,10 +100,18 @@ public static class CallGraphExporter
         builder.AppendLine("  <key id=\"file\" for=\"node\" attr.name=\"file\" attr.type=\"string\" />");
         builder.AppendLine("  <key id=\"purl\" for=\"node\" attr.name=\"purl\" attr.type=\"string\" />");
         builder.AppendLine("  <key id=\"external\" for=\"node\" attr.name=\"external\" attr.type=\"boolean\" />");
+        builder.AppendLine("  <key id=\"reachableEntryPoints\" for=\"node\" attr.name=\"reachableEntryPoints\" attr.type=\"string\" />");
+        builder.AppendLine("  <key id=\"minDepthFromEntryPoint\" for=\"node\" attr.name=\"minDepthFromEntryPoint\" attr.type=\"int\" />");
+        builder.AppendLine("  <key id=\"fanIn\" for=\"node\" attr.name=\"fanIn\" attr.type=\"int\" />");
+        builder.AppendLine("  <key id=\"fanOut\" for=\"node\" attr.name=\"fanOut\" attr.type=\"int\" />");
+        builder.AppendLine("  <key id=\"inRecursiveCycle\" for=\"node\" attr.name=\"inRecursiveCycle\" attr.type=\"boolean\" />");
+        builder.AppendLine("  <key id=\"genericInstantiation\" for=\"node\" attr.name=\"genericInstantiation\" attr.type=\"string\" />");
         builder.AppendLine("  <key id=\"callType\" for=\"edge\" attr.name=\"callType\" attr.type=\"string\" />");
         builder.AppendLine("  <key id=\"sourcePurl\" for=\"edge\" attr.name=\"sourcePurl\" attr.type=\"string\" />");
         builder.AppendLine("  <key id=\"targetPurl\" for=\"edge\" attr.name=\"targetPurl\" attr.type=\"string\" />");
         builder.AppendLine("  <key id=\"location\" for=\"edge\" attr.name=\"location\" attr.type=\"string\" />");
+        builder.AppendLine("  <key id=\"callSiteCount\" for=\"edge\" attr.name=\"callSiteCount\" attr.type=\"int\" />");
+        builder.AppendLine("  <key id=\"dispatchConfidence\" for=\"edge\" attr.name=\"dispatchConfidence\" attr.type=\"string\" />");
         builder.AppendLine("  <graph id=\"callgraph\" edgedefault=\"directed\">");
 
         foreach (var node in callGraph.Nodes.OrderBy(n => n.Id, StringComparer.Ordinal))
@@ -114,6 +122,20 @@ public static class CallGraphExporter
             AppendGraphMlData(builder, "file", node.FileName, 6);
             AppendGraphMlData(builder, "purl", node.Purl, 6);
             AppendGraphMlData(builder, "external", node.IsExternal.ToString().ToLowerInvariant(), 6);
+            if (reachability is not null && reachability.TryGetValue(node.Id, out var facts))
+            {
+                AppendGraphMlData(builder, "reachableEntryPoints", string.Join(",", facts.ReachableEntryPoints), 6);
+                if (facts.DepthFromEntryPoint is { } depth)
+                {
+                    AppendGraphMlData(builder, "minDepthFromEntryPoint", depth.ToString(), 6);
+                }
+
+                AppendGraphMlData(builder, "fanIn", facts.FanIn.ToString(), 6);
+                AppendGraphMlData(builder, "fanOut", facts.FanOut.ToString(), 6);
+                AppendGraphMlData(builder, "inRecursiveCycle", facts.InRecursiveCycle.ToString().ToLowerInvariant(), 6);
+            }
+
+            AppendGraphMlData(builder, "genericInstantiation", node.GenericInstantiation, 6);
             builder.AppendLine("    </node>");
         }
 
@@ -125,6 +147,8 @@ public static class CallGraphExporter
             AppendGraphMlData(builder, "sourcePurl", edge.SourcePurl, 6);
             AppendGraphMlData(builder, "targetPurl", edge.TargetPurl, 6);
             AppendGraphMlData(builder, "location", FormatLocation(edge.CallLocation), 6);
+            AppendGraphMlData(builder, "callSiteCount", edge.CallSiteCount.ToString(), 6);
+            AppendGraphMlData(builder, "dispatchConfidence", edge.DispatchConfidence, 6);
             builder.AppendLine("    </edge>");
         }
 
@@ -133,7 +157,7 @@ public static class CallGraphExporter
         return builder.ToString();
     }
 
-    private static string ToGexf(CallGraph callGraph)
+    private static string ToGexf(CallGraph callGraph, IReadOnlyDictionary<string, NodeReachability>? reachability)
     {
         var builder = new StringBuilder();
         builder.AppendLine("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
@@ -144,12 +168,19 @@ public static class CallGraphExporter
         builder.AppendLine("      <attribute id=\"file\" title=\"file\" type=\"string\" />");
         builder.AppendLine("      <attribute id=\"purl\" title=\"purl\" type=\"string\" />");
         builder.AppendLine("      <attribute id=\"external\" title=\"external\" type=\"boolean\" />");
+        builder.AppendLine("      <attribute id=\"reachableEntryPoints\" title=\"reachableEntryPoints\" type=\"string\" />");
+        builder.AppendLine("      <attribute id=\"minDepthFromEntryPoint\" title=\"minDepthFromEntryPoint\" type=\"int\" />");
+        builder.AppendLine("      <attribute id=\"fanIn\" title=\"fanIn\" type=\"int\" />");
+        builder.AppendLine("      <attribute id=\"fanOut\" title=\"fanOut\" type=\"int\" />");
+        builder.AppendLine("      <attribute id=\"inRecursiveCycle\" title=\"inRecursiveCycle\" type=\"boolean\" />");
         builder.AppendLine("    </attributes>");
         builder.AppendLine("    <attributes class=\"edge\">");
         builder.AppendLine("      <attribute id=\"callType\" title=\"callType\" type=\"string\" />");
         builder.AppendLine("      <attribute id=\"sourcePurl\" title=\"sourcePurl\" type=\"string\" />");
         builder.AppendLine("      <attribute id=\"targetPurl\" title=\"targetPurl\" type=\"string\" />");
         builder.AppendLine("      <attribute id=\"location\" title=\"location\" type=\"string\" />");
+        builder.AppendLine("      <attribute id=\"callSiteCount\" title=\"callSiteCount\" type=\"int\" />");
+        builder.AppendLine("      <attribute id=\"dispatchConfidence\" title=\"dispatchConfidence\" type=\"string\" />");
         builder.AppendLine("    </attributes>");
         builder.AppendLine("    <nodes>");
 
@@ -161,6 +192,19 @@ public static class CallGraphExporter
             AppendGexfValue(builder, "file", node.FileName, 10);
             AppendGexfValue(builder, "purl", node.Purl, 10);
             AppendGexfValue(builder, "external", node.IsExternal.ToString().ToLowerInvariant(), 10);
+            if (reachability is not null && reachability.TryGetValue(node.Id, out var facts))
+            {
+                AppendGexfValue(builder, "reachableEntryPoints", string.Join(",", facts.ReachableEntryPoints), 10);
+                if (facts.DepthFromEntryPoint is { } depth)
+                {
+                    AppendGexfValue(builder, "minDepthFromEntryPoint", depth.ToString(), 10);
+                }
+
+                AppendGexfValue(builder, "fanIn", facts.FanIn.ToString(), 10);
+                AppendGexfValue(builder, "fanOut", facts.FanOut.ToString(), 10);
+                AppendGexfValue(builder, "inRecursiveCycle", facts.InRecursiveCycle.ToString().ToLowerInvariant(), 10);
+            }
+
             builder.AppendLine("        </attvalues>");
             builder.AppendLine("      </node>");
         }
@@ -176,6 +220,8 @@ public static class CallGraphExporter
             AppendGexfValue(builder, "sourcePurl", edge.SourcePurl, 10);
             AppendGexfValue(builder, "targetPurl", edge.TargetPurl, 10);
             AppendGexfValue(builder, "location", FormatLocation(edge.CallLocation), 10);
+            AppendGexfValue(builder, "callSiteCount", edge.CallSiteCount.ToString(), 10);
+            AppendGexfValue(builder, "dispatchConfidence", edge.DispatchConfidence, 10);
             builder.AppendLine("        </attvalues>");
             builder.AppendLine("      </edge>");
         }

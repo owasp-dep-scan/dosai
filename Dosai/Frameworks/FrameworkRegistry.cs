@@ -27,6 +27,9 @@ public sealed class FrameworkAnalysisOptions
 
     /// <summary>IncludePromptText: emit full prompt text instead of the redacted default.</summary>
     public bool IncludePromptText { get; init; }
+
+    /// <summary>S2: policy-approved MCP stdio transport commands (--mcp-allowlist); null disables suppression.</summary>
+    public IReadOnlySet<string>? McpAllowlist { get; init; }
 }
 
 /// <summary>
@@ -50,6 +53,7 @@ public static class FrameworkRegistry
         new Providers.ProtobufProvider(),
         new Providers.GrpcProvider(),
         new Providers.SignalRProvider(),
+        new Providers.OrleansProvider(),
         new Providers.GraphQLODataProvider(),
         // Tier 3 — Serverless, messaging, jobs
         new Providers.ServerlessProvider(),
@@ -69,6 +73,7 @@ public static class FrameworkRegistry
         ctx.ClassifyData = options?.ClassifyData ?? true;
         ctx.MaxConventionalRoutes = options?.MaxConventionalRoutes ?? 500;
         ctx.IncludePromptText = options?.IncludePromptText ?? false;
+        ctx.McpAllowlist = options?.McpAllowlist;
         var result = new FrameworkAnalysisResult();
         var providerResults = new FrameworkResults();
         foreach (var framework in ctx.Detection.Frameworks)

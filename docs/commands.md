@@ -109,6 +109,10 @@ The primary output is `MethodsSlice`. Important collections include `Methods`, `
 
 Reflection-based assembly inventory is enriched with IL method-body call graph extraction for managed binaries. Portable PDBs improve call locations, and the binary call graph includes direct calls, constructor calls, generated async/iterator call collapse, delegate/event callback targets, and shared CHA/RTA-style virtual candidates for instantiated application types. Roslyn semantic quality depends on available references. F#, R, and VC++ frontends are conservative and may over-approximate calls when full project metadata is absent. VC++ extraction does not yet perform full libclang semantic analysis.
 
+`methods` also accepts `--mcp-allowlist <file>` (schema 4.0.1): a policy file of approved MCP
+stdio transport commands (one per line, `#` comments). Commands on the list are not flagged by the
+MCP transport security assessment that runs with the endpoint security findings.
+
 ## `dataflows`
 
 `dataflows` builds source-to-sink slices for security triage from source trees, managed assemblies, or combined source/assembly directories.
@@ -122,9 +126,11 @@ dotnet run --project ./Dosai/Dosai.csproj -- dataflows \
   --graph-out /tmp/dosai-dataflows.gexf
 ```
 
-Common options are `--patterns`, `--pattern-packs`, `--graph-format`, `--graph-out`, `--print`, and `--print-sources-sinks`. Supported graph formats are `mermaid`, `graphml`, and `gexf`. By default, `dataflows` writes the JSON and optional graph artifacts without printing flow details to stdout. Use `--print` for a human-readable path view, and use `--print-sources-sinks` only for source/sink pattern diagnostics.
+Common options are `--patterns`, `--pattern-packs`, `--graph-format`, `--graph-out`, `--print`, `--print-sources-sinks`, and `--suppress`. Supported graph formats are `mermaid`, `graphml`, and `gexf`. By default, `dataflows` writes the JSON and optional graph artifacts without printing flow details to stdout. Use `--print` for a human-readable path view, and use `--print-sources-sinks` only for source/sink pattern diagnostics.
 
 Use `--patterns` to merge project-specific source, sink, passthrough, and sanitizer patterns with Dosai's built-in patterns:
+
+Use `--suppress suppressions.json` to filter known-accepted findings (schema 4.0.1). The file is a JSON array of `{ "file", "line", "sliceKey", "weaknessId", "category", "expires", "reason" }` entries — an entry matches only when **every** field present in it matches, so `file`+`line` cannot over-suppress other files and `file`+`category` cannot suppress a whole category repo-wide. `file` and `line` must both hold for the _same_ location (the flow's source or its sink), so a `file` taken from one end of a flow never pairs with a `line` from the other. Matching, non-expired entries remove the corresponding slices and weakness candidates (with a `Suppressed ...` diagnostic); expired entries let the findings resurface, so suppressions double as a review backlog.
 
 ```bash
 dotnet run --project ./Dosai/Dosai.csproj -- dataflows \
@@ -392,7 +398,17 @@ old DataFlowResult + new DataFlowResult -> TransparencyBuilder.DiffJson -> diff 
 
 The command deserializes two `DataFlowResult` objects and computes a deterministic JSON diff using transparency-layer comparison logic. It is designed for CI trend checks and review of analysis changes between commits.
 
-Because it deserializes typed Dosai data-flow output before comparing, it normalizes away JSON object property ordering and ignores unknown added properties. Slice ordering is ignored by converting slices to keyed sets. The current comparison intentionally focuses on source-to-sink slice identity using `SourceCategory`, `SinkCategory`, and `SinkArgument`, plus old/new statistics. It does not produce a generic tree edit script and does not compare arbitrary node, edge, metadata, or property additions/removals.
+Because it deserializes typed Dosai data-flow output before comparing, it normalizes away JSON object property ordering and ignores unknown added properties. Slice ordering is ignored by converting slices to keyed sets; slice identity uses `SourceCategory`, `SinkCategory`, and `SinkArgument` and is severity-aware (schema 4.0.1).
+
+Since schema 4.0.1 the diff also compares beyond slices, with keyed per-section deltas:
+
+- `AddedSlices` / `RemovedSlices` (severity-aware),
+- `AddedEntryPoints` / `RemovedEntryPoints` (kind + verb + route + target method),
+- `AddedWeaknesses` / `RemovedWeaknesses` (kind + CWE + locations + severity),
+- `AddedPackages` / `RemovedPackages` (purls),
+- `RiskDelta` — a single CI-decidable summary: `NewHighSeveritySlices`, `NewMediumSeveritySlices`, `NewLowSeveritySlices`, `NewAnonymousEndpoints`, `NewWeaknessKinds`, `NewlyReachablePackages`.
+
+It does not produce a generic tree edit script and does not compare arbitrary node, edge, metadata, or property additions/removals.
 
 ### Strengths
 

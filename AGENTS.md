@@ -98,6 +98,7 @@ The `docs` directory doubles as a Docsify site (see `docs/index.html`, `docs/_si
 - Query language: `docs/query-language.md`
 - Framework semantics: `docs/frameworks.md`
 - Migration to schema 4.0.0: `docs/migration-4.0.md`
+- Migration to schema 4.0.1 (additive): `docs/migration-4.0.1.md`
 - Data-flow custom patterns: `docs/dataflow-patterns.md`
 - Built-in data-flow pattern packs: `docs/pattern-packs.md`
 - PURL/supply-chain details: `docs/supply-chain-purl.md`
