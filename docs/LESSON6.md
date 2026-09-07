@@ -104,15 +104,15 @@ sequenceDiagram
     Note over OS: tool injection surface:<br/>tool argument becomes shell input
 ```
 
-Model output is itself a source in the `ai` pack, because a model response is attacker-influenced text in most applications. If the chat endpoint forwarded `response.Text` into another dangerous API, the slice would continue from the model output source.
+Model output is itself a source in the `ai` pack, because a model response is attacker-influenced text in most applications. If the chat endpoint forwarded `response.Text` into another dangerous API, the slice would continue from the model output source. The trust path above also has a machine-readable counterpart since schema 4.1.0: the `Diagnose` tool flow produces an exploit chain whose derived exposure is `mcp`, so `exploitChains[exposure=mcp]` finds exactly these paths without re-deriving them by hand.
 
 ## Why these rules live in pattern packs
 
-The `ai` pack is intentionally precise about what counts as a prompt: `IChatClient.GetResponseAsync`, `Kernel.InvokePromptAsync`, `ChatMessage` construction by exact type match, and `ChatClient.CompleteChatAsync`. A user DTO named `ChatMessageDto` does not match, because the sink patterns match the real prompt types. The `mcp` pack treats `[McpServerTool]` parameters as sources and flags MCP egress through `McpClientFactory.CreateAsync`, which is the supply-chain side of MCP exposure: a client that launches external processes via stdio transport is itself a finding.
+The `ai` pack is intentionally precise about what counts as a prompt: `IChatClient.GetResponseAsync`, `Kernel.InvokePromptAsync`, `ChatMessage` construction by exact type match, and `ChatClient.CompleteChatAsync`. A user DTO named `ChatMessageDto` does not match, because the sink patterns match the real prompt types. The `mcp` pack treats `[McpServerTool]` parameters as sources and flags MCP egress through `McpClientFactory.CreateAsync`, which is the supply-chain side of MCP exposure: a client that launches external processes via stdio transport is itself a finding. Since schema 4.1.0 that transport side also has a dedicated finding kind: MCP transport integrity findings flag stdio commands that resolve by name (whatever is latest on the package registry or PATH is what runs) and are only treated as policy-approved when the command appears in the `--mcp-allowlist` policy file.
 
 ## Read the governance facts
 
-For a governance review, three questions cover most policies, and the artifacts answer all three. What AI components does the application contain is answered by `AiComponents[]` in the methods output. What data crosses the model boundary is answered by the service inventory, where LLM inference endpoints appear as outbound services with data classifications. Where can untrusted input steer model behavior is answered by the `ai` and `mcp` data-flow slices.
+For a governance review, three questions cover most policies, and the artifacts answer all three. What AI components does the application contain is answered by `AiComponents[]` in the methods output. What data crosses the model boundary is answered by the service inventory, where LLM inference endpoints appear as outbound services with data classifications. Where can untrusted input steer model behavior is answered by the `ai` and `mcp` data-flow slices, each carrying a severity alongside its confidence. Agents and scripts can pull the same three answers without loading full JSON: the `dosai.ai_components`, `dosai.attack_surface`, and `dosai.exploit_chains` MCP tools, or the `aiComponents`, `attackSurface`, and `exploitChains` query aliases, return exactly those collections.
 
 ## Try next
 

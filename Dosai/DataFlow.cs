@@ -72,14 +72,14 @@ public sealed class DataFlowMethodSummary
     public List<int> ReturnParameterIndexes { get; set; } = [];
     public List<int> SinkParameterIndexes { get; set; } = [];
     /// <summary>
-    ///     T6: indexes of <c>out</c>/<c>ref</c> parameters written inside the method. By-value
+    ///     Indexes of <c>out</c>/<c>ref</c> parameters written inside the method. By-value
     ///     parameter assignments are excluded: reassigning a by-value parameter is local to the
     ///     callee and never reaches the caller.
     /// </summary>
     public List<int> OutParameterIndexes { get; set; } = [];
     /// <summary>
-    ///     T6: source categories observed flowing into each out/ref parameter, keyed by parameter
-    ///     index — a helper assigning an out param from a pattern-matched source lets call sites
+    ///     Source categories observed flowing into each out/ref parameter, keyed by parameter
+    ///     index, a helper assigning an out param from a pattern-matched source lets call sites
     ///     mint that source for the out local even when no argument is tainted. Keyed per index so
     ///     a source reaching one out parameter cannot mint taint for a sibling that only ever
     ///     receives a literal.
@@ -180,7 +180,7 @@ public sealed class SanitizedFlow
 
 /// <summary>
 ///     A resolved route → call path → taint slice → sink chain: the concrete graph-derived linkage
-///     between an attacker-reachable entry point and a dangerous sink (R2).
+///     between an attacker-reachable entry point and a dangerous sink.
 /// </summary>
 public sealed class ExploitChain
 {
@@ -218,7 +218,7 @@ public sealed class DataFlowResult
     public List<DataFlowSlice> Slices { get; set; } = [];
     public List<SanitizedFlow> SanitizedFlows { get; set; } = [];
     public List<ExploitChain> ExploitChains { get; set; } = [];
-    /// <summary>F6: entry points grouped by exposure with the chains/weaknesses that reach them; built after suppressions.</summary>
+    /// <summary>Entry points grouped by exposure with the chains/weaknesses that reach them; built after suppressions.</summary>
     public List<AttackSurfaceGroup> AttackSurface { get; set; } = [];
     public List<PackageReachability> PackageReachability { get; set; } = [];
     public List<DangerousApiReachability> DangerousApiReachability { get; set; } = [];
@@ -266,7 +266,7 @@ public static partial class DataFlowAnalyzer
         var patterns = LoadPatterns(patternsPath, patternPacks);
         var result = new DataFlowResult { Patterns = patterns, Metadata = TransparencyBuilder.CreateMetadata(path) };
         var purlResolver = PackageUrlResolver.Create(path);
-        // S1: purl-resolution evidence (which lock/config file produced each purl, version
+        // Purl-resolution evidence (which lock/config file produced each purl, version
         // conflicts across sources) rides along with the analysis diagnostics.
         foreach (var diagnostic in purlResolver.Diagnostics.Where(diagnostic => !result.Diagnostics.Contains(diagnostic, StringComparer.Ordinal)))
         {
@@ -310,7 +310,7 @@ public static partial class DataFlowAnalyzer
         var summaryCallerIndex = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
         var summaryMethodRoots = new Dictionary<string, (IOperation Root, SemanticModel Model)>(StringComparer.Ordinal);
 
-        // T1: iterate summary collection to a fixpoint (capped at 3 rounds, mirroring the IL-mode
+        // Iterate summary collection to a fixpoint (capped at 3 rounds, mirroring the IL-mode
         // fixpoint in DataFlowAssembly). Round one is a full pass that also records the caller
         // index (callee summary key → enclosing methods) and each method's root operation; later
         // rounds are a worklist over callers of summarized methods only, so a wrapper chain
@@ -331,7 +331,7 @@ public static partial class DataFlowAnalyzer
         }
 
         // The worklist is seeded with every key round one produced, then narrowed each round to the
-        // callers of the summaries that actually grew — so a converged wrapper chain is not
+        // callers of the summaries that actually grew, so a converged wrapper chain is not
         // re-walked just because some unrelated summary exists.
         var changedSummaryKeys = new HashSet<string>(summaries.Keys, StringComparer.Ordinal);
         var cellCountsByKey = SummaryCellCounts(summaries);
@@ -402,7 +402,7 @@ public static partial class DataFlowAnalyzer
         result.Statistics.SliceCount = result.Slices.Count;
         // Framework entry points carry stable ids (ep:op:...); analyzer/Cli entry points get
         // sequential ids appended after them. The analyzer path is VB-only (providers own every
-        // C# endpoint) and merges through the same dedup as methods mode — rebuilding entry
+        // C# endpoint) and merges through the same dedup as methods mode, rebuilding entry
         // points from provider endpoints produced a second, MethodId-less copy of each.
         var legacyEntryPoints = TransparencyBuilder.BuildEntryPoints(ApiEndpointAnalyzer.GetApiEndpoints(path));
         var frameworkEntryPoints = Depscan.Dosai.MergeEntryPoints(legacyEntryPoints, frameworkResult.EntryPoints);
@@ -417,13 +417,13 @@ public static partial class DataFlowAnalyzer
         result.PackageReachability = TransparencyBuilder.BuildPackageReachability(result);
         result.DangerousApiReachability = TransparencyBuilder.BuildDangerousApiReachability(result);
         result.WeaknessCandidates = TransparencyBuilder.BuildWeaknessCandidates(result, result.EntryPoints);
-        // W5b: statically-detected catastrophic regex literals join the weakness queue as
+        // Statically-detected catastrophic regex literals join the weakness queue as
         // CWE-1333 candidates so suppressions, diff, and downstream consumers see them.
         result.WeaknessCandidates.AddRange(ReDoSAnalyzer.Detect(csharpCompilation, result.Diagnostics));
         TransparencyBuilder.ApplySeverity(result);
         TransparencyBuilder.AttachExploitChains(result, graph.MethodEdges, graph.MethodIdsByFileMethod);
         TransparencyBuilder.ApplySuppressions(result, suppressionsPath);
-        // F6: after suppressions so the surface reflects the final, reportable findings.
+        // After suppressions so the surface reflects the final, reportable findings.
         result.AttackSurface = TransparencyBuilder.BuildAttackSurface(result);
         return result;
     }
@@ -442,7 +442,7 @@ public static partial class DataFlowAnalyzer
             {
                 Id = $"ep{++next}",
                 Kind = "Cli",
-                // R2/R6: the concrete graph node id lets exploit chains resolve directly instead
+                // The concrete graph node id lets exploit chains resolve directly instead
                 // of falling back to the (file, method-name) index.
                 MethodId = source.Properties.TryGetValue("methodId", out var methodId) ? methodId : null,
                 MethodName = source.MethodName,
@@ -471,7 +471,7 @@ public static partial class DataFlowAnalyzer
             }
         }
 
-        // R6: top-level statements are summarized under the synthesized `<Main>$` like any method body.
+        // Top-level statements are summarized under the synthesized `<Main>$` like any method body.
         collector.VisitGlobalStatements(root.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.GlobalStatementSyntax>().Select(statement => statement.Statement));
     }
 
@@ -502,8 +502,8 @@ public static partial class DataFlowAnalyzer
             }
         }
 
-        // R6: top-level statements (the default console template) never appear inside a method-body
-        // operation, so they need an explicit pass — one walker for the whole file so taint carries
+        // Top-level statements (the default console template) never appear inside a method-body
+        // operation, so they need an explicit pass, one walker for the whole file so taint carries
         // across statements exactly as it does within a method body.
         new DataFlowOperationWalker(model, graph, patterns, summaries, basePath, sourceFilePath, frameworkSeeds)
             .VisitGlobalStatements(root.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.GlobalStatementSyntax>().Select(statement => statement.Statement));
@@ -589,7 +589,7 @@ public static partial class DataFlowAnalyzer
             patterns.Sanitizers.AddRange([
                 new() { Target = DataFlowPatternTarget.Sanitizer, Kind = DataFlowPatternKind.Name, Pattern = "AddWithValue", Match = DataFlowMatchKind.Exact, Category = "sql-parameterization", Description = "Parameterized SQL binding" },
                 // Method-anchored on purpose: a bare Name/Exact "Add" sanitizer matched List<T>.Add and
-                // every other Add in the BCL, masking real SQL flows (W7). Only provider parameter
+                // every other Add in the BCL, masking real SQL flows. Only provider parameter
                 // collections parameterize; anything else named Add must stop sanitizing.
                 new() { Target = DataFlowPatternTarget.Sanitizer, Kind = DataFlowPatternKind.Method, Pattern = "SqlParameterCollection.Add", Match = DataFlowMatchKind.Contains, Category = "sql-parameterization", Description = "Parameterized SQL binding (System.Data/Microsoft.Data.SqlClient)" },
                 new() { Target = DataFlowPatternTarget.Sanitizer, Kind = DataFlowPatternKind.Method, Pattern = "NpgsqlParameterCollection.Add", Match = DataFlowMatchKind.Contains, Category = "sql-parameterization", Description = "Parameterized SQL binding (Npgsql)" },
@@ -648,8 +648,8 @@ public static partial class DataFlowAnalyzer
         {
             patterns.Sources.AddRange([
                 new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Code, Pattern = "-----BEGIN", Match = DataFlowMatchKind.Contains, Category = "crypto-material", Description = "PEM encoded crypto material", TaintKinds = ["secret", "crypto-key"] },
-                // W7, revisited: bare "key"/"keys" matched every KeyValuePair iteration and cache
-                // dictionary in a codebase, minting most of the crypto slices on real apps — so the
+                // Bare "key"/"keys" names matched every KeyValuePair iteration and cache
+                // dictionary in a codebase, minting most of the crypto slices on real apps, so the
                 // bare words are gone. Only compound key identifiers (apiKey, client_secret,
                 // session_key, hmacKey, …) mint crypto-material sources; [_.\-]? bridges the
                 // separator inside compounds.
@@ -698,7 +698,7 @@ public static partial class DataFlowAnalyzer
             patterns.Sources.AddRange([
                 // Qualified deliberately. A bare Contains on "ChatResponse"/"GetResponseAsync" matched
                 // System.Net.WebRequest.GetResponseAsync() and any ChatResponseDto, reporting every
-                // legacy WebRequest call site in a codebase as attacker-influenced LLM output — and the
+                // legacy WebRequest call site in a codebase as attacker-influenced LLM output, and the
                 // symbol IS resolved here, so per the AGENTS.md heuristic policy the qualified form is
                 // the correct one, matching the paired sink below.
                 new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Type, Pattern = "Microsoft.Extensions.AI.ChatResponse", Match = DataFlowMatchKind.Contains, Category = "llm-output", Description = "LLM model output (treated as attacker-influenced)", TaintKinds = ["llm"] },
@@ -754,8 +754,8 @@ public static partial class DataFlowAnalyzer
             ]);
             // Hardening markers (spacing-tolerant regexes, not exact strings): a sink invocation
             // whose text or *arguments* carry one of these is treated as hardened and suppressed.
-            // Cross-statement hardening — `var s = new XmlReaderSettings(); s.XmlResolver = null;`
-            // — is tracked separately by the walker (hardened-symbol map), which covers the
+            // Cross-statement hardening, `var s = new XmlReaderSettings(); s.XmlResolver = null;`
+            //, is tracked separately by the walker (hardened-symbol map), which covers the
             // idiomatic form the invocation text cannot show.
             patterns.Sanitizers.AddRange([
                 new() { Target = DataFlowPatternTarget.Sanitizer, Kind = DataFlowPatternKind.Code, Pattern = @"XmlResolver\s*=\s*null", Match = DataFlowMatchKind.Regex, Category = "xxe-hardening", Description = "Null XML resolver disables external entity resolution" },
@@ -777,7 +777,7 @@ public static partial class DataFlowAnalyzer
                 new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "XPathNavigator.Compile", Match = DataFlowMatchKind.Contains, Category = "xpath", Description = "XPathNavigator.Compile with tainted expression" },
                 new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "XPathNavigator.Evaluate", Match = DataFlowMatchKind.Contains, Category = "xpath", Description = "XPathNavigator.Evaluate with tainted expression" },
                 // XPath (CWE-643). XmlDocument.SelectNodes/SelectSingleNode are inherited from
-                // XmlNode, so a type-qualified Method pattern never sees them — Name/Exact anchors
+                // XmlNode, so a type-qualified Method pattern never sees them, Name/Exact anchors
                 // the resolved symbol instead.
                 new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Name, Pattern = "SelectNodes", Match = DataFlowMatchKind.Exact, Category = "xpath", Description = "SelectNodes with tainted XPath" },
                 new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Name, Pattern = "SelectSingleNode", Match = DataFlowMatchKind.Exact, Category = "xpath", Description = "SelectSingleNode with tainted XPath" },
@@ -797,7 +797,7 @@ public static partial class DataFlowAnalyzer
                 // Message bodies (CWE-117). Logging tainted values is usually intentional, so the
                 // category defaults to Low severity; header values (CWE-113) stay Medium.
                 // Real call sites resolve to the extension classes (LoggerExtensions.LogError,
-                // DebugLoggerExtension, …), not the interface — anchor both shapes.
+                // DebugLoggerExtension, …), not the interface, anchor both shapes.
                 new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "Microsoft.Extensions.Logging.LoggerExtensions", Match = DataFlowMatchKind.Contains, Category = "log", Description = "Logger extension output with tainted message/template", Severity = "Low", Confidence = "Low" },
                 new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "Microsoft.Extensions.Logging.ILogger", Match = DataFlowMatchKind.Contains, Category = "log", Description = "Logger output with tainted message/template", Severity = "Low", Confidence = "Low" },
                 new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "System.Console.WriteLine", Match = DataFlowMatchKind.Contains, Category = "log", Description = "Console output with tainted text", Severity = "Low", Confidence = "Low" },
@@ -1281,7 +1281,7 @@ public static partial class DataFlowAnalyzer
     }
 
     /// <summary>
-    ///     Collects per-method data-flow summaries. Optionally records, for the T1 fixpoint, an
+    ///     Collects per-method data-flow summaries. Optionally records, for the summary fixpoint, an
     ///     index of callee summary key → enclosing caller methods and each visited method's root
     ///     operation, so subsequent rounds only re-walk callers of summaries that changed.
     /// </summary>
@@ -1293,7 +1293,7 @@ public static partial class DataFlowAnalyzer
         {
             var previousMethod = _currentMethod;
             // The method-body operation's syntax is the whole declaration, whose span start sits
-            // before the method name — GetEnclosingSymbol there returns the CONTAINING TYPE. Start
+            // before the method name, GetEnclosingSymbol there returns the CONTAINING TYPE. Start
             // from the body/expression span instead, which is unambiguously inside the method.
             var innerSpanStart = operation.BlockBody?.Syntax.SpanStart ?? operation.ExpressionBody?.Syntax.SpanStart ?? operation.Syntax.SpanStart;
             _currentMethod = model.GetEnclosingSymbol(innerSpanStart) as IMethodSymbol
@@ -1318,7 +1318,7 @@ public static partial class DataFlowAnalyzer
         }
 
         /// <summary>
-        ///     R6: summarizes top-level statements under the compiler-synthesized `<Main>$`. Each
+        ///     Summarizes top-level statements under the compiler-synthesized `<Main>$`. Each
         ///     statement is a standalone operation with no enclosing method-body operation, so the
         ///     usual current-method resolution never fires; pin it once from the first statement.
         /// </summary>
@@ -1378,7 +1378,7 @@ public static partial class DataFlowAnalyzer
             base.VisitInvocation(operation);
         }
 
-        /// <summary>T1: records that the enclosing method invokes <paramref name="targetMethod"/>, keyed by the summary keys PropagateCalleeSummary consults.</summary>
+        /// <summary>Records that the enclosing method invokes <paramref name="targetMethod"/>, keyed by the summary keys PropagateCalleeSummary consults.</summary>
         private void IndexCaller(IMethodSymbol? targetMethod)
         {
             if (_currentMethod is null || targetMethod is null || callerIndex is null)
@@ -1417,7 +1417,7 @@ public static partial class DataFlowAnalyzer
         }
 
         /// <summary>
-        ///     T6: an assignment to an <c>out</c>/<c>ref</c> parameter is the write-back contract —
+        ///     An assignment to an <c>out</c>/<c>ref</c> parameter is the write-back contract:
         ///     record the parameter index, and when the assigned value is itself a source-shaped
         ///     expression (a pattern-matched field/property/method/type), remember the categories
         ///     under that index so call sites can mint that source for the caller's out local.
@@ -1477,7 +1477,7 @@ public static partial class DataFlowAnalyzer
         };
 
         /// <summary>
-        ///     T1: absorb the callee's summary into the caller's summary. A wrapper calling another
+        ///     Absorb the callee's summary into the caller's summary. A wrapper calling another
         ///     wrapper that reaches a sink inherits the sink parameter indexes; a wrapper returning the
         ///     callee's tainted return inherits the return parameter indexes. Combined with the fixpoint
         ///     loop this attributes multi-hop chains to the outermost method. Callees without summaries
@@ -1564,7 +1564,7 @@ public static partial class DataFlowAnalyzer
                         }
                     }
 
-                    // T13: surface the taint kinds the sink patterns stamp so multi-hop flows keep
+                    // Surface the taint kinds the sink patterns stamp so multi-hop flows keep
                     // their category payload (e.g. secret/crypto-key surviving wrapper chains);
                     // kinds default to the sink category like the walker's seed logic.
                     foreach (var taintKind in sinkPatterns
@@ -1725,8 +1725,8 @@ public static partial class DataFlowAnalyzer
         private readonly Dictionary<SyntaxNode, string> _syntaxTextCache = new();
         private readonly Dictionary<SyntaxNode, TaintTrace> _awaitTaintBySyntax = new();
         private readonly HashSet<string> _suppressedGuardKeys = new(StringComparer.Ordinal);
-        // W7: symbol keys of XmlReaderSettings/XmlDocument instances proven hardened in an earlier
-        // statement (XmlResolver = null / DtdProcessing.Prohibit|Ignore) — the idiomatic form the
+        // Symbol keys of XmlReaderSettings/XmlDocument instances proven hardened in an earlier
+        // statement (XmlResolver = null / DtdProcessing.Prohibit|Ignore), the idiomatic form the
         // sink-invocation text cannot show.
         private readonly HashSet<string> _hardenedSymbols = new(StringComparer.Ordinal);
         private bool _depthBudgetReported;
@@ -1737,7 +1737,7 @@ public static partial class DataFlowAnalyzer
 
         public override void Visit(IOperation? operation)
         {
-            // T11: silent truncation understates results; report the budget once per walker with the
+            // Silent truncation understates results; report the budget once per walker with the
             // enclosing method so users can tell analysis depth from a finding gap.
             if (MaxDepthReached && !_depthBudgetReported)
             {
@@ -1775,7 +1775,7 @@ public static partial class DataFlowAnalyzer
         }
 
         /// <summary>
-        ///     R6: analyzes top-level statements (the default `dotnet new console` template) under
+        ///     Analyzes top-level statements (the default `dotnet new console` template) under
         ///     the compiler-synthesized `<Main>$`. The statements carry no method-body operation, so
         ///     seeding and current-method resolution never fire on their own; one walker handles the
         ///     whole file so taint carries across statements exactly as inside a method body
@@ -1819,7 +1819,7 @@ public static partial class DataFlowAnalyzer
         }
 
         /// <summary>
-        ///     W2: `var settings = new XmlReaderSettings { XmlResolver = null };` — the hardening
+        ///     `var settings = new XmlReaderSettings { XmlResolver = null };`, the hardening
         ///     marker sits inside the initializer of an Xml-typed settings object, so later sinks
         ///     that take the variable are suppressed.
         /// </summary>
@@ -1883,7 +1883,7 @@ public static partial class DataFlowAnalyzer
             {
                 saved[key] = _taintedSymbols.TryGetValue(key, out var trace) ? trace : null;
                 _taintedSymbols.Remove(key);
-                // T4/a: the guard also suppresses pattern-minted sources for these keys — otherwise
+                // The guard also suppresses pattern-minted sources for these keys, otherwise
                 // a parameter like `input` re-materializes as a fresh source inside the guarded
                 // branch and the validation guard silently stops guarding.
                 _suppressedGuardKeys.Add(key);
@@ -1891,7 +1891,7 @@ public static partial class DataFlowAnalyzer
 
             try
             {
-                // T4: a guard that suppresses a live taint is negative evidence — record which flow the
+                // A guard that suppresses a live taint is negative evidence, record which flow the
                 // validator killed, where, and why the branch below reports nothing.
                 foreach (var trace in saved.Values.Where(trace => trace is not null).Cast<TaintTrace>().Take(8))
                 {
@@ -1929,13 +1929,13 @@ public static partial class DataFlowAnalyzer
         }
 
         /// <summary>
-        ///     T6: out/ref arguments are write-back channels the old walker dropped —
+        ///     Out/ref arguments are write-back channels the old walker dropped:
         ///     `int.TryParse(tainted, out var v)` and `dict.TryGetValue(tainted, out v)` lost the
         ///     out-var taint. Two rules: (a) any tainted in-argument or receiver taints the
         ///     out/ref local (the derived-value rule that covers the TryParse/TryGetValue shapes
         ///     for metadata-only callees); (b) a callee summary that writes a parameter from a
         ///     pattern-matched source mints that source at the call site. Neither rule fires for a
-        ///     call with clean arguments and no source-writing summary — no phantom taint.
+        ///     call with clean arguments and no source-writing summary, no phantom taint.
         /// </summary>
         private void PropagateOutArgumentTaint(IInvocationOperation operation)
         {
@@ -1966,7 +1966,7 @@ public static partial class DataFlowAnalyzer
                 }
 
                 var parameterIndex = argument.Parameter is null ? -1 : operation.TargetMethod.Parameters.IndexOf(argument.Parameter);
-                // Only the categories recorded for *this* parameter index seed it — a sibling out
+                // Only the categories recorded for *this* parameter index seed it, a sibling out
                 // parameter fed from a source must not taint one that only receives a literal.
                 if (summary is null ||
                     parameterIndex < 0 ||
@@ -2022,7 +2022,7 @@ public static partial class DataFlowAnalyzer
         }
 
         /// <summary>
-        ///     T3: awaiting a tainted <c>Task&lt;T&gt;</c>/<c>ValueTask&lt;T&gt;</c> yields the taint of T. Child
+        ///     Awaiting a tainted <c>Task&lt;T&gt;</c>/<c>ValueTask&lt;T&gt;</c> yields the taint of T. Child
         ///     propagation already carries the operand's taint; the explicit Await node keeps the
         ///     asynchronous boundary visible in slices (aligned with the IL mode's state-machine
         ///     reconstruction, which preseeds MoveNext fields).
@@ -2040,7 +2040,7 @@ public static partial class DataFlowAnalyzer
         }
 
         /// <summary>
-        ///     Records a caller→callee edge between method signatures (R2). Keyed with the same
+        ///     Records a caller→callee edge between method signatures. Keyed with the same
         ///     GenerateMethodSignature format as entry-point MethodIds, so exploit-chain resolution
         ///     can walk concrete graph paths instead of file/line heuristics.
         /// </summary>
@@ -2063,8 +2063,8 @@ public static partial class DataFlowAnalyzer
         }
 
         /// <summary>
-        ///     T2: seed lambda parameters when the lambda is passed to a call whose receiver or other
-        ///     arguments are tainted — `tainted.ForEach(x => Sink(x))`, `tainted.Select(Transform)`.
+        ///     Seed lambda parameters when the lambda is passed to a call whose receiver or other
+        ///     arguments are tainted, `tainted.ForEach(x => Sink(x))`, `tainted.Select(Transform)`.
         ///     Parameters are seeded directly into the taint map (not via pattern matching), so the
         ///     phantom-source guard for lambda parameters in MatchOperationSource still holds.
         /// </summary>
@@ -2139,14 +2139,14 @@ public static partial class DataFlowAnalyzer
         private void SeedMethodParameters(IMethodSymbol methodSymbol, SyntaxNode syntax)
         {
             // Lambda parameters are not framework entry-point parameters: binding them here made
-            // query lambdas (claims => ...) inherit the enclosing action's [HttpGet] attribute
+            // query lambdas (claims =>...) inherit the enclosing action's [HttpGet] attribute
             // pattern and mint phantom sources. Their values arrive through the enclosing flow.
             if (methodSymbol.MethodKind is MethodKind.LambdaMethod or MethodKind.AnonymousFunction)
             {
                 return;
             }
 
-            // R2: index the enclosing method so entry points without a MethodId can be resolved to
+            // Index the enclosing method so entry points without a MethodId can be resolved to
             // a concrete graph node by (file, method name).
             graph.RecordMethodLocation(Path.GetFileName(sourceFilePath), methodSymbol.Name, Dosai.FormatMethodSignature(methodSymbol));
 
@@ -2249,8 +2249,8 @@ public static partial class DataFlowAnalyzer
         {
             MarkHardenedAssignment(target, value);
 
-            // T7: element/indexer stores (`arr[i] = tainted`, `dict[key] = tainted`) taint the
-            // container so later reads stay tainted. Ordinary property stores do NOT — member
+            // Element/indexer stores (`arr[i] = tainted`, `dict[key] = tainted`) taint the
+            // container so later reads stay tainted. Ordinary property stores do NOT, member
             // taint keys keep field sensitivity (obj.Safe = x must not taint obj.Secret).
             if (ContainerOf(target) is { } container && GetReferencedSymbol(container) is { } containerSymbol && GetTaint(value) is { } containerTaint && TaintKey(container) is { } containerKey)
             {
@@ -2282,8 +2282,8 @@ public static partial class DataFlowAnalyzer
 
         /// <summary>
         ///     The container operation whose element is being written: `arr[i]` → arr, `dict[k]` →
-        ///     dict. Only genuine element stores match — plain property writes keep their
-        ///     field-sensitive member taint key (T7).
+        ///     dict. Only genuine element stores match, plain property writes keep their
+        ///     field-sensitive member taint key.
         /// </summary>
         private static IOperation? ContainerOf(IOperation target)
         {
@@ -2296,7 +2296,7 @@ public static partial class DataFlowAnalyzer
         }
 
         /// <summary>
-        ///     T7: a tainted collection taints the loop variable — `foreach (var x in tainted)
+        ///     A tainted collection taints the loop variable, `foreach (var x in tainted)
         ///     Process.Start(x)` previously lost the taint because the loop variable has no
         ///     initializer for VisitVariableDeclarator to observe.
         /// </summary>
@@ -2332,7 +2332,7 @@ public static partial class DataFlowAnalyzer
         }
 
         /// <summary>
-        ///     W7 companion: storing a tainted value into a collection taints the collection, so the
+        ///     Storing a tainted value into a collection taints the collection, so the
         ///     flow survives being read back (values.Add(input); Sink(values[0])). The old bare-Name
         ///     "Add" sanitizer masked exactly this shape; without it the receiver needs the taint.
         /// </summary>
@@ -2367,8 +2367,8 @@ public static partial class DataFlowAnalyzer
         }
 
         /// <summary>
-        ///     W2: `doc.XmlResolver = null;` / `settings.DtdProcessing = DtdProcessing.Prohibit;` —
-        ///     the hardened instance is remembered so sinks receiving it later are suppressed.
+        ///     `doc.XmlResolver = null;` / `settings.DtdProcessing = DtdProcessing.Prohibit;`
+        ///     mark the hardened instance so it is remembered so sinks receiving it later are suppressed.
         /// </summary>
         private void MarkHardenedAssignment(IOperation target, IOperation value)
         {
@@ -2437,7 +2437,7 @@ public static partial class DataFlowAnalyzer
             var operationText = SyntaxText(operation.Syntax);
             if (IsHardenedSink(operationText, matchedSinkPatterns, argumentList.Select(argument => argument.Value), out var hardening))
             {
-                // W2-style guards: the sink call carries hardening markers in its own text (e.g.
+                // the sink call carries hardening markers in its own text (e.g.
                 // XmlReaderSettings created inline with a nulled resolver) or receives an instance
                 // hardened in an earlier statement. The would-be flows are negative evidence.
                 foreach (var taint in argumentTaints.Where(taint => taint is not null).Cast<TaintTrace>())
@@ -2516,7 +2516,7 @@ public static partial class DataFlowAnalyzer
                     typeName: Normalize(targetMethod.ReturnType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)),
                     code: SyntaxText(operation.Syntax));
                 sinkNode.Properties["summaryMethod"] = summary.Method;
-                // R2: the concrete sink frame (the summarized callee that reaches the real sink) in
+                // The concrete sink frame (the summarized callee that reaches the real sink) in
                 // GenerateMethodSignature form, so exploit chains can path all the way to it.
                 sinkNode.Properties["sinkMethodId"] = Dosai.FormatMethodSignature(targetMethod);
                 graph.AddEdges(taint.NodeIds, sinkNode.Id, "InterproceduralSink", argument.Syntax, sourceFilePath, argument.Parameter?.Name ?? $"arg{parameterIndex}");
@@ -2562,7 +2562,7 @@ public static partial class DataFlowAnalyzer
         }
 
         /// <summary>
-        ///     Applies matched sanitizer patterns to a trace (T4). A sanitizer with an empty
+        ///     Applies matched sanitizer patterns to a trace. A sanitizer with an empty
         ///     <see cref="DataFlowPattern.RemovesTaintKinds"/> keeps the historic remove-all
         ///     semantics; a sanitizer that names kinds (e.g. RandomNumberGenerator removes only
         ///     "insecure-random") strips exactly those kinds and lets the rest keep flowing.
@@ -2672,10 +2672,10 @@ public static partial class DataFlowAnalyzer
         }
 
         /// <summary>
-        ///     W2-style paired hardening: a sink invocation is suppressed when its text matches a
+        ///     Paired hardening: a sink invocation is suppressed when its text matches a
         ///     "<c>&lt;category&gt;-hardening</c>" sanitizer marker (spacing-tolerant) or when any of
         ///     its arguments (or the receiver) references an instance hardened in an earlier
-        ///     statement — the idiomatic `settings.XmlResolver = null;` form.
+        ///     statement, the idiomatic `settings.XmlResolver = null;` form.
         /// </summary>
         private bool IsHardenedSink(string operationText, List<DataFlowPattern> matchedSinkPatterns, IEnumerable<IOperation> argumentValues, out DataFlowPattern? hardening)
         {
@@ -2840,7 +2840,7 @@ public static partial class DataFlowAnalyzer
             var sanitizerPatterns = MatchSanitizers(operation);
             if (sanitizerPatterns.Count > 0)
             {
-                // T4: when a sanitizer suppresses (or narrows) a live flow, record the negative
+                // When a sanitizer suppresses (or narrows) a live flow, record the negative
                 // evidence instead of letting the flow silently disappear.
                 var existingTaint = FindExistingTaint(operation) ?? GetTaintThroughChildrenForSanitizerEvidence(operation);
                 var sanitized = existingTaint is null ? null : ApplySanitizers(sanitizerPatterns, existingTaint);
@@ -2908,7 +2908,7 @@ public static partial class DataFlowAnalyzer
                     return receiverTaint.Append(node.Id);
                 }
 
-                // T2: invoking a delegate variable (a lambda stored earlier) propagates argument and
+                // Invoking a delegate variable (a lambda stored earlier) propagates argument and
                 // captured taint to the invocation result, mirroring how the lambda's body was walked.
                 if (invocation.TargetMethod.MethodKind == MethodKind.DelegateInvoke && (argTaint is not null || receiverTaint is not null))
                 {
@@ -2921,7 +2921,7 @@ public static partial class DataFlowAnalyzer
                     }
                 }
 
-                // T12: booleans carry a decision, not the payload — a `bool IsValid(string)` returning
+                // Booleans carry a decision, not the payload, a `bool IsValid(string)` returning
                 // "tainted true" minted phantom flows into every sink that consumed the check result.
                 var propagatesPayload = !ReturnsDecisionOnly(invocation.TargetMethod);
                 if (argTaint is not null && propagatesPayload && TryGetSummary(invocation.TargetMethod, out var invocationSummary))
@@ -2940,7 +2940,7 @@ public static partial class DataFlowAnalyzer
                     graph.AddEdges(argTaint.NodeIds, node.Id, "CallReturn", operation.Syntax, sourceFilePath, invocation.TargetMethod.Name);
                     return argTaint.Append(node.Id);
                 }
-                // T12: a boolean result is a decision about the input, not the payload itself.
+                // A boolean result is a decision about the input, not the payload itself.
                 return propagatesPayload ? argTaint : null;
             }
 
@@ -2975,7 +2975,7 @@ public static partial class DataFlowAnalyzer
             {
                 var ownerMethod = _currentMethod ?? parameterReference.Parameter.ContainingSymbol as IMethodSymbol ?? throw new InvalidOperationException("Parameter without containing method");
                 // A lambda parameter must not be matched against the enclosing method's routing
-                // attributes: `claims.Select(c => ...)` inside an [HttpGet] action made `c` a
+                // attributes: `claims.Select(c =>...)` inside an [HttpGet] action made `c` a
                 // phantom http source through exactly this path.
                 if (SymbolEqualityComparer.Default.Equals(parameterReference.Parameter.ContainingSymbol, ownerMethod))
                 {
@@ -3022,7 +3022,7 @@ public static partial class DataFlowAnalyzer
         }
 
         /// <summary>
-        ///     T12: a boolean return carries a decision about the input, not the input itself.
+        ///     A boolean return carries a decision about the input, not the input itself.
         ///     Validator-shaped methods (IsMatch/TryParse/IsValid/…) and every other bool-returning
         ///     method stop propagating argument taint to their result.
         /// </summary>
@@ -3277,9 +3277,9 @@ public static partial class DataFlowAnalyzer
         private static bool IsCodeLike(DataFlowPattern pattern) => pattern.Kind is DataFlowPatternKind.Code or DataFlowPatternKind.Method or DataFlowPatternKind.Symbol or DataFlowPatternKind.Name;
 
         /// <summary>
-        ///     W7: port of the IL-mode noise filter (DataFlowAssembly's IsAssemblySourceMemberPattern)
-        ///     so both modes agree — a bare Name/Contains pattern shorter than four characters matches
-        ///     too much of the dictionary to be a signal (key, url, id, ...).
+        ///     Port of the IL-mode noise filter (DataFlowAssembly's IsAssemblySourceMemberPattern)
+        ///     so both modes agree, a bare Name/Contains pattern shorter than four characters matches
+        ///     too much of the dictionary to be a signal (key, url, id,...).
         /// </summary>
         private static bool HasSignal(DataFlowPattern pattern) => pattern.Kind switch
         {
@@ -3302,10 +3302,10 @@ public static partial class DataFlowAnalyzer
         private readonly Dictionary<string, HashSet<string>> _methodEdges = new(StringComparer.Ordinal);
         private readonly Dictionary<string, string> _methodIdsByFileMethod = new(StringComparer.OrdinalIgnoreCase);
 
-        /// <summary>Caller method id → callee method ids, recorded during the operation walk (R2).</summary>
+        /// <summary>Caller method id → callee method ids, recorded during the operation walk.</summary>
         public IReadOnlyDictionary<string, HashSet<string>> MethodEdges => _methodEdges;
 
-        /// <summary>"file|methodName" → method id, for resolving entry points without a MethodId (R2).</summary>
+        /// <summary>"file|methodName" → method id, for resolving entry points without a MethodId.</summary>
         public IReadOnlyDictionary<string, string> MethodIdsByFileMethod => _methodIdsByFileMethod;
 
         public void RecordDiagnostic(string message)
@@ -3442,7 +3442,7 @@ public static partial class DataFlowAnalyzer
             if (method is not null)
             {
                 node.Properties["method"] = Normalize(method.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat));
-                // R2: the GenerateMethodSignature-form id matches entry-point MethodIds so exploit
+                // The GenerateMethodSignature-form id matches entry-point MethodIds so exploit
                 // chains can link taint nodes to concrete graph paths.
                 node.Properties["methodId"] = Dosai.FormatMethodSignature(method);
             }
@@ -3497,7 +3497,7 @@ public static partial class DataFlowAnalyzer
                 .Distinct(StringComparer.Ordinal)
                 .ToList();
             var firstSource = trace.NodeIds.FirstOrDefault(id => _nodesById.TryGetValue(id, out var candidateSource) && candidateSource.IsSource) ?? trace.NodeIds.First();
-            // T10: source-mode slices used to be appended per match, so the same flow repeated for
+            // Source-mode slices used to be appended per match, so the same flow repeated for
             // every re-evaluation in loops and guards. Keyed on the flow, not the per-site sink
             // node id (each evaluation mints a fresh node), mirroring the IL mode's _sliceKeys.
             var sliceKey = $"{firstSource}\u001f{sinkPattern?.Category ?? sinkNode.Category}\u001f{sinkArgumentIndex}\u001f{sinkArgument}";
@@ -3571,8 +3571,8 @@ public static partial class DataFlowAnalyzer
         summaries.ToDictionary(entry => entry.Key, entry => SummaryCellCount(entry.Value), StringComparer.Ordinal);
 
     /// <summary>
-    ///     Static ReDoS detection (W5b): flags catastrophically-backtracking *literal* regex
-    ///     patterns at their source locations — a quantified group whose body itself contains a
+    ///     Static ReDoS detection: flags catastrophically-backtracking *literal* regex
+    ///     patterns at their source locations, a quantified group whose body itself contains a
     ///     quantifier (<c>(a+)*</c>), or a quantified alternation with overlapping branches
     ///     (<c>(a|aa)*</c>). Covers <c>new Regex("literal")</c>, the static
     ///     <c>Regex.IsMatch/Match/Matches(subject, "literal")</c> forms, and
@@ -3580,7 +3580,7 @@ public static partial class DataFlowAnalyzer
     ///     <c>RegexOptions.NonBacktracking</c> or a match-timeout argument suppress the finding,
     ///     and patterns too long to analyze statically are reported as skipped diagnostics instead
     ///     of being silently ignored. Results are CWE-1333 weakness candidates (severity medium,
-    ///     confidence medium — static evidence without reachability), not taint slices.
+    ///     confidence medium, static evidence without reachability), not taint slices.
     /// </summary>
     internal static partial class ReDoSAnalyzer
     {
@@ -3611,7 +3611,7 @@ public static partial class DataFlowAnalyzer
                         continue;
                     }
 
-                    // A timeout (TimeSpan) or NonBacktracking option bounds backtracking — honored.
+                    // A timeout (TimeSpan) or NonBacktracking option bounds backtracking, honored.
                     if (HasBacktrackingMitigation(operation.Arguments))
                     {
                         continue;

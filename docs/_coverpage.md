@@ -6,14 +6,15 @@
 
 [Quickstart](QUICKSTART.md) · [Security analyst guide](security-analysis.md) · [Command reference](commands.md) · [Lessons](LESSON1.md)
 
-Dosai reads .NET source trees, compiled assemblies, and NuGet packages, and turns them into facts a reviewer can act on: method inventories, call graphs, API endpoints, service inventories, source-to-sink data-flow slices, cryptographic evidence, and package reachability.
+Dosai reads .NET source trees, compiled assemblies, and NuGet packages, and turns them into facts a reviewer can act on: method inventories, call graphs, API endpoints, service inventories, source-to-sink data-flow slices, cryptographic evidence, package reachability, exploit chains, attack-surface grouping, dead-code reporting, and security findings.
 
 ## What Dosai helps you do
 
-- Triage injection and dangerous-API risk with source-to-sink slices and weakness candidates mapped to CWEs
+- Triage injection and dangerous-API risk with source-to-sink slices and weakness candidates mapped to CWEs, severities, and suppressions
 - Build a CycloneDX-style CBOM with code-level crypto evidence, redacted material fingerprints, and reachability
-- Map HTTP, RPC, messaging, serverless, MCP, and AI surfaces with trust zones and data classification
+- Map HTTP, RPC, messaging, serverless, MCP, and AI surfaces with trust zones, data classification, and endpoint security findings
 - Correlate findings to NuGet packages with PURL enrichment so SBOM reviews get reachability evidence
+- Scope reviews with exploit chains, attack-surface groups, and dead-code reports instead of raw flow counts
 
 ## Choose your path
 

@@ -78,7 +78,7 @@ public sealed partial class ProtobufProvider : IFrameworkProvider
                     if (rpc.HttpVerb is not null && rpc.HttpPath is not null)
                     {
                         // google.api.http annotation: the rpc is also reachable over plain HTTP
-                        // (gRPC JSON transcoding) — surfaced for the gRPC provider to expand.
+                        // (gRPC JSON transcoding), surfaced for the gRPC provider to expand.
                         operation.Properties["httpVerb"] = rpc.HttpVerb;
                         operation.Properties["httpPath"] = rpc.HttpPath;
                     }
@@ -247,7 +247,7 @@ public sealed partial class ProtobufProvider : IFrameworkProvider
     [GeneratedRegex(@"(?<verb>get|post|put|patch|delete)\s*:\s*\""(?<path>[^\""]+)\""", RegexOptions.IgnoreCase | RegexOptions.Compiled)]
     private static partial Regex HttpRuleRegex();
 
-    // rpc Name (stream? Input) returns (stream? Output) — the scanner already stripped braces.
+    // rpc Name (stream? Input) returns (stream? Output), the scanner already stripped braces.
     [GeneratedRegex(@"rpc\s+(?<name>\w+)\s*\(\s*(?<inStream>stream\s+)?(?<input>[\w\.]+)\s*\)\s*returns\s*\(\s*(?<outStream>stream\s+)?(?<output>[\w\.]+)\s*\)", RegexOptions.Compiled)]
     private static partial Regex RpcSignatureRegex();
 

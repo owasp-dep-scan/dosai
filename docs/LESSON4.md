@@ -44,7 +44,7 @@ Protect("payload");
 EOF
 ```
 
-The app deliberately bundles several findings: MD5 for checksums, DES with ECB mode, a hardcoded key, and an IV-less legacy cipher setup.
+The app deliberately bundles several findings: MD5 for checksums, DES with ECB mode, a hardcoded key, and an IV-less legacy cipher setup. Note the variable name: crypto-material sources match compound key identifiers such as `apiKey`, `client_secret`, `session_key`, and `hmacKey`, while bare names like `key` or `keys` intentionally mint nothing, because they match every dictionary iteration in a codebase and used to flood real apps with noise.
 
 ## Run the crypto command
 
@@ -103,7 +103,7 @@ For this app the findings include MD5 use, DES use, ECB mode, and hardcoded mate
 
 ## Reachability makes it prioritization
 
-If the weak hash sat inside a function called from `Main`, the finding would carry `reachableFromEntryPoint` with entry point IDs, because the crypto command reuses method extraction and call-graph context for best-effort reachability. Reachability never blocks the analysis: when symbol resolution is incomplete, Dosai records diagnostics and continues with file and method-name correlation. Treat the flag as prioritization evidence, not as proof of exploitability.
+If the weak hash sat inside a function called from `Main`, the finding would carry `reachableFromEntryPoint` with entry point IDs, because the crypto command reuses method extraction and call-graph context for reachability. Reachability never blocks the analysis, but it is never asserted without evidence: a claim requires a graph path from an entry point, and when the call graph cannot support one, the older file-level fallback is gated off and a diagnostic names the file instead of silently marking crypto usage reachable. Treat the flag as prioritization evidence, not as proof of exploitability.
 
 ## How the data-flow slice connects material to operation
 

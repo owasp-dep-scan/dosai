@@ -13,7 +13,7 @@ public interface IFrameworkProvider
 
     /// <summary>
     ///     Cheap gate. Return false to skip entirely. Consult ctx.Detection (PURLs, usings, config
-    ///     files) — never scan the whole tree here.
+    ///     files), never scan the whole tree here.
     /// </summary>
     bool AppliesTo(FrameworkContext ctx);
 

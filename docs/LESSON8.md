@@ -78,7 +78,9 @@ Without help, `dataflows` sees a source it does not recognize and a sink it does
 }
 ```
 
-Three kinds do the heavy lifting. `sources` seed taint where untrusted data enters. `passthroughs` tell the analyzer that a helper returns its input unchanged, so taint survives the wrapper. `sanitizers` both stop direct taint and act as guard validators: inside `if (AllowListedCommand(input))`, the validated true branch suppresses taint while the unvalidated path keeps it.
+Three kinds do the heavy lifting. `sources` seed taint where untrusted data enters. `passthroughs` tell the analyzer that a helper returns its input unchanged, so taint survives the wrapper. `sanitizers` both stop direct taint and act as guard validators: inside `if (AllowListedCommand(input))`, the validated true branch suppresses taint while the unvalidated path keeps it. Two optional fields refine what a match produces: `severity` overrides the slice severity the sink category would otherwise default to, and `taintKinds` labels what kind of taint the source mints, which multi-hop summaries preserve. One rule interacts with the `confidence` you set: a match from a Low-confidence pattern is demoted one severity rank, so a heuristic pattern cannot escalate a slice to high severity on its own.
+
+Sanitizers and suppressions answer different questions, and mixing them up is the classic mistake. A sanitizer says "this code makes the flow safe", belongs in a pattern file, and produces `SanitizedFlows` negative evidence. A suppression says "a human reviewed this finding and accepted it", belongs in the `--suppress` file with file, line, sliceKey, weaknessId, or category (and optionally an `expires` date), and removes the finding from `dataflows` and `agent-context` output until it expires. Teach the analyzer the first; book-keep the second.
 
 ## Run and inspect
 
@@ -90,7 +92,7 @@ dotnet run --project ./Dosai/Dosai.csproj -- dataflows \
   --print-sources-sinks
 ```
 
-User patterns are merged with the built-ins; they never replace them. `--print-sources-sinks` is your tuning lens: it lists every matched source and sink with category, location, symbol, PURL, and code, which tells you immediately whether a pattern matched, matched too broadly, or missed entirely.
+User patterns are merged with the built-ins; they never replace them. `--print-sources-sinks` is your tuning lens: it lists every matched source and sink with category, location, symbol, PURL, and code, which tells you immediately whether a pattern matched, matched too broadly, or missed entirely. When a sanitizer does fire, the suppressed flow shows up in `SanitizedFlows[]` (query alias `sanitizedFlows`) with the sanitizer symbol and location, so you can confirm the validator you taught the analyzer is the one actually stopping the flow.
 
 ```text
 Data-flow sources: 2

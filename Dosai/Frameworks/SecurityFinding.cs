@@ -1,10 +1,10 @@
 namespace Depscan.Frameworks;
 
 /// <summary>
-///     A severity-tagged security finding derived from framework metadata (F1 endpoint findings,
-///     S2 MCP transport integrity, F5 configuration security). Additive schema; every finding
+///     A severity-tagged security finding derived from framework metadata (endpoint findings,
+///     MCP transport integrity, configuration security). Additive schema; every finding
 ///     carries its evidence location and a remediation hint. Ids are content-derived
-///     (kind+file+line) — positional counters churn whenever any earlier finding appears or
+///     (kind+file+line), positional counters churn whenever any earlier finding appears or
 ///     disappears, which would break diffs and suppression keys.
 /// </summary>
 public sealed class SecurityFinding

@@ -7,7 +7,7 @@ namespace Depscan.Frameworks.Providers;
 ///     ASP.NET Core Minimal APIs: Map* endpoint registration invocations with MapGroup prefix
 ///     composition (fluent and via group variables), MapMethods verb arrays, and a node-by-node
 ///     fluent-chain walk for authorization/metadata. Map* calls that mount other frameworks
-///     (MapHub, MapGrpcService, MapGraphQL, MapMcp, ...) are recorded as mount points for the
+///     (MapHub, MapGrpcService, MapGraphQL, MapMcp,...) are recorded as mount points for the
 ///     owning provider instead of emitting duplicate endpoints.
 /// </summary>
 public sealed class MinimalApiProvider : IFrameworkProvider
@@ -41,7 +41,7 @@ public sealed class MinimalApiProvider : IFrameworkProvider
 
     public void Analyze(FrameworkContext ctx, FrameworkResults results)
     {
-        // Prefixes are scoped per file: two Program.cs files both declaring `var g = ...` in the
+        // Prefixes are scoped per file: two Program.cs files both declaring `var g =...` in the
         // same solution must not see each other's prefixes.
         var groupPrefixesByFile = new Dictionary<string, Dictionary<string, string>>(StringComparer.Ordinal);
         Dictionary<string, string> PrefixesFor(string filePath)
@@ -174,8 +174,8 @@ public sealed class MinimalApiProvider : IFrameworkProvider
                 case IdentifierNameSyntax identifier when groupPrefixes.TryGetValue(identifier.Identifier.Text, out var variablePrefix):
                     return RouteTemplateResolver.CombinePrefix(variablePrefix, prefix);
                 case InvocationExpressionSyntax intermediate:
-                    // A non-MapGroup fluent link (HasApiVersion, RequireAuthorization, ...): keep
-                    // walking outward — the MapGroup may sit further up the chain.
+                    // A non-MapGroup fluent link (HasApiVersion, RequireAuthorization,...): keep
+                    // walking outward, the MapGroup may sit further up the chain.
                     receiver = (intermediate.Expression as MemberAccessExpressionSyntax)?.Expression;
                     break;
                 default:
@@ -366,8 +366,8 @@ public sealed class MinimalApiProvider : IFrameworkProvider
         var serviceId = FrameworkIds.Service("minimal-api", Path.GetDirectoryName(CodeLocation.From(ctx.BasePath, invocation.SyntaxTree.FilePath).Path), fileName);
         var operationId = FrameworkIds.Operation(serviceId, httpMethod, resolved.Path, template ?? httpMethod);
 
-        // Repeated registrations of the same (file, verb, path) — e.g. AddHealthChecks wired
-        // twice, or versioned groups collapsing to one path — must not duplicate ids.
+        // Repeated registrations of the same (file, verb, path), e.g. AddHealthChecks wired
+        // twice, or versioned groups collapsing to one path, must not duplicate ids.
         if (!emittedEndpointIds.Add(operationId))
         {
             return;

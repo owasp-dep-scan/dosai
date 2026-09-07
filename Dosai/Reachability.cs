@@ -4,7 +4,7 @@ using System.Text.RegularExpressions;
 namespace Depscan;
 
 /// <summary>
-///     Normalization helpers for graph node ids shared by source/assembly id matching (R10): IL ids
+///     Normalization helpers for graph node ids shared by source/assembly id matching: IL ids
 ///     embed generic instantiations (<c>Method&lt;args&gt;</c>), source ids use the original definition.
 /// </summary>
 internal static partial class GraphIdNormalizer
@@ -33,7 +33,7 @@ internal static partial class GraphIdNormalizer
     /// <summary>
     ///     Identity of a method id independent of generic instantiation and parameter types:
     ///     <c>Ns.G`1&lt;System.String&gt;.Echo(System.String):System.String</c> and
-    ///     <c>Ns.G.Echo(T):T</c> both reduce to <c>Ns.G.Echo</c>. Used only as an R10 fallback for
+    ///     <c>Ns.G.Echo(T):T</c> both reduce to <c>Ns.G.Echo</c>. Used only as a fallback for
     ///     ids that provably embed an instantiation, so overloads defined directly (not via
     ///     instantiation) never merge.
     /// </summary>
@@ -46,9 +46,9 @@ internal static partial class GraphIdNormalizer
 }
 
 /// <summary>
-///     Per-node reachability facts computed once over the merged call graph (R1): which entry
+///     Per-node reachability facts computed once over the merged call graph: which entry
 ///     points can reach the node, how deep it sits, how much code it can reach, plus fan-in/
-///     fan-out (R7) and SCC membership (R3).
+///     fan-out and SCC membership.
 /// </summary>
 public sealed class NodeReachability
 {
@@ -63,26 +63,26 @@ public sealed class NodeReachability
     /// <summary>Minimum call distance from the nearest reachable entry point; null when unreachable.</summary>
     public int? DepthFromEntryPoint { get; set; }
 
-    /// <summary>Distinct callers (R7 fan-in).</summary>
+    /// <summary>Distinct callers.</summary>
     public int FanIn { get; set; }
 
-    /// <summary>Distinct callees (R7 fan-out).</summary>
+    /// <summary>Distinct callees.</summary>
     public int FanOut { get; set; }
 
     /// <summary>
-    ///     R5: true when a forward graph path from a resolvable entry point reaches this node.
+    ///     True when a forward graph path from a resolvable entry point reaches this node.
     ///     Independent of the bounded <see cref="ReachableEntryPoints"/> list: the list saturates
     ///     at 16 entry points, the flag never does.
     /// </summary>
     public bool Reachable { get; set; }
 
     /// <summary>
-    ///     R5: true when the node is unreachable but must not be reported as dead code —
+    ///     True when the node is unreachable but must not be reported as dead code:
     ///     reflection or DI/framework-model evidence keeps it callable at runtime.
     /// </summary>
     public bool KeepAlive { get; set; }
 
-    /// <summary>Why the node is kept alive despite being unreachable (evidence kinds, R5).</summary>
+    /// <summary>Why the node is kept alive despite being unreachable (evidence kinds).</summary>
     public List<string> KeepAliveReasons { get; set; } = [];
 
     /// <summary>
@@ -95,7 +95,7 @@ public sealed class NodeReachability
     public bool InRecursiveCycle { get; set; }
 }
 
-/// <summary>A recursion cluster: an SCC with more than one member, or a self-loop (R3).</summary>
+/// <summary>A recursion cluster: an SCC with more than one member, or a self-loop.</summary>
 public sealed class RecursionCluster
 {
     public required string Id { get; set; }
@@ -107,8 +107,8 @@ public sealed class RecursionCluster
 }
 
 /// <summary>
-///     R5: a method or constructor no entry point can reach and no reflection/DI evidence keeps
-///     alive — dead code from the attacker's point of view (and from the maintainer's).
+///     A method or constructor no entry point can reach and no reflection/DI evidence keeps
+///     alive, dead code from the attacker's point of view (and from the maintainer's).
 /// </summary>
 public sealed class DeadCodeEntry
 {
@@ -140,7 +140,7 @@ public static class ReachabilityAnalyzer
     ///     Computes the reachability section for a methods slice: per-node entry points, depths,
     ///     buckets, fan-in/out, SCC ids, and recursion clusters. Reuses the merged (already
     ///     deduplicated) edge list; builds forward and reverse indexes once; one bounded BFS per
-    ///     resolvable entry point — never per node.
+    ///     resolvable entry point, never per node.
     ///     <para>
     ///         <c>BudgetExhausted</c> reports whether any BFS hit <see cref="MaxVisitedPerEntryPoint"/>.
     ///         Callers that treat "not visited" as "unreachable" (the dead-code report) must consult
@@ -169,7 +169,7 @@ public static class ReachabilityAnalyzer
             }
         }
 
-        // R1: one bounded forward BFS per entry point; every visited node records the entry point
+        // One bounded forward BFS per entry point; every visited node records the entry point
         // id and keeps the minimum depth. Entry points without a resolvable MethodId contribute
         // nothing here (they are still listed in EntryPoints). The budget diagnostic is emitted
         // once for the whole run, not once per entry point.
@@ -203,7 +203,7 @@ public static class ReachabilityAnalyzer
                     continue;
                 }
 
-                // R5: exact reachability flag — set for every visited node, unlike the bounded
+                // Exact reachability flag, set for every visited node, unlike the bounded
                 // entry-point list above.
                 fact.Reachable = true;
 
@@ -230,7 +230,7 @@ public static class ReachabilityAnalyzer
     }
 
     /// <summary>
-    ///     R5: unreachable-but-kept-alive marking. Any node targeted by a reflection or DI/
+    ///     Unreachable-but-kept-alive marking. Any node targeted by a reflection or DI/
     ///     framework-model edge (or carrying that evidence itself) stays out of the dead-code
     ///     report: `AddSingleton<Foo>()`, `Activator.CreateInstance(typeof(Foo))`, and
     ///     `[McpServerTool]`-style framework callbacks are invoked without a call site Dosai can
@@ -285,7 +285,7 @@ public static class ReachabilityAnalyzer
     }
 
     /// <summary>
-    ///     R5: the dead-code report — source-declared methods and constructors that no entry point
+    ///     The dead-code report, source-declared methods and constructors that no entry point
     ///     reaches and no reflection/DI evidence keeps alive. Emitted only for source-mode runs:
     ///     assembly/library trees have no meaningful entry-point roots (library public-API roots are
     ///     a deliberate non-goal), so everything would be flagged. Suppressed when a reachability
@@ -348,7 +348,7 @@ public static class ReachabilityAnalyzer
         return deadCode;
 
         // Bin artifacts pulled into a source scan (DLLs under bin/, their PDB-backed twins) carry
-        // assembly file names rather than source paths — not reviewable dead code.
+        // assembly file names rather than source paths, not reviewable dead code.
         static bool IsSourceLocation(string? fileName) =>
             !string.IsNullOrWhiteSpace(fileName) &&
             (fileName.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) ||
@@ -369,12 +369,12 @@ public static class ReachabilityAnalyzer
     public const int MaxDeadCodeEntries = 500;
 
     /// <summary>
-    ///     R7: annotate each edge with the number of distinct call sites for its (source, target)
+    ///     Annotate each edge with the number of distinct call sites for its (source, target)
     ///     pair and collapse same-pair duplicates into a single edge. Edges with different call
-    ///     types or evidence kinds stay separate — a direct edge and a dispatch-candidate edge are
+    ///     types or evidence kinds stay separate, a direct edge and a dispatch-candidate edge are
     ///     different facts even between the same nodes. The annotations of dropped duplicates
     ///     (argument expressions, evidence, distinct sites as <see cref="MethodCallEdge.CallSiteCount"/>)
-    ///     merge into the keeper; downstream consumers (R2 exploit chains) operate on method ids,
+    ///     merge into the keeper; downstream consumers (exploit chains) operate on method ids,
     ///     not per-site locations, so nothing they need is lost.
     /// </summary>
     public static void CollapseDuplicateCallSites(CallGraph callGraph)
@@ -396,7 +396,7 @@ public static class ReachabilityAnalyzer
                 .Count();
 
             // Merge the annotations of the dropped duplicates (argument expressions, evidence)
-            // so collapsing never discards how the call was made — only where it was repeated.
+            // so collapsing never discards how the call was made, only where it was repeated.
             keeper.Arguments = edges.SelectMany(edge => edge.Arguments ?? []).Distinct(StringComparer.Ordinal).ToList();
             keeper.ArgumentExpressions = edges.SelectMany(edge => edge.ArgumentExpressions ?? []).Distinct(StringComparer.Ordinal).ToList();
             keeper.Evidence = edges.SelectMany(edge => edge.Evidence)
@@ -433,9 +433,9 @@ public static class ReachabilityAnalyzer
     }
 
     /// <summary>
-    ///     Iterative Tarjan over the merged graph (R3). Returns every component (including
-    ///     singletons, which R12 bucketing needs for the condensation), the node→component map,
-    ///     and the recursion clusters. Components come back in Tarjan discovery order — reverse
+    ///     Iterative Tarjan over the merged graph. Returns every component (including
+    ///     singletons, which the size bucketing needs for the condensation), the node→component map,
+    ///     and the recursion clusters. Components come back in Tarjan discovery order, reverse
     ///     topological order of the condensation, so every component's successors precede it.
     /// </summary>
     private static (List<List<string>> Components, Dictionary<string, int> ComponentOfNode, List<RecursionCluster> Clusters) ComputeComponents(CallGraph callGraph, Dictionary<string, List<string>> forward, Dictionary<string, NodeReachability> facts)
@@ -558,10 +558,10 @@ public static class ReachabilityAnalyzer
     }
 
     /// <summary>
-    ///     R7/R12: bucketed forward-reachable sizes computed on the SCC condensation in reverse
-    ///     topological order (Tarjan discovery order — every component's successors already have
+    ///     Bucketed forward-reachable sizes computed on the SCC condensation in reverse
+    ///     topological order (Tarjan discovery order, every component's successors already have
     ///     their set). <c>set(C) = members(C) | ⋃ set(successor components)</c>, so the work is
-    ///     O(components × N/8 bytes) bitset merging — near-linear in practice — instead of a full
+    ///     O(components × N/8 bytes) bitset merging, near-linear in practice, instead of a full
     ///     BFS per node. Graphs too large for the bitset memory cap fall back to the budgeted
     ///     per-node walk with an explicit diagnostic.
     /// </summary>
@@ -646,8 +646,8 @@ public static class ReachabilityAnalyzer
 
     /// <summary>
     ///     Budgeted per-node fallback for graphs above the bitset cap; degrades to bucket 0 with a
-    ///     diagnostic. The degraded flag is raised inside the walk that exhausts the budget — including
-    ///     the walk of the final node — so a truncated count is never reported as a confident bucket.
+    ///     diagnostic. The degraded flag is raised inside the walk that exhausts the budget, including
+    ///     the walk of the final node, so a truncated count is never reported as a confident bucket.
     /// </summary>
     private static void ComputeReachableBucketsBudgeted(Dictionary<string, NodeReachability> facts, Dictionary<string, List<string>> forward, List<string> diagnostics)
     {

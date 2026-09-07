@@ -8,7 +8,7 @@ namespace Depscan.Frameworks.Providers;
 /// <summary>
 ///     ML runtimes: ML.NET pipelines and trainers, ONNX inference sessions, TorchSharp,
 ///     LLamaSharp, and on-disk model artifacts (.onnx/.gguf/.safetensors/.pt) hashed and inventoried
-///     as AI components — model files are SBOM components.
+///     as AI components, model files are SBOM components.
 /// </summary>
 public sealed class MlRuntimeProvider : IFrameworkProvider
 {
@@ -237,7 +237,7 @@ public sealed class MlRuntimeProvider : IFrameworkProvider
 
 /// <summary>
 ///     Vector databases: Qdrant, Pinecone, Milvus, Weaviate, Chroma, Redis vector, pgvector, Azure
-///     AI Search, Elasticsearch — outbound services with collection/index names and dimensions.
+///     AI Search, Elasticsearch, outbound services with collection/index names and dimensions.
 /// </summary>
 public sealed class VectorStoreProvider : IFrameworkProvider
 {

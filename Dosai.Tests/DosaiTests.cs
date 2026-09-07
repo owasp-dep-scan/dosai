@@ -1627,8 +1627,8 @@ class CryptoSample
         Assert.Contains(result.Findings, finding => finding.RuleId == "DOSAI-CRYPTO-WEAK-HASH-MD5");
         Assert.Contains(result.Findings, finding => finding is { RuleId: "DOSAI-CRYPTO-WEAK-HASH-MD5", ReachableFromEntryPoint: true });
         Assert.Contains(result.Findings, finding => finding.RuleId == "DOSAI-CRYPTO-TLS-CERT-VALIDATION-DISABLED");
-        // R9: the line-mode TLS detection carries no resolvable method id, so the old whole-file
-        // reachability guess is gated off — with a diagnostic naming the file — instead of being
+        // The line-mode TLS detection carries no resolvable method id, so the old whole-file
+        // reachability guess is gated off, with a diagnostic naming the file, instead of being
         // asserted as High-confidence reachable in the CBOM.
         Assert.Contains(result.Protocols, protocol => protocol is { Name: "TLS", Version: "SSL 3.0" });
         Assert.All(result.Protocols, protocol => Assert.False(protocol.ReachableFromEntryPoint));

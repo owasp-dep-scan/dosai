@@ -6,10 +6,10 @@ using Xunit;
 namespace Dosai.Tests.Frameworks;
 
 /// <summary>
-///     Regression tests for the adversarial branch review findings
-///     (~/dosai-branch-adversarial-review.md): S1 DI-parameter filtering, S2 secret markers,
-///     S3 MCP confinement, C1 conventional service linkage, C2 .prompty, C3 loopback parsing,
-///     P1 artifact hash cap, and the ChatMessage sink narrowing.
+///     Regression tests for hardening behaviors discovered by adversarial review:
+///     DI-parameter filtering, secret markers, MCP confinement, conventional service
+///     linkage, .prompty support, loopback parsing, the artifact hash cap, and the
+///     ChatMessage sink narrowing.
 /// </summary>
 public class AdversarialReviewRegressionTests : IDisposable
 {
@@ -17,7 +17,7 @@ public class AdversarialReviewRegressionTests : IDisposable
 
     public void Dispose() => _tempDirectory.Dispose();
 
-    // ---- S1: DI-injected handler parameters are not attacker-controlled -----------------
+    // ---- DI-injected handler parameters are not attacker-controlled -----------------
 
     [Fact]
     public void MinimalApiHandler_InterfaceAndServiceParametersAreNotSeeded()
@@ -86,7 +86,7 @@ public class Program
         Assert.DoesNotContain("billing", httpSources);
     }
 
-    // ---- S1 (follow-on): lambda parameters never inherit the enclosing action's attributes -
+    // ---- lambda parameters never inherit the enclosing action's attributes -
 
     [Fact]
     public void LambdaParameter_DoesNotBecomeHttpSourceViaEnclosingHttpAttribute()
@@ -117,7 +117,7 @@ public static class Enumerable
         Assert.DoesNotContain(result.Nodes, node => node.IsSource && node.Category == "http" && node.Name == "c");
     }
 
-    // ---- S6: the ChatMessage sink matches the exact type, not DTO variants ----------------
+    // ---- the ChatMessage sink matches the exact type, not DTO variants ----------------
 
     [Fact]
     public void ChatMessageDto_ConstructionIsNotAPromptSink()
@@ -137,7 +137,7 @@ public class Handlers
         Assert.DoesNotContain(result.Nodes, node => node.IsSink && node.Category == "prompt" && node.Symbol?.Contains("ChatMessageDto") == true);
     }
 
-    // ---- C1: conventional routes link operations and entry-point ids to their service ----
+    // ---- conventional routes link operations and entry-point ids to their service ----
 
     [Fact]
     public void ConventionalRoutes_AreLinkedToTheirControllerService()
@@ -167,7 +167,7 @@ public class OrdersController
         Assert.Contains(slice.EntryPoints ?? [], entryPoint => entryPoint.Id == $"ep:{operation.Id}");
     }
 
-    // ---- C2: .prompty files are classified as config and ingested as prompts -------------
+    // ----.prompty files are classified as config and ingested as prompts -------------
 
     [Fact]
     public void PromptyFiles_AreClassifiedAsConfigFiles()
@@ -199,7 +199,7 @@ You are a helpful assistant that answers questions about the catalog. Be terse a
         Assert.NotNull(prompt.PromptText); // preview emitted for benign prose
     }
 
-    // ---- S2: secret-shaped candidate prompts are withheld entirely ------------------------
+    // ---- secret-shaped candidate prompts are withheld entirely ------------------------
 
     [Theory]
     [InlineData("You are an assistant. eyJhbGciOiJIUzI1NiJ9.e30.signature-token-value-here")]
@@ -222,7 +222,7 @@ name: leaky
         Assert.Null(prompt.PromptText); // withheld even though no --include-prompt-text
     }
 
-    // ---- C3: loopback detection compares the parsed host exactly --------------------------
+    // ---- loopback detection compares the parsed host exactly --------------------------
 
     [Theory]
     [InlineData("https://localhost:5001", true)]
@@ -236,7 +236,7 @@ name: leaky
         Assert.Equal(expected, FrameworkRegistry.IsLoopback(endpoint));
     }
 
-    // ---- P1: oversized model artifacts are inventoried without hashing -------------------
+    // ---- oversized model artifacts are inventoried without hashing -------------------
 
     [Fact]
     public void OversizedModelArtifact_IsInventoriedWithoutHash()
@@ -254,7 +254,7 @@ name: leaky
         Assert.NotNull(Depscan.Frameworks.Providers.MlRuntimeProvider.HashFile(smallPath));
     }
 
-    // ---- S3: MCP path confinement ---------------------------------------------------------
+    // ---- MCP path confinement ---------------------------------------------------------
 
     [Fact]
     public void McpRoot_ConfinesToolPaths()

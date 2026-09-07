@@ -9,15 +9,17 @@ In this lesson we trace NuGet packages through code: which dependencies are actu
 ```text
 .NET SDK 8.0 or newer
 The Dosai repository cloned locally
-A .NET project with restored dependencies (project.assets.json present)
+A .NET project, ideally with restored dependencies or a lock file
 ```
 
 ## Where PURLs come from
 
-Dosai reads `project.assets.json` and `*.deps.json`, the files restore and build leave behind, and maps assemblies, modules, packages, and namespace prefixes to NuGet PURLs:
+Dosai reads `project.assets.json` and `*.deps.json`, the files restore and build leave behind, and falls back to `packages.lock.json`, `paket.lock`, `packages.config`, and direct `.csproj` `<PackageReference>` entries when restore output is absent, in that order of trust. It maps assemblies, modules, packages, and namespace prefixes to NuGet PURLs:
 
 ```text
-project.assets.json / *.deps.json
+project.assets.json / *.deps.json        (restore/build output)
+packages.lock.json / paket.lock          (lock files)
+packages.config / csproj references      (fallbacks)
         │
         ▼
   PackageUrlResolver
@@ -26,7 +28,8 @@ project.assets.json / *.deps.json
         ├── MethodCalls[].Purl
         ├── CallGraph.Nodes[].Purl
         ├── CallGraph.Edges[].TargetPurl
-        └── DataFlow.Slices[].Purls[]
+        ├── DataFlow.Slices[].Purls[]
+        └── ResolutionFacts + diagnostics (which source, which version)
 ```
 
 Resolution is a best-effort ladder from exact assembly name down to namespace prefix matching, with a versionless fallback for common `System.*` APIs such as `pkg:nuget/System.Diagnostics.Process`. Enrichment never fails the analysis; a missing PURL is simply a missing field.
@@ -79,11 +82,11 @@ The location list is deliberately restricted to source files, and DLL-only fallb
 
 An advisory names a package and an API. Dosai answers the questions that decide urgency.
 
-First, is the package called at all? Filter `PackageReachability` by the PURL and check `Reachable`. A restored but never-called package has a different clock than a reachable one.
+First, is the package called at all? Filter `PackageReachability` by the PURL and check `Reachable`. A restored but never-called package has a different clock than a reachable one. For a sharper answer, the reachability index and the dead-code report (schema 4.1.0) tell you which methods are reachable, from which entry points, at what depth, and which source-declared methods nothing reaches at all: `reachability[fanOut>0] sort by fanOut desc` ranks the busiest nodes, and `deadCode` proves disuse more strongly than an empty call list.
 
 Second, where does the call happen? Call graph edges carry `SourcePurl` and `TargetPurl`, so the direct edges into a package are one query away, and the GraphML export opens the neighborhood in yEd or Gephi.
 
-Third, can untrusted input reach it? Data-flow slices carry PURLs on their source and sink nodes:
+Third, can untrusted input reach it? Data-flow slices carry PURLs on their source and sink nodes, and exploit chains (schema 4.1.0) connect the dots: each chain names the entry point, the call path, the taint slice, and the sink with its package, so `exploitChains` filtered by the affected PURL answers "which entry point can push input into this API" directly:
 
 ```mermaid
 flowchart LR
@@ -116,7 +119,7 @@ Reading the network slices tells you whether untrusted input flows toward the af
 
 ## Correlation, not verdict
 
-PURL enrichment has real limits worth repeating in any report. Packages can share namespace prefixes and Dosai picks the longest prefix of the first discovered package. Binding redirects and assembly unification are not modeled. Source-only dependencies without restore metadata may not resolve. A PURL on a node means correlation, and the verdict still belongs to the reviewer. This is the same division of labor as the rest of the tool: reproducible evidence in, human judgment out.
+PURL enrichment has real limits worth repeating in any report. Packages can share namespace prefixes and Dosai picks the longest prefix of the first discovered package; when two sources disagree on a version, the conflict is recorded as a diagnostic and `ResolutionFacts` names the source that won. Binding redirects and assembly unification are not modeled. Dependencies that appear in none of the readable sources may not resolve. A PURL on a node means correlation, and the verdict still belongs to the reviewer. This is the same division of labor as the rest of the tool: reproducible evidence in, human judgment out.
 
 ## Try next
 

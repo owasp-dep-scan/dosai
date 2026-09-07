@@ -20,7 +20,8 @@ This threat model covers Dosai as a local/CI analysis tool that parses .NET sour
 flowchart LR
     UntrustedRepo[Untrusted repo / package] --> Parser[Dosai parsers]
     Parser --> Output[JSON / GraphML / GEXF]
-    PackageMeta[project.assets / deps.json] --> PURL[PURL resolver]
+    PackageMeta[restore / lock / config files] --> PURL[PURL resolver]
+    Suppressions[--suppress JSON] --> Analyzer[Findings filtering]
     CLI[CLI args] --> OutputPaths[Output file paths]
     Output --> Analyst[Analyst tools]
 ```
@@ -29,40 +30,42 @@ flowchart LR
 
 - `methods --path <file|directory|nupkg>`
 - `dataflows --path <file|directory>`
-- `--patterns <json>`
+- `--patterns <json>` and `--suppress <json>` (repo-supplied files parsed by the tool)
+- `--mcp-allowlist <file>` (policy file read by the MCP server)
 - `--o`, `--callgraph-out`, `--graph-out`
 - assembly loading/reflection for managed assemblies
 - source parsing via Roslyn
+- PURL source files parsed from the tree: `project.assets.json`, `*.deps.json`, `packages.lock.json`, `paket.lock`, `packages.config`, and `.csproj` package references
 - XML/graph consumers downstream
 
 ## Threats and mitigations
 
-| Threat                                   | Scenario                                                            | Existing mitigation                                                                                                                                    | Future hardening                                 |
-| ---------------------------------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------ |
-| Arbitrary code execution during analysis | Malicious assembly triggers code execution                          | IL call graph and data-flow analysis read metadata and method bodies; reflection inventory avoids running target code intentionally                    | Prefer metadata-only loading everywhere possible |
-| Dependency load confusion                | Analyzer resolves unexpected local assemblies                       | Search paths are local to target/runtime, and `.deps.json` scoping prefers project assemblies in app output directories                                | Add strict mode limiting assembly load roots     |
-| Path traversal in nupkg extraction       | Malicious archive entry writes outside temp dir                     | Current extraction should be reviewed for canonical path checks                                                                                        | Add explicit full-path containment validation    |
-| Resource exhaustion                      | Huge source tree or malformed syntax                                | Roslyn parsing may consume memory/CPU                                                                                                                  | Add timeout/max-file/max-size options            |
-| Output injection                         | Source strings appear in GraphML/GEXF                               | XML output uses escaping; Mermaid labels are escaped                                                                                                   | Add tests for more special characters            |
-| False confidence                         | Missing refs or inferred runtime behavior produce incomplete graphs | Invalid-operation fallback captures some legacy cases; evidence kinds separate direct, framework, reflection, and heuristic facts; diagnostics emitted | Add more confidence scores per edge and slice    |
-| PURL misattribution                      | Namespace prefix maps to wrong package                              | Longest-prefix best-effort matching                                                                                                                    | Add ambiguity list in diagnostics                |
-| Pattern abuse                            | User pattern regex causes backtracking                              | Regex patterns are supported                                                                                                                           | Add regex timeout                                |
+| Threat                                   | Scenario                                                                     | Existing mitigation                                                                                                                                                                                                                      | Future hardening                                 |
+| ---------------------------------------- | ---------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| Arbitrary code execution during analysis | Malicious assembly triggers code execution                                   | IL call graph and data-flow analysis read metadata and method bodies; reflection inventory avoids running target code intentionally                                                                                                      | Prefer metadata-only loading everywhere possible |
+| Dependency load confusion                | Analyzer resolves unexpected local assemblies                                | Search paths are local to target/runtime, and `.deps.json` scoping prefers project assemblies in app output directories                                                                                                                  | Add strict mode limiting assembly load roots     |
+| Path traversal in nupkg extraction       | Malicious archive entry writes outside temp dir                              | Current extraction should be reviewed for canonical path checks                                                                                                                                                                          | Add explicit full-path containment validation    |
+| Resource exhaustion                      | Huge source tree or malformed syntax                                         | Roslyn parsing may consume memory/CPU                                                                                                                                                                                                    | Add timeout/max-file/max-size options            |
+| Output injection                         | Source strings appear in GraphML/GEXF                                        | XML output uses escaping; Mermaid labels are escaped                                                                                                                                                                                     | Add tests for more special characters            |
+| False confidence                         | Missing refs or inferred runtime behavior produce incomplete graphs          | Invalid-operation fallback captures some legacy cases; evidence kinds separate direct, framework, reflection, and heuristic facts; inferred dispatch edges carry `exact`/`rta-candidate`/`cha-candidate` confidence; diagnostics emitted | Add more confidence scores per edge and slice    |
+| PURL misattribution                      | Namespace prefix maps to wrong package, or two sources disagree on a version | Longest-prefix best-effort matching; version conflicts across sources are recorded as diagnostics and `ResolutionFacts` names the source of each purl                                                                                    | Surface conflicts more prominently in reports    |
+| Pattern abuse                            | User pattern regex causes backtracking                                       | Regex patterns are supported; catastrophic literal regexes in the analyzed code are themselves reported as ReDoS candidates (CWE-1333)                                                                                                   | Add regex timeout for user patterns              |
 
 ## Data-flow specific risks
 
-Dosai data-flow slices are triage artifacts, not proof of exploitability.
+Dosai data-flow slices are triage artifacts, not proof of exploitability. Exploit chains (schema 4.1.0) connect entry points to sinks through the reconstructed call graph and label the exposure, but they remain static evidence derived from the same graph, not a demonstration that an exploit works.
 
 False positives can occur when:
 
-- validation/sanitization is not modeled or a custom validator has different semantics than a configured sanitizer pattern
+- validation/sanitization is not modeled or a custom validator has different semantics than a configured sanitizer pattern (suppressed flows are recorded in `SanitizedFlows`, so the negative evidence is visible)
 - a variable is tainted by name but constrained by control flow
 - syntax fallback captures an unresolved API shape
 - inferred framework, DI, dispatch, or reflection evidence over-approximates runtime behavior
 
 False negatives can occur when:
 
-- flow crosses method boundaries without explicit passthrough
-- taint is stored in object graphs not tracked field-sensitively
+- flow crosses method boundaries that summaries do not model; since schema 4.1.0 summaries iterate to a fixpoint, cover `ref`/`out` writes, and seed lambda and async propagation, so the remaining gap is deep object graphs and unmodeled helpers rather than simple wrappers
+- taint is stored in object graphs not tracked field-sensitively; `foreach` variables and element/indexer stores are tracked, but arbitrary aliasing is not
 - dynamic/reflection calls hide sink invocations
 - dynamic framework dispatch is driven by configuration not visible in source or IL metadata
 
@@ -132,4 +135,12 @@ channel into every directory the process can access:
 - Use `mcp --mcp-root DIR` to confine every tool call (and the `input` file of `dosai.query`)
   to paths under `DIR`. With confinement enabled, out-of-root paths fail the call instead of
   being analyzed.
+- Use `mcp --mcp-allowlist FILE` to restrict which stdio transport commands are treated as
+  policy-approved when MCP transport integrity findings are computed; a missing file disables
+  the allowlist (nothing is policy-approved).
+- The tool surface is read-oriented (`dosai.methods`, `dosai.dataflows`, `dosai.crypto`,
+  `dosai.agent_context`, `dosai.services`, `dosai.ai_components`, `dosai.query`,
+  `dosai.exploit_chains`, `dosai.attack_surface`, `dosai.reachability`), and every tool is a
+  thin wrapper over one analyzer entry point, so no analysis logic or file writing is reachable
+  through the server.
 - Prompt _text_ is not exposed through MCP regardless of flags (see above).

@@ -25,8 +25,8 @@ internal static partial class ProviderHelpers
     /// <remarks>
     ///     Named arguments are excluded before indexing, which is the whole point of this method.
     ///     Indexing the raw argument list first meant a named argument in leading position was read as
-    ///     if it were the positional one: <c>[HttpGet(Name = "GetWeatherForecast")]</c> — the shape the
-    ///     stock <c>dotnet new webapi</c> template emits — produced the route
+    ///     if it were the positional one: <c>[HttpGet(Name = "GetWeatherForecast")]</c>, the shape the
+    ///     stock <c>dotnet new webapi</c> template emits, produced the route
     ///     <c>/api/weather/GetWeatherForecast</c>, and <c>[McpServerTool(Destructive = false)]</c> named
     ///     the tool <c>"false"</c>. <c>Name</c> is a route/tool name, never a template.
     /// </remarks>
@@ -214,7 +214,7 @@ internal static partial class ProviderHelpers
 
     /// <summary>
     ///     The fluent chain of an endpoint registration: the Map* invocation itself plus every
-    ///     enclosing invocation in the same statement (RequireAuthorization(...), WithTags(...), ...).
+    ///     enclosing invocation in the same statement (RequireAuthorization(...), WithTags(...),...).
     ///     Walks node-by-node so nested lambdas are never mistaken for the endpoint's own chain.
     /// </summary>
     internal static IEnumerable<InvocationExpressionSyntax> FluentChain(InvocationExpressionSyntax invocation)

@@ -226,8 +226,8 @@ public class PublicController
         // Computed from the call graph: Post -> Announce, and Announce publishes outbound.
         Assert.True(controller.CrossesTrustBoundary);
 
-        // The publisher's destination is genuinely unresolved — no broker address appears anywhere in
-        // the source — so its trust zone is Unknown rather than External. Claiming External here would
+        // The publisher's destination is genuinely unresolved, no broker address appears anywhere in
+        // the source, so its trust zone is Unknown rather than External. Claiming External here would
         // assert the broker is off-premises, which nothing in the code establishes; an in-cluster
         // broker is at least as likely. That the call egresses at all is a separate, weaker claim, and
         // it is the one that drives CrossesTrustBoundary above.

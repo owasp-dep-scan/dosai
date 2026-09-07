@@ -14,7 +14,7 @@ public sealed record DetectedFramework
     /// <summary>Package URL of the framework package when detection came from restore metadata.</summary>
     public string? Purl { get; init; }
 
-    /// <summary>"purl", "using", or "config" — how the framework was detected.</summary>
+    /// <summary>"purl", "using", or "config", how the framework was detected.</summary>
     public required string DetectionKind { get; init; }
 
     /// <summary>PURL detection is high confidence, using directives medium, config files low.</summary>
@@ -74,8 +74,8 @@ public sealed class FrameworkDetection
     ///     Guards against <see cref="PackageUrlResolver" />'s versionless <c>System.*</c> fallback table,
     ///     whose catch-all <c>("System", "System.Runtime")</c> entry makes <em>every</em> <c>System.*</c>
     ///     probe resolve to <c>pkg:nuget/System.Runtime</c>. Without this check, probing
-    ///     <c>System.ServiceModel</c> and <c>System.Web.Http</c> reported WCF and Web API 2 as present —
-    ///     at high confidence — in every .NET project analyzed, whether or not either was referenced.
+    ///     <c>System.ServiceModel</c> and <c>System.Web.Http</c> reported WCF and Web API 2 as present,
+    ///     at high confidence, in every.NET project analyzed, whether or not either was referenced.
     ///     A detection only counts when the resolved purl actually names the package we probed for.
     /// </summary>
     private static bool PurlIdentifies(string purl, string packageName)

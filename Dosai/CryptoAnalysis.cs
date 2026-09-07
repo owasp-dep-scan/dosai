@@ -165,7 +165,7 @@ public static class CryptoAnalyzer
     public static string Export(CryptoAnalysisResult result, string? format = null) => CryptoBomExporter.Export(result, ParseFormat(format));
 
     /// <summary>
-    ///     W6: crypto misuse findings as WeaknessCandidate-shaped entries so dataflows and crypto
+    ///     Crypto misuse findings as WeaknessCandidate-shaped entries so dataflows and crypto
     ///     converge on one weakness list (agent-context and downstream consumers get a single
     ///     CWE-stamped queue). Ids are prefixed `wcc` to never collide with dataflow `wc` ids.
     /// </summary>
@@ -211,7 +211,7 @@ public static class CryptoAnalyzer
         => Analyze(path, methodsSlice: null);
 
     /// <summary>
-    ///     R9: callers that already hold a <see cref="MethodsSlice"/> (or its R1 reachability index)
+    ///     Callers that already hold a <see cref="MethodsSlice"/> (or its reachability index)
     ///     pass it here instead of forcing a second full methods-pipeline run and a JSON round trip.
     /// </summary>
     public static CryptoAnalysisResult Analyze(string path, MethodsSlice? methodsSlice)
@@ -954,7 +954,7 @@ public static class CryptoAnalyzer
     {
         try
         {
-            // R9: reuse the slice object directly — the previous GetMethods() + serialize +
+            // Reuse the slice object directly, the previous GetMethods() + serialize +
             // deserialize round trip doubled the whole methods pipeline for every crypto scan.
             return CryptoReachability.From(Dosai.GetMethodsSlice(path), diagnostics);
         }
@@ -1245,8 +1245,8 @@ public static class CryptoAnalyzer
                 AddKey(methodIdsByLooseKey, id, method.FileName, null, null, method.Name);
             }
 
-            // R1: when the methods slice carries the precomputed reachability index, per-node entry
-            // points are exact graph facts — no re-walk, no caps, no file-level guessing.
+            // When the methods slice carries the precomputed reachability index, per-node entry
+            // points are exact graph facts, no re-walk, no caps, no file-level guessing.
             var byMethod = new Dictionary<string, List<string>>(StringComparer.Ordinal);
             var byFile = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
             foreach (var entry in entryPoints)
@@ -1314,8 +1314,8 @@ public static class CryptoAnalyzer
             EntryPointsFor(methodId, file, methodName, out _);
 
         /// <summary>
-        ///     R9: the file-level fallback used to silently mark every crypto usage in an
-        ///     endpoint-bearing file as reachable — a guess that fed CycloneDX
+        ///     The file-level fallback used to silently mark every crypto usage in an
+        ///     endpoint-bearing file as reachable, a guess that fed CycloneDX
         ///     reachableFromEntryPoint properties with High-confidence claims. It is now gated off
         ///     (returns no entry points) with a per-file diagnostic carrying the reason; reachability
         ///     claims must come from a graph path or an exact method match.

@@ -6,10 +6,10 @@ using Microsoft.CodeAnalysis.Operations;
 namespace Depscan.Frameworks;
 
 /// <summary>
-///     Post-provider security analysis (F1/S2/F5): turns the endpoint/auth metadata the providers
+///     Post-provider security analysis: turns the endpoint/auth metadata the providers
 ///     already collect, the MCP stdio transports they inventory, and the configuration files they
 ///     discover into severity-tagged findings. Every sub-analyzer is exception-isolated per the
-///     FrameworkRegistry contract — a failure degrades to a diagnostic, never aborts analysis.
+///     FrameworkRegistry contract, a failure degrades to a diagnostic, never aborts analysis.
 /// </summary>
 public static class SecurityAnalyzer
 {
@@ -68,13 +68,13 @@ public static class SecurityAnalyzer
         private static string Sanitize(string? value) => string.IsNullOrWhiteSpace(value) ? "nofile" : value.Replace('/', '-').Replace('\\', '-').Replace(' ', '-');
     }
 
-    // ----- F1: endpoint security findings -----
+    // ----- Endpoint security findings -----
 
     private static void AnalyzeEndpoints(FrameworkContext context, FrameworkAnalysisResult frameworkResult, List<ApiEndpoint> endpoints, List<SecurityFinding> findings, FindingIds ids)
     {
         var servicesById = frameworkResult.Services.ToDictionary(service => service.Id, StringComparer.Ordinal);
-        // F5/F1: a globally-registered antiforgery filter (services.AddMvc(o => o.Filters.Add<AutoValidateAntiforgeryTokenAttribute>()))
-        // validates every mutating handler — per-endpoint findings would be false positives.
+        // A globally-registered antiforgery filter (services.AddMvc(o => o.Filters.Add<AutoValidateAntiforgeryTokenAttribute>()))
+        // validates every mutating handler, per-endpoint findings would be false positives.
         // Razor Pages validate antiforgery automatically (they are skipped by endpoint kind).
         var globalAntiforgery = HasGlobalAntiforgeryFilter(context);
         foreach (var endpoint in endpoints)
@@ -342,7 +342,7 @@ public static class SecurityAnalyzer
                 }
 
                 // The policy builder chain is the last argument (the config lambda). Reading the
-                // chain needs code text — there is no symbol API for "allows any origin" — so this
+                // chain needs code text, there is no symbol API for "allows any origin", so this
                 // is the allowed SyntaxNode.ToString() fallback; everything above it is symbol/name
                 // based.
                 var chainText = arguments.Count > 0 ? arguments[^1].ToString() : invocation.ToString();
@@ -363,7 +363,7 @@ public static class SecurityAnalyzer
         name is "AddCors" or "AddPolicy" or "AddDefaultPolicy";
 }
 
-/// <summary>S2: MCP stdio transport integrity — the transports Dosai inventories become supply-chain assessments.</summary>
+/// <summary>MCP stdio transport integrity, the transports Dosai inventories become supply-chain assessments.</summary>
 public static class McpTransportAnalyzer
 {
     private static readonly HashSet<string> SafeCommands = new(StringComparer.OrdinalIgnoreCase)
@@ -437,8 +437,8 @@ public static class McpTransportAnalyzer
                 });
             }
 
-            // Unversioned npx package: `npx -y something` without @version — supply-chain risk on
-            // every launch (S2): whatever is latest on the registry is what runs.
+            // Unversioned npx package: `npx -y something` without @version, supply-chain risk on
+            // every launch: whatever is latest on the registry is what runs.
             var tokens = arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries);
             if (command.Equals("npx", StringComparison.OrdinalIgnoreCase) || command.Equals("bunx", StringComparison.OrdinalIgnoreCase))
             {
@@ -484,7 +484,7 @@ public static class McpTransportAnalyzer
     }
 }
 
-/// <summary>F5: configuration security over the appsettings*.json / web.config files already collected.</summary>
+/// <summary>Configuration security over the appsettings*.json / web.config files already collected.</summary>
 public static class ConfigSecurityAnalyzer
 {
     public static void Assess(IEnumerable<string> configFiles, List<SecurityFinding> findings, SecurityAnalyzer.FindingIds ids, List<FrameworkDiagnostic> diagnostics)
@@ -506,7 +506,7 @@ public static class ConfigSecurityAnalyzer
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or System.Xml.XmlException)
             {
                 // Config findings are best-effort, but unreadable files are reported, not swallowed
-                // silently — a silently-skipped config file looks exactly like a clean one.
+                // silently, a silently-skipped config file looks exactly like a clean one.
                 diagnostics.Add(new FrameworkDiagnostic("config-security", $"Could not read config file {Path.GetFileName(file)}: {ex.Message}"));
             }
         }
@@ -517,7 +517,7 @@ public static class ConfigSecurityAnalyzer
         using var document = JsonDocument.Parse(text);
         var root = document.RootElement;
 
-        // JwtBearer/OIDC hardening flags — enumerated WITHIN the section so validation flags are
+        // JwtBearer/OIDC hardening flags, enumerated WITHIN the section so validation flags are
         // not reported once per section found (and not reported for unrelated objects).
         foreach (var jwtSection in DescendantPropertiesWithPaths(root).Where(property =>
                      property.Property.Name.Equals("JwtBearer", StringComparison.OrdinalIgnoreCase) ||
@@ -591,7 +591,7 @@ public static class ConfigSecurityAnalyzer
             }
         }
 
-        // CORS in configuration: any-origin plus credentials (cross-checks F1 item 2).
+        // CORS in configuration: any-origin plus credentials (cross-checks the endpoint CORS rule).
         foreach (var cors in DescendantProperties(root).Where(property => property.Name.Equals("Cors", StringComparison.OrdinalIgnoreCase)))
         {
             var corsText = cors.Value.GetRawText();

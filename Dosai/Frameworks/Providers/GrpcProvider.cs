@@ -141,7 +141,7 @@ foreach (var tree in ctx.CSharpTrees)
         }
 
         // A "*Base" base type alone is not proof of gRPC: user base classes (EntityBase,
-        // TestCaseBase, RepositoryBase, ...) are common and their references usually do not
+        // TestCaseBase, RepositoryBase,...) are common and their references usually do not
         // resolve. Require corroboration: a MapGrpcService registration for this type, a .proto
         // service whose name matches, or a ServerCallContext parameter on one of its methods
         // (protoc-generated overrides always have one).
@@ -151,13 +151,13 @@ foreach (var tree in ctx.CSharpTrees)
         if (syntacticBaseOnly && !hasServerCallContext && registeredUnqualified && !registeredServiceNames.Contains(fullName))
         {
             // A bare MapGrpcService<Name> (no namespace) matches every class with that simple
-            // name — e.g. a typed client named like the registered server. Without a *Base base
+            // name, e.g. a typed client named like the registered server. Without a *Base base
             // or a ServerCallContext parameter, this class is not the registered service.
             return;
         }
 
         // A "*Base" base type alone is not proof of gRPC: user base classes (EntityBase,
-        // TestCaseBase, RepositoryBase, ...) are common and their references usually do not
+        // TestCaseBase, RepositoryBase,...) are common and their references usually do not
         // resolve. Require corroboration: a MapGrpcService registration for this type, a .proto
         // service whose name matches, or a ServerCallContext parameter on one of its methods
         // (protoc-generated overrides always have one).

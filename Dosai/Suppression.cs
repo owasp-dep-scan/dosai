@@ -4,7 +4,7 @@ using System.Text.Json.Serialization;
 namespace Depscan;
 
 /// <summary>
-///     A parsed suppressions file (T5): a JSON array of
+///     A parsed suppressions file: a JSON array of
 ///     <c>{ "file": "Foo.cs", "line": 12, "sliceKey": "...", "weaknessId": "wc3", "category": "sql", "expires": "2027-12-31", "reason": "..." }</c>.
 ///     A suppression entry is a security-relevant allowlist, so over-suppression is the worst
 ///     failure mode: an entry matches only when <em>every</em> field present in the entry matches
@@ -129,7 +129,7 @@ public sealed class SuppressionSet
         /// <summary>
         ///     Matches the <c>file</c>/<c>line</c> pair against the weakness's source/sink locations
         ///     ("File.cs:line:column"; locations live on the weakness, not the slice). A single
-        ///     location must satisfy <em>both</em> matchers — otherwise
+        ///     location must satisfy <em>both</em> matchers, otherwise
         ///     <c>{"file":"A.cs","line":12}</c> would suppress a flow whose source is <c>A.cs:5</c>
         ///     and whose sink is <c>B.cs:12</c>, which is neither location the author named.
         /// </summary>

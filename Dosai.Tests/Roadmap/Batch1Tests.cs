@@ -6,10 +6,10 @@ using static Dosai.Tests.Roadmap.RoadmapStubs;
 
 namespace Dosai.Tests.Roadmap;
 
-/// <summary>Batch 1 quick wins: T10 slice dedup, T11 budget diagnostics, T12 validator fix, W6/W7 pattern hygiene, R4/R7/R9 graph facts, O3 drift guard.</summary>
+/// <summary>Analysis precision and hygiene: slice deduplication, budget diagnostics, the validator fix, pattern hygiene, dispatch/call-site/crypto graph facts, and the CLI/docs drift guard.</summary>
 public class Batch1Tests
 {
-    // ----- T10: source-mode slice deduplication -----
+    // ----- Source-mode slice deduplication -----
 
     [Fact]
     public void DataFlows_RepeatedSinkMatch_ProducesSingleSlice()
@@ -30,12 +30,12 @@ public static class Dedup
         var result = directory.DataFlows();
 
         var fileSlices = result.Slices.Where(slice => slice.SinkCategory == "file").ToList();
-        // T10: the same (source, sink, category, argument index) tuple appended once, not once per
+        // The same (source, sink, category, argument index) tuple appended once, not once per
         // duplicated statement evaluation.
         Assert.Single(fileSlices, slice => slice.SinkArgumentIndex == 1 && (slice.SinkArgument ?? string.Empty).Contains("input"));
     }
 
-    // ----- T11: budget-exhaustion diagnostics -----
+    // ----- Budget-exhaustion diagnostics -----
 
     [Fact]
     public void DataFlows_DeepNesting_EmitsWalkerBudgetDiagnostic()
@@ -61,7 +61,7 @@ public static class Deep
         Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Contains("nesting budget", StringComparison.Ordinal));
     }
 
-    // ----- T12: validator over-approximation fix -----
+    // ----- Validator over-approximation fix -----
 
     [Fact]
     public void DataFlows_ValidatorBooleanReturn_NoLongerPropagatesTaint()
@@ -93,13 +93,13 @@ public static class Validator
 
         // The guard path is unaffected: taint still flows to the sink inside the checked branch.
         Assert.Contains(result.Slices, slice => slice is { SinkCategory: "file", SinkArgument: not null } && slice.SinkArgument.Contains("input"));
-        // T12: consuming a bool validator's RESULT no longer taints the sink argument — the
+        // Consuming a bool validator's RESULT no longer taints the sink argument, the
         // "tainted true" over-approximation minted phantom flows into every checked-value use.
         Assert.DoesNotContain(result.Slices, slice => slice.SinkArgument is not null && slice.SinkArgument.Contains("ok.ToString()"));
         Assert.DoesNotContain(result.Slices, slice => slice.SinkArgument is not null && slice.SinkArgument.Contains("ok"));
     }
 
-    // ----- W7: pattern hygiene -----
+    // ----- Pattern hygiene -----
 
     [Fact]
     public void DataFlows_ListAddNoLongerSanitizes_SqlFlowSurvives()
@@ -152,8 +152,8 @@ public static class Noise
 
         Assert.DoesNotContain(result.Nodes, node => node.IsSource && node.Category == "crypto-material" && node.Name == "monkey");
         Assert.DoesNotContain(result.Nodes, node => node.IsSource && node.Name == "secretaryNote");
-        // W7: bare "key"/"keys" names (every KeyValuePair iteration, every cache dictionary)
-        // no longer mint crypto-material sources — only compound identifiers do.
+        // Bare "key"/"keys" names (every KeyValuePair iteration, every cache dictionary)
+        // no longer mint crypto-material sources, only compound identifiers do.
         Assert.DoesNotContain(result.Nodes, node => node.IsSource && node.Name is "key" or "keys");
         // Compound key/secret identifiers are still recognized, across camelCase, PascalCase,
         // and separator forms.
@@ -163,7 +163,7 @@ public static class Noise
         Assert.Contains(result.Nodes, node => node.IsSource && node.Category == "secret" && node.Name == "clientSecret");
     }
 
-    // ----- W6: CWE mappings for previously unmapped categories -----
+    // ----- CWE mappings for previously unmapped categories -----
 
     [Fact]
     public void WeaknessMappings_CoverCryptoFamilyAndNewCategories()
@@ -173,7 +173,7 @@ public static class Noise
         Assert.NotNull(weaknessKind);
         Assert.NotNull(weaknessCwe);
 
-        // W6: existing sink categories stop collapsing into DangerousDataFlowCandidate with no CWE.
+        // Existing sink categories stop collapsing into DangerousDataFlowCandidate with no CWE.
         Assert.Equal("InsecureCryptoUsageCandidate", weaknessKind!.Invoke(null, ["crypto"]));
         Assert.Equal("CWE-327", weaknessCwe!.Invoke(null, ["InsecureCryptoUsageCandidate"]));
         Assert.Equal("JwtValidationCandidate", weaknessKind!.Invoke(null, ["jwt"]));
@@ -223,12 +223,12 @@ public static class CryptoSinkFlow
 """);
         var result = directory.DataFlows();
 
-        // W6: the crypto pack's sink categories used to collapse to DangerousDataFlowCandidate
+        // The crypto pack's sink categories used to collapse to DangerousDataFlowCandidate
         // with no CWE; agent-context now shows the CWE for a crypto slice.
         Assert.Contains(result.WeaknessCandidates, weakness => weakness is { Kind: "InsecureCryptoUsageCandidate", Cwe: "CWE-327", Severity: "high" });
     }
 
-    // ----- R4: sealed-type devirtualization + dispatch confidence -----
+    // ----- Sealed-type devirtualization + dispatch confidence -----
 
     [Fact]
     public void CallGraph_SealedReceiver_DevirtualizesExactly()
@@ -268,7 +268,7 @@ public static class SealedDispatch
 """);
         var slice = directory.Methods();
 
-        // R4: a struct/sealed-typed receiver binds to the concrete implementation directly (the
+        // A struct/sealed-typed receiver binds to the concrete implementation directly (the
         // sealed-receiver exact branch in DispatchResolver guarantees no candidate set even when
         // inference runs); the call site shows a direct edge and no dispatch candidates.
         Assert.Contains(slice.CallGraph!.Edges, edge =>
@@ -314,7 +314,7 @@ public static class Dispatch
         Assert.Contains(candidates, edge => edge.DispatchConfidence == "cha-candidate" && edge.TargetId.Contains("FrenchGreeter", StringComparison.Ordinal));
     }
 
-    // ----- R7: call-site counts and fan-in/fan-out -----
+    // ----- Call-site counts and fan-in/fan-out -----
 
     [Fact]
     public void CallGraph_TwoCallSites_CollapseToOneEdgeWithCount()
@@ -392,14 +392,14 @@ public class MixedController
 """ + MvcStubs);
         var result = CryptoAnalyzer.Analyze(directory.Path);
 
-        // R9: Fingerprint sits in the same FILE as an endpoint but no graph path reaches it; the
+        // Fingerprint sits in the same FILE as an endpoint but no graph path reaches it; the
         // old whole-file fallback claimed High-confidence reachability for it.
         var md5 = Assert.Single(result.Findings, finding => finding.RuleId == "DOSAI-CRYPTO-WEAK-HASH-MD5");
         Assert.False(md5.ReachableFromEntryPoint);
         Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Contains("matched only at file level", StringComparison.Ordinal));
     }
 
-    // ----- O3: CLI/docs drift guard -----
+    // ----- CLI/docs drift guard -----
 
     [Fact]
     public async Task CommandLine_PatternPackHelp_ListsEveryShippedPack()

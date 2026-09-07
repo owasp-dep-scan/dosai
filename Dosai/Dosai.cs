@@ -115,7 +115,7 @@ public static class Dosai
 
     /// <summary>
     ///     Formats a TypedConstant for JSON output. Array-typed constants (params string[]
-    ///     constructor arguments such as HttpTriggerAttribute's methods) must be flattened —
+    ///     constructor arguments such as HttpTriggerAttribute's methods) must be flattened:
     ///     reading Value on them throws.
     /// </summary>
     private static string FormatTypedConstant(TypedConstant constant) =>
@@ -160,7 +160,7 @@ public static class Dosai
         var frameworkResult = Frameworks.FrameworkRegistry.Analyze(frameworkContext, frameworkOptions);
         Frameworks.FrameworkRegistry.ApplyTrustBoundaries(frameworkResult, callGraph);
         // ApiEndpointAnalyzer now only covers what no provider owns (VB.NET); the framework providers
-        // own every C# endpoint. Entry points are therefore built from the analyzer's endpoints ALONE —
+        // own every C# endpoint. Entry points are therefore built from the analyzer's endpoints ALONE;
         // feeding it the combined list produced a second, MethodId-less copy of every provider endpoint.
         var legacyEndpoints = ApiEndpointAnalyzer.GetApiEndpoints(path);
         var apiEndpoints = frameworkResult.ApiEndpoints.Concat(legacyEndpoints).ToList();
@@ -170,8 +170,8 @@ public static class Dosai
         EnrichMethodIdentities(methods, callGraph, sourceMode);
         var packageReachability = TransparencyBuilder.BuildPackageReachability(callGraph, dependencies: usings);
 
-        // R7: collapse repeated call sites of the same (source, target, call type, evidence) pair
-        // into one edge with a count, then compute the R1/R3 reachability section once over the
+        // Collapse repeated call sites of the same (source, target, call type, evidence) pair
+        // into one edge with a count, then compute the reachability section once over the
         // merged graph. Bounded walks; diagnostics land in the slice.
         ReachabilityAnalyzer.CollapseDuplicateCallSites(callGraph);
         var reachabilityDiagnostics = new List<string>();
@@ -235,7 +235,7 @@ public static class Dosai
     /// <summary>
     ///     Identity of an entry point independent of who discovered it: kind, verb, route and the
     ///     method it dispatches to. Deliberately excludes file paths and line numbers so the signature
-    ///     — and therefore the derived id — is reproducible.
+    ///    , and therefore the derived id, is reproducible.
     /// </summary>
     private static string EntryPointSignature(EntryPoint entryPoint)
     {
@@ -565,7 +565,7 @@ public static class Dosai
             return;
         }
 
-        // R10: instantiated-generic assembly ids (Method<args>) never match a source id exactly —
+        // Instantiated-generic assembly ids (Method<args>) never match a source id exactly:
         // the instantiation rewrites parameter types too. Index the methods' identity key
         // (namespace.class.method, instantiation and parameters stripped) so instantiated IL nodes
         // normalize onto the source original-definition node, keeping the instantiation as metadata.
@@ -623,7 +623,7 @@ public static class Dosai
                     }
                 }
 
-                // R10: the original instantiated id survives as metadata when normalization kept
+                // The original instantiated id survives as metadata when normalization kept
                 // an instantiated-generic IL node id or merged it onto a source definition.
                 node.GenericInstantiation = GraphIdNormalizer.HasGenericInstantiation(originalNodeId) ? originalNodeId : null;
                 normalizedNodes[normalizedId] = node;
@@ -1483,9 +1483,9 @@ public static class Dosai
                 }
             }
 
-            // R6: top-level statements (the default `dotnet new console` template) have no
+            // Top-level statements (the default `dotnet new console` template) have no
             // MethodDeclarationSyntax, so the compiler-synthesized `<Main>$` never reached the
-            // method inventory — a modern CLI was invisible to methods, entry points, and every
+            // method inventory, a modern CLI was invisible to methods, entry points, and every
             // consumer of the reachability index. Resolve the synthesized symbol from the first
             // global statement and emit it like a declared method; its SourceSignature matches the
             // call-graph node id the operation walkers already produce for global statements.
@@ -2256,8 +2256,8 @@ public static class Dosai
             // The inventory namespace display for global-namespace types is the literal
             // "<global namespace>", which never matches the edge id format
             // (GenerateMethodSignature omits it). Keeping the node id in edge format prevents a
-            // duplicate unreachable node per global-namespace constructor — the exact false
-            // positive the R5 dead-code report surfaces.
+            // duplicate unreachable node per global-namespace constructor, the exact false
+            // positive the dead-code report surfaces.
             var constructorNamespace = constructor.Namespace is "<global namespace>" ? null : constructor.Namespace;
             var id = CreateMemberId(constructorNamespace, constructorClassName, ".ctor", constructor.Parameters);
             AddNode(id, ".ctor", constructorClassName, constructorNamespace, constructor.FileName, constructor.Assembly, constructor.Module, "Constructor", constructor.LineNumber, constructor.ColumnNumber, false);
@@ -2521,7 +2521,7 @@ public static class Dosai
                 return true;
             }
 
-            // R10: IL ids embed generic instantiations (`Method<args>` decoding) while source ids
+            // IL ids embed generic instantiations (`Method<args>` decoding) while source ids
             // use the original definition. Exact aliases miss, so compare arity-stripped forms
             // before giving up; the instantiation string itself is preserved as node metadata.
             var strippedSourceAliases = MemberTypeAliases(GraphIdNormalizer.StripGenericInstantiation(sourceType)).ToHashSet(StringComparer.Ordinal);
@@ -2720,10 +2720,10 @@ public static class Dosai
                 return;
             }
 
-            // R4: sealed/struct receivers resolve to the exact implementation; remaining candidates
+            // Sealed/struct receivers resolve to the exact implementation; remaining candidates
             // are ranked instantiated-first with per-edge confidence. Even an exact resolution is a
             // *synthesized* edge, not a witnessed call site, so it keeps the VirtualCandidate
-            // evidence kind — consumers that trust SourceRoslynDirect must only see real call
+            // evidence kind, consumers that trust SourceRoslynDirect must only see real call
             // sites. DispatchConfidence = "exact" carries the resolution fact.
             foreach (var (candidate, dispatchConfidence) in dispatchIndex.FindRankedDispatchCandidates(operation.TargetMethod, operation.Instance?.Type).Take(16))
             {

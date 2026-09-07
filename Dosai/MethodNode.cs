@@ -15,7 +15,7 @@ public class MethodNode
     public int LineNumber { get; set; }
     public int ColumnNumber { get; set; }
     public bool IsExternal { get; set; }
-    /// <summary>Original (instantiated) IL id when this node was normalized onto a source original-definition id (R10).</summary>
+    /// <summary>Original (instantiated) IL id when this node was normalized onto a source original-definition id.</summary>
     public string? GenericInstantiation { get; set; }
     public MethodIdentity? Identity { get; set; }
     public List<AnalysisEvidence> Evidence { get; set; } = [];

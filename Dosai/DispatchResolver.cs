@@ -50,7 +50,7 @@ internal static class DispatchResolver
             => FindRankedDispatchCandidates(targetMethod, receiverType).Select(candidate => candidate.Method);
 
         /// <summary>
-        ///     Dispatch candidates with per-candidate confidence (R4). A sealed or struct receiver
+        ///     Dispatch candidates with per-candidate confidence. A sealed or struct receiver
         ///     devirtualizes to the exact implementation; otherwise candidates are ranked with
         ///     RTA-instantiated types before uninstantiated CHA candidates.
         /// </summary>
@@ -63,7 +63,7 @@ internal static class DispatchResolver
 
             var normalizedTarget = targetMethod.OriginalDefinition;
 
-            // R4: a sealed (or struct) receiver has exactly one possible implementation — resolve it
+            // A sealed (or struct) receiver has exactly one possible implementation, resolve it
             // directly instead of emitting a candidate set.
             if (receiverType is INamedTypeSymbol namedReceiver && (namedReceiver.IsSealed || namedReceiver.IsValueType || namedReceiver.TypeKind == TypeKind.Struct))
             {
@@ -109,7 +109,7 @@ internal static class DispatchResolver
             }
 
             // Instantiated types outrank pure CHA candidates before the cap is applied. Exact
-            // resolution stays reserved for sealed/struct static receiver types — RTA singleton
+            // resolution stays reserved for sealed/struct static receiver types, RTA singleton
             // promotions would inflate candidate edges to direct evidence.
             foreach (var candidate in rtaCandidates.Concat(chaCandidates))
             {

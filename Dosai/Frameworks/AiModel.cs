@@ -14,7 +14,7 @@ public sealed class AiComponent
     /// <summary>Model identifier or artifact name, e.g. "gpt-4o", "all-MiniLM-L6-v2", "phi-3.gguf".</summary>
     public string Name { get; set; } = string.Empty;
 
-    /// <summary>"openai", "azure", "anthropic", "local", "huggingface", ...</summary>
+    /// <summary>"openai", "azure", "anthropic", "local", "huggingface",...</summary>
     public string? Provider { get; set; }
 
     public string? Version { get; set; }

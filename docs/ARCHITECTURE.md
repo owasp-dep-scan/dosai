@@ -22,6 +22,7 @@ Dosai turns .NET inputs into review evidence through a small number of cooperati
 │                        Unified evidence model                                │
 │   Methods  MethodCalls  CallGraph  ApiEndpoints  Services  AiComponents      │
 │   DataFlow nodes/edges  MethodSummaries  AssemblyInformation                 │
+│   Reachability  RecursionClusters  SecurityFindings                          │
 │   every record carries evidence kind, confidence, and PURL where known       │
 └──────┬───────────────────────────────────────────────────────────────────────┘
        │
@@ -31,13 +32,17 @@ Dosai turns .NET inputs into review evidence through a small number of cooperati
 │   DataFlowAnalyzer        CryptoAnalyzer        Framework providers          │
 │   taint + slicing         assets/materials      route + trust zones          │
 │   pattern packs           misuse findings       taint seeding                │
+│   ReachabilityAnalyzer     SecurityAnalyzer     suppressions + severity      │
+│   entry-point facts        endpoint/config      review backlog               │
+│   dead code                findings                                          │
 └──────┬───────────────────────────────────────────────────────────────────────┘
        │
        ▼
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │                        Transparency layer                                    │
 │   EntryPoints  PackageReachability  DangerousApiReachability                 │
-│   WeaknessCandidates (CWE mapped)   AgentContext   reports   diffs           │
+│   WeaknessCandidates (CWE, severity)   ExploitChains   AttackSurface         │
+│   DeadCode   SanitizedFlows   AgentContext   reports   diffs                 │
 └──────┬───────────────────────────────────────────────────────────────────────┘
        │
        ▼
@@ -72,6 +77,11 @@ flowchart TD
     Reflect --> DFGraph
     Endpoints -->|"taint seeding"| Walker
 
+    Graph --> Reach["ReachabilityAnalyzer<br/>entry-point facts, dead code"]
+    Reach --> GraphAttrs["Node/edge attributes:<br/>depth, fan-in/out, dispatch confidence"]
+    Endpoints --> SecFindings["SecurityAnalyzer<br/>endpoint, MCP, config findings"]
+    Reach --> Exploit["ExploitChains + AttackSurface"]
+
     Crypto --> CryptoAnalyzer["Crypto assets, materials, findings"]
     CryptoAnalyzer --> DFGraph
     CryptoAnalyzer --> CBOM["CycloneDX-style CBOM"]
@@ -79,7 +89,8 @@ flowchart TD
     Graph --> Exporters["Mermaid / GraphML / GEXF"]
     DFGraph --> Exporters
     DFGraph --> Transparency["TransparencyBuilder"]
-    Transparency --> Weakness["Weakness candidates"]
+    Transparency --> Weakness["Weakness candidates (CWE, severity)"]
+    Transparency --> Suppress["Suppressions + SanitizedFlows"]
     Transparency --> Agent["Agent context, reports, diffs"]
     PURL["PackageUrlResolver"] --> Methods
     PURL --> Graph
@@ -151,7 +162,7 @@ sequenceDiagram
     S->>S: validate endpoints, derive weakness candidates
 ```
 
-Taint enters from matched parameters, attributes, request objects, CLI arguments, and framework entry points. It moves through local variables, field and property assignments with receiver-sensitive keys, passthrough calls, object creation, return values, and simple interprocedural summaries that record parameter-to-return and parameter-to-sink relationships for local helpers. Sanitizer patterns stop flow, and validator guards such as `Regex.IsMatch` suppress taint on the validated branch while preserving the unvalidated branch.
+Taint enters from matched parameters, attributes, request objects, CLI arguments (including the compiler-synthesized `<Main>$` of top-level-statement programs), and framework entry points. It moves through local variables, field and property assignments with receiver-sensitive keys, passthrough calls, object creation, return values, and interprocedural summaries that record parameter-to-return, parameter-to-sink, and `ref`/`out` parameter-write relationships for local helpers, iterating to a fixpoint so wrapper chains attribute to the outermost method. Lambda parameters passed over tainted receivers or arguments are seeded, delegate invocations and `await` propagate taint, `foreach` loop variables and element or indexer stores taint their collection, and boolean-returning validators stop propagation because a decision is not a payload. Sanitizer patterns stop flow, validator guards such as `Regex.IsMatch` suppress taint on the validated branch while preserving the unvalidated branch, and both record the suppressed flow in `SanitizedFlows` as negative evidence.
 
 ```text
    source seed            propagation                sink
@@ -179,13 +190,14 @@ flowchart LR
     Code["Syntax and symbols"] --> Providers
     subgraph Providers
         Web["aspnetcore-mvc<br/>minimal-api<br/>razor-blazor"]
-        RPC["grpc<br/>protobuf<br/>signalr"]
+        RPC["grpc<br/>protobuf<br/>signalr<br/>orleans"]
         Srv["azure-functions<br/>aws-lambda<br/>messaging<br/>background-jobs"]
         AI["mcp<br/>llm<br/>ml-runtime<br/>vector-store"]
     end
     Providers --> Services["Services[] with trust zones<br/>and data classification"]
     Providers --> Endpoints["ApiEndpoints with resolved Path"]
     Providers --> Seed["Taint seeding of entry parameters"]
+    Providers --> Findings["SecurityFindings:<br/>endpoint, MCP transport, config"]
     Seed --> Walker["Data-flow walker"]
 ```
 
@@ -202,7 +214,7 @@ flowchart TD
     Scan --> Assets["Assets: algorithms, protocols, certificates"]
     Scan --> Materials["Materials: redacted values, SHA-256 fingerprints"]
     Scan --> Findings["Findings: weak algorithms, TLS bypass, low PBKDF2"]
-    Inventory --> Reach["Best-effort reachability from entry points"]
+    Inventory --> Reach["Reachability from entry points (graph path required)"]
     Code --> Slice["Crypto-specific data-flow slicing"]
     Slice --> Correlate["Correlate material to operation"]
     Correlate --> Findings
@@ -211,7 +223,7 @@ flowchart TD
     Findings --> Export
 ```
 
-Material values are never emitted in the clear. Dosai emits redacted values and fingerprints, and reachability is best effort by design: it must never fail the analysis, only enrich it.
+Material values are never emitted in the clear. Dosai emits redacted values and fingerprints, and reachability is best effort by design: it must never fail the analysis, only enrich it. Since schema 4.1.0 the enrichment is also honest about its limits, because a reachability claim requires a graph path from an entry point; when the call graph cannot support one, the file-level fallback is gated off and a diagnostic names the file instead of silently claiming reachability.
 
 ## Performance architecture
 
@@ -228,7 +240,7 @@ Slice construction walks trace nodes and pulls in-slice edges from the outgoing-
 
 ## Output contracts
 
-Three JSON shapes carry almost everything: `MethodsSlice` for inventory, `DataFlowResult` for flows and derived facts, and the crypto result with its CycloneDX mapping. Schema evolution is explicit through `Metadata.SchemaVersion`, and output-visible changes are documented per version in the [migration guide](migration-4.0.md). Graph exporters guarantee that every edge endpoint exists as a node, and XML exports escape source-derived text so output injection is not a vector.
+Three JSON shapes carry almost everything: `MethodsSlice` for inventory, `DataFlowResult` for flows and derived facts, and the crypto result with its CycloneDX mapping. Schema evolution is explicit through `Metadata.SchemaVersion`, and output-visible changes are documented per version in the [migration guides](migration-4.1.0.md). Graph exporters guarantee that every edge endpoint exists as a node, and XML exports escape source-derived text so output injection is not a vector.
 
 ## Where to extend
 

@@ -28,7 +28,7 @@ public sealed class FrameworkAnalysisOptions
     /// <summary>IncludePromptText: emit full prompt text instead of the redacted default.</summary>
     public bool IncludePromptText { get; init; }
 
-    /// <summary>S2: policy-approved MCP stdio transport commands (--mcp-allowlist); null disables suppression.</summary>
+    /// <summary>Policy-approved MCP stdio transport commands (--mcp-allowlist); null disables suppression.</summary>
     public IReadOnlySet<string>? McpAllowlist { get; init; }
 }
 
@@ -43,23 +43,23 @@ public static class FrameworkRegistry
 
     private static IFrameworkProvider[] CreateProviders() =>
     [
-        // Tier 1 — Web/HTTP. Minimal APIs first: later providers consume their mount points.
+        // Tier 1, Web/HTTP. Minimal APIs first: later providers consume their mount points.
         new Providers.AspNetCoreMvcProvider(),
         new Providers.MinimalApiProvider(),
         new Providers.LegacyDotNetWebProvider(),
         new Providers.RazorBlazorProvider(),
         new Providers.CommunityHttpProvider(),
-        // Tier 2 — RPC & serialization. Protobuf parses .proto contracts before gRPC joins them.
+        // Tier 2, RPC & serialization. Protobuf parses.proto contracts before gRPC joins them.
         new Providers.ProtobufProvider(),
         new Providers.GrpcProvider(),
         new Providers.SignalRProvider(),
         new Providers.OrleansProvider(),
         new Providers.GraphQLODataProvider(),
-        // Tier 3 — Serverless, messaging, jobs
+        // Tier 3, Serverless, messaging, jobs
         new Providers.ServerlessProvider(),
         new Providers.MessagingProvider(),
         new Providers.BackgroundJobProvider(),
-        // Tier 4 — AI, agents, MCP
+        // Tier 4, AI, agents, MCP
         new Providers.McpProvider(),
         new Providers.LlmSdkProvider(),
         new Providers.MlRuntimeProvider(),
@@ -120,7 +120,7 @@ public static class FrameworkRegistry
     /// </summary>
     /// <remarks>
     ///     Providers previously each remembered to append <c>ep:{operationId}</c> themselves, and only
-    ///     three of the sixteen did — so a consumer could not distinguish "this service has no entry
+    ///     three of the sixteen did, so a consumer could not distinguish "this service has no entry
     ///     points" from "this provider forgot to record them". Deriving the links here from the emitted
     ///     entry-point set also makes the referential-integrity guarantee structural: an id is only ever
     ///     written if the entry point it names exists.
@@ -147,12 +147,12 @@ public static class FrameworkRegistry
     ///     Settles the trust zone of inbound services that no provider classified.
     /// </summary>
     /// <remarks>
-    ///     An inbound HTTP service carrying no authorization metadata is anonymous — that is precisely
-    ///     what "no <c>[Authorize]</c>" means — unless the application authorizes globally, which
+    ///     An inbound HTTP service carrying no authorization metadata is anonymous, that is precisely
+    ///     what "no <c>[Authorize]</c>" means, unless the application authorizes globally, which
     ///     <see cref="FrameworkContext.HasGlobalAuthorizationFallback" /> detects. Leaving these at
     ///     <see cref="TrustZones.Unknown" /> (the previous behaviour for the eleven providers that never
     ///     set a zone, and for every unauthenticated MVC controller) left them out of the
-    ///     <see cref="ApplyTrustBoundaries" /> sweep, which only walks public inbound services — so the
+    ///     <see cref="ApplyTrustBoundaries" /> sweep, which only walks public inbound services, so the
     ///     boundary-crossing analysis silently had almost nothing to work on.
     /// </remarks>
     private static void ApplyDefaultTrustZones(FrameworkAnalysisResult result, FrameworkContext ctx)
@@ -178,7 +178,7 @@ public static class FrameworkRegistry
 
     /// <summary>
     ///     Computes trust zones from the call graph: an inbound public service that can reach an
-    ///     outbound external service's methods crosses a trust boundary. Never guessed — only set
+    ///     outbound external service's methods crosses a trust boundary. Never guessed, only set
     ///     when a positive call-graph path exists. Outbound services with non-loopback endpoints
     ///     are marked external.
     /// </summary>
@@ -190,7 +190,7 @@ public static class FrameworkRegistry
 
         foreach (var outbound in result.Services.Where(service => service.Direction == ServiceDirections.Outbound))
         {
-            // An outbound service with no known endpoint is not evidence of an external call — it is
+            // An outbound service with no known endpoint is not evidence of an external call, it is
             // absence of evidence, and calling it External was exactly the guess this analysis is
             // meant to avoid, since the External set feeds the boundary-crossing sweep below.
             outbound.TrustZone = outbound.Endpoints.Count == 0
@@ -201,7 +201,7 @@ public static class FrameworkRegistry
         }
 
         // "Where does it go" and "does it leave the process" are separate claims. An outbound service
-        // with no resolved address keeps TrustZone Unknown — we genuinely do not know the destination —
+        // with no resolved address keeps TrustZone Unknown, we genuinely do not know the destination,
         // but it still egresses, so it still counts for boundary crossing. Only a confirmed loopback
         // destination (Internal) is excluded.
         var outboundMethodIds = result.Services

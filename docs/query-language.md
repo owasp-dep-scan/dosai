@@ -181,7 +181,7 @@ dotnet run --project ./Dosai/Dosai.csproj -- query \
   --o /tmp/internal-nodes.json
 ```
 
-Find the busiest graph nodes by fan-out (R1 facts live in `reachability`, not on the nodes):
+Find the busiest graph nodes by fan-out (the facts live in `reachability`, not on the nodes):
 
 ```bash
 dotnet run --project ./Dosai/Dosai.csproj -- query \

@@ -10,9 +10,9 @@ You are reviewing a pull request that touches request handling and want to know 
 flowchart LR
     PR["Pull request"] --> Run["dataflows with pattern packs"]
     Run --> Slices["Slices and weakness candidates"]
-    Slices --> Query["query: weaknesses[confidence=High]"]
+    Slices --> Query["query: weaknesses[severity=high]"]
     Query --> Review{"Guarded by a<br/>validator?"}
-    Review -->|"yes"| Close["Close with evidence"]
+    Review -->|"yes"| Close["Close with evidence<br/>(SanitizedFlows or --suppress)"]
     Review -->|"no"| Fix["Request a fix<br/>or add a sanitizer pattern"]
 ```
 
@@ -26,11 +26,11 @@ dotnet run --project ./Dosai -- dataflows \
 
 dotnet run --project ./Dosai -- query \
   --input /tmp/dosai-dataflows.json \
-  --query 'weaknesses[confidence=High]' \
+  --query 'weaknesses[severity=high]' \
   --o /tmp/high-risk.json
 ```
 
-Each weakness candidate names its CWE, the slice that produced it, the route where known, and the PURLs involved. Read the slice like a stack trace and decide whether the flow is genuinely reachable and genuinely unguarded. When your team has a shared validation helper the analyzer does not know about, teach it once with a custom [sanitizer pattern](dataflow-patterns.md) and the finding class disappears on the next run.
+Each weakness candidate names its CWE, severity, the slice that produced it, the route where known, and the PURLs involved. Read the slice like a stack trace and decide whether the flow is genuinely reachable and genuinely unguarded. Two kinds of negative evidence help the close-out: `SanitizedFlows[]` records flows that a sanitizer expression or validator guard suppressed, and findings your team has reviewed and accepted can be carried in a `--suppress` file whose optional `expires` dates turn it into a review backlog. When your team has a shared validation helper the analyzer does not know about, teach it once with a custom [sanitizer pattern](dataflow-patterns.md) and the finding class disappears on the next run.
 
 ## Decide whether a vulnerable package is reachable
 
@@ -46,7 +46,7 @@ An advisory lands against a NuGet package you depend on. Reachability turns a th
                        └──────────────────────┘
 ```
 
-Both `methods` and `dataflows` emit `PackageReachability[]` with source locations, and data-flow slices carry PURLs on nodes and edges. Filter for the package and read the slices that mention it:
+Both `methods` and `dataflows` emit `PackageReachability[]` with source locations, and data-flow slices carry PURLs on nodes and edges. Since schema 4.1.0 the reachability index also answers per-node questions: `reachability[nodeId=...]` (or the `dosai.reachability` MCP tool) reports whether a method is reachable, from which entry points, at what depth, and with what fan-in and fan-out, and `DeadCode[]` names source-declared methods no entry point reaches at all, which is stronger evidence of disuse than an empty call list. Filter for the package and read the slices that mention it:
 
 ```bash
 dotnet run --project ./Dosai -- query \
@@ -108,7 +108,7 @@ dotnet run --project ./Dosai -- methods \
   --o /tmp/dosai-methods.json
 ```
 
-`Services[]` records every inbound surface, from controllers to queue consumers to MCP tools, with a trust zone of `public`, `authenticated`, `internal`, or `external`. `Data[]` classifies request and response members as `pii`, `credential`, `financial`, or `health`, and every non-unknown label names the member that triggered it. Filter on `Confidence` when the test scope requires only symbol-resolved evidence. [Lesson 5](LESSON5.md) shows the interpretation.
+`Services[]` records every inbound surface, from controllers to queue consumers to MCP tools, with a trust zone of `public`, `authenticated`, `internal`, or `external`. `Data[]` classifies request and response members as `pii`, `credential`, `financial`, or `health`, and every non-unknown label names the member that triggered it. Since schema 4.1.0 the `dataflows` output adds two purpose-built views for exactly this scoping exercise: `ExploitChains[]` connects each entry point to the sinks it reaches through the call graph and labels the exposure (`anonymous-http`, `authenticated-http`, `anonymous-rpc`, `queue`, `mcp`, `cli`), and `AttackSurface[]` groups entry points by that exposure, anonymous first, with the weakness counts, CWEs, and chain counts that reach each one. `SecurityFindings[]` adds the review flags a tester would otherwise hand-write: sensitive unauthenticated endpoints, CORS wildcard with credentials, state-changing endpoints without antiforgery, and duplicate routes with conflicting authorization. Filter on `Confidence` when the test scope requires only symbol-resolved evidence. [Lesson 5](LESSON5.md) shows the interpretation.
 
 ## Govern AI components and MCP tools
 
@@ -139,7 +139,7 @@ Secret-shaped prompt text is withheld even with `--include-prompt-text`, and the
 
 ## Gate a pull request with a data-flow diff
 
-Security review scales when the CI job tells reviewers what changed. The `diff` command compares two analysis runs and normalizes away formatting noise, so a gate can answer one question: did the set of source-to-sink flows grow?
+Security review scales when the CI job tells reviewers what changed. The `diff` command compares two analysis runs and normalizes away formatting noise, so a gate can answer one question: did the risk grow?
 
 ```bash
 dotnet run --project ./Dosai -- dataflows \
@@ -157,11 +157,11 @@ flowchart TD
     Push["Push or PR"] --> Job["CI job"]
     Job --> Run["dataflows on the tree"]
     Run --> Diff["diff against baseline"]
-    Diff --> Verdict{"New sink classes<br/>or high-confidence weaknesses?"}
+    Diff --> Verdict{"RiskDelta:<br/>new high-severity slices,<br/>new anonymous endpoints?"]
     Verdict -->|"no"| Pass["Pass with report attached"]
     Verdict -->|"yes"| Fail["Fail or label for review<br/>with diff JSON attached"]
     Pass --> Baseline["Publish JSON as the new baseline"]
     Fail --> Baseline
 ```
 
-Diff identity keys on source category, sink category, and sink argument, so renamed variables do not create noise and genuinely new flow classes stand out. [Lesson 7](LESSON7.md) builds the full job, including baseline storage and query gates.
+Since schema 4.1.0 the diff is severity-aware and goes beyond slice sets: alongside added and removed slices it reports added and removed entry points, weaknesses, and packages, plus a single `RiskDelta` summary with CI-decidable counters such as `NewHighSeveritySlices`, `NewAnonymousEndpoints`, and `NewlyReachablePackages`. Slice identity still keys on source category, sink category, and sink argument, so renamed variables do not create noise and genuinely new flow classes stand out, and a Low-confidence pattern match is demoted one severity rank so heuristic matches cannot trip a high-severity gate on their own. [Lesson 7](LESSON7.md) builds the full job, including baseline storage and query gates.

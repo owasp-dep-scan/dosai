@@ -5,7 +5,7 @@ namespace Depscan.Frameworks;
 /// <summary>
 ///     Conservative data-flow classification for service boundaries (CycloneDX services[].data[]).
 ///     Classifications derive from member names/types of the request/response DTO; the default is
-///     "unknown" — never "public" — and every non-unknown classification names the triggering
+///     "unknown", never "public", and every non-unknown classification names the triggering
 ///     member so a reviewer can audit it.
 /// </summary>
 public static class DataClassifier
@@ -18,9 +18,9 @@ public static class DataClassifier
     ///     Two things went wrong before and both are corrected here. Matching was
     ///     <c>name.Contains(keyword)</c>, so <c>CompanyName</c> classified as financial (it contains
     ///     "pan") and <c>TermsAndConditions</c> as health (it contains "condition"). And several
-    ///     keywords were inherently ambiguous even under exact-token matching — a standalone
+    ///     keywords were inherently ambiguous even under exact-token matching, a standalone
     ///     <c>token</c> matches <c>ContinuationToken</c>, and <c>address</c> matches
-    ///     <c>ServerAddress</c> — so those are replaced by their qualified forms. These entries drive
+    ///     <c>ServerAddress</c>, so those are replaced by their qualified forms. These entries drive
     ///     CycloneDX <c>services[].data[]</c>, where a false "credential" or "health" claim is far more
     ///     costly than a missed one.
     /// </remarks>
@@ -36,7 +36,7 @@ public static class DataClassifier
 
     /// <summary>
     ///     Offsets, within the underscore-stripped lowercase form of <paramref name="name" />, at which
-    ///     a word token starts — derived from underscores and camel/Pascal case transitions. Offset 0
+    ///     a word token starts, derived from underscores and camel/Pascal case transitions. Offset 0
     ///     and the end of the string are always boundaries.
     /// </summary>
     private static List<int> TokenBoundaries(string name)

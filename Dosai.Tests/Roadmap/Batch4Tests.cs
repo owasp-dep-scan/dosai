@@ -7,13 +7,13 @@ using static Dosai.Tests.Roadmap.RoadmapStubs;
 namespace Dosai.Tests.Roadmap;
 
 /// <summary>
-///     Batch 4: R6 entry-point roots for modern CLIs, R5 dead-code report, O4 MCP tool surface,
-///     F6 attack-surface view, O2 query engine (nested paths, OR, sort, count), T6 ref/out taint
-///     propagation, T7 collection/element taint.
+///     Entry points and reporting: top-level-statement entry roots for modern CLIs, the
+///     dead-code report, the MCP tool surface, the attack-surface view, the query engine
+///     (nested paths, OR, sort, count), ref/out taint propagation, and collection taint.
 /// </summary>
 public class Batch4Tests
 {
-    // ----- R6: top-level statements and Main variants -----
+    // ----- Top-level statements and Main variants -----
 
     [Fact]
     public void Methods_TopLevelStatements_ProduceMethodCliEntryPointAndReachability()
@@ -27,7 +27,7 @@ Process.Start("ping", t);
 """);
         var slice = directory.Methods();
 
-        // R6: the compiler-synthesized `<Main>$` reaches the method inventory, with a
+        // The compiler-synthesized `<Main>$` reaches the method inventory, with a
         // SourceSignature that matches the call-graph node id.
         var main = Assert.Single(slice.Methods!, method => method.Name == "<Main>$");
         Assert.Equal("Program.<Main>$(string[]):void", main.SourceSignature);
@@ -103,14 +103,14 @@ public class IntProgram
 """);
         var result = directory.DataFlows();
 
-        // R6: async Task Main and int Main are all literally named Main — seeding parity means
+        // Async Task Main and int Main are all literally named Main, seeding parity means
         // each produces a cli -> command slice and its own Cli entry point.
         Assert.Equal(2, result.Slices.Count(slice => slice is { SourceCategory: "cli", SinkCategory: "command" }));
         Assert.Contains(result.EntryPoints, entryPoint => entryPoint is { Kind: "Cli", MethodName: "Main" } && entryPoint.MethodId!.Contains("AsyncProgram.Main"));
         Assert.Contains(result.EntryPoints, entryPoint => entryPoint is { Kind: "Cli", MethodName: "Main" } && entryPoint.MethodId!.Contains("IntProgram.Main"));
     }
 
-    // ----- R5: dead-code report -----
+    // ----- Dead-code report -----
 
     [Fact]
     public void Methods_DeadCode_FlagsUnreachableHelper()
@@ -218,7 +218,7 @@ public static class Boot
         // The unreachable composition root itself is dead, and so is the unregistered helper...
         Assert.Contains(dead, entry => entry.NodeId.Contains("Bootstrapper.Compose"));
         Assert.Contains(dead, entry => entry.NodeId.Contains("RegisteredService.Helper"));
-        // ...but the DI-registered and reflection-created constructors are kept alive.
+        //...but the DI-registered and reflection-created constructors are kept alive.
         Assert.DoesNotContain(dead, entry => entry.NodeId.Contains(".ctor"));
         var registeredCtor = slice.Reachability!.Single(facts => facts.NodeId.Contains("RegisteredService") && facts.NodeId.Contains(".ctor"));
         Assert.False(registeredCtor.Reachable);
@@ -230,7 +230,7 @@ public static class Boot
         Assert.DoesNotContain(dead, entry => entry.NodeId.Contains("Boot.Main"));
     }
 
-    // ----- F6: attack-surface view -----
+    // ----- Attack-surface view -----
 
     [Fact]
     public void DataFlows_AttackSurface_GroupsByExposureAndCounts()
@@ -261,7 +261,7 @@ public class LockedController : Microsoft.AspNetCore.Mvc.ControllerBase
 """);
         var result = directory.DataFlows();
 
-        // F6: one group per exposure, most-exposed first; the anonymous group carries the linked
+        // One group per exposure, most-exposed first; the anonymous group carries the linked
         // weakness and chain counts, the authenticated group has the same flow but its own group.
         Assert.NotEmpty(result.AttackSurface);
         Assert.Equal("anonymous-http", result.AttackSurface[0].Exposure);
@@ -285,7 +285,7 @@ public class LockedController : Microsoft.AspNetCore.Mvc.ControllerBase
         Assert.NotEmpty(agentContext.AttackSurface);
     }
 
-    // ----- O2: query engine — nested paths, OR, sort, count -----
+    // ----- Query engine, nested paths, OR, sort, count -----
 
     [Fact]
     public void QueryEngine_NestedPathsOperatorsSortAndCount()
@@ -314,7 +314,7 @@ public static class Query
         Assert.NotEmpty(callGraphNodes);
         Assert.All(callGraphNodes, node => Assert.Equal("Query.cs", GetString(node, "FileName")));
 
-        // (b) sort by prop desc over the reachability facts — Main has the largest fan-out.
+        // (b) sort by prop desc over the reachability facts, Main has the largest fan-out.
         var sorted = Deserialize(DosaiQueryEngine.QueryJson(methodsJson, "reachability[fanOut>=0] sort by fanOut desc"));
         Assert.NotEmpty(sorted);
         Assert.True(GetNumber(sorted[0], "FanOut") >= GetNumber(sorted[^1], "FanOut"));
@@ -363,7 +363,7 @@ public static class Dead
         static string GetString(JsonElement element, string property) => element.GetProperty(property).GetString()!;
     }
 
-    // ----- O4: MCP tool surface -----
+    // ----- MCP tool surface -----
 
     [Fact]
     public void Mcp_NewTools_ListAndCallExploitChainsAttackSurfaceReachability()
@@ -416,7 +416,7 @@ public class CmdController : Microsoft.AspNetCore.Mvc.ControllerBase
         Assert.Contains("outside the --mcp-root confinement", output.ToString());
     }
 
-    // ----- T6: ref/out propagation -----
+    // ----- Ref/out propagation -----
 
     [Fact]
     public void DataFlows_TryParseOutVar_CarriesTaintToSink()
@@ -559,7 +559,7 @@ public static class ByValueFlow
         Assert.DoesNotContain(0, summary.OutSourceCategories.Keys);
 
         // Categories are keyed per parameter index, so the source reaching `scratch` cannot mint a
-        // finding for `safe` — which can only ever hold a literal.
+        // finding for `safe`, which can only ever hold a literal.
         Assert.Empty(summary.OutSourceCategories);
         Assert.DoesNotContain(result.Slices, slice => slice.SinkCategory == "command");
     }
@@ -601,7 +601,7 @@ public static class ByValueFlow
         Assert.True(order.IndexOf("anonymous") < order.IndexOf("authenticated-http"));
     }
 
-    // ----- T7: collection/element taint -----
+    // ----- Collection/element taint -----
 
     [Fact]
     public void DataFlows_ForEachOverTaintedCollection_TaintsLoopVariable()
@@ -675,7 +675,7 @@ public static class MemberFlow
 """);
         var result = directory.DataFlows();
 
-        // Negative case: tainting holder.Tag must not taint holder.Other — member taint keys
+        // Negative case: tainting holder.Tag must not taint holder.Other, member taint keys
         // keep field sensitivity for ordinary property stores.
         Assert.DoesNotContain(result.Slices, slice => slice.SinkCategory == "command");
     }

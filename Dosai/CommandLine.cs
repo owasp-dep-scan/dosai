@@ -277,7 +277,7 @@ public class CommandLine
                         return 1;
                     }
 
-                    // R1/R7: node reachability facts and fan-in/out ride along as graph attributes.
+                    // Node reachability facts and fan-in/out ride along as graph attributes.
                     var reachabilityByNode = methodsSlice.Reachability?.ToDictionary(facts => facts.NodeId, StringComparer.Ordinal);
                     callGraphOutputFile ??= Path.ChangeExtension(outputFile!, CallGraphExporter.GetDefaultExtension(format));
                     File.WriteAllText(callGraphOutputFile, CallGraphExporter.Export(methodsSlice.CallGraph, format, reachabilityByNode));
@@ -361,7 +361,7 @@ public class CommandLine
             var patternPacks = parseResult.GetValue(patternPacksOption);
             var suppressionsFile = parseResult.GetValue(suppressionsFileOption);
             var result = DataFlowAnalyzer.Analyze(path, patternsFile, patternPacks, suppressionsFile);
-            // W6: converge crypto misuse findings into the weakness queue so agent-context carries
+            // Converge crypto misuse findings into the weakness queue so agent-context carries
             // one CWE-stamped list; crypto analysis is best-effort and never blocks the context.
             try
             {
@@ -438,7 +438,7 @@ public class CommandLine
         Converters = { new JsonStringEnumConverter() }
     };
 
-    /// <summary>S2: loads the --mcp-allowlist policy file (one command per line); missing file disables the allowlist.</summary>
+    /// <summary>Loads the --mcp-allowlist policy file (one command per line); missing file disables the allowlist.</summary>
     private static IReadOnlySet<string>? LoadMcpAllowlist(string? mcpAllowlistPath)
     {
         if (string.IsNullOrWhiteSpace(mcpAllowlistPath))
