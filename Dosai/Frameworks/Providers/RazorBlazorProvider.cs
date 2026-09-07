@@ -323,7 +323,7 @@ foreach (var tree in ctx.CSharpTrees)
     /// <summary>
     ///     Matches an <c>@page</c> directive with or without a route template, and allows leading
     ///     whitespace. Requiring a quoted template made every Razor Page that relies on the
-    ///     conventional <c>Pages/</c>-relative route — which is most of them — invisible.
+    ///     conventional <c>Pages/</c>-relative route, which is most of them, invisible.
     /// </summary>
     [GeneratedRegex(@"^\s*@page(?:\s+""([^""]*)"")?", RegexOptions.Multiline | RegexOptions.Compiled)]
     private static partial Regex PageDirectiveRegex();
@@ -332,7 +332,7 @@ foreach (var tree in ctx.CSharpTrees)
     ///     Matches a page handler method declaration. The trailing <c>\(</c> is required so that
     ///     <c>@onclick="OnGetData"</c> and prose mentions do not mint endpoints, and the handler-name
     ///     group is lazy so that <c>OnGetCustomerAsync</c> yields the handler <c>Customer</c> rather
-    ///     than <c>CustomerAsync</c> — ASP.NET dispatches <c>?handler=Customer</c>.
+    ///     than <c>CustomerAsync</c>, ASP.NET dispatches <c>?handler=Customer</c>.
     /// </summary>
     [GeneratedRegex(@"\bOn(Get|Post|Put|Delete|Patch|Head|Options)([A-Z]\w*?)?(Async)?\s*\(", RegexOptions.Compiled)]
     private static partial Regex HandlerRegex();

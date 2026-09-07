@@ -73,7 +73,7 @@ flowchart LR
     Param -->|"sanitizer: sql-parameterization"| Execute
 ```
 
-The `aspnet` pack adds `FromQuery`, `FromRoute`, and `FromForm` sources, and framework taint seeding marks route and query parameters as sources regardless. The `data` pack adds Dapper and Npgsql sinks plus the `AddWithValue` and `Add` sanitizers. The always-on baseline contributes `SqlCommand`, `ExecuteReader`, and `ExecuteNonQuery` sinks on its own.
+The `aspnet` pack adds `FromQuery`, `FromRoute`, and `FromForm` sources, and framework taint seeding marks route and query parameters as sources regardless. The `data` pack adds Dapper and Npgsql sinks plus the `AddWithValue` sanitizer and provider-specific parameter-collection `Add` sanitizers (`SqlParameterCollection.Add`, `NpgsqlParameterCollection.Add`, and siblings). A bare `Add` no longer sanitizes anything: `List<T>.Add` matched every other `Add` in the base class library and masked real SQL flows. The always-on baseline contributes `SqlCommand`, `ExecuteReader`, and `ExecuteNonQuery` sinks on its own.
 
 ## Run with the relevant packs
 
@@ -85,7 +85,7 @@ dotnet run --project ./Dosai/Dosai.csproj -- dataflows \
   --print
 ```
 
-The always-on baseline loads regardless of the pack list, so `aspnet,data` here means "baseline plus these two packs". The output contains a slice from the `search` action into `ExecuteReader`, and no slice from the `byid` action because `AddWithValue` stops the taint at the parameter binding.
+The always-on baseline loads regardless of the pack list, so `aspnet,data` here means "baseline plus these two packs". Without `--pattern-packs` at all, every built-in pack loads, which since schema 4.1.0 includes six weakness-class packs that used to be opt-in: `xss`, `xxe`, `injection` (LDAP, XPath, NoSQL), `log`, `redos`, and `template`. The output contains a slice from the `search` action into `ExecuteReader`, and no slice from the `byid` action because `AddWithValue` stops the taint at the parameter binding.
 
 ```text
 └─ DataFlow dfs1: http → sql (Medium)
@@ -106,11 +106,16 @@ Query the result for the weakness candidates:
 ```bash
 dotnet run --project ./Dosai/Dosai.csproj -- query \
   --input /tmp/orders-dataflows.json \
-  --query 'weaknesses[sinkCategory=sql]' \
+  --query 'weaknesses[sinkCategory=sql && severity=high]' \
   --o /tmp/sql-weaknesses.json
+
+dotnet run --project ./Dosai/Dosai.csproj -- query \
+  --input /tmp/orders-dataflows.json \
+  --query 'sanitizedFlows' \
+  --o /tmp/sanitized-flows.json
 ```
 
-You get one `SqlInjectionCandidate` with CWE-89 for the `search` action and none for `byid`.
+You get one `SqlInjectionCandidate` with CWE-89 and high severity for the `search` action and none for `byid`. The `sanitizedFlows` query shows the suppressed `byid` flow as negative evidence, with the sanitizer symbol and location, so "the analyzer missed it" and "a sanitizer stopped it" are distinguishable in one glance.
 
 ## Tuning checklist
 
@@ -125,7 +130,7 @@ dotnet run --project ./Dosai/Dosai.csproj -- dataflows \
   --o /tmp/orders-dataflows.json
 ```
 
-Second, check whether the flow crosses a helper method. Dosai records parameter-to-sink summaries for local callees, so a thin repository wrapper preserves taint, but a deeply re-shaped flow may need a custom passthrough pattern. Third, check whether your team wraps parameterization in a custom helper; if so, add it as a [custom sanitizer](dataflow-patterns.md). Fourth, remember that assembly-only inputs cannot match `Code` source patterns against syntax they do not have, so prefer `Method` and `Type` patterns for rules you want to work on binaries too.
+Second, check whether the flow crosses a helper method. Dosai records parameter-to-sink summaries for local callees and iterates them to a fixpoint, so wrapper-to-wrapper chains preserve taint and attribute to the outermost method. Propagation also covers shapes it used to miss: a call with a tainted argument taints its `out` and `ref` locals (`int.TryParse(term, out var v)`), `foreach` loop variables inherit the collection's taint, and element or indexer stores (`dict[k] = term`) taint the container. A flow that survives none of these may need a custom passthrough pattern. Third, check whether your team wraps parameterization in a custom helper; if so, add it as a [custom sanitizer](dataflow-patterns.md). Fourth, remember that assembly-only inputs cannot match `Code` source patterns against syntax they do not have, so prefer `Method` and `Type` patterns for rules you want to work on binaries too.
 
 ## What this lesson taught
 

@@ -7,13 +7,13 @@ using static Dosai.Tests.Roadmap.RoadmapStubs;
 namespace Dosai.Tests.Roadmap;
 
 /// <summary>
-///     Batch 3 depth and breadth: T2 lambda taint, T3 async modeling, T4 sanitizer evidence,
-///     T5 severity/suppressions, T8 IL sanitizer guards, R3 SCC, R10 generic normalization,
-///     F2 Orleans, F5 config analysis, S1 PURL expansion, O1 richer diff.
+///     Depth and breadth: lambda and async taint modeling, sanitizer evidence, severity and
+///     suppressions, IL sanitizer guards, recursion clusters, generic-id normalization, the
+///     Orleans provider, configuration analysis, PURL source expansion, and the richer diff.
 /// </summary>
 public class Batch3Tests
 {
-    // ----- T2: lambda / anonymous function taint -----
+    // ----- Lambda / anonymous function taint -----
 
     [Fact]
     public void DataFlows_TaintedForEachLambda_SeedParameterReachesSink()
@@ -55,7 +55,7 @@ public static class DelegateFlow
 """);
         var result = directory.DataFlows();
 
-        // T2: invoking a lambda stored in a variable propagates argument taint to the result.
+        // Invoking a lambda stored in a variable propagates argument taint to the result.
         Assert.Contains(result.Slices, slice => slice is { SinkCategory: "file", SinkArgument: not null } && slice.SinkArgument.Contains("transform"));
     }
 
@@ -80,7 +80,7 @@ public static class CapturedFlow
         Assert.Contains(result.Slices, slice => slice.SinkCategory == "file");
     }
 
-    // ----- T3: async/await modeling -----
+    // ----- Async/await modeling -----
 
     [Fact]
     public void DataFlows_AwaitOfAsyncHelper_CarriesTaintAndAwaitNode()
@@ -104,11 +104,11 @@ public static class AsyncFlow
         var result = directory.DataFlows();
 
         Assert.Contains(result.Slices, slice => slice.SinkCategory == "file");
-        // T3: the asynchronous boundary is visible in the trace.
+        // The asynchronous boundary is visible in the trace.
         Assert.Contains(result.Nodes, node => node.Kind == "Await");
     }
 
-    // ----- T4: sanitizer evidence and RemovesTaintKinds -----
+    // ----- Sanitizer evidence and RemovesTaintKinds -----
 
     [Fact]
     public void DataFlows_KindScopedSanitizer_RemovesOnlyNamedKinds()
@@ -138,7 +138,7 @@ public static class ScopedFlow
 """);
         var result = DataFlowAnalyzer.Analyze(directory.Path, patternsPath, null);
 
-        // T4: the sanitizer names RemovesTaintKinds=["insecure-random"]; the sql taint keeps
+        // The sanitizer names RemovesTaintKinds=["insecure-random"]; the sql taint keeps
         // flowing while the insecure-random kind is stripped (partial negative evidence recorded).
         var slice = Assert.Single(result.Slices, candidate => candidate.SinkCategory == "sql");
         Assert.Contains("sql", slice.TaintKinds);
@@ -173,7 +173,7 @@ public static class GuardedFlow
         Assert.True(guard.LineNumber > 0);
     }
 
-    // ----- T5: severity defaults + suppressions -----
+    // ----- Severity defaults + suppressions -----
 
     [Fact]
     public void Severity_DefaultsByCategory_AppliedToSlicesAndWeaknesses()
@@ -271,7 +271,7 @@ public static class ExpiredFlow
         }
     }
 
-    // ----- T8: sanitizer-guard reasoning in IL mode -----
+    // ----- Sanitizer-guard reasoning in IL mode -----
 
     [Fact]
     public void DataFlows_IlMode_RegexGuardSuppressesValidatedBranchOnly()
@@ -298,7 +298,7 @@ public static class Program
 """);
         var result = DataFlowAnalyzer.Analyze(outputDirectory);
 
-        // T8: the validated (true) branch of the guard loses the argument taint; the else branch
+        // The validated (true) branch of the guard loses the argument taint; the else branch
         // keeps it. Assembly mode used to be guard-blind: both branches sliced.
         var slices = result.Slices.Where(slice => slice.SinkCategory == "file").ToList();
         var slice = Assert.Single(slices);
@@ -307,7 +307,7 @@ public static class Program
         Assert.Equal(14, sinkNode.LineNumber);
     }
 
-    // ----- R3: SCC / recursion clusters -----
+    // ----- SCC / recursion clusters -----
 
     [Fact]
     public void Methods_MutuallyRecursivePair_SharesSccAndCluster()
@@ -336,7 +336,7 @@ public static class Recursive
         Assert.False(leaf.InRecursiveCycle);
     }
 
-    // ----- R10: generic-instantiation ID normalization -----
+    // ----- Generic-instantiation ID normalization -----
 
     [Fact]
     public void NormalizeAssemblyGraph_InstantiatedGenericId_MergesOntoOriginalDefinition()
@@ -375,7 +375,7 @@ public static class Recursive
 
         Depscan.Dosai.NormalizeAssemblyGraphToSourceIds(calls, callGraph, mappings);
 
-        // R10: the instantiated IL node merges onto the source original-definition id (one node
+        // The instantiated IL node merges onto the source original-definition id (one node
         // per definition), and the instantiation string survives as node metadata.
         var node = Assert.Single(callGraph.Nodes);
         Assert.Equal("Ns.G.Echo(T):T", node.Id);
@@ -384,7 +384,7 @@ public static class Recursive
         Assert.All(calls, call => Assert.Equal("Ns.G.Echo(T):T", call.TargetId));
     }
 
-    // ----- F2: Orleans provider -----
+    // ----- Orleans provider -----
 
     [Fact]
     public void Methods_OrleansGrain_GrainMethodEntryPointAndTaintSeeds()
@@ -427,14 +427,14 @@ public static class GrainClient
         Assert.Equal(1, slice.EntryPoints!.Count(entryPoint => entryPoint.Kind == "GrainMethod"));
         Assert.Contains(slice.Services!, service => service.Framework == "orleans" && service.Direction == Depscan.Frameworks.ServiceDirections.Outbound);
 
-        // F2: grain method parameters are rpc-message taint seeds — the flow to Process.Start is
+        // Grain method parameters are rpc-message taint seeds, the flow to Process.Start is
         // found without the namespace-prefix heuristic.
         var result = directory.DataFlows();
         Assert.Contains(result.Slices, slice2 => slice2.SinkCategory == "command");
         Assert.Contains(result.Nodes, node => node is { IsSource: true, Category: "rpc" } && node.Name == "message");
     }
 
-    // ----- F5: configuration security analysis -----
+    // ----- Configuration security analysis -----
 
     [Fact]
     public void Methods_InsecureAppSettings_ProduceConfigFindingsWithLines()
@@ -480,7 +480,7 @@ public class PingController : Microsoft.AspNetCore.Mvc.ControllerBase
         Assert.Contains(slice.SecurityFindings!, finding => finding.Properties.GetValueOrDefault("configFile") == "web.config" && finding.Properties.GetValueOrDefault("property") == "httpOnlyCookies");
     }
 
-    // ----- S1: PURL source expansion -----
+    // ----- PURL source expansion -----
 
     [Fact]
     public void PackageUrlResolver_LockFileAndProjectReferences_ResolveWithEvidence()
@@ -519,7 +519,7 @@ public class PingController : Microsoft.AspNetCore.Mvc.ControllerBase
         Assert.Contains(resolver.Diagnostics, diagnostic => diagnostic.Contains("packages.lock.json", StringComparison.Ordinal));
     }
 
-    // ----- O1: structural diff beyond slices -----
+    // ----- Structural diff beyond slices -----
 
     [Fact]
     public void Diff_TwoVersions_ReportsPerSectionDeltasAndRiskDelta()

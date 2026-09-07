@@ -108,14 +108,14 @@ public sealed class AgentContext
     public List<WeaknessCandidate> HighRiskWeaknesses { get; set; } = [];
     public List<DataFlowSlice> HighRiskSlices { get; set; } = [];
     public List<PackageReachability> ReachablePackages { get; set; } = [];
-    /// <summary>F6: bounded attack-surface groups for top-down triage.</summary>
+    /// <summary>Bounded attack-surface groups for top-down triage.</summary>
     public List<AttackSurfaceGroup> AttackSurface { get; set; } = [];
     public List<string> RelevantFiles { get; set; } = [];
     public List<string> SuggestedNextCommands { get; set; } = [];
 }
 
 /// <summary>
-///     F6: one row per entry point in the attack-surface view — what reaches it (exploit chains,
+///     One row per entry point in the attack-surface view, what reaches it (exploit chains,
 ///     weakness candidates, CWEs) so an analyst can triage top-down by exposure.
 /// </summary>
 public sealed class AttackSurfaceEntry
@@ -137,7 +137,7 @@ public sealed class AttackSurfaceEntry
 }
 
 /// <summary>
-///     F6: entry points grouped by exposure (anonymous-http, authenticated-http, rpc, cli, queue,
+///     Entry points grouped by exposure (anonymous-http, authenticated-http, rpc, cli, queue,
 ///     mcp, …) with per-group rollups. The group is the triage unit: anonymous routes with
 ///     high-severity chains sort to the top of a review.
 /// </summary>
@@ -189,9 +189,9 @@ public static class TransparencyBuilder
     };
 
     /// <summary>
-    ///     R6: CLI entry-point method names. `<Main>$` is the compiler-synthesized entry point for
-    ///     top-level statements (the default `dotnet new console` template); declared entry points —
-    ///     including the `async Task`/`Task&lt;int&gt;`/`int` variants — are all literally named Main.
+    ///     CLI entry-point method names. `<Main>$` is the compiler-synthesized entry point for
+    ///     top-level statements (the default `dotnet new console` template); declared entry points,
+    ///     including the `async Task`/`Task&lt;int&gt;`/`int` variants, are all literally named Main.
     /// </summary>
     internal static bool IsCliEntryPointName(string? name) => name is "Main" or "<Main>$";
 
@@ -541,8 +541,8 @@ public static class TransparencyBuilder
     }
 
     /// <summary>
-    ///     F6: the attack-surface view — entry points grouped by exposure, each with the exploit
-    ///     chains and weakness candidates that reach it (R2 linkage). Presentation over existing
+    ///     The attack-surface view, entry points grouped by exposure, each with the exploit
+    ///     chains and weakness candidates that reach it. Presentation over existing
     ///     facts: one linear pass over entry points, chains, and graph-linked weaknesses. Groups
     ///     order most-exposed first; entries order most-findings first.
     /// </summary>
@@ -610,7 +610,7 @@ public static class TransparencyBuilder
     private const int MaxAttackSurfaceEntryPointsPerGroup = 50;
 
     /// <summary>
-    ///     Anonymous surfaces first, authenticated/internal last — the triage order (F6). Every
+    ///     Anonymous surfaces first, authenticated/internal last, the triage order. Every
     ///     value <see cref="ExposureFor"/> can return is ranked explicitly; the bare "anonymous"
     ///     bucket (an unauthenticated entry point of an unclassified kind) must not fall through to
     ///     the default and sort below the authenticated groups.
@@ -722,7 +722,7 @@ public static class TransparencyBuilder
     }
 
     /// <summary>
-    ///     R2: resolve weakness↔entry-point linkage by graph instead of the same-file line heuristic.
+    ///     Resolve weakness↔entry-point linkage by graph instead of the same-file line heuristic.
     ///     For each slice, walk the reverse method-call graph (recorded during the operation walk)
     ///     from the taint source's method to the nearest entry point (≤ <paramref name="MaxHops"/>),
     ///     and emit a concrete route → call path → taint slice → sink chain. Also populates the
@@ -785,7 +785,7 @@ public static class TransparencyBuilder
 
         foreach (var slice in result.Slices)
         {
-            // R2: resolve the chain from the sink's method (falling back to the source's), walking
+            // Resolve the chain from the sink's method (falling back to the source's), walking
             // the reverse graph to the nearest entry point; the call path then spans the whole
             // route the attacker actually takes: entry point → … → sink frame.
             nodesById.TryGetValue(slice.SinkId, out var sinkNode);
@@ -925,8 +925,8 @@ public static class TransparencyBuilder
     }
 
     /// <summary>
-    ///     Exposure classification derived from the entry-point kind and its auth posture (R2).
-    ///     HTTP endpoints are anonymous unless authorization is explicitly required — ASP.NET Core
+    ///     Exposure classification derived from the entry-point kind and its auth posture.
+    ///     HTTP endpoints are anonymous unless authorization is explicitly required, ASP.NET Core
     ///     serves unannotated endpoints without authentication by default.
     /// </summary>
     public static string ExposureFor(EntryPoint entryPoint)
@@ -944,11 +944,11 @@ public static class TransparencyBuilder
     }
 
     /// <summary>
-    ///     T5: apply a suppressions file (file+line, slice key, weakness id, or category — an entry
+    ///     Apply a suppressions file (file+line, slice key, weakness id, or category, an entry
     ///     matches only when all its present fields match, with an optional expiry). Matching,
     ///     non-expired suppressions remove slices and their weakness candidates; expired
     ///     suppressions re-surface the flow. Weakness-only suppressions (a weaknessId, or a
-    ///     category with no matching slice — e.g. statically-derived crypto findings) apply even
+    ///     category with no matching slice, e.g. statically-derived crypto findings) apply even
     ///     when no slice matched. Best-effort: an unreadable or malformed file becomes a
     ///     diagnostic, never an analysis failure.
     /// </summary>
@@ -1020,13 +1020,12 @@ public static class TransparencyBuilder
         "prompt" => "PromptInjectionCandidate",
         "mcp" => "McpToolInjectionCandidate",
         "mcp-egress" => "McpEgressCandidate",
-        // W6: the crypto-family sink categories used to collapse into DangerousDataFlowCandidate
+        // The crypto-family sink categories used to collapse into DangerousDataFlowCandidate
         // with no CWE even though the crypto pack ships them by default.
         "crypto" => "InsecureCryptoUsageCandidate",
         "jwt" => "JwtValidationCandidate",
         "certificate" => "CertificateValidationCandidate",
         "tls" => "TlsValidationCandidate",
-        // W1–W5/W8 weakness classes.
         "xss" => "XssCandidate",
         "xxe" => "XxeCandidate",
         "ldap" => "LdapInjectionCandidate",
@@ -1068,7 +1067,7 @@ public static class TransparencyBuilder
     };
 
     /// <summary>
-    ///     Default severity per sink category (T5). Slices/weaknesses take the pattern's explicit
+    ///     Default severity per sink category. Slices/weaknesses take the pattern's explicit
     ///     Severity when set, otherwise this table, otherwise "medium". Injection primitives that
     ///     yield code execution are high; noisy-but-low-impact classes stay low so CI gating on
     ///     "new high-severity slices" keeps a useful signal.
@@ -1100,8 +1099,8 @@ public static class TransparencyBuilder
     }
 
     /// <summary>
-    ///     T5: resolves a slice's severity, demoting one rank when the matched pattern is
-    ///     Low-confidence. The CI gate story is "new high-severity slices" — a Low-confidence
+    ///     Resolves a slice's severity, demoting one rank when the matched pattern is
+    ///     Low-confidence. The CI gate story is "new high-severity slices", a Low-confidence
     ///     heuristic match (e.g. a Code-fallback sink) must not trip it on its own.
     /// </summary>
     public static string SeverityForPattern(string? category, string? patternSeverity, string? patternConfidence)
@@ -1179,7 +1178,7 @@ public static class TransparencyBuilder
 
         if (result.AttackSurface.Count > 0)
         {
-            // F6: one table an analyst can triage top-down — groups order most-exposed first and
+            // One table an analyst can triage top-down, groups order most-exposed first and
             // each group's rows order most-findings first.
             lines.Add("## Attack surface (grouped by exposure)");
             lines.Add(string.Empty);
@@ -1210,7 +1209,7 @@ public static class TransparencyBuilder
     }
 
     /// <summary>
-    ///     O1: structural diff beyond slices. Keyed comparisons for slices (severity-aware), entry
+    ///     Structural diff beyond slices. Keyed comparisons for slices (severity-aware), entry
     ///     points (kind+verb+route), weakness candidates (kind+CWE+sink location), and package purls,
     ///     plus a single CI-decidable RiskDelta summary.
     /// </summary>

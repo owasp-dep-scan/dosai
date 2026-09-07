@@ -13,15 +13,20 @@ printf '{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n' | \
   dotnet run --project ./Dosai/Dosai.csproj -- mcp --path ./src
 ```
 
-Five tools come back:
+Ten tools come back:
 
-| Tool                  | Answers                                                  |
-| --------------------- | -------------------------------------------------------- |
-| `dosai.methods`       | What is here: methods, endpoints, services, call graph   |
-| `dosai.dataflows`     | Where can untrusted input go: full slices and weaknesses |
-| `dosai.crypto`        | Crypto assets, materials, findings, CBOM                 |
-| `dosai.agent_context` | Compact triage context for a first look                  |
-| `dosai.query`         | Filter any Dosai JSON to just the relevant records       |
+| Tool                   | Answers                                                                          |
+| ---------------------- | -------------------------------------------------------------------------------- |
+| `dosai.methods`        | What is here: methods, endpoints, services, call graph, reachability, dead code  |
+| `dosai.dataflows`      | Where can untrusted input go: slices, weaknesses, exploit chains, attack surface |
+| `dosai.crypto`         | Crypto assets, materials, findings, CBOM                                         |
+| `dosai.agent_context`  | Compact triage context, including a bounded attack-surface view                  |
+| `dosai.services`       | Service inventory with trust zones and data classification                       |
+| `dosai.ai_components`  | Models, MCP tools, prompts, agents                                               |
+| `dosai.exploit_chains` | Entry point to sink chains with exposure classification                          |
+| `dosai.attack_surface` | Entry points grouped by exposure with the chains and weaknesses that reach them  |
+| `dosai.reachability`   | Per-node reachability facts; pass `nodeId` for one node                          |
+| `dosai.query`          | Filter any Dosai JSON to just the relevant records                               |
 
 Call one for real:
 
@@ -38,21 +43,25 @@ The loop that works in practice starts broad and cheap, then pays for detail onl
 
 ```mermaid
 flowchart TD
-    Start["agent receives a task"] --> Context["dosai.agent_context<br/>summary, entry points, high-risk items"]
-    Context --> Decide{"Where to<br/>look deeper?"}
+    Start["agent receives a task"] --> Context["dosai.agent_context<br/>summary, entry points, attack surface"]
+    Context --> Surface["dosai.attack_surface<br/>anonymous exposure first"]
+    Surface --> Chains["dosai.exploit_chains<br/>entry point to sink path"]
+    Chains --> Decide{"Where to<br/>look deeper?"}
     Decide --> Query["dosai.query on saved JSON<br/>slices, weaknesses, packages"]
+    Decide --> Reach["dosai.reachability<br/>depth, fan-in/out, dead code for one node"]
     Decide --> Methods["dosai.methods<br/>endpoints and call graph"]
     Decide --> Flows["dosai.dataflows<br/>with project patterns"]
     Query --> Findings["Interpret findings,<br/>propose a fix or a report"]
+    Reach --> Findings
     Methods --> Findings
     Flows --> Findings
 ```
 
-Concretely, an agent triaging an injection report would call `dosai.agent_context` once, read the suggested next commands and relevant files, then call `dosai.query` with `slices[sinkCategory=command]` against the data-flow JSON, and only then open the three or four files the slice points at. The agent never loads the source tree into context, and it never queries vulnerability databases, because Dosai intentionally does not either.
+Concretely, an agent triaging an injection report would call `dosai.agent_context` once, read the suggested next commands and the attack-surface view, pull the route-to-sink path with `dosai.exploit_chains`, then call `dosai.query` with `slices[sinkCategory=command]` against the data-flow JSON, and only then open the three or four files the slice points at. When a specific method needs context (how deep is it, who calls it, is it dead), `dosai.reachability` with its `nodeId` argument answers in one small payload. The agent never loads the source tree into context, and it never queries vulnerability databases, because Dosai intentionally does not either.
 
 ## Prompt-size discipline
 
-Full `dataflows` JSON can be large. The ordering that keeps prompts small is: `agent-context` first, `query` second, `report` when a human handoff is needed, and full `dataflows` or `methods` JSON only when exact nodes, edges, and method summaries matter. `dosai.query` can also generate and filter in one step when `input` is omitted, which saves a round trip.
+Full `dataflows` JSON can be large. The ordering that keeps prompts small is: `agent-context` first, `attack_surface` and `exploit_chains` to scope, `reachability` with a `nodeId` for single-method facts, `query` for exact records, `report` when a human handoff is needed, and full `dataflows` or `methods` JSON only when exact nodes, edges, and method summaries matter. `dosai.query` can also generate and filter in one step when `input` is omitted, which saves a round trip, and aliases like `exploitChains`, `sanitizedFlows`, `attackSurface`, and `deadCode` keep each response to one collection.
 
 ## Confine the server
 
@@ -64,7 +73,7 @@ dotnet run --project ./Dosai/Dosai.csproj -- mcp \
   --path /workspace/app
 ```
 
-With `--mcp-root` set, every `path` argument and the `input` file of `dosai.query` must resolve under that directory, or the tool call fails. Two defaults stay locked regardless of flags: prompt text is never exposed through MCP, and the server is designed for local stdio use, not as an authenticated network service.
+With `--mcp-root` set, every `path` argument and the `input` file of `dosai.query` must resolve under that directory, or the tool call fails. A second flag bounds what the transport-integrity analysis treats as approved: `--mcp-allowlist FILE` lists the stdio transport commands (one per line) your policy allows, and MCP transport findings mark anything outside it. Two defaults stay locked regardless of flags: prompt text is never exposed through MCP, and the server is designed for local stdio use, not as an authenticated network service.
 
 ```text
    Agent (trusted client)

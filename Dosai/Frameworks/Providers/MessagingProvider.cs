@@ -167,7 +167,7 @@ foreach (var tree in ctx.CSharpTrees)
                     service.Properties["messageType"] = messageType;
                 }
 
-                // Look for entity name: MassTransit ReceiveEndpoint("name", ...), [EntityName("...")]
+                // Look for entity name: MassTransit ReceiveEndpoint("name",...), [EntityName("...")]
                 string? entityName = null;
                 var fileText = ctx.TextFor(tree);
 
@@ -179,7 +179,7 @@ foreach (var tree in ctx.CSharpTrees)
                     entityName = ProviderHelpers.AttributeArgumentText(entityNameAttr, model);
                 }
 
-                // Look for ReceiveEndpoint("queue-name", ...) referencing this consumer type in the same file
+                // Look for ReceiveEndpoint("queue-name",...) referencing this consumer type in the same file
                 if (entityName is null)
                 {
                     foreach (var invocation in root.DescendantNodes().OfType<InvocationExpressionSyntax>())
@@ -505,7 +505,7 @@ foreach (var tree in ctx.CSharpTrees)
                     }
                 }
 
-                // RabbitMQ: IModel.BasicConsume(queue: ...) or IBasicConsumer implementations
+                // RabbitMQ: IModel.BasicConsume(queue:...) or IBasicConsumer implementations
                 if (rawFramework is null && symbol is not null && ProviderHelpers.ImplementsAny(symbol, "IBasicConsumer"))
                 {
                     rawFramework = "rabbitmq";

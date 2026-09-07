@@ -5,7 +5,7 @@ using Xunit;
 
 namespace Dosai.Tests.Roadmap;
 
-/// <summary>Shared helpers for roadmap-batch tests: temp projects, source fixtures, analyzer entry points.</summary>
+/// <summary>Shared helpers for the analysis test suites: temp projects, source fixtures, analyzer entry points.</summary>
 public sealed class RoadmapTemporaryDirectory : IDisposable
 {
     public string Path { get; } = System.IO.Path.Combine(System.IO.Path.GetTempPath(), System.IO.Path.GetRandomFileName());
@@ -122,7 +122,7 @@ namespace MongoDB.Bson
     // W4 sinks mirror the REAL API shapes: ILogger.Log* and IHeaderDictionary.Append are
     // extension methods (Microsoft.Extensions.Logging.LoggerExtensions /
     // Microsoft.AspNetCore.Http.HeaderDictionaryExtensions), so the stubs declare extension
-    // classes — instance-method stubs would silently pass against the wrong pattern anchor.
+    // classes, instance-method stubs would silently pass against the wrong pattern anchor.
     public const string LoggingStubs = """
 // Extension methods only resolve when their namespace is in scope; the analyzed fixture files
 // call logger.LogError(...) without usings, so bring both namespaces in globally.

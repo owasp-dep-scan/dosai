@@ -50,7 +50,7 @@ public sealed partial class LlmSdkProvider : IFrameworkProvider
             }
 
             // System prompts: string literals passed as system messages. `Create` is deliberately NOT
-            // matched bare — it is one of the most common method names in .NET, and matching it meant
+            // matched bare, it is one of the most common method names in.NET, and matching it meant
             // any long string argument to any Create() in a file that merely mentioned "OpenAI" was
             // recorded as a system prompt. Connection strings were being harvested that way.
             foreach (var invocation in root.DescendantNodes().OfType<InvocationExpressionSyntax>().Where(IsSystemPromptCall))
@@ -71,7 +71,7 @@ public sealed partial class LlmSdkProvider : IFrameworkProvider
                     continue;
                 }
 
-                // new ChatMessage { ... } has no argument list; only parenthesized forms carry one.
+                // new ChatMessage {... } has no argument list; only parenthesized forms carry one.
                 if (creation.ArgumentList is not { Arguments: { Count: 2 } arguments })
                 {
                     continue;

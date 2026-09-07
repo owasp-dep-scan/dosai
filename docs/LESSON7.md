@@ -12,7 +12,7 @@ flowchart TD
     Checkout --> Setup["Setup .NET SDK"]
     Setup --> Run["dataflows on the source tree"]
     Run --> Diff["diff against stored baseline"]
-    Diff --> Gate{"New flow classes or<br/>high-confidence weaknesses?"}
+    Diff --> Gate{"RiskDelta: new high-severity slices,<br/>new anonymous endpoints?"}
     Gate -->|"no"| Pass["Pass, publish new baseline artifact"]
     Gate -->|"yes"| Fail["Flag for review with diff and report"]
     Run --> Report["report for the PR comment"]
@@ -50,20 +50,27 @@ dotnet run --project ./Dosai -- diff \
   --o /tmp/dosai-diff.json
 ```
 
-The diff is semantic, not textual. Slices are compared as keyed sets using source category, sink category, and sink argument, and statistics are compared separately. That means renaming a variable, reformatting a file, or reordering output does not create churn, while a genuinely new `http → sql` flow class stands out immediately. Store the baseline JSON as a workflow artifact or a committed file, and refresh it only when a human has reviewed the diff.
+The diff is semantic, not textual. Slices are compared as keyed sets using source category, sink category, and sink argument, now with severity attached, and statistics are compared separately. That means renaming a variable, reformatting a file, or reordering output does not create churn, while a genuinely new `http → sql` flow class stands out immediately. Since schema 4.1.0 the diff also reports added and removed entry points, weaknesses, and packages, and closes with a single `RiskDelta` summary built for CI decisions: `NewHighSeveritySlices`, `NewMediumSeveritySlices`, `NewLowSeveritySlices`, `NewAnonymousEndpoints`, `NewWeaknessKinds`, and `NewlyReachablePackages`. A gate can read one object instead of re-deriving counts from the slice lists. Security finding ids are content-derived (kind, file, and line), so findings that reappear after refactoring keep a stable identity across diffs and suppression keys. Store the baseline JSON as a workflow artifact or a committed file, and refresh it only when a human has reviewed the diff.
 
 ## Apply a query gate
 
-Gates work best when they encode decisions your team already made. High-confidence candidates are a common gate because their evidence is entry-point-linked:
+Gates work best when they encode decisions your team already made. High-severity candidates are the natural gate since severity became a first-class field: injection primitives default to `high`, a pattern can override its category default, and a Low-confidence match is demoted one rank, so a high-severity gate never fires on heuristic evidence alone.
 
 ```bash
 dotnet run --project ./Dosai -- query \
   --input /tmp/dosai-dataflows.json \
-  --query 'weaknesses[confidence=High]' \
+  --query 'weaknesses[severity=high]' \
   --o /tmp/high-risk.json
+
+dotnet run --project ./Dosai -- query \
+  --input /tmp/dosai-dataflows.json \
+  --query 'weaknesses[severity=high] count' \
+  --o /tmp/high-risk-count.json
 ```
 
-Other gates that work well in practice: `slices[sinkCategory=deserialization]` where the team policy is no BinaryFormatter anywhere, `packages[reachable=true]` joined against an advisory list, or `nodes[isSink=true && fileName~=<changed files>]` scoped to the pull request. Validate graph integrity directly against the JSON as well: every edge endpoint must exist as a node, which is a five-line check in any scripting language.
+The trailing `count` returns `{"count": n}`, which is the shape a shell gate wants. Other gates that work well in practice: `slices[sinkCategory=deserialization]` where the team policy is no BinaryFormatter anywhere, `exploitChains[exposure=anonymous-http]` to flag anything new that an unauthenticated caller can reach, `packages[reachable=true]` joined against an advisory list, or `nodes[isSink=true && fileName~=<changed files>]` scoped to the pull request. Validate graph integrity directly against the JSON as well: every edge endpoint must exist as a node, which is a five-line check in any scripting language.
+
+One more gate input keeps accepted findings from re-tripping the job every run. Pass `--suppress suppressions.json` to `dataflows` and `agent-context`; an entry matches only when every field present in it matches (file plus line, sliceKey, weaknessId, or category), and an optional `expires` date makes accepted findings resurface automatically, which turns the suppressions file into a review backlog with a built-in clock.
 
 ## Report for humans
 
@@ -73,7 +80,7 @@ dotnet run --project ./Dosai -- report \
   --o /tmp/dosai-report.md
 ```
 
-The report summarizes counts, entry points, weakness candidates, package reachability, and notable slices in deterministic Markdown. Attach it to the pull request; keep the JSON as the canonical record for the diff and the queries.
+The report summarizes counts, entry points, weakness candidates with their severities, package reachability, and notable slices in deterministic Markdown, plus three sections added in schema 4.1.0: sanitized flows (the negative evidence showing which sanitizers and guards suppressed what), exploit chains (each entry point, call path, and sink with its exposure), and the attack surface (entry points grouped by exposure, anonymous first, with the weaknesses and chains that reach each group). Attach it to the pull request; keep the JSON as the canonical record for the diff and the queries.
 
 ## A complete GitHub Actions job
 
@@ -97,6 +104,7 @@ jobs:
         run: |
           dotnet run --project dosai/Dosai -- dataflows \
             --path ./src \
+            --suppress ./security/suppressions.json \
             --o /tmp/dosai-dataflows.json
       - name: Diff against baseline
         run: |
@@ -104,12 +112,12 @@ jobs:
             --old ./security/baseline-dataflows.json \
             --new /tmp/dosai-dataflows.json \
             --o /tmp/dosai-diff.json
-      - name: High-confidence gate
+      - name: High-severity gate
         run: |
           dotnet run --project dosai/Dosai -- query \
             --input /tmp/dosai-dataflows.json \
-            --query 'weaknesses[confidence=High]' \
-            --o /tmp/high-risk.json
+            --query 'weaknesses[severity=high] count' \
+            --o /tmp/high-risk-count.json
       - name: Report
         run: |
           dotnet run --project dosai/Dosai -- report \
@@ -120,7 +128,7 @@ jobs:
           name: dosai-results
           path: |
             /tmp/dosai-diff.json
-            /tmp/high-risk.json
+            /tmp/high-risk-count.json
             /tmp/dosai-report.md
 ```
 

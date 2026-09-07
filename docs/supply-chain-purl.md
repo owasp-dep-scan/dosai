@@ -20,20 +20,30 @@ NuGet has no namespace component. Package names are case-preserving and generall
 
 ## Data sources
 
-`PackageUrlResolver` reads:
+`PackageUrlResolver` reads sources in order of trust:
 
-- `project.assets.json`
-- `*.deps.json`
+1. `project.assets.json` (restore output)
+2. `*.deps.json` (build output)
+3. `packages.lock.json` (NuGet lock file, schema 4.1.0)
+4. `paket.lock` (Paket lock file, schema 4.1.0)
+5. `packages.config` (legacy packages config, schema 4.1.0)
+6. direct `.csproj` `<PackageReference>` entries (schema 4.1.0)
 
-These files are produced by restore/build and contain package libraries plus compile/runtime assets.
+The first two are produced by restore/build and contain package libraries plus compile/runtime assets. The remaining four let unrestored trees, source-only checkouts, and CI caches that skip restore still resolve packages. Lock files are reproducible, so they outrank the config and project-file fallbacks; direct `<PackageReference>` parsing is the lowest-confidence source because floating versions and Directory.Build.props indirection are invisible to it.
+
+When two sources disagree on the version of the same package, the resolver keeps the most-trusted answer and records the conflict as a diagnostic. `ResolutionFacts` exposes, per package, which source file produced the purl (name, version, purl, source, confidence), so downstream tools can weigh the evidence.
 
 ```mermaid
 flowchart LR
     Assets[project.assets.json] --> Resolver[PackageUrlResolver]
     Deps[*.deps.json] --> Resolver
+    Locks[packages.lock.json / paket.lock] --> Resolver
+    Config[packages.config] --> Resolver
+    Csproj[csproj PackageReference] --> Resolver
     Resolver --> AssemblyMap[assembly -> purl]
     Resolver --> PackageMap[package -> purl]
     Resolver --> NamespacePrefix[namespace prefix -> purl]
+    Resolver --> Facts[ResolutionFacts + conflict diagnostics]
 ```
 
 ## Resolution order
@@ -169,7 +179,9 @@ Pattern-provided PURLs take precedence over resolver-derived PURLs for matching 
 ## ASCII data model
 
 ```text
-project.assets.json / *.deps.json
+project.assets.json / *.deps.json        (restore/build output)
+packages.lock.json / paket.lock          (lock files)
+packages.config / csproj references      (fallbacks)
         │
         ▼
   PackageUrlResolver
@@ -178,12 +190,13 @@ project.assets.json / *.deps.json
         ├── MethodCalls[].Purl
         ├── CallGraph.Nodes[].Purl
         ├── CallGraph.Edges[].TargetPurl
-        └── DataFlow.Slices[].Purls[]
+        ├── DataFlow.Slices[].Purls[]
+        └── ResolutionFacts + diagnostics (which source, which version)
 ```
 
 ## Limitations
 
-- Source-only dependencies without restore metadata may not resolve.
-- Multiple packages can expose the same namespace prefix; Dosai chooses the longest prefix and first discovered package.
+- Dependencies that appear in none of the readable sources (for example transitives in an unrestored tree with no lock file) may not resolve.
+- Multiple packages can expose the same namespace prefix; Dosai chooses the longest prefix and first discovered package, and version conflicts across sources are reported as diagnostics.
 - Runtime binding redirects and assembly unification are not modeled.
 - PURL enrichment is not a vulnerability verdict; it is correlation metadata.

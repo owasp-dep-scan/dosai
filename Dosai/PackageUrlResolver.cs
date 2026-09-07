@@ -4,7 +4,7 @@ using System.Xml.Linq;
 
 namespace Depscan;
 
-/// <summary>One resolved package fact: which source file produced the purl (S1 Evidence).</summary>
+/// <summary>One resolved package fact: which source file produced the purl.</summary>
 public sealed record PackageResolutionFact(string Name, string Version, string Purl, string Source, string Confidence);
 
 public sealed partial class PackageUrlResolver
@@ -37,7 +37,7 @@ public sealed partial class PackageUrlResolver
     private readonly Dictionary<string, string> _assemblyToPurl = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _packageToPurl = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, (string Version, string Source)> _packageVersions = new(StringComparer.OrdinalIgnoreCase);
-    // S1: version conflicts collected during the read and aggregated once per package — a
+    // Version conflicts collected during the read and aggregated once per package, a
     // multi-project/multi-TFM solution would otherwise emit thousands of duplicate lines.
     private readonly Dictionary<string, List<(string Version, string Source)>> _versionConflicts = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<(string Prefix, string Purl)> _namespacePrefixes = [];
@@ -46,10 +46,10 @@ public sealed partial class PackageUrlResolver
     {
     }
 
-    /// <summary>S1: per-source resolution facts (which lock/config file produced each purl) for downstream trust decisions.</summary>
+    /// <summary>Per-source resolution facts (which lock/config file produced each purl) for downstream trust decisions.</summary>
     public List<PackageResolutionFact> ResolutionFacts { get; } = [];
 
-    /// <summary>S1: best-effort diagnostics — files consumed, and version conflicts across sources (the THREAT_MODEL ambiguity item).</summary>
+    /// <summary>Best-effort diagnostics, files consumed, and version conflicts across sources (see docs/THREAT_MODEL.md).</summary>
     public List<string> Diagnostics { get; } = [];
 
     public static PackageUrlResolver Create(string path)
@@ -61,7 +61,7 @@ public sealed partial class PackageUrlResolver
             return resolver;
         }
 
-        // S1: sources in order of trust. Lock files are reproducible, so they win over restore
+        // Sources in order of trust. Lock files are reproducible, so they win over restore
         // outputs; project-file references are lowest (versions may be floating or absent).
         foreach (var lockFile in SafeEnumerateFiles(root, "packages.lock.json"))
         {
@@ -293,7 +293,7 @@ public sealed partial class PackageUrlResolver
     }
 
     /// <summary>
-    ///     S1: NuGet lock file (packages.lock.json) — the most reproducible source. Version comes
+    ///     NuGet lock file (packages.lock.json), the most reproducible source. Version comes
     ///     from the per-framework "resolved" pin.
     /// </summary>
     private void ReadPackagesLockJson(string filePath)
@@ -338,7 +338,7 @@ public sealed partial class PackageUrlResolver
         }
     }
 
-    /// <summary>S1: Paket lock file — `NUGET` section lines like `Newtonsoft.Json (13.0.3)`.</summary>
+    /// <summary>Paket lock file, `NUGET` section lines like `Newtonsoft.Json (13.0.3)`.</summary>
     private void ReadPaketLock(string filePath)
     {
         try
@@ -386,7 +386,7 @@ public sealed partial class PackageUrlResolver
         }
     }
 
-    /// <summary>S1: legacy packages.config — direct id/version pairs.</summary>
+    /// <summary>Legacy packages.config, direct id/version pairs.</summary>
     private void ReadPackagesConfig(string filePath)
     {
         try
@@ -418,7 +418,7 @@ public sealed partial class PackageUrlResolver
     }
 
     /// <summary>
-    ///     S1: direct &lt;PackageReference&gt; parsing for unrestored trees. Lowest confidence —
+    ///     Direct &lt;PackageReference&gt; parsing for unrestored trees. Lowest confidence:
     ///     versions may be absent (floating) or overridden by a lock file that is read first.
     /// </summary>
     private void ReadProjectReferences(string filePath)
@@ -471,8 +471,8 @@ public sealed partial class PackageUrlResolver
 
     private void AddPackage(string packageName, string version, string source, string purl, string confidence)
     {
-        // S1 ambiguity list: when two sources disagree on the version of the same package, record
-        // it for the aggregated per-package diagnostic — the purl keeps the first (most-trusted)
+        // Ambiguity list: when two sources disagree on the version of the same package, record
+        // it for the aggregated per-package diagnostic; the purl keeps the first (most-trusted)
         // source's answer.
         if (_packageVersions.TryGetValue(packageName, out var existing) && !string.IsNullOrEmpty(existing.Version) && !string.IsNullOrEmpty(version) && !string.Equals(existing.Version, version, StringComparison.OrdinalIgnoreCase))
         {

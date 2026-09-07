@@ -34,6 +34,11 @@ Call graph node attributes:
 - `file`
 - `external`
 - `purl`
+- `reachableEntryPoints` (bounded list of entry-point ids that reach the node, schema 4.1.0)
+- `minDepthFromEntryPoint` (minimum call distance from the nearest reachable entry point)
+- `fanIn` / `fanOut` (distinct callers and callees)
+- `inRecursiveCycle` (membership in a recursion cluster)
+- `genericInstantiation` (original instantiated IL id when the node was normalized onto its source original definition)
 
 Call graph edge attributes:
 
@@ -41,6 +46,8 @@ Call graph edge attributes:
 - `sourcePurl`
 - `targetPurl`
 - `location`
+- `callSiteCount` (distinct call sites after same-pair edge collapsing, schema 4.1.0)
+- `dispatchConfidence` (`exact`, `rta-candidate`, or `cha-candidate` for inferred virtual and interface edges)
 
 ## Data-flow export
 

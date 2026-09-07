@@ -58,7 +58,7 @@ public sealed class FrameworkContext
 
     /// <summary>
     ///     Mount points discovered by other providers (MapHub, MapGrpcService, MapGraphQL, MapMcp,
-    ///     ...): the route lives at the mount, not the class, so the owning provider reads it from here.
+    ///    ...): the route lives at the mount, not the class, so the owning provider reads it from here.
     /// </summary>
     public List<MountPoint> MountPoints { get; } = [];
 
@@ -111,7 +111,7 @@ public sealed class FrameworkContext
         return urls;
     }
 
-    /// <summary>True when any keyword appears in the tree's text — the cheap per-file provider gate.</summary>
+    /// <summary>True when any keyword appears in the tree's text, the cheap per-file provider gate.</summary>
     public bool TextContainsAny(SyntaxTree tree, params string[] keywords)
     {
         var text = TextFor(tree);
@@ -125,7 +125,7 @@ public sealed class FrameworkContext
 
     /// <summary>
     ///     CI-policy allowlist (--mcp-allowlist) of MCP stdio transport commands whose launches are
-    ///     approved; null disables allowlist suppression (S2).
+    ///     approved; null disables allowlist suppression.
     /// </summary>
     public IReadOnlySet<string>? McpAllowlist { get; internal set; }
 
@@ -250,7 +250,7 @@ public sealed class FrameworkContext
     /// <remarks>
     ///     This is the difference between "this endpoint has no <c>[Authorize]</c>, so it is anonymous"
     ///     and "this endpoint has no <c>[Authorize]</c>, and it does not need one". Without the signal,
-    ///     an inbound service carrying no authorization metadata cannot honestly be called public — and
+    ///     an inbound service carrying no authorization metadata cannot honestly be called public, and
     ///     a service that is never called public never gets its trust boundary evaluated. Syntactic
     ///     evidence only, so callers must not raise confidence above <see cref="ConfidenceTiers.Syntactic" />
     ///     on the strength of it.

@@ -46,7 +46,7 @@ dotnet run --project ./Dosai/Dosai.csproj -- dataflows \
   --print
 ```
 
-Because `Main(string[] args)` matches the built-in `cli` source pattern and `Process.Start` matches the built-in `command` sink pattern, the run produces one slice and one weakness candidate without any configuration.
+The program has no declared `Main`, but the compiler synthesizes one for top-level statements and Dosai reports it as `<Main>$`. Its `args` parameter matches the built-in `cli` source pattern, `Process.Start` matches the built-in `command` sink pattern, and the run produces one slice and one weakness candidate without any configuration.
 
 ```text
 Dosai Data-flow Analysis
@@ -72,7 +72,7 @@ Read it like a stack trace: the tainted value starts at `args`, moves through th
 ```bash
 dotnet run --project ./Dosai/Dosai.csproj -- query \
   --input /tmp/injector-dataflows.json \
-  --query 'weaknesses[confidence=High]' \
+  --query 'weaknesses[severity=high]' \
   --o /tmp/high-risk.json
 ```
 
@@ -82,8 +82,8 @@ Each command writes one primary JSON file, with optional graph sidecars when you
 
 ```text
 /tmp
-├── injector-dataflows.json        DataFlowResult: nodes, edges, slices, weaknesses
-├── dosai-methods.json             MethodsSlice: methods, endpoints, call graph
+├── injector-dataflows.json        DataFlowResult: nodes, edges, slices, weaknesses, exploit chains, attack surface, sanitized flows
+├── dosai-methods.json             MethodsSlice: methods, endpoints, call graph, reachability, dead code, security findings
 ├── dosai-callgraph.graphml        Call graph sidecar for yEd or Gephi
 └── dosai-cbom.json                CycloneDX-style CBOM from the crypto command
 ```
@@ -92,6 +92,6 @@ The JSON is the canonical record. Reports and printed paths are conveniences for
 
 ## Commands worth learning first
 
-`methods` answers "what is here": methods, API endpoints, services, call graph, and package reachability. `dataflows` answers "where can untrusted input go": slices from sources to sinks with confidence and CWE-mapped weakness candidates. `query` filters either JSON in scripts. Those three cover most day-to-day review, and the remaining commands (`crypto`, `agent-context`, `report`, `diff`, `mcp`) layer on top of them.
+`methods` answers "what is here": methods, API endpoints, services, call graph, package reachability, per-node reachability facts, dead code, and security findings. `dataflows` answers "where can untrusted input go": slices from sources to sinks with confidence, severity, and CWE-mapped weakness candidates, plus the exploit chains and attack-surface view that connect them to entry points. `query` filters either JSON in scripts. Those three cover most day-to-day review, and the remaining commands (`crypto`, `agent-context`, `report`, `diff`, `mcp`) layer on top of them.
 
 The [command reference](commands.md) documents every flag, and [lesson 1](LESSON1.md) turns this quickstart into a full walkthrough with interpretation practice.

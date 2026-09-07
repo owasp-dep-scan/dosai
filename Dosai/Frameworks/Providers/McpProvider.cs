@@ -8,7 +8,7 @@ namespace Depscan.Frameworks.Providers;
 ///     Model Context Protocol servers and clients. Server side: [McpServerToolType]/[McpServerTool]
 ///     (including tools attributed on ordinary MVC controllers), prompts, resources, transport
 ///     registration (stdio vs http, stateless mode), and per-tool JSON Schemas derived from the
-///     method signature plus [Description] attributes — exactly what the SDK sends to the model.
+///     method signature plus [Description] attributes, exactly what the SDK sends to the model.
 ///     Client side: McpClientFactory transports become outbound services; StdioClientTransport's
 ///     command/arguments record which external MCP server binary this app launches.
 /// </summary>
@@ -158,7 +158,7 @@ public sealed class McpProvider : IFrameworkProvider
             return;
         }
 
-        // WithToolsFromAssembly() exposes every attributed type in the assembly — a broader surface
+        // WithToolsFromAssembly() exposes every attributed type in the assembly, a broader surface
         // than an explicit WithTools<T>() list.
         if (registrationText.Contains("WithToolsFromAssembly", StringComparison.Ordinal))
         {
@@ -411,7 +411,7 @@ internal static class ToolSchemaBuilder
     /// <remarks>
     ///     Getting this set wrong is not cosmetic in either direction: a host-bound parameter left in
     ///     the schema is advertised to the model as a required argument that the SDK will never accept,
-    ///     and — because MCP tool arguments are seeded as attacker-controlled taint sources — it also
+    ///     and, because MCP tool arguments are seeded as attacker-controlled taint sources, it also
     ///     invents an untrusted input that no attacker can actually reach.
     /// </remarks>
     internal static bool IsInfrastructureParameter(ParameterSyntax parameter, string typeName) =>

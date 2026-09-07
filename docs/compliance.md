@@ -19,7 +19,7 @@ The CBOM lists crypto assets (algorithms, libraries, protocols, certificates, ke
 
 Dosai properties preserve the audit trail inside the CBOM. The important ones are `dosai:crypto:family`, `dosai:crypto:strength`, `dosai:crypto:evidenceType`, `dosai:crypto:reachableFromEntryPoint`, `dosai:crypto:entryPointIds`, `dosai:location`, and the correlation properties `dosai:crypto:dataFlowSliceIds`, `dosai:crypto:sourceMaterialIds`, and `dosai:crypto:sinkOperationIds`. When Dosai can trace a hardcoded key to the API call that uses it, those properties connect the material to the operation without manual cross-referencing.
 
-Reachability is attached where the call graph supports it: a finding that sits on a path from a CLI or API entry point is flagged `reachableFromEntryPoint`. Reachability is best-effort and never blocks analysis; when symbol resolution is incomplete, Dosai records diagnostics and falls back to file and method-name correlation. Treat reachability as prioritization evidence, not as proof that a finding is exploitable.
+Reachability is attached where the call graph supports it: a finding that sits on a path from a CLI or API entry point is flagged `reachableFromEntryPoint`. Reachability never blocks analysis, and since schema 4.1.0 a reachability claim requires a graph path: the older whole-file fallback no longer marks crypto usage in endpoint-bearing files as reachable, and when the fallback is gated off a diagnostic names the file. Treat reachability as prioritization evidence, not as proof that a finding is exploitable.
 
 For full path inspection, export graph sidecars next to the CBOM:
 
@@ -35,7 +35,7 @@ See [Cryptography and CBOM analysis](./crypto-cbom.md) for the complete evidence
 
 ## Supply-chain inventory and SBOM correlation
 
-Dosai enriches methods, call graph edges, and data-flow slices with NuGet Package URLs (PURLs) inferred from `project.assets.json` and `*.deps.json` restore metadata. The format is `pkg:nuget/<PackageName>@<Version>`.
+Dosai enriches methods, call graph edges, and data-flow slices with NuGet Package URLs (PURLs). The resolver reads `project.assets.json` and `*.deps.json` restore metadata first, and falls back to `packages.lock.json`, `paket.lock`, `packages.config`, and direct `.csproj` `<PackageReference>` entries when restore output is absent, recording which source produced each purl and diagnosing version conflicts between sources (schema 4.1.0). The format is `pkg:nuget/<PackageName>@<Version>`.
 
 For audits, the most useful output is `PackageReachability`: for each package Dosai observes, it records whether the package is reachable from an entry point and attaches source-file occurrence locations. Occurrence evidence is deliberately restricted to source files such as `.cs`, `.vb`, `.fs`, and `.R`, because assembly-only fallback paths are weak evidence for source-oriented SBOMs.
 
@@ -58,11 +58,13 @@ For audits, the most useful output is `PackageReachability`: for each package Do
 
 Typical audit questions this answers: which restored packages does the application actually call, and where in the source do those calls happen. When a vulnerability advisory names a package, the PURL fields on slices and call graph edges let you check whether untrusted input can reach the affected API, which is the input for a risk decision rather than the decision itself.
 
-PURL resolution is best-effort. Source-only dependencies without restore metadata may not resolve, multiple packages can expose the same namespace prefix, and binding redirects are not modeled. PURLs are correlation metadata, not a vulnerability verdict. Details are in [Supply-chain PURL enrichment](./supply-chain-purl.md).
+PURL resolution is best-effort. Dependencies that appear in no readable source may still not resolve, multiple packages can expose the same namespace prefix, and binding redirects are not modeled. PURLs are correlation metadata, not a vulnerability verdict. Details are in [Supply-chain PURL enrichment](./supply-chain-purl.md).
 
 ## Service inventory, trust zones, and data classification
 
-The `methods` command emits a first-class service inventory in `Services[]`. Every detected inbound surface (HTTP controllers, minimal APIs, gRPC services, SignalR hubs, SOAP endpoints, queue consumers, Azure Functions, AWS Lambdas, MCP tools) and outbound dependency (databases, HTTP clients, vector stores, LLM endpoints) is recorded with resolved paths, confidence, and a trust zone.
+The `methods` command emits a first-class service inventory in `Services[]`. Every detected inbound surface (HTTP controllers, minimal APIs, gRPC services, SignalR hubs, SOAP endpoints, queue consumers, Azure Functions, AWS Lambdas, MCP tools, Orleans grain methods) and outbound dependency (databases, HTTP clients, vector stores, LLM endpoints) is recorded with resolved paths, confidence, and a trust zone.
+
+Since schema 4.1.0 the same metadata also yields `SecurityFindings[]`: sensitive unauthenticated endpoints, CORS wildcard with credentials, state-changing endpoints without antiforgery, duplicate routes with conflicting authorization, mass-assignment hints, MCP transport integrity, and configuration security observations. Each finding carries a content-derived id, severity, CWE mapping, and remediation text, which makes it directly usable as audit evidence and stable across diffs.
 
 Two fields matter most for compliance review:
 
@@ -90,7 +92,7 @@ Two properties make Dosai output usable as audit evidence.
 
 First, output is deterministic. Identifiers never contain absolute paths, line numbers, or timestamps, so the same tree analyzed on two machines produces byte-identical ids. A finding re-analyzed after a review should produce the same id, which makes diffing between runs meaningful.
 
-Second, the output schema is versioned in `Metadata.SchemaVersion`. Output-visible changes are documented per version in the [migration guide](./migration-4.0.md). Consumers that integrate Dosai JSON into pipelines should pin to a schema version and check `Metadata.SchemaVersion` before reading fields, because field meaning can change between versions: in 3.0.x `ApiEndpoint.Path` held a source file path, while from 4.0.0 it holds the resolved route and `ApiEndpoint.Route` keeps the verbatim template.
+Second, the output schema is versioned in `Metadata.SchemaVersion`. Output-visible changes are documented per version in the [migration guides](./migration-4.1.0.md). Consumers that integrate Dosai JSON into pipelines should pin to a schema version and check `Metadata.SchemaVersion` before reading fields, because field meaning can change between versions: in 3.0.x `ApiEndpoint.Path` held a source file path, while from 4.0.0 it holds the resolved route and `ApiEndpoint.Route` keeps the verbatim template.
 
 Use the `diff` command to compare a current run against a reviewed baseline, so an audit can be scoped to what changed:
 
@@ -100,6 +102,8 @@ dotnet run --project ./Dosai/Dosai.csproj -- diff \
   --new /tmp/dosai-dataflows.json \
   --o /tmp/dosai-diff.json
 ```
+
+Since schema 4.1.0 the diff is severity-aware and includes a `RiskDelta` summary (`NewHighSeveritySlices`, `NewAnonymousEndpoints`, `NewlyReachablePackages`, and related counters) plus entry-point, weakness, and package sections. Findings that a review accepted can be carried between runs with a suppressions file (`--suppress`), whose optional `expires` dates turn the file into a review backlog: expired entries resurface automatically.
 
 ## Filtering evidence for reports
 

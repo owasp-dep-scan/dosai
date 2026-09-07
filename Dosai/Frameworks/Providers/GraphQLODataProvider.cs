@@ -284,7 +284,7 @@ foreach (var tree in ctx.CSharpTrees)
             .ToList();
         var odataPrefix = odataMounts.Count > 0 ? odataMounts[0] : "/odata";
 
-        // Also check for AddRouteComponents("prefix", ...) in source
+        // Also check for AddRouteComponents("prefix",...) in source
 foreach (var tree in ctx.CSharpTrees)
         {
             if (!ctx.TextContainsAny(tree, "QueryType", "MutationType", "SubscriptionType", "ObjectGraphType", "EnableQuery", "MapGraphQL", "AddRouteComponents", "AddGraphQLServer", "graphql"))

@@ -41,7 +41,7 @@ public static class DosaiQueryEngine
     }
 
     /// <summary>
-    ///     O2: sorts by a (possibly dotted) property; numbers compare numerically, strings
+    ///     Sorts by a (possibly dotted) property; numbers compare numerically, strings
     ///     ordinal-ignore-case, booleans false&lt;true. Elements missing the property sort last in
     ///     both directions; ties keep the input order.
     /// </summary>
@@ -157,7 +157,7 @@ public static class DosaiQueryEngine
         var filterGroups = new List<List<(string Property, string Operator, string Value)>>();
         foreach (var conjunct in filterText.Split("&&", StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
-            // O2: `||` ORs terms inside a conjunct — `severity=high||severity=critical`.
+            // `||` ORs terms inside a conjunct, `severity=high||severity=critical`.
             var terms = conjunct
                 .Split("||", StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                 .Select(ParseFilter)
@@ -187,7 +187,7 @@ public static class DosaiQueryEngine
 
     private static bool Matches(JsonElement element, IEnumerable<List<(string Property, string Operator, string Value)>> filterGroups)
     {
-        // Conjuncts AND, terms inside a conjunct OR (O2 flat semantics).
+        // Conjuncts AND, terms inside a conjunct OR.
         return filterGroups.All(group => group.Any(term => TryResolvePath(element, term.Property, out var value) && Compare(value, term.Operator, term.Value)));
     }
 

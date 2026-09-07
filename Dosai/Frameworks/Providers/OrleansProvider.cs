@@ -5,9 +5,9 @@ using Microsoft.CodeAnalysis.CSharp.Syntax;
 namespace Depscan.Frameworks.Providers;
 
 /// <summary>
-///     Microsoft Orleans (F2): grains as inbound RPC services. Grain-derived types (and types
+///     Microsoft Orleans: grains as inbound RPC services. Grain-derived types (and types
 ///     implementing IGrain-with-key interfaces) become services whose public methods are
-///     GrainMethod entry points with rpc-message taint seeds — replacing the blunt Orleans
+///     GrainMethod entry points with rpc-message taint seeds, replacing the blunt Orleans
 ///     namespace-prefix source pattern in the rpc pattern pack, which stays as fallback for
 ///     assembly-only scans. IGrainFactory.GetGrain&lt;T&gt; call sites become outbound RPC edges,
 ///     and UseOrleans/AddApplicationParts registrations confirm framework presence.
@@ -186,7 +186,7 @@ public sealed class OrleansProvider : IFrameworkProvider
                     service.EntryPointIds.Add($"ep:{operationId}");
 
                     // Grain method parameters arrive from (potentially remote) callers over the
-                    // Orleans runtime — rpc-message seeds replace the namespace-prefix heuristic.
+                    // Orleans runtime, rpc-message seeds replace the namespace-prefix heuristic.
                     foreach (var parameter in method.ParameterList.Parameters)
                     {
                         if (parameter.Type?.ToString().Contains("CancellationToken", StringComparison.Ordinal) == true)

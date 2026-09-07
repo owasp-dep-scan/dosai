@@ -93,13 +93,15 @@ With the PDB present, frames carry real file, line, and column from sequence poi
 
 A few properties of the IL pass are worth knowing when you interpret results. Sink arguments get stable labels such as `arg0` or `receiver` when no source expression exists in IL. Compiler-generated async, iterator, and display-class fields are pre-seeded so taint crosses `await` boundaries. Catch and filter handlers receive exception-object state, so flows that reach a sink from an exception path are still followed. And `Code` source patterns from a custom rules file apply only to IL string literals, because metadata names are the only reliable comparison surface in a binary.
 
+Node identity is normalized before results are reported: an instantiated-generic IL id (`Method<System.String>`) is merged onto the source original-definition node, with the original instantiated id kept in `GenericInstantiation`, so source and binary views of the same generic method do not produce twin nodes. Two reachability-shaped outputs behave differently for assembly-only inputs: per-node reachability facts are computed wherever the merged graph has entry points, but the dead-code report is empty, because "declared in source and unreachable" is a claim about source files a binary cannot make.
+
 ## Combined source and binary review
 
 A common real-world shape is a repository with source for some projects and published output for others. Point `--path` at the parent directory and both frontends run; records merge through stable method identities, and each record's evidence kind tells you whether it was observed directly, summarized, inferred, or reconstructed. When the same method appears from both sides, the merged record keeps the strongest evidence rather than duplicating the finding.
 
 ## Honesty about the limits
 
-Binary analysis cannot recover what was never emitted: source-level `Code` patterns, comments, and preprocessor shapes do not exist in IL. Dispatch through interfaces and virtual methods is approximated with shared candidate sets for instantiated application types, and those candidate edges are marked as inferred evidence, never as direct calls. Treat binary slices as strong triage input, and confirm high-impact findings against source when source exists.
+Binary analysis cannot recover what was never emitted: source-level `Code` patterns, comments, and preprocessor shapes do not exist in IL. Dispatch through interfaces and virtual methods is approximated with candidate sets over instantiated application types, and those inferred edges carry a dispatch confidence tier so you can tell them apart: `exact` when the receiver is sealed or only one implementation was instantiated, `rta-candidate`, or `cha-candidate` for the widest approximation. Repeated call sites of the same edge collapse into one counted edge (`CallSiteCount`). Treat binary slices as strong triage input, and confirm high-impact findings against source when source exists.
 
 ## Try next
 

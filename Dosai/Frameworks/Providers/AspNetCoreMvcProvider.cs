@@ -112,7 +112,7 @@ public sealed class AspNetCoreMvcProvider : IFrameworkProvider
         // MVC additionally requires the type to be public. That is deliberately NOT enforced: an
         // omitted `public` is far more likely to be terse code than a genuine intent to hide the type,
         // and dropping a controller from an attack-surface inventory is a worse failure than listing
-        // one that will not bind. Abstract/static/generic carry no such ambiguity — those types can
+        // one that will not bind. Abstract/static/generic carry no such ambiguity, those types can
         // never be routed, and their actions surface through the derived types instead.
         var derivesFromControllerBase = symbol is not null &&
                                         ProviderHelpers.DerivesFromAny(symbol, "ControllerBase", "Controller");
@@ -432,7 +432,7 @@ public sealed class AspNetCoreMvcProvider : IFrameworkProvider
 
             // Authorization is aggregated across the controller's actions, never assigned from whichever
             // action happened to be visited last. A single [AllowAnonymous] action on an [Authorize]d
-            // controller makes the controller anonymously reachable — that is the fact a reviewer needs —
+            // controller makes the controller anonymously reachable, that is the fact a reviewer needs,
             // while "authenticated" may only be claimed when every action requires authorization.
             operation.Authenticated = endpoint.AllowAnonymous ? false : endpoint.AuthorizationRequired;
             foreach (var scheme in endpoint.AuthenticationSchemes) ProviderHelpers.AddDistinct(service.AuthenticationSchemes, scheme);

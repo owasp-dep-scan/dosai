@@ -7,12 +7,13 @@ using static Dosai.Tests.Roadmap.RoadmapStubs;
 namespace Dosai.Tests.Roadmap;
 
 /// <summary>
-///     Batch 2 core value: T1 summary fixpoint, R1 reachability index, R2 exploit chains,
-///     W1–W5 weakness packs, F1 endpoint findings, S2 MCP transport integrity.
+///     Core cross-cutting analyses: the multi-level summary fixpoint, the per-node
+///     reachability index, exploit chains, weakness packs, endpoint security findings,
+///     and MCP transport integrity.
 /// </summary>
 public class Batch2Tests
 {
-    // ----- T1: multi-level summary fixpoint -----
+    // ----- Multi-level summary fixpoint -----
 
     [Fact]
     public void DataFlows_WrapperWrapperSinkChain_AttributesSinkToOutermostMethod()
@@ -30,7 +31,7 @@ public static class Chain
 """);
         var result = directory.DataFlows();
 
-        // T1: before the fixpoint, summaries never absorbed callee summaries, so the sink stopped
+        // Before the fixpoint, summaries never absorbed callee summaries, so the sink stopped
         // at Inner's frame; the outermost wrapper (the one an entry point actually calls) saw nothing.
         Assert.Contains(result.MethodSummaries, summary => summary.Method.Contains("Chain.Outer") && summary.SinkParameterIndexes.Contains(0));
         Assert.Contains(result.MethodSummaries, summary => summary.Method.Contains("Chain.Middle") && summary.SinkParameterIndexes.Contains(0));
@@ -38,7 +39,7 @@ public static class Chain
         var outerSource = result.Nodes.FirstOrDefault(node => node is { IsSource: true } && node.MethodName == "Outer");
         Assert.NotNull(outerSource);
         Assert.Contains(result.Slices, slice => slice.SourceId == outerSource!.Id && slice.SinkCategory == "command");
-        // T13: multi-hop taint kinds survive summary propagation.
+        // Multi-hop taint kinds survive summary propagation.
         Assert.Contains(result.MethodSummaries, summary => summary.Method.Contains("Chain.Outer") && summary.TaintKinds.Count > 0);
     }
 
@@ -64,7 +65,7 @@ public static class Recursion
         Assert.Contains(result.MethodSummaries, summary => summary.Method.Contains("Recursion.Odd") && summary.SinkParameterIndexes.Contains(0));
     }
 
-    // ----- R1: core reachability index -----
+    // ----- Core reachability index -----
 
     [Fact]
     public void Methods_ReachabilityIndex_ComputesEntryPointsAndDepths()
@@ -119,7 +120,7 @@ public static class Orphan
         Assert.Null(orphanFacts.DepthFromEntryPoint);
     }
 
-    // ----- R2: exploit chains -----
+    // ----- Exploit chains -----
 
     [Fact]
     public void DataFlows_ControllerHelperSinkChain_ProducesExploitChain()
@@ -175,7 +176,7 @@ public class SafeController : Microsoft.AspNetCore.Mvc.ControllerBase
         Assert.Contains(result.SanitizedFlows, sanitized => sanitized.Kind == "SanitizerMatch");
     }
 
-    // ----- W1: XSS -----
+    // ----- XSS -----
 
     [Fact]
     public void DataFlows_HtmlRawXss_ProducesSliceAndCandidate()
@@ -198,7 +199,7 @@ public static class XssPage
         Assert.Contains(result.SanitizedFlows, sanitized => sanitized.Kind == "SanitizerMatch");
     }
 
-    // ----- W2: XXE -----
+    // ----- XXE -----
 
     [Fact]
     public void DataFlows_XmlDocumentTaintedInput_ProducesXxeSlice()
@@ -249,7 +250,7 @@ public static class XxeHardened
 """);
         var result = directory.DataFlows();
 
-        // W2: hardening markers suppress the XXE finding both inline (spacing-tolerant) and
+        // Hardening markers suppress the XXE finding both inline (spacing-tolerant) and
         // when the hardened settings instance was prepared in an earlier statement.
         Assert.DoesNotContain(result.Slices, slice => slice.SinkCategory == "xxe");
         Assert.Contains(result.SanitizedFlows, sanitized => sanitized.SanitizerCategory == "xxe-hardening");
@@ -299,7 +300,7 @@ public static class SourceXxeFlow
         Assert.Contains(sourceResult.Slices, slice => slice.SinkCategory == "xxe" && slice.Confidence != "Low");
     }
 
-    // ----- W3: LDAP / XPath / NoSQL -----
+    // ----- LDAP / XPath / NoSQL -----
 
     [Fact]
     public void DataFlows_LdapXPathNoSql_EachProduceSlices()
@@ -330,7 +331,7 @@ public static class InjectionTargets
         Assert.Contains(result.WeaknessCandidates, weakness => weakness is { Kind: "NoSqlInjectionCandidate", Cwe: "CWE-943" });
     }
 
-    // ----- W4: log / header injection -----
+    // ----- Log / header injection -----
 
     [Fact]
     public void DataFlows_LoggerAndHeaderSinks_ProduceSlicesWithSeverity()
@@ -352,7 +353,7 @@ public static class LogFlow
         var result = directory.DataFlows();
 
         // T5/#10: the log category defaults to Low severity AND its patterns are Low-confidence,
-        // so the confidence demotion drops it one more rank to info — heuristic log matches must
+        // so the confidence demotion drops it one more rank to info, heuristic log matches must
         // never trip a "new high-severity" CI gate.
         Assert.Contains(result.Slices, slice => slice is { SinkCategory: "log", Severity: "info" });
         Assert.Contains(result.WeaknessCandidates, weakness => weakness is { Kind: "LogInjectionCandidate", Cwe: "CWE-117", Severity: "info" });
@@ -360,7 +361,7 @@ public static class LogFlow
         Assert.Contains(result.WeaknessCandidates, weakness => weakness is { Kind: "HeaderInjectionCandidate", Cwe: "CWE-113" });
     }
 
-    // ----- W5: ReDoS -----
+    // ----- ReDoS -----
 
     [Fact]
     public void DataFlows_TaintedRegexPattern_ProducesRedosSlice()
@@ -399,8 +400,8 @@ public static class RedosLiteral
 """);
         var result = directory.DataFlows();
 
-        // W5b: catastrophic literal patterns are CWE-1333 weakness candidates with locations —
-        // not prose in Diagnostics — so suppressions, diff, and downstream tools see them.
+        // Catastrophic literal patterns are CWE-1333 weakness candidates with locations:
+        // not prose in Diagnostics, so suppressions, diff, and downstream tools see them.
         var redos = result.WeaknessCandidates.Where(weakness => weakness.Kind == "ReDoSCandidate").ToList();
         Assert.Equal(2, redos.Count);
         Assert.All(redos, weakness =>
@@ -417,7 +418,7 @@ public static class RedosLiteral
         Assert.DoesNotContain(redos, weakness => weakness.SourceLocation?.Contains("Bounded", StringComparison.Ordinal) == true);
     }
 
-    // ----- F1: endpoint security findings -----
+    // ----- Endpoint security findings -----
 
     [Fact]
     public void Methods_SensitiveAnonymousEndpoint_FlaggedHighSeverity()
@@ -512,7 +513,7 @@ public class DupProtectedController : Microsoft.AspNetCore.Mvc.ControllerBase
         Assert.Equal("CWE-306", finding.Cwe);
     }
 
-    // ----- S2: MCP transport integrity -----
+    // ----- MCP transport integrity -----
 
     [Fact]
     public void Methods_McpStdioTransport_RiskyLaunchFlagged()

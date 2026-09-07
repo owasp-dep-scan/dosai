@@ -143,7 +143,7 @@ public static class McpServer
             "dosai.services" => ServicesPayload(RequirePath(path)),
             "dosai.ai_components" => AiComponentsPayload(RequirePath(path)),
             "dosai.query" => JsonSerializer.Deserialize<object>(DosaiQueryEngine.QueryJson(LoadQueryInput(arguments, path, localPatterns, localPatternPacks), GetString(arguments, "query") ?? "slices"), JsonOptions)!,
-            // O4: thin wrappers over one analyzer entry point each — no analysis logic lives here.
+            // Thin wrappers over one analyzer entry point each, no analysis logic lives here.
             "dosai.exploit_chains" => DataFlowAnalyzer.Analyze(RequirePath(path), localPatterns, localPatternPacks).ExploitChains,
             "dosai.attack_surface" => DataFlowAnalyzer.Analyze(RequirePath(path), localPatterns, localPatternPacks).AttackSurface,
             "dosai.reachability" => ReachabilityPayload(RequirePath(path), GetString(arguments, "nodeId")),
@@ -179,7 +179,7 @@ public static class McpServer
     }
 
     /// <summary>
-    ///     Reachability payload for dosai.reachability (R1): per-node entry points/depths/fan-outs.
+    ///     Reachability payload for dosai.reachability: per-node entry points/depths/fan-outs.
     ///     The optional nodeId argument narrows to one node; absent it returns the full index.
     /// </summary>
     private static object ReachabilityPayload(string path, string? nodeId)

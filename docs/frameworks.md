@@ -3,7 +3,8 @@
 Dosai detects .NET frameworks through a provider model (`Dosai/Frameworks/`) instead of name
 matching. Every detection carries a confidence tier, every inbound surface is emitted as a
 `ServiceComponent` with resolved paths, and entry-point parameters are wired into taint analysis
-as sources. Schema 4.0.0.
+as sources. Introduced in schema 4.0.0 and extended in schema 4.1.0, where the same metadata also
+feeds severity-tagged security findings.
 
 A framework that is not in this table does not count as shipped.
 
@@ -20,21 +21,27 @@ Providers never silently promote a heuristic match to high confidence. Consumers
 
 ## Output surface
 
-| Field                           | Content                                                                        |
-| ------------------------------- | ------------------------------------------------------------------------------ |
-| `MethodsSlice.Services[]`       | First-class service inventory (inbound surfaces and outbound dependencies)     |
-| `MethodsSlice.AiComponents[]`   | Models, MCP tools with JSON Schemas, prompts, agents, embeddings               |
-| `MethodsSlice.Frameworks[]`     | Detected frameworks with version/purl/confidence                               |
-| `ApiEndpoint.Path`              | Resolved route path (leading `/`, tokens substituted), what CycloneDX consumes |
-| `ApiEndpoint.Route`             | Verbatim route template, preserved for humans and diffing                      |
-| `ApiEndpoint.RouteParameters[]` | Parameters with constraints, defaults, optionality, binding source             |
-| `ApiEndpoint.RawUrls[]`         | File-scope absolute URLs (heuristic evidence; renamed from `Urls`)             |
+| Field                              | Content                                                                                                                                                                       |
+| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MethodsSlice.Services[]`          | First-class service inventory (inbound surfaces and outbound dependencies)                                                                                                    |
+| `MethodsSlice.AiComponents[]`      | Models, MCP tools with JSON Schemas, prompts, agents, embeddings                                                                                                              |
+| `MethodsSlice.Frameworks[]`        | Detected frameworks with version/purl/confidence                                                                                                                              |
+| `MethodsSlice.SecurityFindings[]`  | Security findings derived from provider metadata (schema 4.1.0): endpoint security, MCP transport integrity, configuration security, each with severity, CWE, and remediation |
+| `MethodsSlice.Reachability[]`      | Per-node reachability facts over the merged call graph (schema 4.1.0)                                                                                                         |
+| `MethodsSlice.RecursionClusters[]` | Strongly-connected recursion clusters (schema 4.1.0)                                                                                                                          |
+| `MethodsSlice.DeadCode[]`          | Source-declared methods no entry point reaches and no reflection/DI evidence keeps alive (schema 4.1.0)                                                                       |
+| `ApiEndpoint.Path`                 | Resolved route path (leading `/`, tokens substituted), what CycloneDX consumes                                                                                                |
+| `ApiEndpoint.Route`                | Verbatim route template, preserved for humans and diffing                                                                                                                     |
+| `ApiEndpoint.RouteParameters[]`    | Parameters with constraints, defaults, optionality, binding source                                                                                                            |
+| `ApiEndpoint.RawUrls[]`            | File-scope absolute URLs (heuristic evidence; renamed from `Urls`)                                                                                                            |
 
 Stable bom-refs: `svc:<framework>:<group>/<name>`, `op:<serviceId>#<verb>:<path>`,
 `ai:<kind>:<provider>/<name>`. Ids never contain absolute paths, lines, or timestamps, so output
 is byte-reproducible across runs and machines; when the same namespace + class name appears in
 several projects, the service group carries the relative source directory to keep ids unique.
-See [migration to 4.0.0](./migration-4.0.md) for every output-visible change.
+See the [migration to 4.0.0](./migration-4.0.md) and [migration to 4.1.0](./migration-4.1.0.md)
+guides for every output-visible change. Rows marked "(finding)" in the catalog below also produce
+entries in `SecurityFindings[]` with severity, CWE, and remediation text.
 
 Segment-versioned attribute routes (`v{version:apiVersion}/[controller]`) have a statically known
 value domain: one concrete endpoint is emitted per declared `[ApiVersion]` (with `[MapToApiVersion]`
@@ -87,15 +94,15 @@ files from disk, and model artifacts over 256 MB skip hashing (see THREAT_MODEL.
 | Framework (provider id)        | Detected                                                                                                                                                                                                                                                                                                                                                                                                                                       | Service kind / entry kind                     | Confidence  |
 | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- | ----------- |
 | Model Context Protocol (`mcp`) | Server: `[McpServerToolType]`/`[McpServerTool]` (including tools on ordinary classes), prompts, resources, per-tool JSON Schemas ([Description] carried, `CancellationToken`/`IProgress` excluded), transport (stdio/http), stateless mode, `WithToolsFromAssembly` breadth (finding), HTTP host-header restriction (finding). Client: `McpClientFactory` transports; `StdioClientTransport` command/arguments captured as a supply-chain fact | `mcp` / `McpTool`, `McpPrompt`, `McpResource` | high/medium |
-| LLM SDKs (`llm`)               | Model identifiers in chat/embedding calls (provider inferred: openai/azure/anthropic/google/huggingface), inference endpoints as outbound services, tools exposed to models, agents, system prompts (redacted by default; `--include-prompt-text` for full text)                                                                                                                                                                               | `ai-inference` /,                             | medium      |
-| ML runtimes (`ml-runtime`)     | ML.NET trainers (task/architecture family), `InferenceSession`/`Model.Load` references, on-disk artifacts (`.onnx`, `.gguf`, `.safetensors`, `.pt`) hashed with SHA-256, HuggingFace repo ids                                                                                                                                                                                                                                                  | , (AI components)                             | medium/low  |
+| LLM SDKs (`llm`)               | Model identifiers in chat/embedding calls (provider inferred: openai/azure/anthropic/google/huggingface), inference endpoints as outbound services, tools exposed to models, agents, system prompts (redacted by default; `--include-prompt-text` for full text)                                                                                                                                                                               | `ai-inference` (outbound)                     | medium      |
+| ML runtimes (`ml-runtime`)     | ML.NET trainers (task/architecture family), `InferenceSession`/`Model.Load` references, on-disk artifacts (`.onnx`, `.gguf`, `.safetensors`, `.pt`) hashed with SHA-256, HuggingFace repo ids                                                                                                                                                                                                                                                  | AI components only                            | medium/low  |
 | Vector stores (`vector-store`) | Qdrant, Pinecone, Milvus, Weaviate, Chroma, pgvector, Azure AI Search, Elasticsearch, Redis vector clients with collection metadata                                                                                                                                                                                                                                                                                                            | `vector-store` (outbound)                     | medium      |
 
 ## Data classification and trust zones
 
 `Services[].Data[]` classifies request/response types from their members (`pii`, `credential`,
 `financial`, `health`; default `unknown`, never `public`). Every non-`unknown` classification
-names the member that triggered it in `Description`. Disable with `--classify-data false`.
+names the member that triggered it in `Description`. Disable with `--no-classify-data`.
 
 `TrustZone`: `public` (anonymous inbound), `authenticated`, `internal` (loopback/queue),
 `external` (outbound to non-loopback hosts), `unknown`. `CrossesTrustBoundary` is computed from
@@ -106,9 +113,11 @@ external outbound service's methods, never guessed.
 
 Framework entry points taint their bound parameters in data-flow analysis (binding sources:
 `http-route`, `http-query`, `http-body`, `rpc-message`, `queue-message`, `websocket-message`,
-`mcp-tool-arg`, `function-payload`). A controller action taking a plain `string id` produces a
-real source→sink slice. Weakness kinds include `PromptInjectionCandidate` and
-`McpToolInjectionCandidate` (CWE-1427).
+`mcp-tool-arg`, `function-payload`; Orleans grain methods seed `rpc-message`). CLI entry points
+do the same for `args`, including the compiler-synthesized `<Main>$` of top-level-statement
+programs, which is seeded as a `cli` source (schema 4.1.0). A controller action taking a plain
+`string id` produces a real source→sink slice. Weakness kinds include `PromptInjectionCandidate`
+and `McpToolInjectionCandidate` (CWE-1427).
 
 ## Best-effort areas
 
@@ -122,7 +131,7 @@ real source→sink slice. Weakness kinds include `PromptInjectionCandidate` and
 
 ```bash
 dotnet run --project ./Dosai/Dosai.csproj -- methods --path ./src --o methods.json \
-  --classify-data false \        # disable service.data classification
-  --max-conventional-routes 250 \ # cap conventional route expansion
-  --include-prompt-text           # emit full system prompt text (redacted by default)
+  --no-classify-data \             # disable service.data classification
+  --max-conventional-routes 250 \  # cap conventional route expansion
+  --include-prompt-text            # emit full system prompt text (redacted by default)
 ```

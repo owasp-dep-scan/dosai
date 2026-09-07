@@ -1,6 +1,6 @@
 # Dosai Compiler Engineering Notes
 
-This document describes the Roslyn-based implementation details behind the call graph, data-flow, endpoint, crypto, and PURL analysis in Dosai. It is written for compiler engineers and maintainers who need to evolve Dosai's analysis pipeline.
+This document describes the Roslyn-based implementation details behind the call graph, data-flow, endpoint, crypto, reachability, and PURL analysis in Dosai. It is written for compiler engineers and maintainers who need to evolve Dosai's analysis pipeline.
 
 ## Architecture overview
 
@@ -11,7 +11,7 @@ flowchart TD
     CLI --> Crypto[crypto command]
     Methods --> Reflection[Assembly reflection]
     Methods --> Source[Roslyn source extraction]
-    Methods --> Endpoints[API endpoint extraction]
+    Methods --> Endpoints[Framework providers + endpoint extraction]
     Source --> Calls[Operation-based call capture]
     Calls --> CallGraph[Stable call graph]
     Dataflows --> Patterns[Default + user patterns]
@@ -20,6 +20,9 @@ flowchart TD
     Crypto --> CryptoAnalyzer[Crypto assets, misuse, CBOM]
     CryptoAnalyzer --> CBOM[CycloneDX-style CBOM]
     CryptoAnalyzer --> DFGraph
+    CallGraph --> Reach[ReachabilityAnalyzer<br/>entry-point facts, dead code]
+    Reach --> Exploit[Exploit chains + attack surface]
+    Endpoints --> SecFind[SecurityAnalyzer<br/>endpoint/MCP/config findings]
     PURL[PackageUrlResolver] --> Methods
     PURL --> CallGraph
     PURL --> DFGraph
@@ -34,13 +37,16 @@ flowchart TD
 
 `TransparencyBuilder` derives higher-level review facts from lower-level compiler artifacts:
 
-- `EntryPoint` records from API endpoints and CLI sources.
+- `EntryPoint` records from API endpoints and CLI sources, including the compiler-synthesized `<Main>$` of top-level-statement programs.
 - `PackageReachability` facts from graph/data-flow PURLs.
-- `DangerousApiReachability` facts from sink nodes.
-- `WeaknessCandidate` records from source-to-sink slices.
-- `AgentContext` bundles for AI agents.
+- `DangerousApiReachability` facts from sink nodes, with entry-point ids attached by exploit chains.
+- `WeaknessCandidate` records from source-to-sink slices, each with a severity.
+- `ExploitChain` records linking an entry point through the call graph to a slice and sink, with a derived exposure class.
+- `AttackSurface` groups of entry points by exposure with linked chains and weaknesses.
+- `SanitizedFlow` records of flows suppressed by sanitizers or validator guards (negative evidence).
+- `AgentContext` bundles for AI agents, including a bounded attack-surface view.
 
-This layer intentionally remains deterministic. It does not query vulnerability databases and does not make exploitability claims. It converts semantic evidence into structured facts.
+This layer intentionally remains deterministic. It does not query vulnerability databases and does not make exploitability claims. It converts semantic evidence into structured facts. Suppressions (`--suppress`) are applied here, with AND semantics per entry and `expires` resurfacing, so reportable findings reflect the post-suppression set.
 
 ```text
 Roslyn operations -> nodes/edges/slices -> transparency facts -> reports/agent context/diff
@@ -60,6 +66,8 @@ References are populated from:
 3. managed assemblies under the inspected tree
 
 This improves cross-file symbol resolution compared with one-file compilations. It also lets the data-flow walker observe method calls, constructor calls, property references, field references, and invalid operations with better context.
+
+Top-level statements (the default `dotnet new console` template) have no declared `Main`, so the method inventory reports the compiler-synthesized `<Main>$` like any method, the entry-point list carries a `Cli` entry whose `MethodId` matches the call graph node, and `args` is seeded as a taint source. Declared `Main` variants (`async Task`, `Task<int>`, `int`) follow the same path.
 
 When enumerating source files from a directory, Dosai excludes `bin` and `obj` directories relative to the inspected root. Source-mode checks use the same C#, VB, and F# source enumeration rules so VB-only and F#-only trees are treated as source analysis. Assembly discovery keeps app output directories valid because binary-only users often point directly at `bin/Debug/...` or publish directories.
 
@@ -90,9 +98,11 @@ Supported operation kinds include:
 - `IPropertyReferenceOperation`
 - assignment context for property set/get detection
 
-The graph builder guarantees that every edge endpoint exists as a node. External targets become external nodes when no source declaration exists. Assembly call graph edge de-duplication includes evidence kind so direct IL, generated-state, delegate-target, and inferred candidate edges are not accidentally collapsed into one classification. Source and assembly call graphs are merged with dictionary-backed node lookups so duplicate node evidence can be combined without repeatedly scanning large node lists.
+The graph builder guarantees that every edge endpoint exists as a node. External targets become external nodes when no source declaration exists. Repeated call sites of the same `(source, target, callType, evidence)` pair collapse into one counted edge (`CallSiteCount`) whose argument and evidence annotations are merged. Assembly call graph edge de-duplication includes evidence kind so direct IL, generated-state, delegate-target, and inferred candidate edges are not accidentally collapsed into one classification. Source and assembly call graphs are merged with dictionary-backed node lookups so duplicate node evidence can be combined without repeatedly scanning large node lists.
 
-Source and binary call graph extraction share a small CHA/RTA-style dispatch resolver. For source, it indexes concrete application types, interface implementations, overrides, and instantiated types observed from object creation operations. The source index is built once per Roslyn compilation and reused by per-file walkers. For assemblies, it matches known methods against decoded type metadata, base types, implemented interfaces, and instantiated IL types. Candidate edges are still marked as inferred evidence, not direct calls.
+Source and binary call graph extraction share a small CHA/RTA-style dispatch resolver. For source, it indexes concrete application types, interface implementations, overrides, and instantiated types observed from object creation operations. The source index is built once per Roslyn compilation and reused by per-file walkers. For assemblies, it matches known methods against decoded type metadata, base types, implemented interfaces, and instantiated IL types. Inferred virtual and interface edges carry a dispatch confidence tier: `exact` when the receiver is sealed or exactly one implementation was instantiated, `rta-candidate`, or `cha-candidate`.
+
+Instantiated-generic IL ids (`Method<args>`) never match a source id exactly because the instantiation rewrites parameter types too, so the merged graph normalizes them onto the source original-definition node keyed by an instantiation-free identity, keeping the original instantiated id in `MethodNode.GenericInstantiation`.
 
 Source-to-assembly mapping prefers exact stable signatures. If a fallback name match is needed, it only maps methods when parameter count, available parameter types, and available return type leave a single unambiguous assembly candidate. Mapped assembly name and module metadata come from the matched on-disk method, not the synthetic Roslyn compilation. This avoids corrupting mappings for overloads and keeps PURL enrichment tied to the compiled representation.
 
@@ -125,18 +135,23 @@ Keys are normalized Roslyn symbol display strings. Values are ordered node trace
 
 ### Supported propagation
 
-- parameter sources
+- parameter sources, including `args` of the synthesized `<Main>$` for top-level statements
 - local variable initializers
 - simple assignments
 - compound assignments
-- invocation return propagation for passthrough/system/source methods
+- invocation return propagation for passthrough/system/source methods, except boolean-returning validators, which carry decisions rather than payloads
 - object creation argument propagation
 - binary/interpolated/coalesce/array expression propagation
+- lambda parameter seeding when the lambda is passed over a tainted receiver or argument; delegate invocations propagate argument taint; `await` of a tainted task yields the taint of its result
+- `ref`/`out` write-back: a call with tainted arguments or receiver taints its out/ref locals, and callee summaries record which parameter indexes are written and which source categories flow into each index
+- collection taint: `foreach` loop variables inherit the collection's taint and element or indexer stores (`arr[i] = tainted`, `dict[k] = tainted`) taint the container, while ordinary property stores stay field-sensitive (`obj.Tag = tainted` leaves `obj.Other` clean)
 - return edges
 - sink argument flows
 - sink receiver flows, e.g. `model.File.CopyTo(stream)`
 - fallback invalid-operation sink matching for projects with unresolved legacy frameworks
-- branch-aware sanitizer guards for validators such as `Regex.IsMatch`
+- branch-aware sanitizer guards for validators such as `Regex.IsMatch`, recorded as sanitized flows (negative evidence)
+
+Summaries iterate to a fixpoint (capped rounds), so wrapper-to-wrapper-to-sink chains attribute to the outermost method, and `TaintKinds` survive across summary hops.
 
 ### Performance-sensitive implementation details
 
@@ -193,12 +208,22 @@ Call graph and data-flow graph exporters produce:
 
 GraphML/GEXF include PURL metadata where available.
 
+## Reachability and dead code
+
+The reachability analyzer runs once over the merged call graph. It performs a bounded forward BFS per entry point (every visited node records which entry points reached it, capped at 16 with an exact `Reachable` flag that never saturates), computes minimum depth, fan-in and fan-out, and Tarjan strongly-connected components for recursion clusters. Bucketed forward-reachable sizes are computed on the SCC condensation in reverse topological order so large graphs stay cheap.
+
+The dead-code report lists source-declared methods and constructors that no entry point reaches and that no keep-alive evidence protects. Keep-alive evidence is reflection or DI/framework-model usage that proves runtime callability: an `AddSingleton<Foo>()` registration, an `Activator.CreateInstance` target, or a `typeof(T).GetMethod(...)` receiver. The report is empty for assembly-only inputs and is suppressed entirely, with a diagnostic, when the reachability budget was exhausted, because an unvisited node is then unknown rather than unreachable.
+
+Crypto analysis consumes the same index: a reachability claim requires a graph path, and the older whole-file fallback is gated off with a diagnostic naming the file.
+
 ## PURL enrichment
 
-`PackageUrlResolver` reads:
+`PackageUrlResolver` reads, in order of trust:
 
-- `project.assets.json`
-- `*.deps.json`
+- `project.assets.json` and `*.deps.json` (restore/build output)
+- `packages.lock.json` and `paket.lock` (lock files)
+- `packages.config` (legacy)
+- direct `.csproj` `<PackageReference>` entries (unrestored trees, lowest confidence)
 
 It maps package libraries and compile/runtime assets to NuGet PURLs such as:
 
@@ -213,35 +238,37 @@ Resolution uses:
 3. package name
 4. namespace/type/symbol prefix matching
 
-PURLs are best-effort and never fail analysis.
+Version conflicts across sources are recorded as diagnostics, and `ResolutionFacts` exposes which source file produced each purl (name, version, purl, source, confidence). PURLs are best-effort and never fail analysis.
 
 ## Weakness candidate model
 
 Weakness candidates are generated from sink categories. Each candidate includes:
 
 - kind and CWE mapping where applicable;
-- confidence and confidence reasons;
+- severity (`info`, `low`, `medium`, `high`) and confidence with confidence reasons;
 - source/sink location;
 - slice id;
 - route/entrypoint when known;
 - PURLs and evidence strings.
 
-Confidence is deliberately simple and explainable:
+Severity defaults by sink category (injection primitives are `high`, exposure classes are `medium`, log and ReDoS are `low`); a pattern's optional `Severity` field overrides the default, and a match from a Low-confidence pattern is demoted one rank so heuristic matches cannot trip a high-severity gate on their own. Confidence remains deliberately simple and explainable:
 
 - `High` when the flow is tied to an entrypoint and a sink node.
 - `Medium` when the sink is clear but entrypoint correlation is absent.
 - `Low` for weaker evidence.
 
+Catastrophically-backtracking literal regexes (`new Regex("(a+)*$")`, `[GeneratedRegex("literal")]`) are additionally detected statically as ReDoS candidates (CWE-1333); `RegexOptions.NonBacktracking` and an explicit match timeout suppress the finding, and overlong patterns get a review-needed diagnostic instead of a silent skip. Security findings derived from framework metadata (endpoint security, MCP transport integrity, configuration security) use content-derived ids (kind, file, and line) so they stay stable across diffs.
+
 ## Current limitations
 
-- Data-flow is mostly intraprocedural with lightweight summaries for parameter-to-return and parameter-to-sink callees.
-- Generic type flow is decoded for common metadata signatures but not fully substituted through every runtime construction.
+- Data-flow is intraprocedural with fixpoint summaries for parameter-to-return, parameter-to-sink, and ref/out callees; deep object graphs and unmodeled helpers can still hide flows.
+- Generic type flow is decoded for common metadata signatures; instantiated-generic call graph nodes are normalized onto source original definitions, but taint is not substituted through every runtime construction.
 - Sanitizers are pattern-driven and can stop propagation or suppress validated branches, but custom validation logic may require project-specific patterns.
 - Endpoint extraction is intentionally syntax-based and may capture routes from non-runtime code.
-- PURL attribution is package-asset based; source-only projects without assets/deps cannot always be attributed.
+- PURL attribution is package-asset and lock/config based; projects whose dependencies appear in no readable source cannot always be attributed.
 
 ## Recommended engineering next steps
 
 1. Cache Roslyn compilations and PURL resolver indexes for large monorepos.
-2. Add richer alias and collection modeling for complex object graphs.
+2. Extend alias modeling for complex object graphs beyond collections and indexer stores.
 3. Extend the CycloneDX CBOM surface with PURL-linked slice properties and SARIF export.

@@ -22,7 +22,7 @@ public class MethodCalls
     public string? CallerClass { get; init; }
     public bool IsInternal { get; set; }
     public AnalysisEvidenceKind EvidenceKind { get; init; } = AnalysisEvidenceKind.Unknown;
-    /// <summary>Dispatch resolution tier for inferred virtual/interface edges: exact / rta-candidate / cha-candidate (R4).</summary>
+    /// <summary>Dispatch resolution tier for inferred virtual/interface edges: exact / rta-candidate / cha-candidate.</summary>
     public string? DispatchConfidence { get; set; }
     public List<AnalysisEvidence> Evidence { get; init; } = [];
 }

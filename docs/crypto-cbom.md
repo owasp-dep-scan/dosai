@@ -42,7 +42,7 @@ Dosai also runs crypto-specific data-flow slicing as part of the `crypto` comman
 
 ## Reachability
 
-Dosai performs best-effort reachability by reusing method extraction, entry point discovery, and callgraph data. When a crypto operation or finding can be associated with a reachable method, the result includes `reachableFromEntryPoint`, `entryPointIds`, and `methodId`. Reachability must never fail crypto analysis. If symbol resolution or callgraph construction is incomplete, Dosai records diagnostics and continues with file and method-name correlation.
+Dosai performs best-effort reachability by reusing method extraction, entry point discovery, and callgraph data. When a crypto operation or finding can be associated with a reachable method, the result includes `reachableFromEntryPoint`, `entryPointIds`, and `methodId`. Reachability must never fail crypto analysis, but it is also never asserted without evidence: a reachability claim requires a graph path from an entry point, and when symbol resolution or callgraph construction is incomplete the older file-level fallback is gated off and a diagnostic names the file instead of silently claiming reachability.
 
 ## CycloneDX mapping
 

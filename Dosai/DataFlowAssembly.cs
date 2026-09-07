@@ -267,7 +267,7 @@ public static partial class DataFlowAnalyzer
 
             var visitKey = $"{instructionIndex}:{state.Signature()}";
             visitCounts.TryGetValue(visitKey, out var visitCount);
-            // T11: silent truncation understates results; the state budget is reported once per
+            // Silent truncation understates results; the state budget is reported once per
             // method so a missing flow can be told apart from a clean one. The per-state 2-visit
             // limit is by-design loop convergence, not a budget.
             if (!budgetReported && visitCounts.Count > 20000)
@@ -405,12 +405,12 @@ public static partial class DataFlowAnalyzer
             {
                 ProcessAssemblyCall(reader, instruction, opCode, methodInfo, assemblyPath, context, state, summaries);
 
-                // T8: sanitizer-guard reasoning. `call Validator(x); brtrue.s L` — the true edge of a
+                // Sanitizer-guard reasoning. `call Validator(x); brtrue.s L`, the true edge of a
                 // conditional branch on a sanitizer's result is the validated path; the argument
                 // slots that fed the validator are suppressed along that edge only. The guard is
                 // applied atomically here (successors of the *branch* are enqueued with validation)
                 // so the worklist's interleaved states never observe stale guard data. Debug builds
-                // forward the result through a local (stloc/ldloc) before branching — accepted too.
+                // forward the result through a local (stloc/ldloc) before branching, accepted too.
                 if (FindSanitizerGuardBranch(instructions, instructionIndex) is { } branchIndex &&
                     TryDetectSanitizerGuardSlots(reader, instruction, instructions, instructionIndex, context) is { Count: > 0 } guardSlots)
                 {
@@ -658,7 +658,7 @@ public static partial class DataFlowAnalyzer
             if (instructionIndex < 0 || instructionIndex >= instructions.Count) continue;
             var visitKey = $"{instructionIndex}:{state.Signature()}";
             visits.TryGetValue(visitKey, out var visitCount);
-            // T11: the summary-state budget truncates silently today; report it so a shallow
+            // The summary-state budget truncates silently today; report it so a shallow
             // summary is visible instead of looking like a small method.
             if (!budgetReported && visits.Count > 10000)
             {
@@ -1234,7 +1234,7 @@ public static partial class DataFlowAnalyzer
     }
 
     /// <summary>
-    ///     T8: when a call's target matches a sanitizer pattern and the call result is consumed by an
+    ///     When a call's target matches a sanitizer pattern and the call result is consumed by an
     ///     immediately following conditional branch, recover which local/argument slots fed the
     ///     validator. A bounded forward stack simulation over the instructions before the call; any
     ///     opcode outside the whitelist yields no guard rather than a wrong one.
@@ -1251,7 +1251,7 @@ public static partial class DataFlowAnalyzer
             return null;
         }
 
-        // Simulate up to 16 preceding instructions — enough for guarded validator calls on
+        // Simulate up to 16 preceding instructions, enough for guarded validator calls on
         // locals, arguments, and array/collection elements without modeling whole methods.
         var windowStart = Math.Max(0, instructionIndex - 16);
         var stack = new List<string?>(); // "a:<index>" argument slot, "l:<index>" local slot, "lit" literal, null unknown
@@ -1308,7 +1308,7 @@ public static partial class DataFlowAnalyzer
             }
 
             // Anything else (calls, arithmetic, conversions on the guard path) makes the slot
-            // attribution ambiguous — bail out with no guard.
+            // attribution ambiguous, bail out with no guard.
             return null;
         }
 

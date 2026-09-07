@@ -72,7 +72,7 @@ Every non-unknown classification names the member that triggered it, so the labe
 
 ## Route resolution: template versus path
 
-Schema 4.0.0 separates what the developer wrote from what the framework will actually serve:
+Schema 4.0.0 introduced the separation between what the developer wrote and what the framework will actually serve, and it still works the same way in the current schema:
 
 ```text
   ApiEndpoint.Route            ApiEndpoint.Path
@@ -96,7 +96,7 @@ flowchart LR
 
 ## Trust zones are computed, not guessed
 
-`TrustZone` values come from evidence: `public` for anonymous inbound, `authenticated` for protected inbound, `internal` for loopback or queue surfaces, `external` for outbound dependencies. The related field `CrossesTrustBoundary` is only set when a positive call-graph path exists from a public inbound service to an external outbound service. No path, no flag; that restraint is the point.
+`TrustZone` values come from evidence: `public` for anonymous inbound, `authenticated` for protected inbound, `internal` for loopback or queue surfaces, `external` for outbound dependencies. The related field `CrossesTrustBoundary` is only set when a positive call-graph path exists from a public inbound service to an external outbound service. No path, no flag; that restraint is the point. Since schema 4.1.0, the same graph evidence backs a machine-readable version of this lesson's picture: every entry point gets a derived exposure class (`anonymous-http`, `authenticated-http`, `anonymous-rpc`, `queue`, `mcp`, `cli`), and the `dataflows` output groups them into `AttackSurface[]`, anonymous first, with the weakness counts, CWEs, and exploit chains that reach each group.
 
 ```text
         internet
@@ -117,7 +117,9 @@ flowchart LR
 
 ## What the inventory covers
 
-The provider model in `methods` goes far beyond controllers: gRPC services with streaming modes, SignalR hubs, SOAP contracts, queue consumers from MassTransit, NServiceBus, MediatR, and raw clients, Azure Functions and AWS Lambda handlers, scheduled jobs, MCP tools, and LLM inference endpoints with their model identifiers. Each detection carries a confidence tier, and providers never promote a heuristic match to high confidence. Filter on `Confidence` when a review requires only symbol-resolved facts.
+The provider model in `methods` goes far beyond controllers: gRPC services with streaming modes, SignalR hubs, SOAP contracts, queue consumers from MassTransit, NServiceBus, MediatR, and raw clients, Azure Functions and AWS Lambda handlers, scheduled jobs, Orleans grain methods surfaced as RPC entry points with `rpc-message` taint seeds, MCP tools, and LLM inference endpoints with their model identifiers. Each detection carries a confidence tier, and providers never promote a heuristic match to high confidence. Filter on `Confidence` when a review requires only symbol-resolved facts.
+
+Two schema 4.1.0 additions turn this inventory into review findings. `SecurityFindings[]` derives severity-tagged, CWE-mapped findings from the same metadata: sensitive data on unauthenticated endpoints, CORS wildcard with credentials, state-changing endpoints without antiforgery, duplicate routes with conflicting authorization, and mass-assignment hints, each with remediation text and an id derived from kind, file, and line so it stays stable across runs. And `Reachability[]` gives every call graph node its entry-point set, minimum depth, fan-in, fan-out, and recursion-cluster membership, with `DeadCode[]` listing source-declared methods no entry point reaches and no reflection or DI registration keeps alive.
 
 ## Performance expectations
 
