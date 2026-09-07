@@ -2268,7 +2268,7 @@ class Program
         Assert.Contains(methodsSlice.ApiEndpoints ?? [], endpoint => endpoint is { HttpMethod: "GET", Route: "api/[controller]/{id}", Path: "/api/Orders/{id}", FilePath: "Endpoints.cs" } && endpoint.RawUrls.Contains("https://api.example.test/orders/"));
         Assert.Contains(methodsSlice.ApiEndpoints ?? [], endpoint => endpoint is { HttpMethod: "POST", Route: "/upload", Path: "/upload", EndpointKind: "MinimalApi" });
         Assert.NotNull(methodsSlice.Metadata);
-        Assert.Equal("4.0.1", methodsSlice.Metadata.SchemaVersion);
+        Assert.Equal("4.1.0", methodsSlice.Metadata.SchemaVersion);
         Assert.Contains(methodsSlice.EntryPoints ?? [], entryPoint => entryPoint is { Kind: "HttpController", Route: "/api/Orders/{id}" });
     }
 

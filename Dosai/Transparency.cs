@@ -5,8 +5,8 @@ namespace Depscan;
 
 public sealed class AnalysisMetadata
 {
-    public string SchemaVersion { get; set; } = "4.0.1";
-    public string AnalyzerVersion { get; set; } = typeof(Dosai).Assembly.GetName().Version?.ToString() ?? "4.0.1";
+    public string SchemaVersion { get; set; } = "4.1.0";
+    public string AnalyzerVersion { get; set; } = typeof(Dosai).Assembly.GetName().Version?.ToString() ?? "4.1.0";
     public DateTimeOffset GeneratedAt { get; set; } = DateTimeOffset.UtcNow;
     public string? InputPath { get; set; }
     public string Tool { get; set; } = "Dosai";
@@ -108,8 +108,55 @@ public sealed class AgentContext
     public List<WeaknessCandidate> HighRiskWeaknesses { get; set; } = [];
     public List<DataFlowSlice> HighRiskSlices { get; set; } = [];
     public List<PackageReachability> ReachablePackages { get; set; } = [];
+    /// <summary>F6: bounded attack-surface groups for top-down triage.</summary>
+    public List<AttackSurfaceGroup> AttackSurface { get; set; } = [];
     public List<string> RelevantFiles { get; set; } = [];
     public List<string> SuggestedNextCommands { get; set; } = [];
+}
+
+/// <summary>
+///     F6: one row per entry point in the attack-surface view — what reaches it (exploit chains,
+///     weakness candidates, CWEs) so an analyst can triage top-down by exposure.
+/// </summary>
+public sealed class AttackSurfaceEntry
+{
+    public required string EntryPointId { get; set; }
+    public required string Exposure { get; set; }
+    public string? Kind { get; set; }
+    public string? HttpMethod { get; set; }
+    public string? Route { get; set; }
+    public string? FileName { get; set; }
+    public int LineNumber { get; set; }
+    public bool AllowAnonymous { get; set; }
+    public int ExploitChainCount { get; set; }
+    public int WeaknessCount { get; set; }
+    public int HighSeverityWeaknessCount { get; set; }
+    public List<string> WeaknessKinds { get; set; } = [];
+    public List<string> Cwes { get; set; } = [];
+    public List<string> SinkCategories { get; set; } = [];
+}
+
+/// <summary>
+///     F6: entry points grouped by exposure (anonymous-http, authenticated-http, rpc, cli, queue,
+///     mcp, …) with per-group rollups. The group is the triage unit: anonymous routes with
+///     high-severity chains sort to the top of a review.
+/// </summary>
+public sealed class AttackSurfaceGroup
+{
+    public required string Exposure { get; set; }
+    public int EntryPointCount { get; set; }
+    public int ExploitChainCount { get; set; }
+    public int WeaknessCount { get; set; }
+    public int HighSeverityWeaknessCount { get; set; }
+
+    /// <summary>
+    ///     True when <see cref="EntryPoints"/> lists fewer rows than <see cref="EntryPointCount"/>.
+    ///     The rollup counts above always cover every entry point in the group; only the row list
+    ///     is capped, so a consumer needs this to tell a short list from a complete one.
+    /// </summary>
+    public bool EntryPointsTruncated { get; set; }
+
+    public List<AttackSurfaceEntry> EntryPoints { get; set; } = [];
 }
 
 public static class TransparencyBuilder
@@ -140,6 +187,13 @@ public static class TransparencyBuilder
         "McpResource" => "McpResource",
         _ => "HttpController"
     };
+
+    /// <summary>
+    ///     R6: CLI entry-point method names. `<Main>$` is the compiler-synthesized entry point for
+    ///     top-level statements (the default `dotnet new console` template); declared entry points —
+    ///     including the `async Task`/`Task&lt;int&gt;`/`int` variants — are all literally named Main.
+    /// </summary>
+    internal static bool IsCliEntryPointName(string? name) => name is "Main" or "<Main>$";
 
     public static List<EntryPoint> BuildEntryPoints(IEnumerable<ApiEndpoint> apiEndpoints, IEnumerable<Method>? methods = null)
     {
@@ -175,7 +229,7 @@ public static class TransparencyBuilder
 
         if (methods is not null)
         {
-            foreach (var method in methods.Where(m => m.Name == "Main"))
+            foreach (var method in methods.Where(m => IsCliEntryPointName(m.Name)))
             {
                 entries.Add(new EntryPoint
                 {
@@ -486,6 +540,95 @@ public static class TransparencyBuilder
         if (!reachability.ConfidenceReasons.Contains(reason, StringComparer.Ordinal)) reachability.ConfidenceReasons.Add(reason);
     }
 
+    /// <summary>
+    ///     F6: the attack-surface view — entry points grouped by exposure, each with the exploit
+    ///     chains and weakness candidates that reach it (R2 linkage). Presentation over existing
+    ///     facts: one linear pass over entry points, chains, and graph-linked weaknesses. Groups
+    ///     order most-exposed first; entries order most-findings first.
+    /// </summary>
+    public static List<AttackSurfaceGroup> BuildAttackSurface(DataFlowResult result)
+    {
+        var chainsByEntryPointId = result.ExploitChains
+            .GroupBy(chain => chain.EntryPointId, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal);
+        var weaknessesByEntryPointId = result.WeaknessCandidates
+            .Where(weakness => !string.IsNullOrWhiteSpace(weakness.EntryPointId))
+            .GroupBy(weakness => weakness.EntryPointId!, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.Ordinal);
+
+        var groups = new List<AttackSurfaceGroup>();
+        foreach (var exposureGroup in result.EntryPoints.GroupBy(ExposureFor, StringComparer.Ordinal))
+        {
+            var entries = new List<AttackSurfaceEntry>();
+            foreach (var entryPoint in exposureGroup)
+            {
+                var weaknesses = weaknessesByEntryPointId.GetValueOrDefault(entryPoint.Id) ?? [];
+                entries.Add(new AttackSurfaceEntry
+                {
+                    EntryPointId = entryPoint.Id,
+                    Exposure = exposureGroup.Key,
+                    Kind = entryPoint.Kind,
+                    HttpMethod = entryPoint.HttpMethod,
+                    Route = entryPoint.Route,
+                    FileName = entryPoint.FileName,
+                    LineNumber = entryPoint.LineNumber,
+                    AllowAnonymous = entryPoint.AllowAnonymous,
+                    ExploitChainCount = chainsByEntryPointId.GetValueOrDefault(entryPoint.Id),
+                    WeaknessCount = weaknesses.Count,
+                    HighSeverityWeaknessCount = weaknesses.Count(weakness => SeverityRank(weakness.Severity) >= SeverityRank("high")),
+                    WeaknessKinds = weaknesses.Select(weakness => weakness.Kind).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).Take(MaxAttackSurfaceListEntries).ToList(),
+                    Cwes = weaknesses.Select(weakness => weakness.Cwe).Where(cwe => cwe is not null).Select(cwe => cwe!).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).Take(MaxAttackSurfaceListEntries).ToList(),
+                    SinkCategories = weaknesses.Select(weakness => weakness.SinkCategory).Where(category => category is not null).Select(category => category!).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).Take(MaxAttackSurfaceListEntries).ToList()
+                });
+            }
+
+            groups.Add(new AttackSurfaceGroup
+            {
+                Exposure = exposureGroup.Key,
+                EntryPointCount = entries.Count,
+                ExploitChainCount = entries.Sum(entry => entry.ExploitChainCount),
+                WeaknessCount = entries.Sum(entry => entry.WeaknessCount),
+                HighSeverityWeaknessCount = entries.Sum(entry => entry.HighSeverityWeaknessCount),
+                EntryPointsTruncated = entries.Count > MaxAttackSurfaceEntryPointsPerGroup,
+                EntryPoints = entries
+                    .OrderByDescending(entry => entry.HighSeverityWeaknessCount)
+                    .ThenByDescending(entry => entry.WeaknessCount)
+                    // Descending like the counts above it: entries are truncated at
+                    // MaxAttackSurfaceEntryPointsPerGroup, so sorting chains ascending pushed the
+                    // entry points that actually have chains out of the report first.
+                    .ThenByDescending(entry => entry.ExploitChainCount)
+                    .ThenBy(entry => entry.EntryPointId, StringComparer.Ordinal)
+                    .Take(MaxAttackSurfaceEntryPointsPerGroup)
+                    .ToList()
+            });
+        }
+
+        return groups.OrderBy(group => ExposureRank(group.Exposure)).ThenBy(group => group.Exposure, StringComparer.Ordinal).ToList();
+    }
+
+    private const int MaxAttackSurfaceListEntries = 8;
+    private const int MaxAttackSurfaceEntryPointsPerGroup = 50;
+
+    /// <summary>
+    ///     Anonymous surfaces first, authenticated/internal last — the triage order (F6). Every
+    ///     value <see cref="ExposureFor"/> can return is ranked explicitly; the bare "anonymous"
+    ///     bucket (an unauthenticated entry point of an unclassified kind) must not fall through to
+    ///     the default and sort below the authenticated groups.
+    /// </summary>
+    private static int ExposureRank(string exposure) => exposure switch
+    {
+        "anonymous-http" => 0,
+        "anonymous-rpc" => 1,
+        "anonymous" => 2,
+        "mcp" => 3,
+        "queue" => 4,
+        "cli" => 5,
+        "authenticated-http" => 6,
+        "authenticated-rpc" => 7,
+        "internal" => 8,
+        _ => 9
+    };
+
     public static List<WeaknessCandidate> BuildWeaknessCandidates(DataFlowResult result, IEnumerable<EntryPoint>? entryPoints = null)
     {
         var nodes = result.Nodes.ToDictionaryFirstWins(n => n.Id, StringComparer.Ordinal);
@@ -562,6 +705,7 @@ public static class TransparencyBuilder
             HighRiskWeaknesses = highRiskWeaknesses,
             HighRiskSlices = result.Slices.Where(s => highRiskSliceIds.Contains(s.Id)).Take(25).ToList(),
             ReachablePackages = result.PackageReachability.Take(50).ToList(),
+            AttackSurface = BuildAttackSurface(result).Take(10).ToList(),
             RelevantFiles = result.Nodes.Select(n => n.Path ?? n.FileName).Where(p => !string.IsNullOrWhiteSpace(p)).Distinct(StringComparer.Ordinal).Take(100).ToList()!,
             SuggestedNextCommands =
             [
@@ -1031,6 +1175,35 @@ public static class TransparencyBuilder
             }
 
             lines.Add(string.Empty);
+        }
+
+        if (result.AttackSurface.Count > 0)
+        {
+            // F6: one table an analyst can triage top-down — groups order most-exposed first and
+            // each group's rows order most-findings first.
+            lines.Add("## Attack surface (grouped by exposure)");
+            lines.Add(string.Empty);
+            foreach (var group in result.AttackSurface)
+            {
+                lines.Add($"### {group.Exposure} — {group.EntryPointCount} entry point(s), {group.ExploitChainCount} chain(s), {group.WeaknessCount} weakness(ies) ({group.HighSeverityWeaknessCount} high-severity)");
+                lines.Add(string.Empty);
+                foreach (var entry in group.EntryPoints.Take(10))
+                {
+                    var target = string.IsNullOrWhiteSpace(entry.Route) ? entry.FileName ?? entry.EntryPointId : entry.Route;
+                    var verb = string.IsNullOrWhiteSpace(entry.HttpMethod) ? string.Empty : $"{entry.HttpMethod} ";
+                    var findings = entry.WeaknessCount == 0
+                        ? "no linked findings"
+                        : $"{entry.WeaknessCount} weakness(es), {entry.HighSeverityWeaknessCount} high, {entry.ExploitChainCount} chain(s), CWE {string.Join("/", entry.Cwes)}";
+                    lines.Add($"- {entry.EntryPointId} `{verb}{target}` ({entry.FileName}:{entry.LineNumber}) — {findings}");
+                }
+
+                if (group.EntryPointCount > Math.Min(group.EntryPoints.Count, 10))
+                {
+                    lines.Add($"- _…{group.EntryPointCount - Math.Min(group.EntryPoints.Count, 10)} more entry point(s) not shown; the counts above cover the whole group._");
+                }
+
+                lines.Add(string.Empty);
+            }
         }
 
         return string.Join(Environment.NewLine, lines);

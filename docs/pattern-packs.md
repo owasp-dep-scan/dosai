@@ -236,7 +236,7 @@ prompt invocation yields `PromptInjectionCandidate` weaknesses (CWE-1427); MCP t
 yield `McpToolInjectionCandidate`. See [Framework semantics](./frameworks.md) for the provider
 side (taint seeding of framework entry points).
 
-## New packs (schema 4.0.1)
+## New packs (schema 4.1.0)
 
 Six additional weakness-class packs ship enabled by default. Slices from these packs carry
 severity (`Severity` on `DataFlowSlice` and `WeaknessCandidate`), and every mapped category
@@ -251,7 +251,7 @@ produces a CWE-stamped `WeaknessCandidate` kind (see [security analysis](./secur
 | `redos`     | `new Regex(tainted)` (Medium), `Regex.IsMatch`/`Regex.Match` with a tainted pattern (Low) (CWE-1333); catastrophically-backtracking `new Regex("literal")` patterns are additionally flagged statically in `Diagnostics`                                                                                                   | —                                                                                                                                                                                                                                                                                                                                     |
 | `template`  | Fluid, Scriban, Handlebars.NET, RazorEngine, DotLiquid parse/render of tainted template source (CWE-1336)                                                                                                                                                                                                                  | —                                                                                                                                                                                                                                                                                                                                     |
 
-### Hygiene fixes in 4.0.1
+### Hygiene fixes in 4.1.0
 
 - The `data` pack's bare `Add` sanitizer is gone: only provider parameter collections
   (`SqlParameterCollection.Add`, `NpgsqlParameterCollection.Add`, `NpgsqlParameter`/`SqlParameter`
@@ -263,7 +263,7 @@ produces a CWE-stamped `WeaknessCandidate` kind (see [security analysis](./secur
 - The IL-mode short-pattern noise filter (bare `Name`/`Contains` patterns under four characters)
   now applies in source mode too, so both modes agree.
 
-## Severity (schema 4.0.1)
+## Severity (schema 4.1.0)
 
 Every slice and weakness candidate carries `Severity` (`info|low|medium|high`), defaulting by sink
 category — injection primitives (command/sql/file/xss/xxe/ldap/xpath/nosql/template/crypto family)

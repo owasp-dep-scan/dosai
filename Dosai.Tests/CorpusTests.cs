@@ -8,7 +8,7 @@ namespace Dosai.Tests;
 ///     Integration tests against the real sample apps in ~/sandbox/dosai-corpus (cloned from GitHub
 ///     at pinned commits and built — run <c>Dosai.Tests/Corpus/setup.sh</c>). Tests SKIP (not pass)
 ///     when the corpus is absent, so a green CI run cannot hide a corpus that was never analyzed.
-///     The numeric floors are pinned from the 4.0.1 release runs to surface analysis regressions.
+///     The numeric floors are pinned from the batch 1-3 baseline runs to surface analysis regressions.
 /// </summary>
 public class CorpusTests
 {
@@ -34,7 +34,7 @@ public class CorpusTests
         var slice = JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(path), JsonOptions)!;
 
         // A real mixed MVC + minimal-api app: dozens of framework entry points
-        // (43 at the 4.0.1 release run).
+        // (43 at the batch 1-3 baseline run).
         Assert.True(slice.EntryPoints!.Count >= 40, $"expected >= 40 entry points, got {slice.EntryPoints.Count}");
         Assert.Contains(slice.EntryPoints, entryPoint => entryPoint.Kind is "HttpController" or "HttpMinimalApi");
 
@@ -117,5 +117,33 @@ public class CorpusTests
                 Assert.NotEmpty(finding.EntryPointIds);
             }
         });
+    }
+
+    [SkippableFact]
+    public void Corpus_EShopOnWeb_Batch4_TopLevelEntryPointsDeadCodeAndAttackSurface()
+    {
+        var path = CorpusPathOrSkip("eShopOnWeb/src/Web");
+        var slice = JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(path), JsonOptions)!;
+
+        // R6: eShop's Program.cs uses top-level statements — the synthesized `<Main>$` must be a
+        // Cli entry point whose MethodId resolves against a reachable graph node.
+        var cli = slice.EntryPoints!.FirstOrDefault(entryPoint => entryPoint is { Kind: "Cli", MethodId: not null } && entryPoint.MethodId.Contains("<Main>$", StringComparison.Ordinal));
+        Assert.NotNull(cli);
+        Assert.Contains(slice.Reachability!, facts => string.Equals(facts.NodeId, cli.MethodId, StringComparison.Ordinal) && facts.Reachable);
+
+        // R5: dead code on a real app — non-empty, source-located, bounded, and never a
+        // reflection/DI keep-alive target.
+        var deadCode = slice.DeadCode!;
+        Assert.True(deadCode.Count > 0, $"expected dead code on a real app, got {deadCode.Count}");
+        Assert.All(deadCode, entry => Assert.False(string.IsNullOrWhiteSpace(entry.FileName)));
+        Assert.True(deadCode.Count <= 500, $"dead-code report exceeded its bound: {deadCode.Count}");
+        var keepAliveNodes = slice.Reachability!.Where(facts => facts.KeepAlive).Select(facts => facts.NodeId).ToHashSet(StringComparer.Ordinal);
+        Assert.All(deadCode, entry => Assert.DoesNotContain(entry.NodeId, keepAliveNodes));
+
+        // F6: the attack-surface view groups every entry point by exposure on real code.
+        var result = DataFlowAnalyzer.Analyze(path);
+        Assert.NotEmpty(result.AttackSurface);
+        Assert.Equal(result.EntryPoints.Count, result.AttackSurface.Sum(group => group.EntryPointCount));
+        Assert.Contains(result.AttackSurface, group => group.Exposure.EndsWith("-http", StringComparison.Ordinal));
     }
 }

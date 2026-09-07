@@ -25,6 +25,10 @@ public class MethodsSlice
     public List<EntryPoint>? EntryPoints { get; init; }
     public List<NodeReachability>? Reachability { get; init; }
     public List<RecursionCluster>? RecursionClusters { get; init; }
+
+    /// <summary>R5: source-declared methods no entry point reaches and no reflection/DI evidence keeps alive (empty for assembly-only inputs).</summary>
+    public List<DeadCodeEntry>? DeadCode { get; init; }
+
     public List<Frameworks.SecurityFinding>? SecurityFindings { get; init; }
     public List<PackageReachability>? PackageReachability { get; init; }
     public List<SourceAssemblyMapping>? SourceAssemblyMapping { get; init; }

@@ -71,6 +71,20 @@ public sealed class DataFlowMethodSummary
     public required string Method { get; set; }
     public List<int> ReturnParameterIndexes { get; set; } = [];
     public List<int> SinkParameterIndexes { get; set; } = [];
+    /// <summary>
+    ///     T6: indexes of <c>out</c>/<c>ref</c> parameters written inside the method. By-value
+    ///     parameter assignments are excluded: reassigning a by-value parameter is local to the
+    ///     callee and never reaches the caller.
+    /// </summary>
+    public List<int> OutParameterIndexes { get; set; } = [];
+    /// <summary>
+    ///     T6: source categories observed flowing into each out/ref parameter, keyed by parameter
+    ///     index — a helper assigning an out param from a pattern-matched source lets call sites
+    ///     mint that source for the out local even when no argument is tainted. Keyed per index so
+    ///     a source reaching one out parameter cannot mint taint for a sibling that only ever
+    ///     receives a literal.
+    /// </summary>
+    public Dictionary<int, List<string>> OutSourceCategories { get; set; } = [];
     public List<string> SinkCategories { get; set; } = [];
     public List<string> TaintKinds { get; set; } = [];
     public List<string> FieldPaths { get; set; } = [];
@@ -204,6 +218,8 @@ public sealed class DataFlowResult
     public List<DataFlowSlice> Slices { get; set; } = [];
     public List<SanitizedFlow> SanitizedFlows { get; set; } = [];
     public List<ExploitChain> ExploitChains { get; set; } = [];
+    /// <summary>F6: entry points grouped by exposure with the chains/weaknesses that reach them; built after suppressions.</summary>
+    public List<AttackSurfaceGroup> AttackSurface { get; set; } = [];
     public List<PackageReachability> PackageReachability { get; set; } = [];
     public List<DangerousApiReachability> DangerousApiReachability { get; set; } = [];
     public List<WeaknessCandidate> WeaknessCandidates { get; set; } = [];
@@ -385,11 +401,13 @@ public static partial class DataFlowAnalyzer
         result.Statistics.SinkCount = result.Nodes.Count(n => n.IsSink);
         result.Statistics.SliceCount = result.Slices.Count;
         // Framework entry points carry stable ids (ep:op:...); analyzer/Cli entry points get
-        // sequential ids appended after them.
-        var frameworkEntryPoints = frameworkResult.EntryPoints
-            .Concat(TransparencyBuilder.BuildEntryPoints(frameworkResult.ApiEndpoints.Concat(ApiEndpointAnalyzer.GetApiEndpoints(path))));
+        // sequential ids appended after them. The analyzer path is VB-only (providers own every
+        // C# endpoint) and merges through the same dedup as methods mode — rebuilding entry
+        // points from provider endpoints produced a second, MethodId-less copy of each.
+        var legacyEntryPoints = TransparencyBuilder.BuildEntryPoints(ApiEndpointAnalyzer.GetApiEndpoints(path));
+        var frameworkEntryPoints = Depscan.Dosai.MergeEntryPoints(legacyEntryPoints, frameworkResult.EntryPoints);
         AddDataFlowEntryPoints(result);
-        var next = frameworkEntryPoints.Count();
+        var next = frameworkEntryPoints.Count;
         foreach (var entryPoint in result.EntryPoints)
         {
             entryPoint.Id = $"ep{++next}";
@@ -405,13 +423,15 @@ public static partial class DataFlowAnalyzer
         TransparencyBuilder.ApplySeverity(result);
         TransparencyBuilder.AttachExploitChains(result, graph.MethodEdges, graph.MethodIdsByFileMethod);
         TransparencyBuilder.ApplySuppressions(result, suppressionsPath);
+        // F6: after suppressions so the surface reflects the final, reportable findings.
+        result.AttackSurface = TransparencyBuilder.BuildAttackSurface(result);
         return result;
     }
 
     private static void AddDataFlowEntryPoints(DataFlowResult result)
     {
         var next = result.EntryPoints.Count;
-        foreach (var source in result.Nodes.Where(node => node is { IsSource: true, Category: "cli", MethodName: "Main" }))
+        foreach (var source in result.Nodes.Where(node => node is { IsSource: true, Category: "cli" } && TransparencyBuilder.IsCliEntryPointName(node.MethodName)))
         {
             if (result.EntryPoints.Any(entryPoint => entryPoint.Kind == "Cli" && entryPoint.FileName == source.FileName && entryPoint.LineNumber == source.LineNumber))
             {
@@ -422,6 +442,9 @@ public static partial class DataFlowAnalyzer
             {
                 Id = $"ep{++next}",
                 Kind = "Cli",
+                // R2/R6: the concrete graph node id lets exploit chains resolve directly instead
+                // of falling back to the (file, method-name) index.
+                MethodId = source.Properties.TryGetValue("methodId", out var methodId) ? methodId : null,
                 MethodName = source.MethodName,
                 ClassName = source.ClassName,
                 Namespace = source.Namespace,
@@ -438,14 +461,18 @@ public static partial class DataFlowAnalyzer
     {
         var operationNodes = root.DescendantNodes()
             .Where(node => node is Microsoft.CodeAnalysis.CSharp.Syntax.BaseMethodDeclarationSyntax or Microsoft.CodeAnalysis.CSharp.Syntax.AccessorDeclarationSyntax or Microsoft.CodeAnalysis.CSharp.Syntax.LocalFunctionStatementSyntax);
+        var collector = new DataFlowSummaryCollector(model, summaries, patterns, callerIndex, methodRoots);
         foreach (var node in operationNodes)
         {
             var operation = model.GetOperation(node);
             if (operation is not null)
             {
-                new DataFlowSummaryCollector(model, summaries, patterns, callerIndex, methodRoots).Visit(operation);
+                collector.Visit(operation);
             }
         }
+
+        // R6: top-level statements are summarized under the synthesized `<Main>$` like any method body.
+        collector.VisitGlobalStatements(root.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.GlobalStatementSyntax>().Select(statement => statement.Statement));
     }
 
     private static void CollectCompilationUnitSummaries(SemanticModel model, VisualBasicCompilationUnitSyntax root, Dictionary<string, DataFlowMethodSummary> summaries, DataFlowPatternSet patterns, Dictionary<string, HashSet<string>>? callerIndex = null, Dictionary<string, (IOperation Root, SemanticModel Model)>? methodRoots = null)
@@ -474,6 +501,12 @@ public static partial class DataFlowAnalyzer
                 new DataFlowOperationWalker(model, graph, patterns, summaries, basePath, sourceFilePath, frameworkSeeds).Visit(operation);
             }
         }
+
+        // R6: top-level statements (the default console template) never appear inside a method-body
+        // operation, so they need an explicit pass — one walker for the whole file so taint carries
+        // across statements exactly as it does within a method body.
+        new DataFlowOperationWalker(model, graph, patterns, summaries, basePath, sourceFilePath, frameworkSeeds)
+            .VisitGlobalStatements(root.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.GlobalStatementSyntax>().Select(statement => statement.Statement));
     }
 
     private static void AnalyzeCompilationUnit(SemanticModel model, VisualBasicCompilationUnitSyntax root, DataFlowGraphBuilder graph, DataFlowPatternSet patterns, Dictionary<string, DataFlowMethodSummary> summaries, string basePath, string sourceFilePath, FrameworkTaintSeedIndex? frameworkSeeds = null)
@@ -1284,6 +1317,47 @@ public static partial class DataFlowAnalyzer
             _currentMethod = previousMethod;
         }
 
+        /// <summary>
+        ///     R6: summarizes top-level statements under the compiler-synthesized `<Main>$`. Each
+        ///     statement is a standalone operation with no enclosing method-body operation, so the
+        ///     usual current-method resolution never fires; pin it once from the first statement.
+        /// </summary>
+        public void VisitGlobalStatements(IEnumerable<Microsoft.CodeAnalysis.CSharp.Syntax.StatementSyntax> statements)
+        {
+            var statementList = statements.ToList();
+            if (statementList.Count == 0 || model.GetEnclosingSymbol(statementList[0].SpanStart) is not IMethodSymbol topLevelMain)
+            {
+                return;
+            }
+
+            var previousMethod = _currentMethod;
+            _currentMethod = topLevelMain;
+            try
+            {
+                foreach (var statement in statementList)
+                {
+                    if (model.GetOperation(statement) is not { } operation)
+                    {
+                        continue;
+                    }
+
+                    // `<Main>$` is nobody's callee, so fixpoint rounds never need to re-walk it;
+                    // the root is registered anyway when present so the invariant "visited methods
+                    // have roots" holds for every summary key.
+                    if (methodRoots is not null)
+                    {
+                        methodRoots.TryAdd(DescribeSymbol(topLevelMain), (operation, model));
+                    }
+
+                    Visit(operation);
+                }
+            }
+            finally
+            {
+                _currentMethod = previousMethod;
+            }
+        }
+
         public override void VisitReturn(IReturnOperation operation)
         {
             if (_currentMethod is not null && operation.ReturnedValue is not null)
@@ -1341,6 +1415,66 @@ public static partial class DataFlowAnalyzer
             RecordSinkSummary(operation, operation.Constructor, operation.Arguments);
             base.VisitObjectCreation(operation);
         }
+
+        /// <summary>
+        ///     T6: an assignment to an <c>out</c>/<c>ref</c> parameter is the write-back contract —
+        ///     record the parameter index, and when the assigned value is itself a source-shaped
+        ///     expression (a pattern-matched field/property/method/type), remember the categories
+        ///     under that index so call sites can mint that source for the caller's out local.
+        ///     By-value parameters are skipped: `void F(string s) { s = Secret; }` writes nothing
+        ///     the caller can observe, and recording it would let an unrelated out parameter of the
+        ///     same method inherit the category and mint a finding that cannot happen at runtime.
+        /// </summary>
+        public override void VisitSimpleAssignment(ISimpleAssignmentOperation operation)
+        {
+            if (_currentMethod is not null &&
+                Strip(operation.Target) is IParameterReferenceOperation { Parameter.RefKind: RefKind.Out or RefKind.Ref } parameterReference)
+            {
+                var parameterIndex = _currentMethod.Parameters.IndexOf(parameterReference.Parameter);
+                if (parameterIndex >= 0)
+                {
+                    var summary = GetSummary(_currentMethod);
+                    AddUnique(summary.OutParameterIndexes, parameterIndex);
+                    foreach (var pattern in MatchSourceExpression(operation.Value).Where(pattern => !string.IsNullOrWhiteSpace(pattern.Category)))
+                    {
+                        var categories = summary.OutSourceCategories.TryGetValue(parameterIndex, out var existing) ? existing : summary.OutSourceCategories[parameterIndex] = [];
+                        if (!categories.Contains(pattern.Category!, StringComparer.Ordinal))
+                        {
+                            categories.Add(pattern.Category!);
+                        }
+                    }
+                }
+            }
+
+            base.VisitSimpleAssignment(operation);
+        }
+
+        private IEnumerable<DataFlowPattern> MatchSourceExpression(IOperation value)
+        {
+            if (GetReferencedSymbol(value) is { } symbol)
+            {
+                foreach (var pattern in MatchSymbol(symbol, value.Syntax, patterns.Sources))
+                {
+                    yield return pattern;
+                }
+            }
+
+            var typeName = Normalize(value.Type?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty);
+            foreach (var pattern in patterns.Sources.Where(pattern => pattern.Kind == DataFlowPatternKind.Type && PatternMatches(typeName, pattern)))
+            {
+                yield return pattern;
+            }
+        }
+
+        private static ISymbol? GetReferencedSymbol(IOperation operation) => operation switch
+        {
+            ILocalReferenceOperation local => local.Local,
+            IParameterReferenceOperation parameter => parameter.Parameter,
+            IFieldReferenceOperation field => field.Field,
+            IPropertyReferenceOperation property => property.Property,
+            IInvocationOperation invocation => invocation.TargetMethod,
+            _ => null
+        };
 
         /// <summary>
         ///     T1: absorb the callee's summary into the caller's summary. A wrapper calling another
@@ -1640,6 +1774,40 @@ public static partial class DataFlowAnalyzer
             base.VisitBlock(operation);
         }
 
+        /// <summary>
+        ///     R6: analyzes top-level statements (the default `dotnet new console` template) under
+        ///     the compiler-synthesized `<Main>$`. The statements carry no method-body operation, so
+        ///     seeding and current-method resolution never fire on their own; one walker handles the
+        ///     whole file so taint carries across statements exactly as inside a method body
+        ///     (`var t = args[0]; Process.Start("ping", t);` spans two statements).
+        /// </summary>
+        public void VisitGlobalStatements(IEnumerable<Microsoft.CodeAnalysis.CSharp.Syntax.StatementSyntax> statements)
+        {
+            var statementList = statements.ToList();
+            if (statementList.Count == 0 || model.GetEnclosingSymbol(statementList[0].SpanStart) is not IMethodSymbol topLevelMain)
+            {
+                return;
+            }
+
+            var previousMethod = _currentMethod;
+            _currentMethod = topLevelMain;
+            try
+            {
+                SeedMethodParameters(topLevelMain, statementList[0]);
+                foreach (var statement in statementList)
+                {
+                    if (model.GetOperation(statement) is { } operation)
+                    {
+                        Visit(operation);
+                    }
+                }
+            }
+            finally
+            {
+                _currentMethod = previousMethod;
+            }
+        }
+
         public override void VisitVariableDeclarator(IVariableDeclaratorOperation operation)
         {
             if (operation.GetVariableInitializer()?.Value is { } initializer)
@@ -1754,9 +1922,95 @@ public static partial class DataFlowAnalyzer
             RecordMethodEdge(operation.TargetMethod);
             SeedLambdaArguments(operation);
             PropagateCollectionMutation(operation);
+            PropagateOutArgumentTaint(operation);
             ProcessSink(operation, operation.TargetMethod, operation.Arguments);
             ProcessCodeSink(operation, operation.Arguments);
             base.VisitInvocation(operation);
+        }
+
+        /// <summary>
+        ///     T6: out/ref arguments are write-back channels the old walker dropped —
+        ///     `int.TryParse(tainted, out var v)` and `dict.TryGetValue(tainted, out v)` lost the
+        ///     out-var taint. Two rules: (a) any tainted in-argument or receiver taints the
+        ///     out/ref local (the derived-value rule that covers the TryParse/TryGetValue shapes
+        ///     for metadata-only callees); (b) a callee summary that writes a parameter from a
+        ///     pattern-matched source mints that source at the call site. Neither rule fires for a
+        ///     call with clean arguments and no source-writing summary — no phantom taint.
+        /// </summary>
+        private void PropagateOutArgumentTaint(IInvocationOperation operation)
+        {
+            var writeBacks = operation.Arguments
+                .Where(argument => argument.Parameter is { RefKind: RefKind.Out or RefKind.Ref })
+                .Select(argument => (Argument: argument, Symbol: ResolveWrittenSymbol(argument.Value)))
+                .Where(writeBack => writeBack.Symbol is not null)
+                .ToList();
+            if (writeBacks.Count == 0)
+            {
+                return;
+            }
+
+            var inTaint = Combine(operation.Arguments
+                .Where(argument => argument.Parameter is not { RefKind: RefKind.Out or RefKind.Ref })
+                .Select(argument => GetTaint(argument.Value))
+                .Append(GetTaint(operation.Instance)));
+            TryGetSummary(operation.TargetMethod, out var summary);
+
+            foreach (var (argument, symbol) in writeBacks)
+            {
+                if (inTaint is not null)
+                {
+                    var node = graph.AddNode("OutArgument", argument.Parameter?.Name ?? "out", argument, model, basePath, sourceFilePath, _currentMethod, isSource: false, isSink: false, matchedPatterns: [], category: null, symbol: symbol!.ToDisplayString(), typeName: GetSymbolType(symbol), code: SafeSyntaxText.Text(argument.Syntax));
+                    graph.AddEdges(inTaint.NodeIds, node.Id, "OutArgument", argument.Syntax, sourceFilePath, argument.Parameter?.Name ?? "out");
+                    _taintedSymbols[SymbolKey(symbol)] = inTaint.Append(node.Id);
+                    continue;
+                }
+
+                var parameterIndex = argument.Parameter is null ? -1 : operation.TargetMethod.Parameters.IndexOf(argument.Parameter);
+                // Only the categories recorded for *this* parameter index seed it — a sibling out
+                // parameter fed from a source must not taint one that only receives a literal.
+                if (summary is null ||
+                    parameterIndex < 0 ||
+                    !summary.OutSourceCategories.TryGetValue(parameterIndex, out var categories) ||
+                    categories.Count == 0)
+                {
+                    continue;
+                }
+
+                var category = categories[0];
+                var sourcePattern = new DataFlowPattern
+                {
+                    Target = DataFlowPatternTarget.Source,
+                    Kind = DataFlowPatternKind.Method,
+                    Pattern = summary.Method,
+                    Category = category,
+                    Description = "Out parameter seeded from a source-matched write in the callee summary"
+                };
+                var sourceNode = graph.AddNode("Source", symbol!.Name, argument, model, basePath, sourceFilePath, _currentMethod,
+                    isSource: true,
+                    isSink: false,
+                    matchedPatterns: [sourcePattern],
+                    category: category,
+                    symbol: symbol.ToDisplayString(),
+                    typeName: GetSymbolType(symbol),
+                    code: SafeSyntaxText.Text(argument.Syntax));
+                _taintedSymbols[SymbolKey(symbol)] = new TaintTrace([sourceNode.Id], [category], []);
+            }
+        }
+
+        /// <summary>
+        ///     The local/parameter/field/property a write-back argument fills: `out v`, `out var v`,
+        ///     `ref field`. In this Roslyn version `out var v` is a declaration expression wrapping a
+        ///     bare local reference (single-variable designation), not a variable declaration.
+        /// </summary>
+        private static ISymbol? ResolveWrittenSymbol(IOperation operation)
+        {
+            operation = Strip(operation);
+            if (operation is IDeclarationExpressionOperation { Expression: { } declarationExpression })
+            {
+                operation = Strip(declarationExpression);
+            }
+
+            return GetReferencedSymbol(operation);
         }
 
         public override void VisitObjectCreation(IObjectCreationOperation operation)
@@ -1941,7 +2195,7 @@ public static partial class DataFlowAnalyzer
                 yield return pattern;
             }
 
-            if (methodSymbol.Name == "Main" && parameter.Name.Equals("args", StringComparison.OrdinalIgnoreCase))
+            if (TransparencyBuilder.IsCliEntryPointName(methodSymbol.Name) && parameter.Name.Equals("args", StringComparison.OrdinalIgnoreCase))
             {
                 foreach (var pattern in _patternIndex.SourceParameters.Where(p => PatternMatches("Main", p)))
                 {
@@ -1994,23 +2248,87 @@ public static partial class DataFlowAnalyzer
         private void AssignTarget(IOperation target, IOperation value, SyntaxNode syntax, string edgeKind)
         {
             MarkHardenedAssignment(target, value);
-            var symbol = GetReferencedSymbol(target);
-            if (symbol is not null)
-            {
-                var taintKey = TaintKey(target) ?? SymbolKey(symbol);
-                if (GetTaint(value) is not { } taint)
-                {
-                    _taintedSymbols.Remove(taintKey);
-                    if (taintKey != SymbolKey(symbol)) _taintedSymbols.Remove(SymbolKey(symbol));
-                    return;
-                }
 
-                var assignmentNode = graph.AddNode("Assignment", symbol.Name, syntax, model, basePath, sourceFilePath, _currentMethod, isSource: false, isSink: false, matchedPatterns: [], category: null, symbol: symbol.ToDisplayString(), typeName: GetSymbolType(symbol), code: SyntaxText(syntax));
-                if (taint.TaintKinds.Count > 0) assignmentNode.Properties["taintKinds"] = string.Join(',', taint.TaintKinds);
-                if (taint.FieldPaths.Count > 0) assignmentNode.Properties["fieldPaths"] = string.Join(',', taint.FieldPaths);
-                graph.AddEdges(taint.NodeIds, assignmentNode.Id, edgeKind, syntax, sourceFilePath, symbol.Name);
-                _taintedSymbols[taintKey] = taint.Append(assignmentNode.Id).WithFieldPath(TaintKey(target));
+            // T7: element/indexer stores (`arr[i] = tainted`, `dict[key] = tainted`) taint the
+            // container so later reads stay tainted. Ordinary property stores do NOT — member
+            // taint keys keep field sensitivity (obj.Safe = x must not taint obj.Secret).
+            if (ContainerOf(target) is { } container && GetReferencedSymbol(container) is { } containerSymbol && GetTaint(value) is { } containerTaint && TaintKey(container) is { } containerKey)
+            {
+                var elementStoreNode = graph.AddNode("Assignment", containerSymbol.Name, syntax, model, basePath, sourceFilePath, _currentMethod, isSource: false, isSink: false, matchedPatterns: [], category: null, symbol: containerSymbol.ToDisplayString(), typeName: GetSymbolType(containerSymbol), code: SyntaxText(syntax));
+                graph.AddEdges(containerTaint.NodeIds, elementStoreNode.Id, "ElementStore", syntax, sourceFilePath, containerSymbol.Name);
+                _taintedSymbols[containerKey] = containerTaint.Append(elementStoreNode.Id);
             }
+
+            var symbol = GetReferencedSymbol(target);
+            if (symbol is null)
+            {
+                return;
+            }
+
+            var taintKey = TaintKey(target) ?? SymbolKey(symbol);
+            if (GetTaint(value) is not { } taint)
+            {
+                _taintedSymbols.Remove(taintKey);
+                if (taintKey != SymbolKey(symbol)) _taintedSymbols.Remove(SymbolKey(symbol));
+                return;
+            }
+
+            var assignmentNode = graph.AddNode("Assignment", symbol.Name, syntax, model, basePath, sourceFilePath, _currentMethod, isSource: false, isSink: false, matchedPatterns: [], category: null, symbol: symbol.ToDisplayString(), typeName: GetSymbolType(symbol), code: SyntaxText(syntax));
+            if (taint.TaintKinds.Count > 0) assignmentNode.Properties["taintKinds"] = string.Join(',', taint.TaintKinds);
+            if (taint.FieldPaths.Count > 0) assignmentNode.Properties["fieldPaths"] = string.Join(',', taint.FieldPaths);
+            graph.AddEdges(taint.NodeIds, assignmentNode.Id, edgeKind, syntax, sourceFilePath, symbol.Name);
+            _taintedSymbols[taintKey] = taint.Append(assignmentNode.Id).WithFieldPath(TaintKey(target));
+        }
+
+        /// <summary>
+        ///     The container operation whose element is being written: `arr[i]` → arr, `dict[k]` →
+        ///     dict. Only genuine element stores match — plain property writes keep their
+        ///     field-sensitive member taint key (T7).
+        /// </summary>
+        private static IOperation? ContainerOf(IOperation target)
+        {
+            return Strip(target) switch
+            {
+                IArrayElementReferenceOperation arrayElement => arrayElement.ArrayReference,
+                IPropertyReferenceOperation { Property.IsIndexer: true, Instance: not null } indexer => indexer.Instance,
+                _ => null
+            };
+        }
+
+        /// <summary>
+        ///     T7: a tainted collection taints the loop variable — `foreach (var x in tainted)
+        ///     Process.Start(x)` previously lost the taint because the loop variable has no
+        ///     initializer for VisitVariableDeclarator to observe.
+        /// </summary>
+        public override void VisitForEachLoop(IForEachLoopOperation operation)
+        {
+            if (GetTaint(operation.Collection) is { } collectionTaint)
+            {
+                foreach (var symbol in ForEachLoopVariables(operation.LoopControlVariable))
+                {
+                    var elementNode = graph.AddNode("Element", symbol.Name, operation.Collection, model, basePath, sourceFilePath, _currentMethod, isSource: false, isSink: false, matchedPatterns: [], category: null, symbol: symbol.ToDisplayString(), typeName: GetSymbolType(symbol), code: SyntaxText(operation.Collection.Syntax));
+                    graph.AddEdges(collectionTaint.NodeIds, elementNode.Id, "Element", operation.Collection.Syntax, sourceFilePath, "element");
+                    _taintedSymbols[SymbolKey(symbol)] = collectionTaint.Append(elementNode.Id);
+                }
+            }
+
+            base.VisitForEachLoop(operation);
+        }
+
+        private static IEnumerable<ILocalSymbol> ForEachLoopVariables(IOperation? loopControlVariable)
+        {
+            // In this Roslyn version the C# loop control variable is a bare declarator; the
+            // declaration/group wrappers appear for deconstruction and multi-variable forms.
+            var declarators = loopControlVariable switch
+            {
+                IVariableDeclaratorOperation declarator => [declarator],
+                IVariableDeclarationOperation declaration => declaration.Declarators.ToArray(),
+                IVariableDeclarationGroupOperation group => group.Declarations.SelectMany(declaration => declaration.Declarators).ToArray(),
+                _ => []
+            };
+            return declarators
+                .Select(declarator => declarator.Symbol)
+                .OfType<ILocalSymbol>();
         }
 
         /// <summary>
@@ -3246,7 +3564,7 @@ public static partial class DataFlowAnalyzer
     ///     summary does not.
     /// </summary>
     private static int SummaryCellCount(DataFlowMethodSummary summary) =>
-        2 + summary.ReturnParameterIndexes.Count + summary.SinkParameterIndexes.Count + summary.SinkCategories.Count + summary.TaintKinds.Count + summary.FieldPaths.Count;
+        2 + summary.ReturnParameterIndexes.Count + summary.SinkParameterIndexes.Count + summary.OutParameterIndexes.Count + summary.OutSourceCategories.Sum(entry => 1 + entry.Value.Count) + summary.SinkCategories.Count + summary.TaintKinds.Count + summary.FieldPaths.Count;
 
     /// <summary>Per-summary cell counts, so a fixpoint round can tell which summaries grew and walk only their callers.</summary>
     private static Dictionary<string, int> SummaryCellCounts(Dictionary<string, DataFlowMethodSummary> summaries) =>

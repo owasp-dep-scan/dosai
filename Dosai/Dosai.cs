@@ -175,7 +175,8 @@ public static class Dosai
         // merged graph. Bounded walks; diagnostics land in the slice.
         ReachabilityAnalyzer.CollapseDuplicateCallSites(callGraph);
         var reachabilityDiagnostics = new List<string>();
-        var (reachability, recursionClusters) = ReachabilityAnalyzer.Compute(callGraph, entryPoints, reachabilityDiagnostics);
+        var (reachability, recursionClusters, budgetExhausted) = ReachabilityAnalyzer.Compute(callGraph, entryPoints, reachabilityDiagnostics);
+        var deadCode = ReachabilityAnalyzer.BuildDeadCode(callGraph, reachability, sourceMode, budgetExhausted, reachabilityDiagnostics);
         var securityFindings = Frameworks.SecurityAnalyzer.Run(frameworkContext, frameworkResult, apiEndpoints);
 
         return new MethodsSlice
@@ -193,6 +194,7 @@ public static class Dosai
             EntryPoints = entryPoints,
             Reachability = reachability,
             RecursionClusters = recursionClusters,
+            DeadCode = deadCode,
             SecurityFindings = securityFindings,
             PackageReachability = packageReachability,
             AssemblyInformation = assemblyInformation,
@@ -211,7 +213,7 @@ public static class Dosai
     ///     (file discovery order must not change a bom-ref), and any that describe an endpoint a
     ///     provider already claimed are dropped instead of duplicated.
     /// </summary>
-    private static List<EntryPoint> MergeEntryPoints(List<EntryPoint> analyzerEntryPoints, List<EntryPoint> frameworkEntryPoints)
+    internal static List<EntryPoint> MergeEntryPoints(List<EntryPoint> analyzerEntryPoints, List<EntryPoint> frameworkEntryPoints)
     {
         var merged = new List<EntryPoint>(frameworkEntryPoints);
         var seen = frameworkEntryPoints.Select(EntryPointSignature).ToHashSet(StringComparer.Ordinal);
@@ -1481,6 +1483,43 @@ public static class Dosai
                 }
             }
 
+            // R6: top-level statements (the default `dotnet new console` template) have no
+            // MethodDeclarationSyntax, so the compiler-synthesized `<Main>$` never reached the
+            // method inventory — a modern CLI was invisible to methods, entry points, and every
+            // consumer of the reachability index. Resolve the synthesized symbol from the first
+            // global statement and emit it like a declared method; its SourceSignature matches the
+            // call-graph node id the operation walkers already produce for global statements.
+            var globalStatements = csRoot?.Members.OfType<GlobalStatementSyntax>().ToList();
+            if (globalStatements is { Count: > 0 } && model.GetEnclosingSymbol(globalStatements[0].Statement.SpanStart) is IMethodSymbol { Name: "<Main>$" } topLevelMain)
+            {
+                var mainSpan = globalStatements[0].Statement.SyntaxTree.GetLineSpan(globalStatements[0].Statement.Span);
+                sourceMethods.Add(new Method
+                {
+                    Path = Path.GetRelativePath(path, sourceFilePath),
+                    FileName = fileName,
+                    Assembly = topLevelMain.ContainingAssembly.ToDisplayString(),
+                    Module = topLevelMain.ContainingModule.ToDisplayString(),
+                    Namespace = topLevelMain.ContainingNamespace.ToDisplayString(),
+                    ClassName = topLevelMain.ContainingType.Name,
+                    Attributes = "Static",
+                    Name = topLevelMain.Name,
+                    ReturnType = topLevelMain.ReturnType.ToDisplayString(),
+                    LineNumber = mainSpan.StartLinePosition.Line + 1,
+                    ColumnNumber = mainSpan.StartLinePosition.Character + 1,
+                    Parameters = topLevelMain.Parameters.Select(p => new Parameter
+                    {
+                        Name = p.Name,
+                        Type = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(p.Type.ToString()!),
+                        TypeFullName = p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
+                        IsGenericParameter = p.Type is ITypeParameterSymbol
+                    }).ToList(),
+                    CustomAttributes = [],
+                    BaseType = null,
+                    ImplementedInterfaces = [],
+                    SourceSignature = GenerateMethodSignature(topLevelMain)
+                });
+            }
+
             // VB method declarations
             if (vbMethodDeclarations is not null)
             {
@@ -2214,8 +2253,14 @@ public static class Dosai
             var constructorClassName = constructor.GenericParameters is { Count: > 0 } && constructor.ClassName?.Contains('<', StringComparison.Ordinal) != true
                 ? $"{constructor.ClassName}<{string.Join(',', constructor.GenericParameters)}>"
                 : constructor.ClassName;
-            var id = CreateMemberId(constructor.Namespace, constructorClassName, ".ctor", constructor.Parameters);
-            AddNode(id, ".ctor", constructorClassName, constructor.Namespace, constructor.FileName, constructor.Assembly, constructor.Module, "Constructor", constructor.LineNumber, constructor.ColumnNumber, false);
+            // The inventory namespace display for global-namespace types is the literal
+            // "<global namespace>", which never matches the edge id format
+            // (GenerateMethodSignature omits it). Keeping the node id in edge format prevents a
+            // duplicate unreachable node per global-namespace constructor — the exact false
+            // positive the R5 dead-code report surfaces.
+            var constructorNamespace = constructor.Namespace is "<global namespace>" ? null : constructor.Namespace;
+            var id = CreateMemberId(constructorNamespace, constructorClassName, ".ctor", constructor.Parameters);
+            AddNode(id, ".ctor", constructorClassName, constructorNamespace, constructor.FileName, constructor.Assembly, constructor.Module, "Constructor", constructor.LineNumber, constructor.ColumnNumber, false);
         }
 
         foreach (var call in allMethodCalls.Where(c => !string.IsNullOrWhiteSpace(c.SourceId) && !string.IsNullOrWhiteSpace(c.TargetId)))

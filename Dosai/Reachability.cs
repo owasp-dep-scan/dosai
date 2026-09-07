@@ -70,6 +70,22 @@ public sealed class NodeReachability
     public int FanOut { get; set; }
 
     /// <summary>
+    ///     R5: true when a forward graph path from a resolvable entry point reaches this node.
+    ///     Independent of the bounded <see cref="ReachableEntryPoints"/> list: the list saturates
+    ///     at 16 entry points, the flag never does.
+    /// </summary>
+    public bool Reachable { get; set; }
+
+    /// <summary>
+    ///     R5: true when the node is unreachable but must not be reported as dead code —
+    ///     reflection or DI/framework-model evidence keeps it callable at runtime.
+    /// </summary>
+    public bool KeepAlive { get; set; }
+
+    /// <summary>Why the node is kept alive despite being unreachable (evidence kinds, R5).</summary>
+    public List<string> KeepAliveReasons { get; set; } = [];
+
+    /// <summary>
     ///     Strongly-connected-component id. Multi-node components share a non-negative id; plain
     ///     singletons are -1; every self-loop gets its own unique negative id so grouping by SccId
     ///     never merges unrelated self-recursive methods.
@@ -90,6 +106,23 @@ public sealed class RecursionCluster
     public List<string> MemberIds { get; set; } = [];
 }
 
+/// <summary>
+///     R5: a method or constructor no entry point can reach and no reflection/DI evidence keeps
+///     alive — dead code from the attacker's point of view (and from the maintainer's).
+/// </summary>
+public sealed class DeadCodeEntry
+{
+    public required string NodeId { get; set; }
+    public string? Name { get; set; }
+    public string? ClassName { get; set; }
+    public string? Namespace { get; set; }
+    /// <summary>Method or Constructor.</summary>
+    public string Kind { get; set; } = "Method";
+    public string? FileName { get; set; }
+    public int LineNumber { get; set; }
+    public int ColumnNumber { get; set; }
+}
+
 public static class ReachabilityAnalyzer
 {
     /// <summary>Per-entry-point BFS visited budget; exceeding it emits a diagnostic instead of hanging.</summary>
@@ -108,8 +141,13 @@ public static class ReachabilityAnalyzer
     ///     buckets, fan-in/out, SCC ids, and recursion clusters. Reuses the merged (already
     ///     deduplicated) edge list; builds forward and reverse indexes once; one bounded BFS per
     ///     resolvable entry point — never per node.
+    ///     <para>
+    ///         <c>BudgetExhausted</c> reports whether any BFS hit <see cref="MaxVisitedPerEntryPoint"/>.
+    ///         Callers that treat "not visited" as "unreachable" (the dead-code report) must consult
+    ///         it rather than pattern-matching the diagnostic text.
+    ///     </para>
     /// </summary>
-    public static (List<NodeReachability> Nodes, List<RecursionCluster> Clusters) Compute(CallGraph callGraph, IEnumerable<EntryPoint> entryPoints, List<string> diagnostics)
+    public static (List<NodeReachability> Nodes, List<RecursionCluster> Clusters, bool BudgetExhausted) Compute(CallGraph callGraph, IEnumerable<EntryPoint> entryPoints, List<string> diagnostics)
     {
         var forward = BuildAdjacency(callGraph.Edges, forward: true);
         var reverse = BuildAdjacency(callGraph.Edges, forward: false);
@@ -165,6 +203,10 @@ public static class ReachabilityAnalyzer
                     continue;
                 }
 
+                // R5: exact reachability flag — set for every visited node, unlike the bounded
+                // entry-point list above.
+                fact.Reachable = true;
+
                 if (fact.ReachableEntryPoints.Count < 16 && !fact.ReachableEntryPoints.Contains(entryPoint.Id))
                 {
                     fact.ReachableEntryPoints.Add(entryPoint.Id);
@@ -183,8 +225,148 @@ public static class ReachabilityAnalyzer
 
         var (components, componentOfNode, clusters) = ComputeComponents(callGraph, forward, facts);
         ComputeReachableBuckets(facts, forward, components, componentOfNode, callGraph.Nodes, diagnostics);
-        return (facts.Values.OrderBy(fact => fact.NodeId, StringComparer.Ordinal).ToList(), clusters);
+        MarkKeepAlive(callGraph, facts);
+        return (facts.Values.OrderBy(fact => fact.NodeId, StringComparer.Ordinal).ToList(), clusters, entryBudgetReported);
     }
+
+    /// <summary>
+    ///     R5: unreachable-but-kept-alive marking. Any node targeted by a reflection or DI/
+    ///     framework-model edge (or carrying that evidence itself) stays out of the dead-code
+    ///     report: `AddSingleton<Foo>()`, `Activator.CreateInstance(typeof(Foo))`, and
+    ///     `[McpServerTool]`-style framework callbacks are invoked without a call site Dosai can
+    ///     attribute to an entry point. One linear pass over edges and nodes.
+    /// </summary>
+    private static void MarkKeepAlive(CallGraph callGraph, Dictionary<string, NodeReachability> facts)
+    {
+        void KeepAlive(string nodeId, string reason)
+        {
+            // Only unreachable nodes need keeping alive; a reachable node already has its answer.
+            if (!facts.TryGetValue(nodeId, out var fact) || fact.Reachable)
+            {
+                return;
+            }
+
+            fact.KeepAlive = true;
+            if (!fact.KeepAliveReasons.Contains(reason, StringComparer.Ordinal))
+            {
+                fact.KeepAliveReasons.Add(reason);
+            }
+        }
+
+        foreach (var edge in callGraph.Edges)
+        {
+            // Report the evidence kind that actually kept the node alive. The edge's own
+            // EvidenceKind is frequently an ordinary call kind while a reflection/framework kind
+            // sits in its Evidence list, so naming EvidenceKind unconditionally attributed the
+            // decision to the wrong evidence.
+            foreach (var kind in KeepAliveEvidenceKinds(edge.EvidenceKind, edge.Evidence.Select(evidence => evidence.Kind)))
+            {
+                KeepAlive(edge.TargetId, kind.ToString());
+            }
+        }
+
+        foreach (var node in callGraph.Nodes)
+        {
+            foreach (var kind in KeepAliveEvidenceKinds(null, node.Evidence.Select(evidence => evidence.Kind).Concat(node.Identity?.Evidence ?? [])))
+            {
+                KeepAlive(node.Id, kind.ToString());
+            }
+        }
+    }
+
+    private static bool IsKeepAliveEvidence(AnalysisEvidenceKind kind) =>
+        kind is AnalysisEvidenceKind.ReflectionHeuristic or AnalysisEvidenceKind.FrameworkModel;
+
+    /// <summary>The distinct keep-alive evidence kinds among a declared kind and an evidence list.</summary>
+    private static IEnumerable<AnalysisEvidenceKind> KeepAliveEvidenceKinds(AnalysisEvidenceKind? declaredKind, IEnumerable<AnalysisEvidenceKind> evidenceKinds)
+    {
+        var kinds = declaredKind is { } kind ? evidenceKinds.Prepend(kind) : evidenceKinds;
+        return kinds.Where(IsKeepAliveEvidence).Distinct();
+    }
+
+    /// <summary>
+    ///     R5: the dead-code report — source-declared methods and constructors that no entry point
+    ///     reaches and no reflection/DI evidence keeps alive. Emitted only for source-mode runs:
+    ///     assembly/library trees have no meaningful entry-point roots (library public-API roots are
+    ///     a deliberate non-goal), so everything would be flagged. Suppressed when a reachability
+    ///     budget was exhausted (an unvisited node is then unknown, not unreachable). Bounded at
+    ///     <see cref="MaxDeadCodeEntries"/> with a diagnostic.
+    /// </summary>
+    public static List<DeadCodeEntry> BuildDeadCode(CallGraph callGraph, List<NodeReachability> reachability, bool sourceMode, bool budgetExhausted, List<string> diagnostics)
+    {
+        if (!sourceMode)
+        {
+            return [];
+        }
+
+        if (budgetExhausted)
+        {
+            diagnostics.Add("Dead-code report suppressed: the reachability budget was exhausted, so unvisited nodes are unknown rather than unreachable.");
+            return [];
+        }
+
+        var factsByNodeId = reachability.ToDictionary(facts => facts.NodeId, StringComparer.Ordinal);
+        var deadCode = new List<DeadCodeEntry>();
+        var truncated = false;
+        foreach (var node in callGraph.Nodes.OrderBy(node => node.Id, StringComparer.Ordinal))
+        {
+            if (!factsByNodeId.TryGetValue(node.Id, out var facts) ||
+                facts.Reachable ||
+                facts.KeepAlive ||
+                node.IsExternal ||
+                node.Kind is not ("Method" or "Constructor") ||
+                !IsSourceLocation(node.FileName) ||
+                IsCompilerGenerated(node.Name, node.ClassName))
+            {
+                continue;
+            }
+
+            if (deadCode.Count >= MaxDeadCodeEntries)
+            {
+                truncated = true;
+                break;
+            }
+
+            deadCode.Add(new DeadCodeEntry
+            {
+                NodeId = node.Id,
+                Name = node.Name,
+                ClassName = node.ClassName,
+                Namespace = node.Namespace,
+                Kind = node.Kind,
+                FileName = node.FileName,
+                LineNumber = node.LineNumber,
+                ColumnNumber = node.ColumnNumber
+            });
+        }
+
+        if (truncated)
+        {
+            diagnostics.Add($"Dead-code report truncated at {MaxDeadCodeEntries} entries; query reachability[reachable=false] for the full set.");
+        }
+
+        return deadCode;
+
+        // Bin artifacts pulled into a source scan (DLLs under bin/, their PDB-backed twins) carry
+        // assembly file names rather than source paths — not reviewable dead code.
+        static bool IsSourceLocation(string? fileName) =>
+            !string.IsNullOrWhiteSpace(fileName) &&
+            (fileName.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) ||
+             fileName.EndsWith(".vb", StringComparison.OrdinalIgnoreCase) ||
+             fileName.EndsWith(".fs", StringComparison.OrdinalIgnoreCase));
+
+        // Roslyn-synthesized members are recognised by their *name*, never by the whole node id:
+        // the id of any member of a generic type embeds the type arguments (`Box<T>..ctor(T)`), so
+        // testing the id for angle brackets silently dropped every generic type from the report.
+        // Synthesized member names begin with '<' (`<Main>$`, `<Run>b__0`, `<Read>d__3`) and
+        // synthesized containers are `<>`-prefixed (`<>c`, `<>c__DisplayClass0_0`).
+        static bool IsCompilerGenerated(string? name, string? className) =>
+            name is not null && name.StartsWith('<') ||
+            className is not null && className.Contains("<>", StringComparison.Ordinal);
+    }
+
+    /// <summary>Upper bound on DeadCode list entries; larger graphs get a diagnostic + the query alias instead.</summary>
+    public const int MaxDeadCodeEntries = 500;
 
     /// <summary>
     ///     R7: annotate each edge with the number of distinct call sites for its (source, target)
