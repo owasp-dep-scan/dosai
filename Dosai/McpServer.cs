@@ -96,7 +96,10 @@ public static class McpServer
                     Tool("dosai.agent_context", "Generate compact agent context from data-flow analysis."),
                     Tool("dosai.services", "List detected framework services: inbound endpoints (MVC, minimal APIs, gRPC, hubs, functions) and outbound dependencies (inference endpoints, queues, vector stores), with resolved paths, confidence, trust zones, and data classifications."),
                     Tool("dosai.ai_components", "List AI inventory: models (ids and on-disk artifacts with SHA-256), MCP tools with JSON Schemas, prompts (redacted by default), agents, embeddings."),
-                    Tool("dosai.query", "Filter Dosai JSON with queries like slices[sinkCategory=sql].")
+                    Tool("dosai.query", "Filter Dosai JSON with queries like slices[sinkCategory=sql]."),
+                    Tool("dosai.exploit_chains", "List exploit chains: resolved entry point → call path → taint slice → sink linkages with exposure classification."),
+                    Tool("dosai.attack_surface", "Attack-surface view: entry points grouped by exposure (anonymous-http, rpc, cli, queue, mcp) with the weakness candidates and chains that reach each."),
+                    Tool("dosai.reachability", "Per-node reachability facts from the call graph: which entry points reach a node, at what depth, plus fan-in/fan-out and dead-code flags.")
                 }
             },
             "tools/call" => CallTool(request.Params, defaultPath, patternsPath, patternPacks, confinedRoot),
@@ -140,6 +143,10 @@ public static class McpServer
             "dosai.services" => ServicesPayload(RequirePath(path)),
             "dosai.ai_components" => AiComponentsPayload(RequirePath(path)),
             "dosai.query" => JsonSerializer.Deserialize<object>(DosaiQueryEngine.QueryJson(LoadQueryInput(arguments, path, localPatterns, localPatternPacks), GetString(arguments, "query") ?? "slices"), JsonOptions)!,
+            // O4: thin wrappers over one analyzer entry point each — no analysis logic lives here.
+            "dosai.exploit_chains" => DataFlowAnalyzer.Analyze(RequirePath(path), localPatterns, localPatternPacks).ExploitChains,
+            "dosai.attack_surface" => DataFlowAnalyzer.Analyze(RequirePath(path), localPatterns, localPatternPacks).AttackSurface,
+            "dosai.reachability" => ReachabilityPayload(RequirePath(path), GetString(arguments, "nodeId")),
             _ => throw new ArgumentException($"Unsupported tool: {name}")
         };
 
@@ -171,6 +178,19 @@ public static class McpServer
         return new { aiComponents = slice.AiComponents };
     }
 
+    /// <summary>
+    ///     Reachability payload for dosai.reachability (R1): per-node entry points/depths/fan-outs.
+    ///     The optional nodeId argument narrows to one node; absent it returns the full index.
+    /// </summary>
+    private static object ReachabilityPayload(string path, string? nodeId)
+    {
+        var slice = Dosai.GetMethodsSlice(path);
+        var reachability = string.IsNullOrWhiteSpace(nodeId)
+            ? slice.Reachability
+            : (slice.Reachability ?? []).Where(facts => string.Equals(facts.NodeId, nodeId, StringComparison.Ordinal)).ToList();
+        return new { reachability, deadCode = slice.DeadCode };
+    }
+
     private static string LoadQueryInput(JsonElement arguments, string? path, string? patternsPath, string? patternPacks)
     {
         var inputFile = GetString(arguments, "input");
@@ -197,7 +217,8 @@ public static class McpServer
                 ["patternPacks"] = new { type = "string", description = "Comma-separated built-in pattern packs." },
                 ["format"] = new { type = "string", description = "Output format for dosai.crypto: dosai, cyclonedx." },
                 ["input"] = new { type = "string", description = "Existing Dosai JSON file for dosai.query." },
-                ["query"] = new { type = "string", description = "Query expression for dosai.query." }
+                ["query"] = new { type = "string", description = "Query expression for dosai.query." },
+                ["nodeId"] = new { type = "string", description = "Optional node id to narrow dosai.reachability to a single call-graph node." }
             }
         }
     };

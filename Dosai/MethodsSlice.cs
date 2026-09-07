@@ -23,9 +23,17 @@ public class MethodsSlice
     public CallGraph? CallGraph { get; init; }
     public List<ApiEndpoint>? ApiEndpoints { get; init; }
     public List<EntryPoint>? EntryPoints { get; init; }
+    public List<NodeReachability>? Reachability { get; init; }
+    public List<RecursionCluster>? RecursionClusters { get; init; }
+
+    /// <summary>R5: source-declared methods no entry point reaches and no reflection/DI evidence keeps alive (empty for assembly-only inputs).</summary>
+    public List<DeadCodeEntry>? DeadCode { get; init; }
+
+    public List<Frameworks.SecurityFinding>? SecurityFindings { get; init; }
     public List<PackageReachability>? PackageReachability { get; init; }
     public List<SourceAssemblyMapping>? SourceAssemblyMapping { get; init; }
     public List<Frameworks.ServiceComponent>? Services { get; init; }
     public List<Frameworks.AiComponent>? AiComponents { get; init; }
     public List<Frameworks.DetectedFramework>? Frameworks { get; init; }
+    public List<string>? Diagnostics { get; init; }
 }

@@ -170,6 +170,15 @@ public static class Dosai
         EnrichMethodIdentities(methods, callGraph, sourceMode);
         var packageReachability = TransparencyBuilder.BuildPackageReachability(callGraph, dependencies: usings);
 
+        // R7: collapse repeated call sites of the same (source, target, call type, evidence) pair
+        // into one edge with a count, then compute the R1/R3 reachability section once over the
+        // merged graph. Bounded walks; diagnostics land in the slice.
+        ReachabilityAnalyzer.CollapseDuplicateCallSites(callGraph);
+        var reachabilityDiagnostics = new List<string>();
+        var (reachability, recursionClusters, budgetExhausted) = ReachabilityAnalyzer.Compute(callGraph, entryPoints, reachabilityDiagnostics);
+        var deadCode = ReachabilityAnalyzer.BuildDeadCode(callGraph, reachability, sourceMode, budgetExhausted, reachabilityDiagnostics);
+        var securityFindings = Frameworks.SecurityAnalyzer.Run(frameworkContext, frameworkResult, apiEndpoints);
+
         return new MethodsSlice
         {
             Metadata = TransparencyBuilder.CreateMetadata(path),
@@ -183,12 +192,17 @@ public static class Dosai
             CallGraph = callGraph,
             ApiEndpoints = apiEndpoints,
             EntryPoints = entryPoints,
+            Reachability = reachability,
+            RecursionClusters = recursionClusters,
+            DeadCode = deadCode,
+            SecurityFindings = securityFindings,
             PackageReachability = packageReachability,
             AssemblyInformation = assemblyInformation,
             SourceAssemblyMapping = sourceAssemblyMapping,
             Services = frameworkResult.Services,
             AiComponents = frameworkResult.AiComponents,
-            Frameworks = frameworkResult.Frameworks
+            Frameworks = frameworkResult.Frameworks,
+            Diagnostics = frameworkResult.Diagnostics.Select(diagnostic => $"{diagnostic.FrameworkId}: {diagnostic.Message}").Concat(reachabilityDiagnostics).ToList()
         };
     }
 
@@ -199,7 +213,7 @@ public static class Dosai
     ///     (file discovery order must not change a bom-ref), and any that describe an endpoint a
     ///     provider already claimed are dropped instead of duplicated.
     /// </summary>
-    private static List<EntryPoint> MergeEntryPoints(List<EntryPoint> analyzerEntryPoints, List<EntryPoint> frameworkEntryPoints)
+    internal static List<EntryPoint> MergeEntryPoints(List<EntryPoint> analyzerEntryPoints, List<EntryPoint> frameworkEntryPoints)
     {
         var merged = new List<EntryPoint>(frameworkEntryPoints);
         var seen = frameworkEntryPoints.Select(EntryPointSignature).ToHashSet(StringComparer.Ordinal);
@@ -540,24 +554,39 @@ public static class Dosai
 
     private static string? FirstNonBlank(string? preferred, string? fallback) => string.IsNullOrWhiteSpace(preferred) ? fallback : preferred;
 
-    private static void NormalizeAssemblyGraphToSourceIds(List<MethodCalls> assemblyMethodCalls, CallGraph assemblyCallGraph, List<SourceAssemblyMapping> sourceAssemblyMappings)
+    internal static void NormalizeAssemblyGraphToSourceIds(List<MethodCalls> assemblyMethodCalls, CallGraph assemblyCallGraph, List<SourceAssemblyMapping> sourceAssemblyMappings)
     {
         var sourceIdByAssemblyId = sourceAssemblyMappings
             .Where(mapping => mapping.IsMapped && !string.IsNullOrWhiteSpace(mapping.SourceId) && !string.IsNullOrWhiteSpace(mapping.AssemblyId))
             .GroupBy(mapping => mapping.AssemblyId!, StringComparer.Ordinal)
-            .ToDictionary(group => group.Key, group => group.First().SourceId!, StringComparer.Ordinal);
+            .ToDictionary(group => group.First().AssemblyId!, group => group.First().SourceId!, StringComparer.Ordinal);
         if (sourceIdByAssemblyId.Count == 0)
         {
             return;
         }
 
+        // R10: instantiated-generic assembly ids (Method<args>) never match a source id exactly —
+        // the instantiation rewrites parameter types too. Index the methods' identity key
+        // (namespace.class.method, instantiation and parameters stripped) so instantiated IL nodes
+        // normalize onto the source original-definition node, keeping the instantiation as metadata.
+        var sourceIdByMethodIdentity = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (assemblyId, sourceId) in sourceIdByAssemblyId)
+        {
+            sourceIdByMethodIdentity.TryAdd(GraphIdNormalizer.MethodIdentityKey(assemblyId), sourceId);
+        }
+
+        string? Resolve(string id) =>
+            sourceIdByAssemblyId.TryGetValue(id, out var exact) ? exact :
+            GraphIdNormalizer.HasGenericInstantiation(id) && sourceIdByMethodIdentity.TryGetValue(GraphIdNormalizer.MethodIdentityKey(id), out var byIdentity) ? byIdentity :
+            null;
+
         foreach (var call in assemblyMethodCalls)
         {
-            if (call.SourceId is not null && sourceIdByAssemblyId.TryGetValue(call.SourceId, out var sourceId))
+            if (call.SourceId is not null && Resolve(call.SourceId) is { } sourceId)
             {
                 call.SourceId = sourceId;
             }
-            if (call.TargetId is not null && sourceIdByAssemblyId.TryGetValue(call.TargetId, out var targetId))
+            if (call.TargetId is not null && Resolve(call.TargetId) is { } targetId)
             {
                 call.TargetId = targetId;
             }
@@ -565,35 +594,45 @@ public static class Dosai
 
         foreach (var edge in assemblyCallGraph.Edges)
         {
-            if (sourceIdByAssemblyId.TryGetValue(edge.SourceId, out var sourceId))
+            if (Resolve(edge.SourceId) is { } edgeSourceId)
             {
-                edge.SourceId = sourceId;
+                edge.SourceId = edgeSourceId;
             }
-            if (sourceIdByAssemblyId.TryGetValue(edge.TargetId, out var targetId))
+            if (Resolve(edge.TargetId) is { } edgeTargetId)
             {
-                edge.TargetId = targetId;
+                edge.TargetId = edgeTargetId;
             }
         }
 
         var normalizedNodes = new Dictionary<string, MethodNode>(StringComparer.Ordinal);
         foreach (var node in assemblyCallGraph.Nodes)
         {
-            var wasMapped = sourceIdByAssemblyId.TryGetValue(node.Id, out var mappedSourceId);
-            var normalizedId = mappedSourceId ?? node.Id;
+            var originalNodeId = node.Id;
+            var mappedSourceId = Resolve(originalNodeId);
+            var normalizedId = mappedSourceId ?? originalNodeId;
             if (!normalizedNodes.TryGetValue(normalizedId, out var existing))
             {
                 node.Id = normalizedId;
                 if (node.Identity is not null)
                 {
                     node.Identity.Id = normalizedId;
-                    if (wasMapped)
+                    if (mappedSourceId is not null)
                     {
                         node.Identity.SourceSignature ??= normalizedId;
                         node.Identity.Symbol = normalizedId;
                     }
                 }
+
+                // R10: the original instantiated id survives as metadata when normalization kept
+                // an instantiated-generic IL node id or merged it onto a source definition.
+                node.GenericInstantiation = GraphIdNormalizer.HasGenericInstantiation(originalNodeId) ? originalNodeId : null;
                 normalizedNodes[normalizedId] = node;
                 continue;
+            }
+
+            if (existing.GenericInstantiation is null && GraphIdNormalizer.HasGenericInstantiation(originalNodeId))
+            {
+                existing.GenericInstantiation = originalNodeId;
             }
 
             foreach (var evidence in node.Evidence)
@@ -1444,6 +1483,43 @@ public static class Dosai
                 }
             }
 
+            // R6: top-level statements (the default `dotnet new console` template) have no
+            // MethodDeclarationSyntax, so the compiler-synthesized `<Main>$` never reached the
+            // method inventory — a modern CLI was invisible to methods, entry points, and every
+            // consumer of the reachability index. Resolve the synthesized symbol from the first
+            // global statement and emit it like a declared method; its SourceSignature matches the
+            // call-graph node id the operation walkers already produce for global statements.
+            var globalStatements = csRoot?.Members.OfType<GlobalStatementSyntax>().ToList();
+            if (globalStatements is { Count: > 0 } && model.GetEnclosingSymbol(globalStatements[0].Statement.SpanStart) is IMethodSymbol { Name: "<Main>$" } topLevelMain)
+            {
+                var mainSpan = globalStatements[0].Statement.SyntaxTree.GetLineSpan(globalStatements[0].Statement.Span);
+                sourceMethods.Add(new Method
+                {
+                    Path = Path.GetRelativePath(path, sourceFilePath),
+                    FileName = fileName,
+                    Assembly = topLevelMain.ContainingAssembly.ToDisplayString(),
+                    Module = topLevelMain.ContainingModule.ToDisplayString(),
+                    Namespace = topLevelMain.ContainingNamespace.ToDisplayString(),
+                    ClassName = topLevelMain.ContainingType.Name,
+                    Attributes = "Static",
+                    Name = topLevelMain.Name,
+                    ReturnType = topLevelMain.ReturnType.ToDisplayString(),
+                    LineNumber = mainSpan.StartLinePosition.Line + 1,
+                    ColumnNumber = mainSpan.StartLinePosition.Character + 1,
+                    Parameters = topLevelMain.Parameters.Select(p => new Parameter
+                    {
+                        Name = p.Name,
+                        Type = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(p.Type.ToString()!),
+                        TypeFullName = p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
+                        IsGenericParameter = p.Type is ITypeParameterSymbol
+                    }).ToList(),
+                    CustomAttributes = [],
+                    BaseType = null,
+                    ImplementedInterfaces = [],
+                    SourceSignature = GenerateMethodSignature(topLevelMain)
+                });
+            }
+
             // VB method declarations
             if (vbMethodDeclarations is not null)
             {
@@ -2177,8 +2253,14 @@ public static class Dosai
             var constructorClassName = constructor.GenericParameters is { Count: > 0 } && constructor.ClassName?.Contains('<', StringComparison.Ordinal) != true
                 ? $"{constructor.ClassName}<{string.Join(',', constructor.GenericParameters)}>"
                 : constructor.ClassName;
-            var id = CreateMemberId(constructor.Namespace, constructorClassName, ".ctor", constructor.Parameters);
-            AddNode(id, ".ctor", constructorClassName, constructor.Namespace, constructor.FileName, constructor.Assembly, constructor.Module, "Constructor", constructor.LineNumber, constructor.ColumnNumber, false);
+            // The inventory namespace display for global-namespace types is the literal
+            // "<global namespace>", which never matches the edge id format
+            // (GenerateMethodSignature omits it). Keeping the node id in edge format prevents a
+            // duplicate unreachable node per global-namespace constructor — the exact false
+            // positive the R5 dead-code report surfaces.
+            var constructorNamespace = constructor.Namespace is "<global namespace>" ? null : constructor.Namespace;
+            var id = CreateMemberId(constructorNamespace, constructorClassName, ".ctor", constructor.Parameters);
+            AddNode(id, ".ctor", constructorClassName, constructorNamespace, constructor.FileName, constructor.Assembly, constructor.Module, "Constructor", constructor.LineNumber, constructor.ColumnNumber, false);
         }
 
         foreach (var call in allMethodCalls.Where(c => !string.IsNullOrWhiteSpace(c.SourceId) && !string.IsNullOrWhiteSpace(c.TargetId)))
@@ -2215,6 +2297,7 @@ public static class Dosai
                     ArgumentExpressions = call.ArgumentExpressions ?? [],
                     CallType = call.CallType,
                     EvidenceKind = evidenceKind,
+                    DispatchConfidence = call.DispatchConfidence,
                     Evidence = call.Evidence.Count > 0 ? call.Evidence : [CreateDefaultCallEvidence(call, evidenceKind)]
                 };
             })
@@ -2433,7 +2516,16 @@ public static class Dosai
         static bool MemberTypeNamesMatch(string sourceType, string assemblyType)
         {
             var sourceAliases = MemberTypeAliases(sourceType).ToHashSet(StringComparer.Ordinal);
-            return MemberTypeAliases(assemblyType).Any(sourceAliases.Contains);
+            if (MemberTypeAliases(assemblyType).Any(sourceAliases.Contains))
+            {
+                return true;
+            }
+
+            // R10: IL ids embed generic instantiations (`Method<args>` decoding) while source ids
+            // use the original definition. Exact aliases miss, so compare arity-stripped forms
+            // before giving up; the instantiation string itself is preserved as node metadata.
+            var strippedSourceAliases = MemberTypeAliases(GraphIdNormalizer.StripGenericInstantiation(sourceType)).ToHashSet(StringComparer.Ordinal);
+            return MemberTypeAliases(GraphIdNormalizer.StripGenericInstantiation(assemblyType)).Any(strippedSourceAliases.Contains);
         }
 
         static IEnumerable<string> MemberTypeAliases(string typeName)
@@ -2628,17 +2720,26 @@ public static class Dosai
                 return;
             }
 
-            foreach (var candidate in dispatchIndex.FindDispatchCandidates(operation.TargetMethod, operation.Instance?.Type).Take(16))
+            // R4: sealed/struct receivers resolve to the exact implementation; remaining candidates
+            // are ranked instantiated-first with per-edge confidence. Even an exact resolution is a
+            // *synthesized* edge, not a witnessed call site, so it keeps the VirtualCandidate
+            // evidence kind — consumers that trust SourceRoslynDirect must only see real call
+            // sites. DispatchConfidence = "exact" carries the resolution fact.
+            foreach (var (candidate, dispatchConfidence) in dispatchIndex.FindRankedDispatchCandidates(operation.TargetMethod, operation.Instance?.Type).Take(16))
             {
+                var isExact = dispatchConfidence == "exact";
                 AddInferredMethodCall(
                     operation,
                     candidate,
                     CallType.MethodCall,
                     operation.Arguments,
-                    ["source-dispatch-candidate"],
+                    [isExact ? "source-dispatch-exact" : "source-dispatch-candidate"],
                     AnalysisEvidenceKind.SourceRoslynVirtualCandidate,
-                    "Virtual/interface dispatch candidate inferred from source type hierarchy.",
-                    "Low");
+                    isExact
+                        ? "Dispatch resolved exactly (sealed receiver); edge synthesized from type hierarchy, not a witnessed call site."
+                        : "Virtual/interface dispatch candidate inferred from source type hierarchy.",
+                    isExact ? "High" : dispatchConfidence == "rta-candidate" ? "Medium" : "Low",
+                    dispatchConfidence: dispatchConfidence);
             }
         }
 
@@ -2818,7 +2919,7 @@ public static class Dosai
             AddInferredMethodCall(operation, callback, callType, [], ["source-callback-target"], evidenceKind, description, "Medium");
         }
 
-        private void AddInferredMethodCall(IOperation operation, IMethodSymbol targetMethod, CallType callType, IEnumerable<IArgumentOperation> arguments, List<string> argumentExpressions, AnalysisEvidenceKind evidenceKind, string description, string confidence, IMethodSymbol? callerOverride = null)
+        private void AddInferredMethodCall(IOperation operation, IMethodSymbol targetMethod, CallType callType, IEnumerable<IArgumentOperation> arguments, List<string> argumentExpressions, AnalysisEvidenceKind evidenceKind, string description, string confidence, IMethodSymbol? callerOverride = null, string? dispatchConfidence = null)
         {
             if ((callerOverride ?? model.GetEnclosingSymbol(operation.Syntax.SpanStart)) is not IMethodSymbol callerSymbol)
             {
@@ -2859,6 +2960,7 @@ public static class Dosai
                 CallerClass = callerSymbol.ContainingType?.Name ?? string.Empty,
                 IsInternal = (isInSource || SymbolEqualityComparer.Default.Equals(targetMethod.ContainingAssembly, model.Compilation.Assembly)) && !isInMetadata,
                 EvidenceKind = evidenceKind,
+                DispatchConfidence = dispatchConfidence,
                 Evidence =
                 [
                     new AnalysisEvidence

@@ -61,6 +61,8 @@ public static class ServiceKinds
     public const string OData = "odata";
     public const string Soap = "soap";
     public const string WebSocket = "websocket";
+    /// <summary>Orleans grain dispatch and similar in-process RPC runtimes (documented in docs/frameworks.md).</summary>
+    public const string Rpc = "rpc";
     public const string Queue = "queue";
     public const string Topic = "topic";
     public const string PubSub = "pubsub";

@@ -47,6 +47,14 @@ internal static class DispatchResolver
         }
 
         public IEnumerable<IMethodSymbol> FindDispatchCandidates(IMethodSymbol targetMethod, ITypeSymbol? receiverType = null)
+            => FindRankedDispatchCandidates(targetMethod, receiverType).Select(candidate => candidate.Method);
+
+        /// <summary>
+        ///     Dispatch candidates with per-candidate confidence (R4). A sealed or struct receiver
+        ///     devirtualizes to the exact implementation; otherwise candidates are ranked with
+        ///     RTA-instantiated types before uninstantiated CHA candidates.
+        /// </summary>
+        public IEnumerable<(IMethodSymbol Method, string Confidence)> FindRankedDispatchCandidates(IMethodSymbol targetMethod, ITypeSymbol? receiverType = null)
         {
             if (targetMethod.IsStatic || targetMethod.MethodKind != MethodKind.Ordinary || targetMethod.ContainingType is null)
             {
@@ -54,15 +62,25 @@ internal static class DispatchResolver
             }
 
             var normalizedTarget = targetMethod.OriginalDefinition;
-            var requireInstantiated = _instantiatedTypeKeys.Count > 0;
-            var candidateCount = 0;
-            foreach (var type in _concreteTypes)
+
+            // R4: a sealed (or struct) receiver has exactly one possible implementation — resolve it
+            // directly instead of emitting a candidate set.
+            if (receiverType is INamedTypeSymbol namedReceiver && (namedReceiver.IsSealed || namedReceiver.IsValueType || namedReceiver.TypeKind == TypeKind.Struct))
             {
-                if (requireInstantiated && !IsInstantiated(type) && !MayBeFrameworkInstantiated(type, receiverType))
+                var exact = ResolveSourceCandidate(namedReceiver, normalizedTarget, targetMethod);
+                if (exact is not null && !SymbolEqualityComparer.Default.Equals(exact.OriginalDefinition, normalizedTarget) && exact.Locations.Any(location => location.IsInSource))
                 {
-                    continue;
+                    yield return (exact, "exact");
                 }
 
+                yield break;
+            }
+
+            var requireInstantiated = _instantiatedTypeKeys.Count > 0;
+            var rtaCandidates = new List<(IMethodSymbol Method, string Confidence)>();
+            var chaCandidates = new List<(IMethodSymbol Method, string Confidence)>();
+            foreach (var type in _concreteTypes)
+            {
                 if (receiverType is INamedTypeSymbol receiverNamed && !MayDispatchTo(type, receiverNamed))
                 {
                     continue;
@@ -79,9 +97,24 @@ internal static class DispatchResolver
                     continue;
                 }
 
+                // RTA evidence: the candidate type was instantiated in this compilation.
+                if (requireInstantiated && IsInstantiated(type))
+                {
+                    rtaCandidates.Add((candidate, "rta-candidate"));
+                }
+                else if (!requireInstantiated || MayBeFrameworkInstantiated(type, receiverType))
+                {
+                    chaCandidates.Add((candidate, "cha-candidate"));
+                }
+            }
+
+            // Instantiated types outrank pure CHA candidates before the cap is applied. Exact
+            // resolution stays reserved for sealed/struct static receiver types — RTA singleton
+            // promotions would inflate candidate edges to direct evidence.
+            foreach (var candidate in rtaCandidates.Concat(chaCandidates))
+            {
                 yield return candidate;
-                candidateCount++;
-                if (candidateCount >= 32)
+                if (rtaCandidates.Count + chaCandidates.Count >= 32)
                 {
                     yield break;
                 }

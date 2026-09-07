@@ -99,7 +99,9 @@ F#, R, and VC++ frontends are intentionally tolerant of incomplete project metad
 
 ### Output
 
-The primary output is `MethodsSlice`. Important collections include `Methods`, `MethodCalls`, `Properties`, `Fields`, `Events`, `Constructors`, `CallGraph`, `ApiEndpoints`, `EntryPoints`, `PackageReachability`, `AssemblyInformation`, and `SourceAssemblyMapping`. `PackageReachability[].SourceLocations` records source-file-backed call graph nodes or edges that support each reachable PURL. If a project has dependency/import PURLs but no package-attributed call graph edge, Dosai also emits low-confidence dependency-backed reachability facts from `Dependencies[]`; this keeps VB `Imports`, F# `open`, and R `library`/`require` evidence available to SBOM occurrence matching. Assembly DLL fallback locations are filtered out so downstream tools can prefer actionable source files.
+The primary output is `MethodsSlice`. Important collections include `Methods`, `MethodCalls`, `Properties`, `Fields`, `Events`, `Constructors`, `CallGraph`, `ApiEndpoints`, `EntryPoints`, `Reachability`, `RecursionClusters`, `DeadCode`, `SecurityFindings`, `PackageReachability`, `AssemblyInformation`, and `SourceAssemblyMapping`. `PackageReachability[].SourceLocations` records source-file-backed call graph nodes or edges that support each reachable PURL. If a project has dependency/import PURLs but no package-attributed call graph edge, Dosai also emits low-confidence dependency-backed reachability facts from `Dependencies[]`; this keeps VB `Imports`, F# `open`, and R `library`/`require` evidence available to SBOM occurrence matching. Assembly DLL fallback locations are filtered out so downstream tools can prefer actionable source files.
+
+`DeadCode[]` (schema 4.1.0) lists source-declared methods and constructors that no entry point reaches and no reflection/DI evidence keeps alive — the inverse of the reachability index, capped at 500 entries. Only reviewable targets are listed: entries must resolve to a `.cs`/`.vb`/`.fs` source location (so binaries pulled into a source scan are skipped), and compiler-synthesized members — lambdas, closures, iterator and async state machines, identified by their `<`-prefixed names — are excluded. Members of generic types are included; their node ids embed the type arguments (`Box<T>..ctor(T)`). The report is suppressed entirely when the reachability budget was exhausted, because an unvisited node is then unknown rather than unreachable. `Reachability[].KeepAlive`/`KeepAliveReasons` explain why an unreachable node was still retained (for example an `AddSingleton<T>()` registration or `Activator.CreateInstance` target). Top-level-statement programs (the default `dotnet new console` template) report their synthesized `<Main>$` like any declared `Main`, so a modern CLI keeps its entry point, reachability facts, and exploit chains.
 
 ### Strengths
 
@@ -108,6 +110,10 @@ The primary output is `MethodsSlice`. Important collections include `Methods`, `
 ### Weaknesses and edge cases
 
 Reflection-based assembly inventory is enriched with IL method-body call graph extraction for managed binaries. Portable PDBs improve call locations, and the binary call graph includes direct calls, constructor calls, generated async/iterator call collapse, delegate/event callback targets, and shared CHA/RTA-style virtual candidates for instantiated application types. Roslyn semantic quality depends on available references. F#, R, and VC++ frontends are conservative and may over-approximate calls when full project metadata is absent. VC++ extraction does not yet perform full libclang semantic analysis.
+
+`methods` also accepts `--mcp-allowlist <file>` (schema 4.1.0): a policy file of approved MCP
+stdio transport commands (one per line, `#` comments). Commands on the list are not flagged by the
+MCP transport security assessment that runs with the endpoint security findings.
 
 ## `dataflows`
 
@@ -122,9 +128,11 @@ dotnet run --project ./Dosai/Dosai.csproj -- dataflows \
   --graph-out /tmp/dosai-dataflows.gexf
 ```
 
-Common options are `--patterns`, `--pattern-packs`, `--graph-format`, `--graph-out`, `--print`, and `--print-sources-sinks`. Supported graph formats are `mermaid`, `graphml`, and `gexf`. By default, `dataflows` writes the JSON and optional graph artifacts without printing flow details to stdout. Use `--print` for a human-readable path view, and use `--print-sources-sinks` only for source/sink pattern diagnostics.
+Common options are `--patterns`, `--pattern-packs`, `--graph-format`, `--graph-out`, `--print`, `--print-sources-sinks`, and `--suppress`. Supported graph formats are `mermaid`, `graphml`, and `gexf`. By default, `dataflows` writes the JSON and optional graph artifacts without printing flow details to stdout. Use `--print` for a human-readable path view, and use `--print-sources-sinks` only for source/sink pattern diagnostics.
 
 Use `--patterns` to merge project-specific source, sink, passthrough, and sanitizer patterns with Dosai's built-in patterns:
+
+Use `--suppress suppressions.json` to filter known-accepted findings (schema 4.1.0). The file is a JSON array of `{ "file", "line", "sliceKey", "weaknessId", "category", "expires", "reason" }` entries — an entry matches only when **every** field present in it matches, so `file`+`line` cannot over-suppress other files and `file`+`category` cannot suppress a whole category repo-wide. `file` and `line` must both hold for the _same_ location (the flow's source or its sink), so a `file` taken from one end of a flow never pairs with a `line` from the other. Matching, non-expired entries remove the corresponding slices and weakness candidates (with a `Suppressed ...` diagnostic); expired entries let the findings resurface, so suppressions double as a review backlog.
 
 ```bash
 dotnet run --project ./Dosai/Dosai.csproj -- dataflows \
@@ -212,7 +220,9 @@ The hot path is optimized for full source-tree CI runs. Pattern lists are pre-in
 
 ### Output
 
-The primary output is `DataFlowResult`. It contains `Nodes`, `Edges`, `Slices`, `EntryPoints`, `PackageReachability`, `DangerousApiReachability`, `WeaknessCandidates`, `Patterns`, `MethodSummaries`, `Statistics`, and `Diagnostics`. `PackageReachability[].SourceLocations` is populated from matching PURL-bearing data-flow nodes and edges, with a sink/source fallback for pattern-provided slice PURLs. Locations are deduplicated, sorted, and limited to source files (`.cs`, `.csx`, `.vb`, `.fs`, `.fsx`, `.r`, `.rmd`, `.qmd`) to keep package occurrence evidence precise.
+The primary output is `DataFlowResult`. It contains `Nodes`, `Edges`, `Slices`, `EntryPoints`, `ExploitChains`, `AttackSurface`, `SanitizedFlows`, `PackageReachability`, `DangerousApiReachability`, `WeaknessCandidates`, `Patterns`, `MethodSummaries`, `Statistics`, and `Diagnostics`. `PackageReachability[].SourceLocations` is populated from matching PURL-bearing data-flow nodes and edges, with a sink/source fallback for pattern-provided slice PURLs. Locations are deduplicated, sorted, and limited to source files (`.cs`, `.csx`, `.vb`, `.fs`, `.fsx`, `.r`, `.rmd`, `.qmd`) to keep package occurrence evidence precise.
+
+`AttackSurface[]` (schema 4.1.0) groups entry points by exposure (`anonymous-http` first, then `anonymous-rpc`, `anonymous`, `mcp`, `queue`, `cli`, `authenticated-http`, `authenticated-rpc`, `internal`) with the exploit chains, weakness candidates, CWEs, and sink categories linked to each — the same view appears in `report` Markdown and `agent-context`, and behind the `dosai.attack_surface` MCP tool. Within a group, entry points sort by high-severity weakness count, then total weaknesses, then exploit chains, all descending. Each group's rollup counts cover every entry point in it, while the `EntryPoints` rows are capped at 50; `EntryPointsTruncated` marks the difference.
 
 Method inventory, call graph, and data-flow records carry shared source/binary evidence metadata. `MethodIdentity` links source signatures, assembly signatures, metadata tokens, package identity, and symbol names where known. `AnalysisEvidenceKind` distinguishes `SourceRoslynDirect`, `SourceRoslynSummary`, `SourceRoslynVirtualCandidate`, `SourceRoslynDelegateTarget`, `AssemblyReflection`, `AssemblyIlDirect`, `AssemblyIlSummary`, `AssemblyIlVirtualCandidate`, `AssemblyIlDelegateTarget`, `AssemblyIlGeneratedState`, `ExternalSummary`, `FrameworkModel`, `ReflectionHeuristic`, and `LanguageFrontend` facts so combined analysis can merge and prioritize evidence instead of treating source and binary outputs as unrelated modes.
 
@@ -392,7 +402,17 @@ old DataFlowResult + new DataFlowResult -> TransparencyBuilder.DiffJson -> diff 
 
 The command deserializes two `DataFlowResult` objects and computes a deterministic JSON diff using transparency-layer comparison logic. It is designed for CI trend checks and review of analysis changes between commits.
 
-Because it deserializes typed Dosai data-flow output before comparing, it normalizes away JSON object property ordering and ignores unknown added properties. Slice ordering is ignored by converting slices to keyed sets. The current comparison intentionally focuses on source-to-sink slice identity using `SourceCategory`, `SinkCategory`, and `SinkArgument`, plus old/new statistics. It does not produce a generic tree edit script and does not compare arbitrary node, edge, metadata, or property additions/removals.
+Because it deserializes typed Dosai data-flow output before comparing, it normalizes away JSON object property ordering and ignores unknown added properties. Slice ordering is ignored by converting slices to keyed sets; slice identity uses `SourceCategory`, `SinkCategory`, and `SinkArgument` and is severity-aware (schema 4.1.0).
+
+Since schema 4.1.0 the diff also compares beyond slices, with keyed per-section deltas:
+
+- `AddedSlices` / `RemovedSlices` (severity-aware),
+- `AddedEntryPoints` / `RemovedEntryPoints` (kind + verb + route + target method),
+- `AddedWeaknesses` / `RemovedWeaknesses` (kind + CWE + locations + severity),
+- `AddedPackages` / `RemovedPackages` (purls),
+- `RiskDelta` — a single CI-decidable summary: `NewHighSeveritySlices`, `NewMediumSeveritySlices`, `NewLowSeveritySlices`, `NewAnonymousEndpoints`, `NewWeaknessKinds`, `NewlyReachablePackages`.
+
+It does not produce a generic tree edit script and does not compare arbitrary node, edge, metadata, or property additions/removals.
 
 ### Strengths
 
@@ -496,11 +516,16 @@ sequenceDiagram
 ### Tools
 
 ```text
-dosai.methods       -> Dosai.GetMethods
-dosai.dataflows     -> DataFlowAnalyzer.Analyze
-dosai.crypto        -> CryptoAnalyzer.GetCryptoAnalysis
-dosai.agent_context -> TransparencyBuilder.BuildAgentContext
-dosai.query         -> DosaiQueryEngine.QueryJson
+dosai.methods          -> Dosai.GetMethods
+dosai.dataflows        -> DataFlowAnalyzer.Analyze
+dosai.crypto           -> CryptoAnalyzer.GetCryptoAnalysis
+dosai.agent_context    -> TransparencyBuilder.BuildAgentContext
+dosai.services         -> FrameworkRegistry services/AI inventory payload
+dosai.ai_components    -> AI component inventory payload
+dosai.query            -> DosaiQueryEngine.QueryJson
+dosai.exploit_chains   -> DataFlowAnalyzer.Analyze(...).ExploitChains
+dosai.attack_surface   -> DataFlowAnalyzer.Analyze(...).AttackSurface
+dosai.reachability     -> MethodsSlice reachability facts (optional nodeId argument)
 ```
 
 ### Algorithm and logic

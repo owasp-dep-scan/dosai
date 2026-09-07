@@ -16,6 +16,7 @@
 - [Pattern pack catalog](pattern-packs.md)
 - [Framework semantics](frameworks.md)
 - [Migration to schema 4.0.0](migration-4.0.md)
+- [Migration to schema 4.1.0](migration-4.1.0.md)
 
 - **Architecture**
 - [Architecture overview](ARCHITECTURE.md)

@@ -1627,7 +1627,12 @@ class CryptoSample
         Assert.Contains(result.Findings, finding => finding.RuleId == "DOSAI-CRYPTO-WEAK-HASH-MD5");
         Assert.Contains(result.Findings, finding => finding is { RuleId: "DOSAI-CRYPTO-WEAK-HASH-MD5", ReachableFromEntryPoint: true });
         Assert.Contains(result.Findings, finding => finding.RuleId == "DOSAI-CRYPTO-TLS-CERT-VALIDATION-DISABLED");
-        Assert.Contains(result.Protocols, protocol => protocol is { Name: "TLS", Version: "SSL 3.0", ReachableFromEntryPoint: true });
+        // R9: the line-mode TLS detection carries no resolvable method id, so the old whole-file
+        // reachability guess is gated off — with a diagnostic naming the file — instead of being
+        // asserted as High-confidence reachable in the CBOM.
+        Assert.Contains(result.Protocols, protocol => protocol is { Name: "TLS", Version: "SSL 3.0" });
+        Assert.All(result.Protocols, protocol => Assert.False(protocol.ReachableFromEntryPoint));
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Contains("matched only at file level", StringComparison.Ordinal) && diagnostic.Contains("CryptoSample.cs", StringComparison.Ordinal));
         Assert.Equal(result.Findings.Select(finding => (finding.RuleId, finding.Location.FileName, finding.Location.LineNumber)).Distinct().Count(), result.Findings.Count);
         Assert.NotNull(result.CryptoDataFlows);
         Assert.True(result.Statistics.CryptoDataFlowSliceCount >= 1);
@@ -2263,7 +2268,7 @@ class Program
         Assert.Contains(methodsSlice.ApiEndpoints ?? [], endpoint => endpoint is { HttpMethod: "GET", Route: "api/[controller]/{id}", Path: "/api/Orders/{id}", FilePath: "Endpoints.cs" } && endpoint.RawUrls.Contains("https://api.example.test/orders/"));
         Assert.Contains(methodsSlice.ApiEndpoints ?? [], endpoint => endpoint is { HttpMethod: "POST", Route: "/upload", Path: "/upload", EndpointKind: "MinimalApi" });
         Assert.NotNull(methodsSlice.Metadata);
-        Assert.Equal("4.0.0", methodsSlice.Metadata.SchemaVersion);
+        Assert.Equal("4.1.0", methodsSlice.Metadata.SchemaVersion);
         Assert.Contains(methodsSlice.EntryPoints ?? [], entryPoint => entryPoint is { Kind: "HttpController", Route: "/api/Orders/{id}" });
     }
 
