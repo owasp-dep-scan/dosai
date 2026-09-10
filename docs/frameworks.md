@@ -104,6 +104,13 @@ files from disk, and model artifacts over 256 MB skip hashing (see THREAT_MODEL.
 `financial`, `health`; default `unknown`, never `public`). Every non-`unknown` classification
 names the member that triggered it in `Description`. Disable with `--no-classify-data`.
 
+C# union declarations (C# 15, .NET 11) classify through their case records: the classifier
+expands a union into the payload records the compiler lowers per case, so a `credential` or
+`pii` member on one case surfaces even though the union declares no members of its own. Types
+marked for JSON closed-type polymorphism or union serialization (`JsonPolymorphicAttribute`,
+`JsonUnionAttribute`) are treated as (de)serialization boundaries and their interface-typed
+members are followed.
+
 `TrustZone`: `public` (anonymous inbound), `authenticated`, `internal` (loopback/queue),
 `external` (outbound to non-loopback hosts), `unknown`. `CrossesTrustBoundary` is computed from
 the call graph, it is only set when a positive path exists from a public inbound service to an

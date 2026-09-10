@@ -1041,8 +1041,12 @@ public static class Program
             UseShellExecute = false
         });
         Assert.NotNull(build);
+        // Drain both pipes before waiting: a build that fills either buffer would otherwise
+        // block until the test times out.
+        var buildStdout = build.StandardOutput.ReadToEndAsync();
+        var buildStderr = build.StandardError.ReadToEndAsync();
         build.WaitForExit();
-        var buildOutput = build.StandardOutput.ReadToEnd() + build.StandardError.ReadToEnd();
+        var buildOutput = buildStdout.GetAwaiter().GetResult() + buildStderr.GetAwaiter().GetResult();
         Assert.True(build.ExitCode == 0, buildOutput);
 
         var resultJson = DataFlowAnalyzer.GetDataFlows(Path.Combine(outputDirectory, "AssemblyOnlyFlow.dll"));
@@ -1215,6 +1219,118 @@ class CryptoIvNoise
 
         Assert.DoesNotContain(result.Nodes, node => node is { IsSource: true, Category: "crypto-material", Name: "deriv" });
         Assert.DoesNotContain(result.Slices, slice => slice is { SourceCategory: "crypto-material", SinkCategory: "crypto" } && slice.SinkArgument?.Contains("deriv", StringComparison.OrdinalIgnoreCase) == true);
+    }
+
+    // C# 15 union declarations are the headline language change in .NET 11, so they show up in
+    // analyzed code as soon as projects move to the new target framework. The source fixture is
+    // parsed with the newest accepted language version; these tests guard that the union
+    // declaration is inventoried like any other type and that taint flows through the
+    // pattern-bound payload locals of both switch forms.
+    [Fact]
+    public void GetMethods_CSharp15UnionSource_InventoriesUnionAndCaseMembers()
+    {
+        var methodsSlice = ReadMethods(GetFilePath("UnionTypes.cs"));
+
+        Assert.Contains(methodsSlice.Methods!, method => method.ClassName == "Result" && method.Name == "Describe");
+        Assert.Contains(methodsSlice.Methods!, method => method.ClassName == "UnionTypes" && method.Name == "Main");
+        Assert.Contains(methodsSlice.Methods!, method => method.ClassName == "UnionTypes" && method.Name == "Describe");
+    }
+
+    [Fact]
+    public void GetDataFlows_CSharp15UnionSwitchStatement_PropagatesTaintToCasePayload()
+    {
+        var result = ReadDataFlows(GetFilePath("UnionTypes.cs"));
+
+        Assert.Contains(result.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" } && slice.SinkArgument?.Contains("message", StringComparison.Ordinal) == true);
+    }
+
+    [Fact]
+    public void GetDataFlows_CSharp15UnionSwitchExpression_PropagatesTaintToArmResult()
+    {
+        var result = ReadDataFlows(GetFilePath("UnionTypes.cs"));
+
+        Assert.Contains(result.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" } && slice.SinkArgument?.Contains("command", StringComparison.Ordinal) == true);
+    }
+
+    // The `is` pattern is the third matching form and the most common one outside a switch;
+    // its declared locals need the same operand-to-pattern propagation.
+    [Fact]
+    public void GetDataFlows_IsPatternBoundLocal_PropagatesOperandTaintToSink()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "IsPatternFlow.cs"), """
+using System;
+using System.Diagnostics;
+
+class IsPatternFlow
+{
+    static void Main(string[] args)
+    {
+        object payload = args[0];
+        if (payload is string command)
+        {
+            Process.Start(command);
+        }
+    }
+}
+""");
+
+        var result = DataFlowAnalyzer.Analyze(tempDirectory.Path);
+
+        Assert.Contains(result.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" } && slice.SinkArgument?.Contains("command", StringComparison.Ordinal) == true);
+    }
+
+    // Inspecting an assembly must not leave it locked. AssemblyLoadContext.LoadFromAssemblyPath
+    // memory-maps the file and collectible contexts unload asynchronously, so on Windows the
+    // analyzed build output stayed undeletable for the rest of the process; deleting the
+    // inspected directory afterwards is the portable way to assert no handle survives.
+    [Fact]
+    public void GetMethods_AfterInspectingAssembly_LeavesNoFileLock()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "LockRelease", """
+public static class Program
+{
+    public static void Main() => System.Console.WriteLine("hello");
+}
+""");
+
+        var methodsSlice = ReadMethods(Path.Combine(outputDirectory, "LockRelease.dll"));
+        Assert.Contains(methodsSlice.Methods!, method => method.ClassName == "Program" && method.Name == "Main");
+
+        // Throws UnauthorizedAccessException on Windows while a mapped handle is still open.
+        Directory.Delete(outputDirectory, recursive: true);
+        Assert.False(Directory.Exists(outputDirectory));
+    }
+
+    // The assembly pipeline must handle .NET 11 assemblies produced from union declarations,
+    // whose lowered metadata shape differs from plain records and classes.
+    [SkippableFact]
+    public void GetMethods_CSharp15UnionAssembly_InventoriesLoweredMembers()
+    {
+        Skip.IfNot(HasNet11Sdk(), "Compiling a C# 15 union declaration at test time needs a .NET 11 SDK.");
+        using var tempDirectory = new TemporaryDirectory();
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "UnionAssembly", """
+public sealed record Success(string Message);
+public sealed record Failure(int ErrorCode);
+public union Result(Success, Failure)
+{
+    public string Describe() => "result";
+}
+public static class Program
+{
+    public static void Main(string[] args)
+    {
+        Result parsed = new Success(args[0]);
+        System.Console.WriteLine(parsed.Describe());
+    }
+}
+""", targetFramework: "net11.0");
+
+        var methodsSlice = ReadMethods(Path.Combine(outputDirectory, "UnionAssembly.dll"));
+
+        Assert.Contains(methodsSlice.Methods!, method => method.ClassName == "Result" && method.Name == "Describe");
+        Assert.Contains(methodsSlice.Methods!, method => method.ClassName == "Program" && method.Name == "Main");
     }
 
     [Fact]
@@ -1682,6 +1798,52 @@ void configure_tls()
         Assert.Contains(result.Operations, operation => operation is { Algorithm: "TLS", Symbol: "TLS_method" });
         Assert.Contains(result.Operations, operation => operation is { Algorithm: "TLS", Symbol: "TLSv1_2_method" });
         Assert.Contains(result.Operations, operation => operation is { Algorithm: "TLS", Symbol: "TLS1_2_method" });
+    }
+
+    // .NET 11 crypto additions: the Aes key-wrap methods (RFC 3394) are real crypto operations
+    // that belong in the CBOM, and the experimental caller-driven TLS session types in
+    // System.Net.Security carry diagnostic SYSLIB5007, which analysts should see flagged.
+    [Fact]
+    public void CryptoAnalysis_DetectsNet11KeyWrapAndTlsSessionApis()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Net11KeyWrapSample.cs"), """
+using System.Security.Cryptography;
+
+class Net11KeyWrapSample
+{
+    static byte[] WrapPayload(byte[] key, byte[] payload)
+    {
+        using var aes = Aes.Create();
+        return aes.EncryptKeyWrap(key, payload);
+    }
+
+    static byte[] UnwrapPayload(byte[] key, byte[] wrapped)
+    {
+        using var aes = Aes.Create();
+        return aes.DecryptKeyWrap(key, wrapped);
+    }
+}
+""");
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Net11TlsSessionSample.cs"), """
+using System.Net.Security;
+
+class Net11TlsSessionSample
+{
+    static void Exchange()
+    {
+        var session = new TlsBufferSession();
+        session.Handshake();
+    }
+}
+""");
+
+        var result = CryptoAnalyzer.Analyze(tempDirectory.Path);
+
+        Assert.Contains(result.Assets, asset => asset is { Name: "AES Key Wrap", Family: "key-wrap", Strength: "strong", Standard: "RFC 3394" });
+        Assert.Contains(result.Operations, operation => operation is { Algorithm: "AES Key Wrap", OperationType: "key-wrap/unwrap" });
+        Assert.Contains(result.Assets, asset => asset is { Name: "TLS", Family: "protocol" });
+        Assert.Contains(result.Findings, finding => finding is { RuleId: "DOSAI-CRYPTO-EXPERIMENTAL-TLS-API", Severity: "Low" });
     }
 
     [Fact]
@@ -2268,7 +2430,7 @@ class Program
         Assert.Contains(methodsSlice.ApiEndpoints ?? [], endpoint => endpoint is { HttpMethod: "GET", Route: "api/[controller]/{id}", Path: "/api/Orders/{id}", FilePath: "Endpoints.cs" } && endpoint.RawUrls.Contains("https://api.example.test/orders/"));
         Assert.Contains(methodsSlice.ApiEndpoints ?? [], endpoint => endpoint is { HttpMethod: "POST", Route: "/upload", Path: "/upload", EndpointKind: "MinimalApi" });
         Assert.NotNull(methodsSlice.Metadata);
-        Assert.Equal("4.1.0", methodsSlice.Metadata.SchemaVersion);
+        Assert.Equal("5.0.0", methodsSlice.Metadata.SchemaVersion);
         Assert.Contains(methodsSlice.EntryPoints ?? [], entryPoint => entryPoint is { Kind: "HttpController", Route: "/api/Orders/{id}" });
     }
 
@@ -2795,6 +2957,27 @@ class SqlFlow
         Assert.Contains(actualMethods, m => m is { ClassName: "Person", Name: "CelebrateBirthday" });
     }
 
+    // F# 11 ships with .NET 11 (record spreads and constructors, direct delegate construction,
+    // interpolated strings). The frontend is line-based and must keep extracting declarations
+    // from the new syntax, degrading to reduced coverage rather than failing.
+    [Fact]
+    public void GetMethods_FSharp11Source_ReturnsFunctionsAndDependencies()
+    {
+        var sourcePath = GetFilePath(FSharp11FeaturesSource);
+        var result = Depscan.Dosai.GetMethods(sourcePath);
+        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result, new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() }
+        });
+        var actualMethods = methodsSlice?.Methods;
+
+        Assert.True(actualMethods?.Count > 0);
+        Assert.Contains(actualMethods, m => m.Name == "describe");
+        Assert.Contains(actualMethods, m => m.Name == "relocate");
+        Assert.Contains(actualMethods, m => m.Name == "build");
+        Assert.Contains(actualMethods, m => m.Name == "register");
+    }
+
     [Fact]
     public void GetMethods_CSharpSource_PathIsDirectory_ReturnsDetails()
     {
@@ -3126,16 +3309,16 @@ class SqlFlow
         }
     }
 
-    private static string BuildTemporaryProject(string tempRoot, string projectName, string programSource)
+    private static string BuildTemporaryProject(string tempRoot, string projectName, string programSource, string targetFramework = "net10.0")
     {
         var projectDirectory = Path.Combine(tempRoot, projectName, "src");
         var outputDirectory = Path.Combine(tempRoot, projectName, "bin");
         Directory.CreateDirectory(projectDirectory);
         Directory.CreateDirectory(outputDirectory);
-        File.WriteAllText(Path.Combine(projectDirectory, $"{projectName}.csproj"), """
+        File.WriteAllText(Path.Combine(projectDirectory, $"{projectName}.csproj"), $"""
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFramework>{targetFramework}</TargetFramework>
     <OutputType>Exe</OutputType>
     <DebugType>portable</DebugType>
   </PropertyGroup>
@@ -3152,11 +3335,48 @@ class SqlFlow
             UseShellExecute = false
         });
         Assert.NotNull(build);
+        // Drain both pipes before waiting: a build that fills either buffer would otherwise
+        // block until the test times out.
+        var buildStdout = build.StandardOutput.ReadToEndAsync();
+        var buildStderr = build.StandardError.ReadToEndAsync();
         build.WaitForExit();
-        var buildOutput = build.StandardOutput.ReadToEnd() + build.StandardError.ReadToEnd();
+        var buildOutput = buildStdout.GetAwaiter().GetResult() + buildStderr.GetAwaiter().GetResult();
         Assert.True(build.ExitCode == 0, buildOutput);
         return outputDirectory;
     }
+
+    /// <summary>
+    ///     Tests that compile .NET 11-only source (C# 15 union declarations) at test time need
+    ///     an 11.x SDK on the machine; they skip otherwise so older environments only lose
+    ///     coverage instead of failing. Lazy so the probe runs once even though xUnit may reach
+    ///     it from several test threads.
+    /// </summary>
+    private static readonly Lazy<bool> Net11SdkAvailable = new(() =>
+    {
+        using var probe = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = "dotnet",
+            Arguments = "--list-sdks",
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        });
+        if (probe is null)
+        {
+            return false;
+        }
+
+        // Read before waiting: a probe that fills the pipe buffer would otherwise block forever.
+        var output = probe.StandardOutput.ReadToEnd();
+        probe.WaitForExit();
+        return probe.ExitCode == 0 && output
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            // Lines look like "11.0.100-rc.1.26425.128 [/path]" or "11.0.100 [/path]"; the
+            // numeric component precedes any prerelease suffix and the path bracket.
+            .Any(line => Version.TryParse(line.Split(['[', '-'])[0].Trim(), out var version) && version.Major >= 11);
+    });
+
+    private static bool HasNet11Sdk() => Net11SdkAvailable.Value;
 
     private static void WriteProjectAssets(string directory, string packageName, string version, string assemblyFileName)
     {
@@ -3607,6 +3827,7 @@ class SqlFlow
     private const string HelloWorldVBSource = "HelloWorld.vb";
     private const string FooBarVBSource = "FooBar.vb";
     private const string HelloWorldFSharpSource = "HelloWorld.fs";
+    private const string FSharp11FeaturesSource = "FSharp11Features.fs";
     private const string FakeDLL = "Fake.dll";
     private const string sourceDirectory = "source";
     private const string fsharpSourceDirectory = "fsharp-source";

@@ -45,15 +45,52 @@ internal static partial class FSharpRegex
 }
 
 /// <summary>
-/// An enhanced AssemblyLoadContext that resolves dependencies from a list of specified search paths.
+///     An enhanced AssemblyLoadContext that resolves dependencies from a list of specified
+///     search paths. Inspected paths are searched before shared-framework paths, matching the
+///     probing order callers expect for an application's own dependencies.
 /// </summary>
-internal class InspectionAssemblyLoadContext(IEnumerable<string> searchPaths) : AssemblyLoadContext(isCollectible: true)
+/// <remarks>
+///     Assemblies from the inspected paths are read into memory instead of being loaded from
+///     their file path. <see cref="AssemblyLoadContext.LoadFromAssemblyPath" /> memory-maps the
+///     file and keeps it open for the lifetime of the context, and unloading a collectible
+///     context is asynchronous, so an analyzed assembly stayed locked well after inspection
+///     finished. On Windows that made the analyzed build output undeletable for the rest of the
+///     process - a caller could not scan its own output directory and then clean or replace it.
+///     Shared-framework assemblies keep the mapped path: they are immutable, nobody deletes
+///     them, and copying them per inspected assembly would read tens of megabytes each time.
+/// </remarks>
+internal sealed class InspectionAssemblyLoadContext(IEnumerable<string> inspectedPaths, IEnumerable<string> sharedFrameworkPaths)
+    : AssemblyLoadContext(isCollectible: true)
 {
-    private readonly List<string> _searchDirectories = searchPaths.Distinct().ToList();
+    private readonly List<string> _inspectedDirectories = inspectedPaths.Distinct().ToList();
+    private readonly List<string> _sharedFrameworkDirectories = sharedFrameworkPaths.Distinct().ToList();
 
     protected override Assembly? Load(AssemblyName assemblyName)
     {
-        return (from dir in _searchDirectories select Path.Combine(dir, assemblyName.Name + ".dll") into potentialPath where File.Exists(potentialPath) select LoadFromAssemblyPath(potentialPath)).FirstOrDefault();
+        var fileName = assemblyName.Name + Constants.AssemblyExtension;
+        return Probe(_inspectedDirectories, fileName, LoadWithoutLockingFile)
+               ?? Probe(_sharedFrameworkDirectories, fileName, LoadFromAssemblyPath);
+    }
+
+    /// <summary>Loads an inspected assembly by value so no handle outlives the read.</summary>
+    internal Assembly LoadWithoutLockingFile(string assemblyPath)
+    {
+        using var stream = new FileStream(assemblyPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        return LoadFromStream(stream);
+    }
+
+    private static Assembly? Probe(List<string> directories, string fileName, Func<string, Assembly> load)
+    {
+        foreach (var directory in directories)
+        {
+            var candidate = Path.Combine(directory, fileName);
+            if (File.Exists(candidate))
+            {
+                return load(candidate);
+            }
+        }
+
+        return null;
     }
 }
 
@@ -730,7 +767,9 @@ public static class Dosai
     {
         try
         {
-            using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            // FileShare.Delete matches the other metadata readers: probing a file must never
+            // stop the owning build from replacing or deleting it.
+            using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
             using var peReader = new PEReader(fs);
             return peReader is { HasMetadata: true, PEHeaders.CorHeader: not null };
         }
@@ -740,6 +779,71 @@ public static class Dosai
         }
     }
     
+    /// <summary>
+    ///     Shared-framework directories to probe for an inspected assembly's framework
+    ///     references, ordered so the running runtime's own version is tried first and the
+    ///     remaining installed versions newest-first.
+    /// </summary>
+    /// <remarks>
+    ///     Order is correctness, not a preference. These directories all contain a
+    ///     `System.Runtime.dll`, one per installed framework version, and probing stops at the
+    ///     first hit. Enumerating them in directory order meant the oldest installed framework
+    ///     usually won, so types referencing anything newer failed to load and were dropped from
+    ///     the inventory with only a warning - a machine with .NET 10 and 11 side by side
+    ///     silently lost every C# 15 union type, because unions implement
+    ///     `System.Runtime.CompilerServices.IUnion`, which exists only in 11's `System.Runtime`.
+    ///     Newest-first resolves references from a superset framework instead, and the running
+    ///     runtime leads because it is the one version guaranteed to be loadable in-process.
+    /// </remarks>
+    private static List<string> GetSharedFrameworkProbingPaths()
+    {
+        var runtimeDir = System.Runtime.InteropServices.RuntimeEnvironment.GetRuntimeDirectory();
+        var sharedRoots = new HashSet<string>(StringComparer.Ordinal);
+        var runningSharedRoot = Path.GetFullPath(Path.Combine(runtimeDir, "..", ".."));
+        if (Directory.Exists(runningSharedRoot))
+        {
+            sharedRoots.Add(runningSharedRoot);
+        }
+
+        foreach (var sharedRoot in GetDotnetSharedRuntimePaths().Where(Directory.Exists))
+        {
+            sharedRoots.Add(sharedRoot);
+        }
+
+        var versionDirectories = new List<string>();
+        foreach (var frameworkRoot in from sharedRoot in sharedRoots
+                 from frameworkName in new[] { "Microsoft.NETCore.App", "Microsoft.AspNetCore.App" }
+                 select Path.Combine(sharedRoot, frameworkName))
+        {
+            if (Directory.Exists(frameworkRoot))
+            {
+                versionDirectories.AddRange(Directory.GetDirectories(frameworkRoot));
+            }
+        }
+
+        var runningVersionDirectory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(runtimeDir));
+        return versionDirectories
+            .Select(directory => Path.TrimEndingDirectorySeparator(Path.GetFullPath(directory)))
+            .Distinct(StringComparer.Ordinal)
+            .OrderByDescending(directory => string.Equals(directory, runningVersionDirectory, StringComparison.Ordinal))
+            .ThenByDescending(directory => ParseFrameworkVersion(Path.GetFileName(directory)))
+            .ToList();
+    }
+
+    /// <summary>
+    ///     Version of a shared-framework directory name such as "11.0.0" or
+    ///     "11.0.0-rc.1.26425.128". A prerelease sorts below the matching release, and an
+    ///     unparseable name sorts last so it never displaces a known version.
+    /// </summary>
+    private static (Version Version, bool IsRelease) ParseFrameworkVersion(string directoryName)
+    {
+        var separatorIndex = directoryName.IndexOf('-', StringComparison.Ordinal);
+        var numericPart = separatorIndex < 0 ? directoryName : directoryName[..separatorIndex];
+        return Version.TryParse(numericPart, out var version)
+            ? (version, separatorIndex < 0)
+            : (new Version(0, 0), false);
+    }
+
     /// <summary>
     /// Discovers the paths of all installed .NET shared runtimes (like Microsoft.NETCore.App
     /// and Microsoft.AspNetCore.App) by executing 'dotnet --list-runtimes'.
@@ -844,22 +948,7 @@ public static class Dosai
         var assembliesToInspect = AssemblyScope.ScopeApplicationAssemblies(path, GetFilesToInspect(path, Constants.AssemblyExtension, Constants.ExeExtension), message => Console.WriteLine($"Warning: {message}"));
         var assemblyMethods = new List<Method>();
         var processedAssemblyIdentities = new HashSet<string>();
-        var sharedRuntimePaths = GetDotnetSharedRuntimePaths();
-        var runtimeDir = System.Runtime.InteropServices.RuntimeEnvironment.GetRuntimeDirectory();
-        var sharedDir = Path.GetFullPath(Path.Combine(runtimeDir, "..", ".."));
-        var dependencyDirs = new List<string> { Path.GetDirectoryName(path)! };
-        if (Directory.Exists(sharedDir))
-        {
-            if (Directory.Exists(Path.Combine(sharedDir, "Microsoft.NETCore.App")))
-            {
-                dependencyDirs.AddRange(Directory.GetDirectories(Path.Combine(sharedDir, "Microsoft.NETCore.App")));
-            }
-
-            if (Directory.Exists(Path.Combine(sharedDir, "Microsoft.AspNetCore.App")))
-            {
-                dependencyDirs.AddRange(Directory.GetDirectories(Path.Combine(sharedDir, "Microsoft.AspNetCore.App")));
-            }
-        }
+        var sharedFrameworkDirs = GetSharedFrameworkProbingPaths();
         foreach (var assemblyFilePath in assembliesToInspect)
         {
             var fileName = Path.GetFileName(assemblyFilePath);
@@ -868,10 +957,8 @@ public static class Dosai
                 Console.WriteLine($"Info: Skipping native library or non-assembly file: {assemblyFilePath}");
                 continue;
             }
-            var searchPaths = new List<string> { Path.GetDirectoryName(assemblyFilePath)! };
-            searchPaths.AddRange(dependencyDirs);
-            searchPaths.AddRange(sharedRuntimePaths);
-            var loadContext = new InspectionAssemblyLoadContext(searchPaths);
+            var inspectedDirs = new List<string> { Path.GetDirectoryName(assemblyFilePath)!, Path.GetDirectoryName(path)! };
+            var loadContext = new InspectionAssemblyLoadContext(inspectedDirs, sharedFrameworkDirs);
             try
             {
                 var assemblyName = AssemblyName.GetAssemblyName(assemblyFilePath);
@@ -1344,7 +1431,7 @@ public static class Dosai
         var csharpTrees = sourcesToInspect
             .Where(source => Path.GetExtension(source).Equals(Constants.CSharpSourceExtension, StringComparison.OrdinalIgnoreCase))
             .Select(source => SafeFileRead.TryReadAllText(source, out var content)
-                ? (CSharpSyntaxTree)CSharpSyntaxTree.ParseText(content, path: source)
+                ? CSharpSourceParser.Parse(content, source)
                 : null)
             .OfType<CSharpSyntaxTree>()
             .ToList();

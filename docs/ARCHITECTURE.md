@@ -240,7 +240,7 @@ Slice construction walks trace nodes and pulls in-slice edges from the outgoing-
 
 ## Output contracts
 
-Three JSON shapes carry almost everything: `MethodsSlice` for inventory, `DataFlowResult` for flows and derived facts, and the crypto result with its CycloneDX mapping. Schema evolution is explicit through `Metadata.SchemaVersion`, and output-visible changes are documented per version in the [migration guides](migration-4.1.0.md). Graph exporters guarantee that every edge endpoint exists as a node, and XML exports escape source-derived text so output injection is not a vector.
+Three JSON shapes carry almost everything: `MethodsSlice` for inventory, `DataFlowResult` for flows and derived facts, and the crypto result with its CycloneDX mapping. Schema evolution is explicit through `Metadata.SchemaVersion`, and output-visible changes are documented per version in the [migration guides](migration-5.0.md). Graph exporters guarantee that every edge endpoint exists as a node, and XML exports escape source-derived text so output injection is not a vector.
 
 ## Where to extend
 

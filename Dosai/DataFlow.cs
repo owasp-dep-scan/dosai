@@ -279,7 +279,7 @@ public static partial class DataFlowAnalyzer
         var csharpTrees = sourcesToInspect
             .Where(source => Path.GetExtension(source).Equals(Constants.CSharpSourceExtension, StringComparison.OrdinalIgnoreCase))
             .Select(source => SafeFileRead.TryReadAllText(source, out var content)
-                ? (CSharpSyntaxTree)CSharpSyntaxTree.ParseText(content, path: source)
+                ? CSharpSourceParser.Parse(content, source)
                 : null)
             .OfType<CSharpSyntaxTree>()
             .ToList();
@@ -1235,7 +1235,9 @@ public static partial class DataFlowAnalyzer
     {
         try
         {
-            using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            // FileShare.Delete matches the other metadata readers: probing a file must never
+            // stop the owning build from replacing or deleting it.
+            using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
             using var peReader = new PEReader(stream);
             return peReader is { HasMetadata: true, PEHeaders.CorHeader: not null };
         }
@@ -2329,6 +2331,83 @@ public static partial class DataFlowAnalyzer
             return declarators
                 .Select(declarator => declarator.Symbol)
                 .OfType<ILocalSymbol>();
+        }
+
+        /// <summary>
+        ///     Pattern matching binds the matched value to fresh locals (`case var message:`,
+        ///     `case string message:`, recursive patterns over union cases and positional
+        ///     records such as `case Success(var message):`, and list patterns). Those locals
+        ///     have no initializer for VisitVariableDeclarator to observe, so without this
+        ///     propagation taint stops at the pattern and every sink consuming the extracted
+        ///     payload goes unreported. All three matching forms need it: the switch statement,
+        ///     the switch expression, and `is` patterns.
+        /// </summary>
+        public override void VisitSwitch(ISwitchOperation operation)
+        {
+            PropagateOperandTaintToPatternVariables(operation.Value, operation.Cases.SelectMany(@case => @case.Clauses.OfType<IPatternCaseClauseOperation>()).Select(clause => clause.Pattern));
+            base.VisitSwitch(operation);
+        }
+
+        public override void VisitSwitchExpression(ISwitchExpressionOperation operation)
+        {
+            PropagateOperandTaintToPatternVariables(operation.Value, operation.Arms.Select(arm => arm.Pattern));
+            base.VisitSwitchExpression(operation);
+        }
+
+        public override void VisitIsPattern(IIsPatternOperation operation)
+        {
+            PropagateOperandTaintToPatternVariables(operation.Value, [operation.Pattern]);
+            base.VisitIsPattern(operation);
+        }
+
+        private void PropagateOperandTaintToPatternVariables(IOperation operand, IEnumerable<IOperation?> patterns)
+        {
+            if (GetTaint(operand) is not { } operandTaint)
+            {
+                return;
+            }
+
+            foreach (var symbol in patterns.SelectMany(PatternDeclaredSymbols).Distinct<ISymbol>(SymbolEqualityComparer.Default))
+            {
+                var bindingNode = graph.AddNode("PatternBinding", symbol.Name, operand, model, basePath, sourceFilePath, _currentMethod, isSource: false, isSink: false, matchedPatterns: [], category: null, symbol: symbol.ToDisplayString(), typeName: GetSymbolType(symbol), code: SyntaxText(operand.Syntax));
+                graph.AddEdges(operandTaint.NodeIds, bindingNode.Id, "PatternBinding", operand.Syntax, sourceFilePath, symbol.Name);
+                _taintedSymbols[SymbolKey(symbol)] = operandTaint.Append(bindingNode.Id);
+            }
+        }
+
+        /// <summary>
+        ///     Locals declared by a pattern, including the payload variables nested in
+        ///     subpatterns and a designation naming the whole match (`case Success(var message)
+        ///     ok:` declares both `message` and `ok`). Nested patterns are reached through
+        ///     ChildOperations, which covers property subpatterns, `and`/`or` patterns, and
+        ///     slice patterns without naming each operation kind. Discards declare nothing.
+        /// </summary>
+        private static IEnumerable<ILocalSymbol> PatternDeclaredSymbols(IOperation? pattern)
+        {
+            if (pattern is null)
+            {
+                yield break;
+            }
+
+            // The three pattern kinds that declare a symbol of their own; every other kind only
+            // nests. DeclaredSymbol is typed as ISymbol and is null for discards.
+            var declared = pattern switch
+            {
+                IDeclarationPatternOperation declaration => declaration.DeclaredSymbol,
+                IRecursivePatternOperation recursive => recursive.DeclaredSymbol,
+                IListPatternOperation list => list.DeclaredSymbol,
+                _ => null
+            };
+
+            if (declared is ILocalSymbol local)
+            {
+                yield return local;
+            }
+
+            foreach (var nested in pattern.ChildOperations.SelectMany(PatternDeclaredSymbols))
+            {
+                yield return nested;
+            }
         }
 
         /// <summary>

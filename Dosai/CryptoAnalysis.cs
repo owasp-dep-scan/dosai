@@ -277,7 +277,7 @@ public static class CryptoAnalyzer
         var references = GetMetadataReferences(basePath, result.Diagnostics);
         var csharpTrees = files.Where(file => Path.GetExtension(file).Equals(Constants.CSharpSourceExtension, StringComparison.OrdinalIgnoreCase))
             .Select(file => SafeFileRead.TryReadAllText(file, out var content)
-                ? (CSharpSyntaxTree)CSharpSyntaxTree.ParseText(content, path: file)
+                ? CSharpSourceParser.Parse(content, file)
                 : null)
             .OfType<CSharpSyntaxTree>().ToList();
         var vbTrees = files.Where(file => Path.GetExtension(file).Equals(Constants.VBSourceExtension, StringComparison.OrdinalIgnoreCase))
@@ -430,7 +430,7 @@ public static class CryptoAnalyzer
         }
         else
         {
-            names.AddRange(Regex.Matches(line, @"\b(AesGcm|AesCcm|Aes|DES|TripleDES|RC2|MD5|SHA1|SHA256|SHA384|SHA512|RSA|DSA|ECDsa|ECDiffieHellman|HMACSHA256|HMACSHA384|HMACSHA512|Rfc2898DeriveBytes|RandomNumberGenerator|RNGCryptoServiceProvider|X509Certificate2|SslStream|SslProtocols|System\.Random|Random|CipherMode\.ECB|SecurityAlgorithms\.None)\b").Select(match => match.Value));
+            names.AddRange(Regex.Matches(line, @"\b(AesGcm|AesCcm|Aes|DES|TripleDES|RC2|MD5|SHA1|SHA256|SHA384|SHA512|RSA|DSA|ECDsa|ECDiffieHellman|HMACSHA256|HMACSHA384|HMACSHA512|Rfc2898DeriveBytes|RandomNumberGenerator|RNGCryptoServiceProvider|X509Certificate2|SslStream|SslProtocols|EncryptKeyWrap|DecryptKeyWrap|TryDecryptKeyWrap|GetKeyWrapLength|TlsContext|TlsSession|TlsBufferSession|TlsSocketSession|TlsOperationStatus|System\.Random|Random|CipherMode\.ECB|SecurityAlgorithms\.None)\b").Select(match => match.Value));
         }
 
         return names.Where(name => !string.IsNullOrWhiteSpace(name)).Distinct(StringComparer.OrdinalIgnoreCase);
@@ -479,7 +479,20 @@ public static class CryptoAnalyzer
         }
     }
 
-    private static void DetectLineMisuse(string line, string basePath, string file, int lineNumber, string? namespaceName, string? className, string? methodName, CryptoReachability reachability, CryptoAnalysisResult result)
+    /// <summary>
+    ///     The experimental caller-driven TLS session types added in .NET 11
+    ///     (System.Net.Security, diagnostic SYSLIB5007). Matched with word boundaries and
+    ///     reported once per line: the names share suffixes, so a substring check would report
+    ///     the same usage several times.
+    /// </summary>
+    private static readonly Regex ExperimentalTlsSessionApi = new(
+        @"\b(TlsContext|TlsSession|TlsBufferSession|TlsSocketSession|TlsOperationStatus)\b",
+        RegexOptions.Compiled);
+
+    private static readonly (string Pattern, string Rule, string Severity, string Summary, string Recommendation)[] LineMisuseChecks =
+        BuildLineMisuseChecks();
+
+    private static (string Pattern, string Rule, string Severity, string Summary, string Recommendation)[] BuildLineMisuseChecks()
     {
         var checks = new[]
         {
@@ -492,7 +505,20 @@ public static class CryptoAnalyzer
             (Pattern: "SSL_VERIFY_NONE", Rule: "DOSAI-CRYPTO-TLS-CERT-VALIDATION-DISABLED", Severity: "High", Summary: "OpenSSL peer verification is disabled.", Recommendation: "Use SSL_VERIFY_PEER and verify hostnames.")
         };
 
-        foreach (var check in checks.Where(check => line.Contains(check.Pattern, StringComparison.OrdinalIgnoreCase)))
+        return checks;
+    }
+
+    private static void DetectLineMisuse(string line, string basePath, string file, int lineNumber, string? namespaceName, string? className, string? methodName, CryptoReachability reachability, CryptoAnalysisResult result)
+    {
+        if (ExperimentalTlsSessionApi.Match(line) is { Success: true } experimentalTls)
+        {
+            var location = CreateLocation(basePath, file, lineNumber, experimentalTls.Index + 1);
+            var methodId = ResolveMethodId(reachability, file, namespaceName, className, methodName);
+            var entryPointIds = reachability.EntryPointsFor(methodId, file, methodName);
+            AddFinding(result, "DOSAI-CRYPTO-EXPERIMENTAL-TLS-API", "Low", "High", "Experimental caller-driven TLS session API is used (diagnostic SYSLIB5007).", "Pin the runtime version and review usages before relying on this API in production; the surface may still change.", location, methodId, entryPointIds.Count > 0, entryPointIds, [], [], []);
+        }
+
+        foreach (var check in LineMisuseChecks.Where(check => line.Contains(check.Pattern, StringComparison.OrdinalIgnoreCase)))
         {
             var location = CreateLocation(basePath, file, lineNumber, Math.Max(1, line.IndexOf(check.Pattern, StringComparison.OrdinalIgnoreCase) + 1));
             var methodId = ResolveMethodId(reachability, file, namespaceName, className, methodName);
@@ -787,6 +813,9 @@ public static class CryptoAnalyzer
             return Classify(symbol.Contains("Triple", StringComparison.OrdinalIgnoreCase) ? "3DES" : "DES/RC2/RC4", "symmetric", "weak", rule: "DOSAI-CRYPTO-WEAK-CIPHER", severity: "High", summary: "Weak or legacy symmetric cipher was detected.", recommendation: "Use AES-GCM or another approved authenticated encryption mode.");
         if (HasCryptoToken(symbolText, "AesGcm", "AES_gcm", "EVP_aes_256_gcm")) return Classify("AES-GCM", "symmetric", "strong", "encrypt/decrypt", "NIST");
         if (HasCryptoToken(symbolText, "AesCcm", "AES_ccm")) return Classify("AES-CCM", "symmetric", "strong", "encrypt/decrypt", "NIST");
+        // AES Key Wrap (RFC 3394), introduced by the Aes key-wrap methods in .NET 11; must be
+        // classified before the generic Aes branch so the key-wrap purpose is preserved.
+        if (HasCryptoToken(symbolText, "EncryptKeyWrap", "DecryptKeyWrap", "TryDecryptKeyWrap", "GetKeyWrapLength", "AES_wrap_key")) return Classify("AES Key Wrap", "key-wrap", "strong", "key-wrap/unwrap", "RFC 3394");
         if (HasCryptoToken(symbolText, "Aes", "AES_", "EVP_aes")) return Classify("AES", "symmetric", "acceptable", "encrypt/decrypt", "NIST");
         if (HasCryptoToken(symbolText, "RSA", "RSA_")) return Classify("RSA", "asymmetric", "acceptable", "sign/encrypt", "PKCS#1");
         if (HasCryptoToken(symbolText, "ECDsa", "ECDSA")) return Classify("ECDSA", "asymmetric", "strong", "sign", "FIPS 186");
@@ -797,7 +826,7 @@ public static class CryptoAnalyzer
         if (HasCryptoToken(symbolText, "RandomNumberGenerator", "RNGCryptoServiceProvider", "RAND_bytes")) return Classify("CSPRNG", "random", "strong", "random");
         if (HasCryptoToken(symbolText, "System.Random", "Random", "rand", "srand")) return Classify("Non-cryptographic RNG", "random", "weak", "random", rule: "DOSAI-CRYPTO-INSECURE-RNG", severity: "Medium", summary: "Non-cryptographic random number generator was detected near security analysis context.", recommendation: "Use RandomNumberGenerator for security-sensitive randomness.");
         if (HasCryptoToken(symbolText, "X509Certificate2", "X509_STORE", "CertificateRequest")) return Classify("X.509", "certificate", "unknown", "certificate");
-        if (HasCryptoToken(symbolText, "SslStream", "SSL_CTX", "SslProtocols", "TLS")) return Classify("TLS", "protocol", "acceptable", "transport-security", "TLS");
+        if (HasCryptoToken(symbolText, "SslStream", "SSL_CTX", "SslProtocols", "TlsContext", "TlsSession", "TlsBufferSession", "TlsSocketSession", "TlsOperationStatus", "TLS")) return Classify("TLS", "protocol", "acceptable", "transport-security", "TLS");
         if (HasCryptoToken(symbolText, "SecurityAlgorithms.None")) return Classify("JWT none", "signature", "weak", "sign", rule: "DOSAI-CRYPTO-JWT-NONE", severity: "High", summary: "JWT 'none' algorithm was detected.", recommendation: "Require strong token signing and validation.");
         if (HasCryptoToken(symbolText, "openssl::", "sodium::", "digest::")) return Classify(symbol, "library", "unknown", "library");
         return null;

@@ -13,7 +13,12 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  DOTNET_VERSION: '10.0.x'
+  # The .NET 11 SDK is required to build Dosai itself and to compile the C# 15
+  # (union declaration) fixtures used by the unit tests. While 11.0 is still prerelease,
+  # DOTNET_QUALITY must stay 'preview' or setup-dotnet resolves no matching SDK; set it back
+  # to 'ga' once 11.0 ships.
+  DOTNET_VERSION: '11.0.x'
+  DOTNET_QUALITY: 'preview'
 
 jobs:
   unit-tests:
@@ -29,6 +34,7 @@ jobs:
       uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68  # v6.0.0
       with:
         dotnet-version: ${{ env.DOTNET_VERSION }}
+        dotnet-quality: ${{ env.DOTNET_QUALITY }}
         source-url: https://nuget.pkg.github.com/owasp-dep-scan/index.json
       env:
         NUGET_AUTH_TOKEN: ${{secrets.GITHUB_TOKEN}}
@@ -52,6 +58,7 @@ jobs:
       uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68  # v6.0.0
       with:
         dotnet-version: ${{ env.DOTNET_VERSION }}
+        dotnet-quality: ${{ env.DOTNET_QUALITY }}
         source-url: https://nuget.pkg.github.com/owasp-dep-scan/index.json
       env:
         NUGET_AUTH_TOKEN: ${{secrets.GITHUB_TOKEN}}
@@ -84,6 +91,7 @@ jobs:
       uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68  # v6.0.0
       with:
         dotnet-version: ${{ env.DOTNET_VERSION }}
+        dotnet-quality: ${{ env.DOTNET_QUALITY }}
         source-url: https://nuget.pkg.github.com/owasp-dep-scan/index.json
       env:
         NUGET_AUTH_TOKEN: ${{secrets.GITHUB_TOKEN}}
@@ -138,6 +146,20 @@ jobs:
         }
         CS
         dotnet build /tmp/dosai-assembly-smoke/AssemblySmoke.csproj -o /tmp/dosai-assembly-smoke/out -v:quiet
+        # The same program built for .NET 11 exercises the pipeline against the new runtime's
+        # metadata layout.
+        sed 's|<TargetFramework>net10.0</TargetFramework>|<TargetFramework>net11.0</TargetFramework>|' /tmp/dosai-assembly-smoke/AssemblySmoke.csproj > /tmp/dosai-assembly-smoke/AssemblySmoke11.csproj
+        dotnet build /tmp/dosai-assembly-smoke/AssemblySmoke11.csproj -o /tmp/dosai-assembly-smoke/out11 -v:quiet
+        dotnet run --no-build --project ./Dosai/Dosai.csproj -- methods --path /tmp/dosai-assembly-smoke/out11/AssemblySmoke11.dll --o /tmp/dosai-assembly-methods11.json
+        python3 - <<'PY'
+        import json
+        methods11 = json.load(open('/tmp/dosai-assembly-methods11.json'))
+        assert any(m['Name'] == 'Main' for m in methods11['Methods']), methods11['Methods']
+        graph11 = methods11['CallGraph']
+        ids11 = {node['Id'] for node in graph11['Nodes']}
+        assert all(edge['SourceId'] in ids11 and edge['TargetId'] in ids11 for edge in graph11['Edges'])
+        assert any(edge['TargetId'].find('System.Diagnostics.Process.Start') >= 0 for edge in graph11['Edges'])
+        PY
         dotnet run --no-build --project ./Dosai/Dosai.csproj -- methods --path /tmp/dosai-assembly-smoke/out/AssemblySmoke.dll --o /tmp/dosai-assembly-methods.json --callgraph-format graphml --callgraph-out /tmp/dosai-assembly-callgraph.graphml
         dotnet run --no-build --project ./Dosai/Dosai.csproj -- dataflows --path /tmp/dosai-assembly-smoke/out/AssemblySmoke.dll --o /tmp/dosai-assembly-dataflows.json --graph-format graphml --graph-out /tmp/dosai-assembly-dataflows.graphml
         python3 - <<'PY'
@@ -176,6 +198,7 @@ jobs:
       uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68  # v6.0.0
       with:
         dotnet-version: ${{ env.DOTNET_VERSION }}
+        dotnet-quality: ${{ env.DOTNET_QUALITY }}
         source-url: https://nuget.pkg.github.com/owasp-dep-scan/index.json
       env:
         NUGET_AUTH_TOKEN: ${{secrets.GITHUB_TOKEN}}
@@ -234,6 +257,7 @@ jobs:
       uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68  # v6.0.0
       with:
         dotnet-version: ${{ env.DOTNET_VERSION }}
+        dotnet-quality: ${{ env.DOTNET_QUALITY }}
         source-url: https://nuget.pkg.github.com/owasp-dep-scan/index.json
       env:
         NUGET_AUTH_TOKEN: ${{secrets.GITHUB_TOKEN}}
@@ -280,6 +304,7 @@ jobs:
       uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68  # v6.0.0
       with:
         dotnet-version: ${{ env.DOTNET_VERSION }}
+        dotnet-quality: ${{ env.DOTNET_QUALITY }}
         source-url: https://nuget.pkg.github.com/owasp-dep-scan/index.json
       env:
         NUGET_AUTH_TOKEN: ${{secrets.GITHUB_TOKEN}}

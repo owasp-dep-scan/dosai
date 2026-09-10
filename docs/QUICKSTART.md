@@ -5,7 +5,7 @@ This page takes you from an empty shell to your first reviewed data-flow slice i
 ## Prerequisites
 
 ```text
-.NET SDK 8.0 or newer
+.NET SDK 11.0 or newer
 ```
 
 That is all. Dosai runs from source with `dotnet run`, and Roslyn ships with the SDK. Optional extras widen coverage later: the `Rscript` binary improves R analysis, and `FSharp.Compiler.Service` improves F# analysis, but neither is required.
