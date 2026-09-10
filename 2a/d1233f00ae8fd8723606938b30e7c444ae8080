@@ -1,0 +1,30 @@
+Dosai.TestData/Dosai.TestData.CSharp.csproj
+  h_6a4cc5cdf68def 7-12
+Dosai.TestData/UnionTypes.cs
+  h_6a4cc5cdf68def 1-43
+Dosai.Tests/Dosai.Tests.csproj
+  h_6a4cc5cdf68def 32
+Dosai.Tests/DosaiTests.cs
+  h_6a4cc5cdf68def 1220-1250,3160,3166,3169,3192-3223
+Dosai/CSharpSourceParser.cs
+  h_6a4cc5cdf68def 1-25
+Dosai/CryptoAnalysis.cs
+  h_6a4cc5cdf68def 280
+Dosai/DataFlow.cs
+  h_6a4cc5cdf68def 282,2334-2402
+Dosai/Dosai.cs
+  h_6a4cc5cdf68def 1347
+Dosai/Frameworks/FrameworkContext.cs
+  h_6a4cc5cdf68def 162
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "2ad1233f00ae8fd8723606938b30e7c444ae8080",
+  "prompts": {},
+  "humans": {
+    "h_6a4cc5cdf68def": {
+      "author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}
