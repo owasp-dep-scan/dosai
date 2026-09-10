@@ -1,0 +1,22 @@
+Dosai.TestData/Dosai.TestData.FSharp.fsproj
+  h_6a4cc5cdf68def 11
+Dosai.TestData/FSharp11Features.fs
+  h_6a4cc5cdf68def 1-28
+Dosai.Tests/Dosai.Tests.csproj
+  h_6a4cc5cdf68def 33
+Dosai.Tests/DosaiTests.cs
+  h_6a4cc5cdf68def 2875-2895,3740
+Dosai/Dosai.csproj
+  h_6a4cc5cdf68def 25
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "e42420edfaa76c5d33ea503ff2bfeb548d7b4350",
+  "prompts": {},
+  "humans": {
+    "h_6a4cc5cdf68def": {
+      "author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}
