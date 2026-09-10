@@ -1,0 +1,16 @@
+Dosai.Tests/DosaiTests.cs
+  h_6a4cc5cdf68def 1718-1763
+Dosai/CryptoAnalysis.cs
+  h_6a4cc5cdf68def 433,492-494,792-794,805
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "be351923c3f105d878389b243a61915058bb0c08",
+  "prompts": {},
+  "humans": {
+    "h_6a4cc5cdf68def": {
+      "author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}
