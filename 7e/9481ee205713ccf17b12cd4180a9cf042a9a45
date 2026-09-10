@@ -1,0 +1,28 @@
+.github/workflows/test.yml
+  h_6a4cc5cdf68def 147-160
+Dosai.TestData/Dosai.TestData.CSharp.csproj
+  h_6a4cc5cdf68def 4,7-9
+Dosai.TestData/Dosai.TestData.FSharp.fsproj
+  h_6a4cc5cdf68def 3
+Dosai.TestData/Dosai.TestData.VB.vbproj
+  h_6a4cc5cdf68def 4
+Dosai.Tests/Dosai.Tests.csproj
+  h_6a4cc5cdf68def 4
+Dosai.Tests/DosaiTests.cs
+  h_6a4cc5cdf68def 1251-1280
+Dosai/Dosai.csproj
+  h_6a4cc5cdf68def 4,30
+docs/QUICKSTART.md
+  h_6a4cc5cdf68def 8
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "7e9481ee205713ccf17b12cd4180a9cf042a9a45",
+  "prompts": {},
+  "humans": {
+    "h_6a4cc5cdf68def": {
+      "author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}
