@@ -1,0 +1,20 @@
+README.md
+  h_6a4cc5cdf68def 103-108
+docs/compiler-engineering.md
+  h_6a4cc5cdf68def 62-67
+docs/crypto-cbom.md
+  h_6a4cc5cdf68def 41-42
+docs/frameworks.md
+  h_6a4cc5cdf68def 107-113
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "2b7ee0d8f74f951088943e144393134c2770beaa",
+  "prompts": {},
+  "humans": {
+    "h_6a4cc5cdf68def": {
+      "author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}
