@@ -1,7 +1,14 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFramework>net11.0</TargetFramework>
   </PropertyGroup>
+
+  <!-- The C# 15 union-declaration fixture stays source-mode only: compiling it here
+       would change this assembly's lowered member set and with it the method tables
+       the tests expect. -->
+  <ItemGroup>
+    <Compile Remove="UnionTypes.cs" />
+  </ItemGroup>
 
 </Project>

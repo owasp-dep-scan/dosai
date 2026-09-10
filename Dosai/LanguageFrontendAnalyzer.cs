@@ -242,7 +242,7 @@ write.table(pd, file = "", sep = "\t", row.names = FALSE, col.names = TRUE, quot
             if (process is null) return false;
             var stdoutTask = process.StandardOutput.ReadToEndAsync();
             var stderrTask = process.StandardError.ReadToEndAsync();
-            if (!process.WaitForExit((int)RParserTimeout.TotalMilliseconds))
+            if (!process.TryWaitForExitStatus(RParserTimeout, out var exitStatus))
             {
                 KillProcess(process);
                 return false;
@@ -250,7 +250,10 @@ write.table(pd, file = "", sep = "\t", row.names = FALSE, col.names = TRUE, quot
 
             var stdout = stdoutTask.GetAwaiter().GetResult();
             _ = stderrTask.GetAwaiter().GetResult();
-            if (process.ExitCode != 0 || string.IsNullOrWhiteSpace(stdout))
+            // A parser killed by a signal (memory pressure, external teardown) and a clean
+            // non-zero exit are both unusable output; the caller falls back to the line parser
+            // for either.
+            if (exitStatus.Signal is not null || exitStatus.ExitCode != 0 || string.IsNullOrWhiteSpace(stdout))
             {
                 return false;
             }

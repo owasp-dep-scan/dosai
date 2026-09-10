@@ -159,7 +159,7 @@ public sealed class FrameworkContext
             .Where(file => file.EndsWith(Constants.CSharpSourceExtension, StringComparison.OrdinalIgnoreCase))
             .Select(context.TryReadFile)
             .Where(read => read.Text is not null)
-            .Select(read => (CSharpSyntaxTree)CSharpSyntaxTree.ParseText(read.Text!, path: read.Path))
+            .Select(read => CSharpSourceParser.Parse(read.Text!, read.Path))
             .ToList();
         if (csharpTrees.Count > 0)
         {

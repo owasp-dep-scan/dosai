@@ -59,6 +59,15 @@ Dosai now creates per-language compilations from all source files in the inspect
 - C#: `CSharpCompilation.Create("Dosai.SourceAnalysis.CSharp", ...)`
 - VB.NET: `VisualBasicCompilation.Create("Dosai.SourceAnalysis.VisualBasic", ...)`
 
+All C# parsing goes through one helper (`CSharpSourceParser`), which parses with
+`LanguageVersion.Preview` - the widest grammar the referenced compiler accepts. Analyzed source
+is not ours to constrain: a project can target a language version newer than the compiler Dosai
+references, and source that fails to parse disappears from the inventory, call graph, and
+data-flow results without an error. C# 15 union declarations are the current example - the
+Roslyn 5.9.0 line parses them only under `Preview`, because its `Default` is still C# 14.
+Preview only widens the accepted grammar; it does not change the meaning of source that already
+parsed.
+
 References are populated from:
 
 1. `typeof(object).Assembly.Location`

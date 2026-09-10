@@ -190,20 +190,78 @@ public static class DataClassifier
 
         if (type is INamedTypeSymbol namedType && namedType.SpecialType == SpecialType.None && visited.Add(namedType))
         {
-            foreach (var member in namedType.GetMembers())
+            foreach (var referenced in ReferencedDataTypes(namedType).Where(referenced => !visited.Contains(referenced)))
             {
-                var memberType = member switch
-                {
-                    IPropertySymbol property => property.Type,
-                    IFieldSymbol field when field.DeclaredAccessibility is Accessibility.Public => field.Type,
-                    _ => null
-                };
-
-                if (memberType is INamedTypeSymbol nested && nested.SpecialType == SpecialType.None && nested.TypeKind is TypeKind.Class or TypeKind.Struct && !visited.Contains(nested))
-                {
-                    Collect(nested, seen, visited, results, depth + 1);
-                }
+                Collect(referenced, seen, visited, results, depth + 1);
             }
         }
     }
+
+    /// <summary>
+    ///     Types whose members take part in classification because external input is bound into
+    ///     them. Two shapes matter beyond the nested property and field types:
+    ///     C# union declarations lower each case into a constructor whose parameter is the case
+    ///     payload record, and inbound JSON reaches every case, so a credential or PII member
+    ///     hidden in a single case is still a mass-assignment surface. And a type marked for
+    ///     JSON polymorphism or union serialization is a closed (de)serialization boundary whose
+    ///     interface-typed members bind into concrete payload types as well.
+    /// </summary>
+    private static IEnumerable<INamedTypeSymbol> ReferencedDataTypes(INamedTypeSymbol type)
+    {
+        var jsonBoundary = HasJsonSerializationAttribute(type);
+        foreach (var member in type.GetMembers())
+        {
+            var memberType = member switch
+            {
+                IPropertySymbol property => property.Type,
+                IFieldSymbol field when field.DeclaredAccessibility is Accessibility.Public => field.Type,
+                _ => null
+            };
+
+            if (memberType is INamedTypeSymbol nested &&
+                nested.SpecialType == SpecialType.None &&
+                (nested.TypeKind is TypeKind.Class or TypeKind.Struct ||
+                 (jsonBoundary && nested.TypeKind is TypeKind.Interface)))
+            {
+                yield return nested;
+            }
+        }
+
+        foreach (var caseType in UnionCaseTypes(type))
+        {
+            yield return caseType;
+        }
+    }
+
+    /// <summary>
+    ///     The case payload types of a C# union declaration. The compiler lowers one
+    ///     single-parameter constructor per case, and that parameter's type is the case payload,
+    ///     so the cases are read back off the constructors. The union's own copy constructor is
+    ///     excluded; recursion is guarded by the caller's visited set either way.
+    /// </summary>
+    /// <remarks>
+    ///     <c>ITypeSymbol.IsUnion</c> is marked experimental (RSEXPERIMENTAL006) on the
+    ///     referenced compiler and is the only union marker its public API surfaces. Replace this
+    ///     with <c>UnionCaseTypes</c> once a compiler package exposing it is published, which
+    ///     removes the constructor-shape assumption.
+    /// </remarks>
+    private static IEnumerable<INamedTypeSymbol> UnionCaseTypes(INamedTypeSymbol type)
+    {
+#pragma warning disable RSEXPERIMENTAL006
+        if (!type.IsUnion)
+#pragma warning restore RSEXPERIMENTAL006
+        {
+            return [];
+        }
+
+        return type.InstanceConstructors
+            .Where(constructor => constructor.Parameters.Length == 1)
+            .Select(constructor => constructor.Parameters[0].Type)
+            .OfType<INamedTypeSymbol>()
+            .Where(caseType => caseType.SpecialType == SpecialType.None && !SymbolEqualityComparer.Default.Equals(caseType, type));
+    }
+
+    /// <summary>System.Text.Json closed-type polymorphism and union serialization markers, matched by name so analyzing older targets stays safe.</summary>
+    private static bool HasJsonSerializationAttribute(INamedTypeSymbol type) =>
+        type.GetAttributes().Any(attribute => attribute.AttributeClass?.Name is "JsonPolymorphicAttribute" or "JsonUnionAttribute");
 }

@@ -5,7 +5,7 @@ namespace Depscan;
 
 public sealed class AnalysisMetadata
 {
-    public string SchemaVersion { get; set; } = "4.1.0";
+    public string SchemaVersion { get; set; } = "5.0.0";
     public string AnalyzerVersion { get; set; } = typeof(Dosai).Assembly.GetName().Version?.ToString() ?? "4.1.0";
     public DateTimeOffset GeneratedAt { get; set; } = DateTimeOffset.UtcNow;
     public string? InputPath { get; set; }

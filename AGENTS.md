@@ -31,10 +31,18 @@ dotnet test ./Dosai.sln
 | `Dosai/Transparency.cs`              | Derived review facts, agent context, reports, diffs              |
 | `Dosai/CommandLine.cs`               | CLI commands and options                                         |
 | `Dosai.Tests/DosaiTests.cs`          | Unit/integration tests                                           |
+| `Dosai/CSharpSourceParser.cs`        | Single C# parse entry point and language-version policy           |
 
 ## Coding expectations
 
 - Prefer Roslyn `IOperation` over syntax-only analysis when semantic accuracy matters.
+- Parse C# only through `CSharpSourceParser.Parse`. Analyzed source may use a newer language
+  version than the referenced compiler's default, and a parse error silently drops the file from
+  every result, so the accepted language version stays a single decision.
+- Never leave an inspected file locked. Metadata readers open with
+  `FileShare.ReadWrite | FileShare.Delete`, and inspected assemblies are loaded by value
+  (`InspectionAssemblyLoadContext`), because a mapped path stays locked on Windows for the
+  process lifetime even after a collectible context is unloaded.
 - Keep edge endpoints valid: every graph edge must reference existing nodes.
 - Preserve JSON compatibility unless a task explicitly allows breaking changes.
 - PURL enrichment must be best-effort and must never fail analysis.
@@ -55,6 +63,10 @@ Run before finishing changes:
 ```bash
 dotnet test ./Dosai.sln
 ```
+
+Building requires the .NET 11 SDK (11.0.x); a .NET 10 SDK cannot build the current target
+frameworks. Run the suite on Windows as well when touching assembly loading or file I/O: file
+locking and path semantics differ there and CI only covers Linux.
 
 For CLI smoke tests:
 
@@ -99,6 +111,7 @@ The `docs` directory doubles as a Docsify site (see `docs/index.html`, `docs/_si
 - Framework semantics: `docs/frameworks.md`
 - Migration to schema 4.0.0: `docs/migration-4.0.md`
 - Migration to schema 4.1.0 (additive; supersedes the unreleased 4.0.1): `docs/migration-4.1.0.md`
+- Migration to schema 5.0.0 (.NET 11 / C# 15; additive output changes): `docs/migration-5.0.md`
 - Data-flow custom patterns: `docs/dataflow-patterns.md`
 - Built-in data-flow pattern packs: `docs/pattern-packs.md`
 - PURL/supply-chain details: `docs/supply-chain-purl.md`
