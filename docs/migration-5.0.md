@@ -11,12 +11,12 @@ The one field every consumer sees change value is `Metadata.SchemaVersion`, whic
 
 ## Platform requirements
 
-| Requirement          | 4.1.0    | 5.0.0                                                        |
-| -------------------- | -------- | ------------------------------------------------------------ |
-| Target framework     | `net10.0`| `net11.0`                                                    |
-| SDK to build         | 10.0.x   | 11.0.x (a 10.0.x SDK cannot build this target)               |
-| Runtime to run       | 10.0.x   | Bundled — published binaries are self-contained              |
-| Analyzable languages | C# 14    | C# 15 (including union declarations), F# 11, VB.NET, R, C/C++ |
+| Requirement          | 4.1.0     | 5.0.0                                                         |
+| -------------------- | --------- | ------------------------------------------------------------- |
+| Target framework     | `net10.0` | `net11.0`                                                     |
+| SDK to build         | 10.0.x    | 11.0.x (a 10.0.x SDK cannot build this target)                |
+| Runtime to run       | 10.0.x    | Bundled — published binaries are self-contained               |
+| Analyzable languages | C# 14     | C# 15 (including union declarations), F# 11, VB.NET, R, C/C++ |
 
 While .NET 11 is prerelease, the `FSharp.Compiler.Service`, `FSharp.Core`, and
 `System.Reflection.MetadataLoadContext` references are pinned to the RC SDK's builds and move to
@@ -60,9 +60,9 @@ matching, not only unions, so existing C# projects can gain slices on upgrade.
   `TlsSession`, `TlsBufferSession`, `TlsSocketSession`, `TlsOperationStatus`) classify as TLS
   `protocol` assets and raise one new finding per line:
 
-| Rule id                            | Severity | Meaning                                                            |
-| ---------------------------------- | -------- | ------------------------------------------------------------------ |
-| `DOSAI-CRYPTO-EXPERIMENTAL-TLS-API`| `Low`    | Experimental TLS session API in use (diagnostic `SYSLIB5007`).     |
+| Rule id                             | Severity | Meaning                                                        |
+| ----------------------------------- | -------- | -------------------------------------------------------------- |
+| `DOSAI-CRYPTO-EXPERIMENTAL-TLS-API` | `Low`    | Experimental TLS session API in use (diagnostic `SYSLIB5007`). |
 
 Consumers that enumerate rule ids, or that fail a build on any new finding, should expect this
 id. It is informational: the API works, its surface is not yet stable.

@@ -31,7 +31,7 @@ dotnet test ./Dosai.sln
 | `Dosai/Transparency.cs`              | Derived review facts, agent context, reports, diffs              |
 | `Dosai/CommandLine.cs`               | CLI commands and options                                         |
 | `Dosai.Tests/DosaiTests.cs`          | Unit/integration tests                                           |
-| `Dosai/CSharpSourceParser.cs`        | Single C# parse entry point and language-version policy           |
+| `Dosai/CSharpSourceParser.cs`        | Single C# parse entry point and language-version policy          |
 
 ## Coding expectations
 
