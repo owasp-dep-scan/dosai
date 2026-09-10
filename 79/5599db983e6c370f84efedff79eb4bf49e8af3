@@ -1,0 +1,65 @@
+docs/compiler-engineering.md
+  s_b3cdb4d727f106::t_e3f52b637bff5f 62-69
+.github/workflows/vulnerable-repo-smoke.yml
+  s_b3cdb4d727f106::t_ca23d712d1d1d7 32
+AGENTS.md
+  s_b3cdb4d727f106::t_e3f52b637bff5f 34,39-45,67-69
+  s_b3cdb4d727f106::t_2b0055946554e1 114
+  s_b3cdb4d727f106::t_b52f0a8aca136c 70
+README.md
+  s_b3cdb4d727f106::t_ec420c3b1b978c 11,206
+  s_b3cdb4d727f106::t_0315e0ca20eb1e 107-109
+Dosai/Frameworks/DataClassifier.cs
+  s_b3cdb4d727f106::t_6d2dd9cb08d52a 230,232-251,253-254,256-261
+Dosai/Transparency.cs
+  s_b3cdb4d727f106::t_2b0055946554e1 8
+docs/_sidebar.md
+  s_b3cdb4d727f106::t_2b0055946554e1 20
+Dosai/Dosai.cs
+  s_b3cdb4d727f106::t_0a04b2d9d3a3ac 770-772
+  s_b3cdb4d727f106::t_daffe460fe52c9 48-50,52-63,65-66,70-93
+  s_b3cdb4d727f106::t_2b68993489595e 782-846
+  s_b3cdb4d727f106::t_c1a10846863757 951
+  s_b3cdb4d727f106::t_557c249e45f465 960-961
+Dosai.TestData/FSharp11Features.fs
+  s_b3cdb4d727f106::t_cc4b4d6f322003 2-10,28
+  s_b3cdb4d727f106::t_1c2272c232ef6f 26-27
+Dosai/DataFlow.cs
+  s_b3cdb4d727f106::t_0d3b5bd41b4cfd 1238-1240
+  s_b3cdb4d727f106::t_e66f8f4fdb8738 2337-2343,2357-2362,2370,2381-2383,2385,2387,2389,2392-2394,2396-2409
+Dosai/Dosai.csproj
+  s_b3cdb4d727f106::t_2b0055946554e1 12
+Dosai.Tests/DosaiTests.cs
+  s_b3cdb4d727f106::t_2b0055946554e1 2429
+  s_b3cdb4d727f106::t_9b2769cad20c55 3343-3344,3346,3348,3353,3356-3361,3363-3364,3369-3371
+  s_b3cdb4d727f106::t_42ab7e48fdb11a 1251-1301
+docs/migration-5.0.md
+  s_b3cdb4d727f106::t_56de18d89c0906 1-97
+docs/ARCHITECTURE.md
+  s_b3cdb4d727f106::t_ec420c3b1b978c 243
+docs/compliance.md
+  s_b3cdb4d727f106::t_ec420c3b1b978c 95
+Dosai/CryptoAnalysis.cs
+  s_b3cdb4d727f106::t_56e9cf1049ba20 482-495
+  s_b3cdb4d727f106::t_b8d1d897902ebb 505,508-521
+Dosai/CSharpSourceParser.cs
+  s_b3cdb4d727f106::t_4276d188cf4310 6-7,10-17,21-22,24
+.github/workflows/test.yml
+  s_b3cdb4d727f106::t_ca23d712d1d1d7 17-19,21,37,61,94,201,260,307
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "795599db983e6c370f84efedff79eb4bf49e8af3",
+  "prompts": {},
+  "sessions": {
+    "s_b3cdb4d727f106": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4344da80-9748-4022-a45f-2556066e5a9e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
