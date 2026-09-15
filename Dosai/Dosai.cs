@@ -896,7 +896,7 @@ public static class Dosai
     /// <returns>List of assembly information</returns>
     private static List<AssemblyInformation> GetAssemblyInformation(string path)
     {
-        var assembliesToInspect = AssemblyScope.ScopeApplicationAssemblies(path, GetFilesToInspect(path, Constants.AssemblyExtension, Constants.ExeExtension), message => Console.WriteLine($"Warning: {message}"));
+        var assembliesToInspect = AssemblyScope.ScopeApplicationAssemblies(path, GetFilesToInspect(path, Constants.AssemblyExtension, Constants.ExeExtension), message => Console.Error.WriteLine($"Warning: {message}"));
         List<AssemblyInformation> assemblyInformation = [];
         List<string> failedAssemblies = [];
 
@@ -945,7 +945,7 @@ public static class Dosai
     /// <returns>List of assembly methods</returns>
     private static List<Method> GetAssemblyMethods(string path)
     {
-        var assembliesToInspect = AssemblyScope.ScopeApplicationAssemblies(path, GetFilesToInspect(path, Constants.AssemblyExtension, Constants.ExeExtension), message => Console.WriteLine($"Warning: {message}"));
+        var assembliesToInspect = AssemblyScope.ScopeApplicationAssemblies(path, GetFilesToInspect(path, Constants.AssemblyExtension, Constants.ExeExtension), message => Console.Error.WriteLine($"Warning: {message}"));
         var assemblyMethods = new List<Method>();
         var processedAssemblyIdentities = new HashSet<string>();
         var sharedFrameworkDirs = GetSharedFrameworkProbingPaths();
@@ -1351,7 +1351,7 @@ public static class Dosai
             Assembly = assembly?.ToDisplayString() ?? "",
             Module = module?.ToDisplayString() ?? "",
             Namespace = containingNamespace?.ToDisplayString() ?? "",
-            ClassName = containingType?.Name ?? "",
+            ClassName = GetNamedContainingTypeName(methodSymbol),
             Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
             Name = methodSymbol.Name,
             ReturnType = methodSymbol.ReturnType.ToDisplayString(),
@@ -1536,7 +1536,7 @@ public static class Dosai
                             Assembly = methodSymbol.ContainingAssembly.ToDisplayString(),
                             Module = methodSymbol.ContainingModule.ToDisplayString(),
                             Namespace = methodSymbol.ContainingNamespace.ToDisplayString(),
-                            ClassName = methodSymbol.ContainingType.Name,
+                            ClassName = GetNamedContainingTypeName(methodSymbol),
                             Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
                             Name = methodSymbol.Name,
                             ReturnType = methodSymbol.ReturnType.ToDisplayString(),
@@ -1695,7 +1695,7 @@ public static class Dosai
                             Assembly = propertySymbol.ContainingAssembly.ToDisplayString(),
                             Module = propertySymbol.ContainingModule.ToDisplayString(),
                             Namespace = propertySymbol.ContainingNamespace.ToDisplayString(),
-                            ClassName = propertySymbol.ContainingType.Name,
+                            ClassName = GetNamedContainingTypeName(propertySymbol),
                             Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
                             Name = propertySymbol.Name,
                             Type = propertySymbol.Type.Name,
@@ -1762,7 +1762,7 @@ public static class Dosai
                             Assembly = propertySymbol.ContainingAssembly.ToDisplayString(),
                             Module = propertySymbol.ContainingModule.ToDisplayString(),
                             Namespace = propertySymbol.ContainingNamespace.ToDisplayString(),
-                            ClassName = propertySymbol.ContainingType.Name,
+                            ClassName = GetNamedContainingTypeName(propertySymbol),
                             Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
                             Name = propertySymbol.Name,
                             Type = propertySymbol.Type.Name,
@@ -1949,7 +1949,7 @@ public static class Dosai
                             Assembly = eventSymbol.ContainingAssembly.ToDisplayString(),
                             Module = eventSymbol.ContainingModule.ToDisplayString(),
                             Namespace = eventSymbol.ContainingNamespace.ToDisplayString(),
-                            ClassName = eventSymbol.ContainingType.Name,
+                            ClassName = GetNamedContainingTypeName(eventSymbol),
                             Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
                             Name = eventSymbol.Name,
                             Type = eventSymbol.Type.Name,
@@ -2006,7 +2006,7 @@ public static class Dosai
                             Assembly = variableSymbol?.ContainingAssembly.ToDisplayString() ?? model?.Compilation.Assembly.ToDisplayString(),
                             Module = variableSymbol?.ContainingModule.ToDisplayString() ?? model?.Compilation.Assembly.Modules.FirstOrDefault()?.ToDisplayString(),
                             Namespace = variableSymbol?.ContainingNamespace.ToDisplayString() ?? model?.Compilation.Assembly.Name,
-                            ClassName = variableSymbol?.ContainingType.Name ?? GetContainingTypeName(eventFieldDeclaration),
+                            ClassName = variableSymbol is null ? GetContainingTypeName(eventFieldDeclaration) : GetNamedContainingTypeName(variableSymbol),
                             Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
                             Name = variable.Identifier.Text,
                             Type = typeSymbol?.Name ?? type.ToString(),
@@ -2061,7 +2061,7 @@ public static class Dosai
                             Assembly = eventSymbol.ContainingAssembly.ToDisplayString(),
                             Module = eventSymbol.ContainingModule.ToDisplayString(),
                             Namespace = eventSymbol.ContainingNamespace.ToDisplayString(),
-                            ClassName = eventSymbol.ContainingType.Name,
+                            ClassName = GetNamedContainingTypeName(eventSymbol),
                             Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
                             Name = eventSymbol.Name,
                             Type = eventSymbol.Type.Name,
@@ -2186,7 +2186,7 @@ public static class Dosai
                                 Assembly = constructorSymbol.ContainingAssembly.ToDisplayString(),
                                 Module = constructorSymbol.ContainingModule.ToDisplayString(),
                                 Namespace = constructorSymbol.ContainingNamespace.ToDisplayString(),
-                                ClassName = constructorSymbol.ContainingType.Name,
+                                ClassName = GetNamedContainingTypeName(constructorSymbol),
                                 Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
                                 Name = constructorSymbol.ContainingType.Name,
                                 ReturnType = "Void",
@@ -2696,6 +2696,26 @@ public static class Dosai
         return "";
     }
 
+    /// <summary>
+    ///     Name of the nearest named declaring type of a symbol. Members declared in a C# 14+
+    ///     <c>extension</c> block (methods, properties, C# 15 extension indexers) are contained in
+    ///     a compiler-synthesized nested type whose metadata <see cref="INamedTypeSymbol.Name" />
+    ///     is empty - it only renders as <c>extension(...)</c> in display strings. Walking outward
+    ///     attributes those members to the enclosing static class, so the inventory keeps the
+    ///     grouping callers expect instead of an empty class name.
+    /// </summary>
+    private static string GetNamedContainingTypeName(ISymbol symbol)
+    {
+        for (var containingType = symbol.ContainingType; containingType is not null; containingType = containingType.ContainingType)
+        {
+            if (!string.IsNullOrEmpty(containingType.Name))
+            {
+                return containingType.Name;
+            }
+        }
+        return string.Empty;
+    }
+
     private sealed class MethodCallOperationWalker(SemanticModel model, DispatchResolver.SourceIndex dispatchIndex, List<MethodCalls> methodCalls, string basePath, string sourceFilePath, string fileName) : DataFlowAnalyzer.DepthBoundedOperationWalker
     {
         public override void VisitInvocation(IInvocationOperation operation)
@@ -2771,7 +2791,7 @@ public static class Dosai
                 Assembly = targetMethod.ContainingAssembly?.ToDisplayString() ?? string.Empty,
                 Module = targetMethod.ContainingModule?.ToDisplayString() ?? string.Empty,
                 Namespace = targetMethod.ContainingNamespace?.ToDisplayString() ?? string.Empty,
-                ClassName = targetMethod.ContainingType?.Name ?? string.Empty,
+                ClassName = GetNamedContainingTypeName(targetMethod),
                 CalledMethod = calledMethod,
                 LineNumber = location.Line + 1,
                 ColumnNumber = location.Character + 1,
@@ -2782,7 +2802,7 @@ public static class Dosai
                 TargetId = targetId,
                 CallerMethod = callerSymbol.Name,
                 CallerNamespace = callerSymbol.ContainingNamespace?.ToDisplayString() ?? string.Empty,
-                CallerClass = callerSymbol.ContainingType?.Name ?? string.Empty,
+                CallerClass = GetNamedContainingTypeName(callerSymbol),
                 IsInternal = isInternal && !isInMetadata,
                 EvidenceKind = AnalysisEvidenceKind.SourceRoslynDirect,
                 Evidence =
@@ -3033,7 +3053,7 @@ public static class Dosai
                 Assembly = targetMethod.ContainingAssembly?.ToDisplayString() ?? string.Empty,
                 Module = targetMethod.ContainingModule?.ToDisplayString() ?? string.Empty,
                 Namespace = targetMethod.ContainingNamespace?.ToDisplayString() ?? string.Empty,
-                ClassName = targetMethod.ContainingType?.Name ?? string.Empty,
+                ClassName = GetNamedContainingTypeName(targetMethod),
                 CalledMethod = targetMethod.MethodKind == MethodKind.Constructor ? targetMethod.ContainingType?.Name ?? targetMethod.Name : NormalizeSymbolName(targetMethod.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat)),
                 LineNumber = location.Line + 1,
                 ColumnNumber = location.Character + 1,
@@ -3044,7 +3064,7 @@ public static class Dosai
                 TargetId = targetId,
                 CallerMethod = callerSymbol.Name,
                 CallerNamespace = callerSymbol.ContainingNamespace?.ToDisplayString() ?? string.Empty,
-                CallerClass = callerSymbol.ContainingType?.Name ?? string.Empty,
+                CallerClass = GetNamedContainingTypeName(callerSymbol),
                 IsInternal = (isInSource || SymbolEqualityComparer.Default.Equals(targetMethod.ContainingAssembly, model.Compilation.Assembly)) && !isInMetadata,
                 EvidenceKind = evidenceKind,
                 DispatchConfidence = dispatchConfidence,
@@ -3293,15 +3313,40 @@ public static class Dosai
         if (fileAttributes.HasFlag(FileAttributes.Directory))
         {
             var sourceExtensions = new HashSet<string>([Constants.CSharpSourceExtension, Constants.VBSourceExtension, Constants.FSharpSourceExtension], StringComparer.OrdinalIgnoreCase);
-            filesToInspect.AddRange(
-                from extension in fileExtensions 
-                from inputFile in new DirectoryInfo(path).EnumerateFiles($"*{extension}", SearchOption.AllDirectories)
-                let isSourceExtension = sourceExtensions.Contains(extension)
-                let relativePath = Path.GetRelativePath(path, inputFile.FullName)
-                where !HasDirectorySegment(relativePath, "obj")
-                      && (!isSourceExtension || !HasDirectorySegment(relativePath, "bin"))
-                      && !inputFile.FullName.EndsWith($".g{extension}", StringComparison.OrdinalIgnoreCase) 
-                select inputFile.FullName);
+            // One walk for every requested extension: repeating the recursive enumeration per
+            // extension multiplied both the I/O and the warnings a hostile tree produces. Results
+            // are bucketed so the caller still sees them grouped by extension, in the requested
+            // order, and only matching paths are held.
+            var buckets = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+            foreach (var extension in fileExtensions)
+            {
+                buckets.TryAdd(extension, []);
+            }
+            // Best-effort discovery: unreadable or over-long subtrees are skipped with a
+            // console warning; the inspection continues with the readable remainder.
+            foreach (var inputFile in SafeFileRead.EnumerateAllFilesSafe(path))
+            {
+                var extension = Path.GetExtension(inputFile);
+                if (!buckets.TryGetValue(extension, out var bucket))
+                {
+                    continue;
+                }
+                var relativePath = Path.GetRelativePath(path, inputFile);
+                if (HasDirectorySegment(relativePath, "obj") ||
+                    (sourceExtensions.Contains(extension) && HasDirectorySegment(relativePath, "bin")) ||
+                    inputFile.EndsWith($".g{extension}", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                bucket.Add(inputFile);
+            }
+            foreach (var extension in fileExtensions)
+            {
+                if (buckets.Remove(extension, out var bucket))
+                {
+                    filesToInspect.AddRange(bucket);
+                }
+            }
         }
         else
         {

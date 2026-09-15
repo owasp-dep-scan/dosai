@@ -50,12 +50,43 @@ Consumers that switch exhaustively on node or edge kinds must add a default bran
 new value; the graph exporters emit it like any other kind. This applies to **all** pattern
 matching, not only unions, so existing C# projects can gain slices on upgrade.
 
+### C# 15 beyond unions
+
+The rest of the C# 15 feature set parses and analyzes like ordinary code:
+
+- `closed` hierarchies (`public closed record class GateState;`) with exhaustive switch arms;
+  payload bindings in those arms receive taint exactly like union case payloads.
+- Extension indexers (`extension(IEnumerable<int> s) { public int this[int i] => ...; }`) parse, and
+  indexer use sites resolve in the call graph to the lowered
+  `extension(...).this[int]` member. In source mode the accessor is not an inventory entry, since
+  indexers do not appear in `Methods[]` or `Properties[]`; assembly mode lists the lowered
+  `get_Item`. Either way the call graph node reports the enclosing static class rather than the
+  synthesized container's empty name.
+- Collection expression arguments (`[with(capacity: n), .. values]`) propagate element taint to
+  the collection and through indexer reads (`names[0]`).
+- Labeled `break`/`continue` (`outer: for (...) { continue outer; }`) do not disturb slice
+  construction.
+- The memory-safety preview shapes — `unsafe(...)` expressions in field initializers, and the
+  pointer relaxations (`&x`, `fixed`, `stackalloc`, `sizeof` outside an `unsafe` context) — parse
+  and inventory without requiring the updated safety rules.
+
+Members declared in an `extension` block (C# 14 methods/properties, C# 15 indexers) are now
+attributed to the enclosing static class in `Methods[].ClassName`, in `MethodCalls[].ClassName` and
+`CallerClass`, and in `CallGraph.Nodes[].ClassName` with its `Identity.ClassName`. They are
+contained in a compiler-synthesized nested type with no metadata name, so 4.1.0 reported an empty
+class name for them.
+
 ### Crypto and CBOM
 
 - The `Aes` key-wrap methods (`EncryptKeyWrap`, `DecryptKeyWrap`, `TryDecryptKeyWrap`,
   `GetKeyWrapLength`) classify as an `AES Key Wrap` asset: family `key-wrap`, strength `strong`,
   operation `key-wrap/unwrap`, standard `RFC 3394`. It is matched ahead of the generic `AES`
   branch so the key-wrap purpose is preserved.
+- .NET's post-quantum algorithms classify as strong assets: `MLKem` → ML-KEM
+  (family `key-agreement`, operation `key-agreement/encapsulate`, standard FIPS 203), `MLDsa` →
+  ML-DSA (family `signature`, operation `sign`, standard FIPS 204), and `SlhDsa` → SLH-DSA
+  (family `signature`, operation `sign`, standard FIPS 205). They appear in `Assets[]`,
+  `Operations[]`, and the CBOM like any other primitive.
 - The experimental caller-driven TLS session types in `System.Net.Security` (`TlsContext`,
   `TlsSession`, `TlsBufferSession`, `TlsSocketSession`, `TlsOperationStatus`) classify as TLS
   `protocol` assets and raise one new finding per line:
@@ -70,13 +101,14 @@ id. It is informational: the API works, its surface is not yet stable.
 ### F# 11
 
 `FSharp.Compiler.Service` moves to the .NET 11-aligned release, so F# 11 syntax — record
-spreads (`{ ...record; Field = v }`) among them — parses instead of degrading to reduced
-coverage.
+spreads (`{ ...record; Field = v }`), record constructors (`Point(0, 0)` and
+`Point(Y = 20, X = 10)`), direct delegate construction (`Func<...>(Calculator.Add)`), and the
+efficient interpolated strings — parses instead of degrading to reduced coverage.
 
 ## Correctness fixes with output impact
 
-Two loader bugs are fixed. Both could **remove** results in 4.1.0, so 5.0.0 can report more from
-an unchanged input:
+The following bugs are fixed. All of them could **remove** or corrupt results in 4.1.0, so
+5.0.0 can report more from an unchanged input:
 
 - **Shared-framework probing order.** Framework references were probed in directory-enumeration
   order, so on a machine with several .NET runtimes installed the oldest usually won. Types
@@ -89,6 +121,46 @@ an unchanged input:
   asynchronous. On Windows this made an analyzed build output undeletable, so a caller could not
   scan its own output directory and then clean or replace it. Inspected assemblies are now
   loaded by value; shared-framework assemblies keep the mapped path, being immutable.
+- **Assembly-mode taint survived no type conversion.** The IL interpreter dropped taint on
+  `castclass`, `isinst`, `box`, `unbox`, `ldlen`, and `conv.*`, so every object-typed dispatch
+  in compiled code was invisible: closed-hierarchy and union switch arms, `is`-pattern
+  bindings, downcasts (`object o = args[0]; Process.Start((string)o);`), and `args.Length`
+  arithmetic all produced no slice. Conversions now preserve the operand's taint,
+  `add`-family arithmetic combines its operands' taint (matching source mode), and by-ref
+  arguments receive their pointee's taint.
+- **`out`/by-ref parameters did not write back in IL.** Positional patterns lower to a
+  `Deconstruct` call with `ldloca` of the bound local; the local never received the payload
+  taint. `ldloca`/`ldarga` now push an address marker and calls write the callee-side taint
+  back through the addressed slots. Reads and writes through those markers (`ldind`/`ldobj`,
+  `stind`/`stobj`) follow the pointee, and `ldelema` forwards the array's taint because an array
+  element has no slot. The write-back is deliberately over-approximate: IL does not record which
+  parameter a callee copied into which `out` slot, so each by-ref slot receives the union of the
+  arguments and receiver.
+- **R lambda-assigned functions were invisible.** `name <- \(args) { ... }` (R 4.1+ shorthand)
+  was not recognized as a function declaration by the fallback parser; its calls were
+  attributed to the previous function.
+- **R Markdown and Quarto documents were scanned as flat R.** Markdown prose (full of
+  `word (paren)` shapes) and other engines' chunks (python, sql) produced phantom functions,
+  calls, and dependencies. Only `` ```{r} `` chunks are analyzed now.
+- **F# and R comment prose produced phantom calls.** `// Record constructors (F# 11)` and
+  `# Lambda syntax (R 4.1+)` matched the call regexes. Comments are stripped (quote-aware,
+  nested `(* *)` for F#) before extraction. All three F# string forms are recognised - normal,
+  verbatim (`@"...\"`), and triple-quoted - and the multi-line forms carry state across lines, so
+  their body is no longer read as code.
+- **F# module functions after a `type` were misattributed.** A `let` at or left of the enclosing
+  `type` declaration's indentation is module-level - in flat scripts and in indented `module M =`
+  bodies alike; the line frontend now resets the class context so `Methods[].ClassName` is the
+  module, not the preceding type. F# script directives (`#r "nuget: ..."`, `#load "file.fsx"`)
+  are collected as `Dependencies[]`.
+- **Hostile input directories crashed scans.** Recursive enumeration for sources, assemblies,
+  framework files, and metadata references threw on unreadable or over-long subtrees (a
+  `--path` pointing into a shared temp directory hit `PathTooLongException`). All discovery is
+  now best-effort: an unreadable subtree is skipped while enumeration continues with its
+  siblings, so only the offending subtree is lost instead of everything after it. Linked
+  directories are still followed - only a link that re-enters a directory already walked is
+  skipped - so a symlinked source tree keeps contributing results. The metadata reference sweep
+  and assembly discovery report the skipped directory in `Diagnostics[]`; the remaining discovery
+  sites warn on stderr, leaving stdout to the MCP server's JSON-RPC stream.
 
 ## Nothing to change in queries or exports
 

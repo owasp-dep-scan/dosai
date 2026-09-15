@@ -39,12 +39,13 @@ internal static class AssemblyScope
         }
 
         var applicationAssemblyNames = GetApplicationAssemblyNames(path, diagnostics);
-        var candidates = new List<FileInfo>();
+        var candidates = new List<string>();
         var hasSourceFiles = false;
-        var root = new DirectoryInfo(path);
-        foreach (var file in root.EnumerateFiles("*.*", SearchOption.AllDirectories))
+        // Discovery is best-effort: unreadable or over-long subtrees are skipped and reported,
+        // and the scan continues with the readable remainder.
+        foreach (var file in SafeFileRead.EnumerateAllFilesSafe(path, "*.*", diagnostics))
         {
-            var extension = file.Extension;
+            var extension = Path.GetExtension(file);
             if (IsSupportedSourceExtension(extension))
             {
                 hasSourceFiles = true;
@@ -56,7 +57,7 @@ internal static class AssemblyScope
                 continue;
             }
 
-            var relativePath = Path.GetRelativePath(path, file.FullName);
+            var relativePath = Path.GetRelativePath(path, file);
             if (!includeBuildArtifacts && HasDirectorySegment(relativePath, ObjSegment))
             {
                 continue;
@@ -66,11 +67,11 @@ internal static class AssemblyScope
         }
 
         return candidates
-            .Where(file => includeBuildArtifacts || !excludeBinWhenSourceFilesPresent || !hasSourceFiles || !HasDirectorySegment(Path.GetRelativePath(path, file.FullName), BinSegment))
+            .Where(file => includeBuildArtifacts || !excludeBinWhenSourceFilesPresent || !hasSourceFiles || !HasDirectorySegment(Path.GetRelativePath(path, file), BinSegment))
             .Where(file => applicationAssemblyNames.Count == 0
-                ? IsLikelyApplicationAssembly(file.Name)
-                : applicationAssemblyNames.Contains(Path.GetFileNameWithoutExtension(file.Name)))
-            .ToDictionary(file => Path.GetFullPath(file.FullName), file => file.FullName, StringComparer.OrdinalIgnoreCase)
+                ? IsLikelyApplicationAssembly(Path.GetFileName(file))
+                : applicationAssemblyNames.Contains(Path.GetFileNameWithoutExtension(file)))
+            .ToDictionary(file => Path.GetFullPath(file), file => file, StringComparer.OrdinalIgnoreCase)
             .Values
             .ToList();
     }

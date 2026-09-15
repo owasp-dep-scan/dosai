@@ -1,0 +1,40 @@
+# Quarto/R Markdown notebook: only ```{r} chunks contain R code. Markdown prose (full of
+# call-shaped text like file.path("a", "b")) and other engines' chunks (python below) must not
+# produce phantom functions, calls, or dependencies; the R chunk's library(), functions, and
+# system() call must all be extracted.
+
+---
+title: "Analysis notebook"
+---
+
+Some prose describing the pipeline (with parentheses that look like calls).
+
+More prose here with file.path("looks", "like", "code") and sum(1, 2).
+
+```{r setup}
+library(ggplot2)
+render <- function(input) {
+  system(input$cmd)
+}
+```
+
+Prose between chunks with readLines("data.csv") shapes.
+
+```{python}
+import os
+os.system("nope")
+```
+
+An rstan chunk: its engine name starts with `r` but it is not the R engine, so nothing inside
+may leak into the R scan.
+
+```{rstan}
+file.path("stan", "only")
+sum(1, 2)
+```
+
+```{r}
+process <- \(rows) {
+  sum(rows)
+}
+```

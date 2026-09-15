@@ -224,12 +224,11 @@ public static partial class ApiEndpointAnalyzer
             return [];
         }
 
-        return new DirectoryInfo(path).EnumerateFiles("*.*", SearchOption.AllDirectories)
-            .Where(file => file.Extension.Equals(Constants.VBSourceExtension, StringComparison.OrdinalIgnoreCase))
-            .Where(file => !file.FullName.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase))
-            .Where(file => !file.FullName.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase))
-            .Where(file => !file.Name.EndsWith(".g.vb", StringComparison.OrdinalIgnoreCase))
-            .Select(file => file.FullName)
+        return SafeFileRead.EnumerateAllFilesSafe(path)
+            .Where(file => Path.GetExtension(file).Equals(Constants.VBSourceExtension, StringComparison.OrdinalIgnoreCase))
+            .Where(file => !file.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase))
+            .Where(file => !file.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase))
+            .Where(file => !Path.GetFileName(file).EndsWith(".g.vb", StringComparison.OrdinalIgnoreCase))
             .ToList();
     }
 }

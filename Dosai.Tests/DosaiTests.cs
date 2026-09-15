@@ -1333,6 +1333,477 @@ public static class Program
         Assert.Contains(methodsSlice.Methods!, method => method.ClassName == "Program" && method.Name == "Main");
     }
 
+    // C# 15's non-union features (closed hierarchies, extension indexers, collection expression
+    // arguments, labeled break/continue, unsafe expressions, pointer relaxations) must parse with
+    // the widest accepted language version and keep the inventory and taint tracking working.
+    [Fact]
+    public void GetMethods_CSharp15FeatureSource_InventoriesFeatureAndExtensionMembers()
+    {
+        var methodsSlice = ReadMethods(GetFilePath(CSharp15FeatureSource));
+
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "CSharp15Features", Name: "ClosedSwitch" });
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "CSharp15Features", Name: "UnionIsPattern" });
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "CSharp15Features", Name: "CollectionExpressionArguments" });
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "CSharp15Features", Name: "LabeledJumps" });
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "CSharp15Features", Name: "PointerRelaxations" });
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "CSharp15Features", Name: "ReadBootCommand" });
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "SequenceExtensions", Name: "CountAtLeast" });
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Pet", Name: "Name" });
+    }
+
+    [Fact]
+    public void GetDataFlows_CSharp15FeatureSource_PropagatesTaintThroughEveryConstruct()
+    {
+        var result = ReadDataFlows(GetFilePath(CSharp15FeatureSource));
+
+        // Closed-hierarchy switch payload.
+        Assert.Contains(result.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" } && slice.SinkArgument == "command");
+        // Union `is`-pattern binding.
+        Assert.Contains(result.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" } && slice.SinkArgument == "name");
+        // Collection expression with a `with(...)` constructor argument.
+        Assert.Contains(result.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" } && slice.SinkArgument == "names[0]");
+        // Labeled break/continue does not break slice construction.
+        Assert.Contains(result.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" } && slice.SinkArgument == "found");
+    }
+
+    // Extension-member declarations live in a compiler-synthesized nested type whose metadata
+    // name is empty; the inventory must attribute them to the enclosing static class instead of
+    // reporting a blank class name.
+    [Fact]
+    public void GetMethods_ExtensionBlockMembers_AttributeToContainingStaticClass()
+    {
+        var methodsSlice = ReadMethods(GetFilePath(ExtensionMemberSource));
+
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "SequenceHelpers", Name: "CountAtLeast" });
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "SequenceHelpers", Name: "get_Count" });
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "SequenceHelpers", Name: "DoubleCount" });
+        Assert.All(methodsSlice.Methods!, method => Assert.False(string.IsNullOrWhiteSpace(method.ClassName)));
+    }
+
+    [Fact]
+    public void GetMethods_ExtensionBlockIndexerUse_AppearsInCallGraph()
+    {
+        var methodsSlice = ReadMethods(GetFilePath(ExtensionMemberSource));
+
+        Assert.Contains(methodsSlice.MethodCalls ?? [], call => call.CalledMethod is not null && call.CalledMethod.Contains("this[int]", StringComparison.Ordinal));
+        var nodeIds = methodsSlice.CallGraph!.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
+        Assert.All(methodsSlice.CallGraph.Edges, edge =>
+        {
+            Assert.Contains(edge.SourceId, nodeIds);
+            Assert.Contains(edge.TargetId, nodeIds);
+        });
+    }
+
+    // A compiled closed-hierarchy switch lowers to `isinst` + payload reads; the IL interpreter
+    // must keep taint through the type test instead of dropping it on the cast.
+    [SkippableFact]
+    public void GetDataFlows_ClosedHierarchyAssembly_TypeTestKeepsTaint()
+    {
+        Skip.IfNot(HasNet11Sdk(), "Compiling a C# 15 closed hierarchy at test time needs a .NET 11 SDK.");
+        using var tempDirectory = new TemporaryDirectory();
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "ClosedHierarchyAssembly", """
+public closed record class GateState;
+public record class GateClosed : GateState;
+public record class GateOpen(string Command) : GateState;
+public static class Program
+{
+    public static void Main(string[] args)
+    {
+        GateState state = new GateOpen(args[0]);
+        var command = state switch
+        {
+            GateClosed => string.Empty,
+            GateOpen(var cmd) => cmd,
+        };
+        System.Diagnostics.Process.Start(command);
+    }
+}
+""", targetFramework: "net11.0");
+
+        var result = ReadDataFlows(Path.Combine(outputDirectory, "ClosedHierarchyAssembly.dll"));
+
+        Assert.Contains(result.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" });
+    }
+
+    // Positional patterns (`GateOpen(var cmd)`) lower to a Deconstruct call with an out local;
+    // the interpreter must write the callee-side taint back through the by-ref slot.
+    [SkippableFact]
+    public void GetDataFlows_PositionalPatternAssembly_OutParameterReceivesTaint()
+    {
+        Skip.IfNot(HasNet11Sdk(), "Compiling a positional pattern at test time needs a .NET 11 SDK.");
+        using var tempDirectory = new TemporaryDirectory();
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "PositionalPatternAssembly", """
+public record class GateOpen(string Command);
+public static class Program
+{
+    public static void Main(string[] args)
+    {
+        object state = new GateOpen(args[0]);
+        if (state is GateOpen(var cmd))
+        {
+            System.Diagnostics.Process.Start(cmd);
+        }
+    }
+}
+""", targetFramework: "net11.0");
+
+        var result = ReadDataFlows(Path.Combine(outputDirectory, "PositionalPatternAssembly.dll"));
+
+        Assert.Contains(result.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" });
+    }
+
+    [SkippableFact]
+    public void GetDataFlows_ObjectDowncastAssembly_KeepsTaint()
+    {
+        Skip.IfNot(HasNet11Sdk(), "Compiling the downcast sample at test time needs a .NET 11 SDK.");
+        using var tempDirectory = new TemporaryDirectory();
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "ObjectDowncastAssembly", """
+public static class Program
+{
+    public static void Main(string[] args)
+    {
+        object value = args[0];
+        System.Diagnostics.Process.Start((string)value);
+    }
+}
+""", targetFramework: "net11.0");
+
+        var result = ReadDataFlows(Path.Combine(outputDirectory, "ObjectDowncastAssembly.dll"));
+
+        Assert.Contains(result.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" });
+    }
+
+    // The full C# 15 feature mix in one compiled assembly: closed hierarchy, union is-pattern,
+    // collection expression arguments, extension indexer use, and labeled break/continue.
+    [SkippableFact]
+    public void GetDataFlows_CSharp15FeatureAssembly_PropagatesTaintThroughAllConstructs()
+    {
+        Skip.IfNot(HasNet11Sdk(), "Compiling C# 15 features at test time needs a .NET 11 SDK.");
+        using var tempDirectory = new TemporaryDirectory();
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "CSharp15Assembly", """
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+
+public sealed record Cat(string Name);
+public union Pet(Cat);
+public closed record class GateState;
+public record class GateClosed : GateState;
+public record class GateOpen(string Command) : GateState;
+
+public static class SequenceExtensions
+{
+    extension(IEnumerable<string> sequence)
+    {
+        public string this[int index] => sequence.ElementAt(index);
+    }
+}
+
+public static class Program
+{
+    public static void Main(string[] args)
+    {
+        GateState state = new GateOpen(args[0]);
+        var command = state switch
+        {
+            GateClosed => string.Empty,
+            GateOpen(var cmd) => cmd,
+        };
+        Process.Start(command);
+
+        Pet pet = new Cat(args[0]);
+        if (pet is Cat(var name))
+        {
+            Process.Start(name);
+        }
+
+        List<string> names = [with(capacity: args.Length * 2), .. args];
+        Process.Start(names[0]);
+
+        outer: for (int i = 0; i < names.Count; i++)
+        {
+            if (names[i] == "x") continue outer;
+            if (names[i] == "y") break outer;
+        }
+    }
+}
+""", targetFramework: "net11.0");
+
+        var result = ReadDataFlows(Path.Combine(outputDirectory, "CSharp15Assembly.dll"));
+
+        Assert.Contains(result.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" });
+        Assert.Contains(result.Edges, edge => edge.Kind == "AssemblySinkCall");
+    }
+
+    // Extension indexers compile into a compiler-generated container; the assembly inventory
+    // must still expose the lowered getter and the use site must resolve to it.
+    [SkippableFact]
+    public void GetMethods_CSharp15ExtensionIndexerAssembly_InventoriesLoweredMembers()
+    {
+        Skip.IfNot(HasNet11Sdk(), "Compiling a C# 15 extension indexer at test time needs a .NET 11 SDK.");
+        using var tempDirectory = new TemporaryDirectory();
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "ExtensionIndexerAssembly", """
+using System.Collections.Generic;
+using System.Linq;
+
+public static class SequenceExtensions
+{
+    extension(IEnumerable<string> sequence)
+    {
+        public string this[int index] => sequence.ElementAt(index);
+    }
+}
+
+public static class Program
+{
+    public static void Main(string[] args)
+    {
+        IEnumerable<string> names = Enumerable.Range(1, 10).Select(i => i.ToString());
+        System.Console.WriteLine(names[2]);
+    }
+}
+""", targetFramework: "net11.0");
+
+        var methodsSlice = ReadMethods(Path.Combine(outputDirectory, "ExtensionIndexerAssembly.dll"));
+
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "SequenceExtensions", Name: "get_Item" });
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Program", Name: "Main" });
+    }
+
+    // Binary operators (here `args.Length + 1`) must keep taint in compiled code like they do
+    // in source mode; the `add`-family opcodes would otherwise pop both operand taints.
+    [Fact]
+    public void GetDataFlows_ArithmeticExpressionAssembly_KeepsTaintThroughBinaryOperators()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "AssemblyArithmeticFlow", """
+using System.Diagnostics;
+
+public static class Program
+{
+    public static void Main(string[] args)
+    {
+        int count = args.Length + 1;
+        Process.Start(count.ToString());
+    }
+}
+""");
+
+        var dataFlowResult = ReadDataFlows(Path.Combine(outputDirectory, "AssemblyArithmeticFlow.dll"));
+
+        Assert.Contains(dataFlowResult.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" });
+    }
+
+    // Analyzing one file must survive a hostile sibling tree: the best-effort discovery skips
+    // the unreadable subtree, keeps enumerating its siblings, and warns instead of letting an
+    // inaccessible (or over-long) directory crash the whole scan.
+    [SkippableFact]
+    public void GetDataFlows_SingleFileWithUnreadableSiblingDirectory_RemainsBestEffort()
+    {
+        Skip.If(OperatingSystem.IsWindows(), "The unreadable-directory setup relies on Unix permission bits.");
+
+        using var tempDirectory = new TemporaryDirectory();
+        var locked = Path.Combine(tempDirectory.Path, "locked");
+        Directory.CreateDirectory(locked);
+        Directory.CreateDirectory(Path.Combine(tempDirectory.Path, "after"));
+        File.WriteAllText(Path.Combine(locked, "hidden.cs"), "// unreachable");
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "after", "reachable.cs"), "// ok");
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Program.cs"), """
+using System.Diagnostics;
+
+public static class Program
+{
+    public static void Main(string[] args)
+    {
+        Process.Start(args[0]);
+    }
+}
+""");
+        File.SetUnixFileMode(locked, UnixFileMode.None);
+        try
+        {
+            // Root (the default in SDK container images) bypasses permission bits, so the
+            // lock is only meaningful when the mode is actually enforced for this user.
+            var permissionsEnforced = !File.Exists(Path.Combine(locked, "hidden.cs"));
+            if (permissionsEnforced)
+            {
+                // Partial discovery is observable: the sibling enumerated after the locked
+                // subtree is still found, which distinguishes skip-and-continue from
+                // abort-on-error.
+                var discovered = SafeFileRead.EnumerateAllFilesSafe(tempDirectory.Path);
+                Assert.Contains(discovered, file => file.EndsWith("Program.cs", StringComparison.Ordinal));
+                Assert.Contains(discovered, file => file.EndsWith(Path.Combine("after", "reachable.cs"), StringComparison.Ordinal));
+                Assert.DoesNotContain(discovered, file => file.EndsWith("hidden.cs", StringComparison.Ordinal));
+            }
+
+            var result = DataFlowAnalyzer.Analyze(tempDirectory.Path);
+
+            Assert.Contains(result.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" });
+        }
+        finally
+        {
+            new DirectoryInfo(locked).UnixFileMode = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+        }
+    }
+
+    // Linked source directories are a normal repository layout, so discovery follows them; only
+    // a link that re-enters a directory already walked is skipped. Pruning every link silently
+    // dropped the files behind it.
+    [SkippableFact]
+    public void GetMethods_SourceBehindDirectorySymlink_IsStillAnalyzed()
+    {
+        Skip.If(OperatingSystem.IsWindows(), "Creating directory links needs elevation on Windows.");
+
+        using var tempDirectory = new TemporaryDirectory();
+        var real = Path.Combine(tempDirectory.Path, "real");
+        var tree = Path.Combine(tempDirectory.Path, "tree");
+        Directory.CreateDirectory(real);
+        Directory.CreateDirectory(tree);
+        File.WriteAllText(Path.Combine(real, "Linked.cs"), """
+public static class Linked
+{
+    public static string Run(string value) => value;
+}
+""");
+        Directory.CreateSymbolicLink(Path.Combine(tree, "linked"), real);
+
+        var methodsSlice = ReadMethods(tree);
+
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Linked", Name: "Run" });
+    }
+
+    // A link pointing back at an ancestor is a cycle; enumeration must terminate and still
+    // report each file once.
+    [SkippableFact]
+    public void EnumerateAllFilesSafe_SymlinkCycle_TerminatesWithoutRepeating()
+    {
+        Skip.If(OperatingSystem.IsWindows(), "Creating directory links needs elevation on Windows.");
+
+        using var tempDirectory = new TemporaryDirectory();
+        var nested = Path.Combine(tempDirectory.Path, "nested");
+        Directory.CreateDirectory(nested);
+        File.WriteAllText(Path.Combine(nested, "Cycle.cs"), "// cycle");
+        Directory.CreateSymbolicLink(Path.Combine(nested, "loop"), tempDirectory.Path);
+
+        var discovered = SafeFileRead.EnumerateAllFilesSafe(tempDirectory.Path).ToList();
+
+        Assert.Equal(1, discovered.Count(file => file.EndsWith("Cycle.cs", StringComparison.Ordinal)));
+    }
+
+    // Discovery warnings must not reach stdout: the MCP server writes line-delimited JSON-RPC
+    // there, and a warning line in that stream is a protocol error for strict clients.
+    [SkippableFact]
+    public void EnumerateAllFilesSafe_UnreadableDirectory_WarnsOnStandardErrorOnly()
+    {
+        Skip.If(OperatingSystem.IsWindows(), "The unreadable-directory setup relies on Unix permission bits.");
+
+        using var tempDirectory = new TemporaryDirectory();
+        var locked = Path.Combine(tempDirectory.Path, $"locked-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(locked);
+        File.WriteAllText(Path.Combine(locked, "hidden.cs"), "// unreachable");
+        File.SetUnixFileMode(locked, UnixFileMode.None);
+        Skip.If(File.Exists(Path.Combine(locked, "hidden.cs")), "Permission bits are not enforced for this user (root).");
+        var capturedOut = new StringWriter();
+        var capturedError = new StringWriter();
+        lock (ConsoleOutputLock)
+        {
+            var originalOut = Console.Out;
+            var originalError = Console.Error;
+            try
+            {
+                Console.SetOut(capturedOut);
+                Console.SetError(capturedError);
+                _ = SafeFileRead.EnumerateAllFilesSafe(tempDirectory.Path).ToList();
+            }
+            finally
+            {
+                Console.SetOut(originalOut);
+                Console.SetError(originalError);
+                new DirectoryInfo(locked).UnixFileMode = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+            }
+        }
+
+        Assert.Contains(locked, capturedError.ToString(), StringComparison.Ordinal);
+        // The unique directory name keeps this assertion immune to output from other tests.
+        Assert.DoesNotContain(locked, capturedOut.ToString(), StringComparison.Ordinal);
+    }
+
+    // Extension-block members reach the call graph through their use sites; the synthesized
+    // container's empty metadata name must not leak into node or identity class names, which
+    // stayed blank for extension indexers even after the inventory was fixed.
+    [Fact]
+    public void GetMethods_ExtensionBlockIndexerUse_CallGraphNodeKeepsContainingClassName()
+    {
+        var methodsSlice = ReadMethods(GetFilePath(ExtensionMemberSource));
+
+        var indexerNodes = methodsSlice.CallGraph!.Nodes.Where(node => node.Name == "get_Item").ToList();
+        Assert.NotEmpty(indexerNodes);
+        Assert.All(indexerNodes, node =>
+        {
+            Assert.Equal("SequenceHelpers", node.ClassName);
+            Assert.Equal("SequenceHelpers", node.Identity?.ClassName);
+        });
+        Assert.All(methodsSlice.CallGraph.Nodes.Where(node => !node.IsExternal), node => Assert.False(string.IsNullOrWhiteSpace(node.ClassName)));
+    }
+
+    // Unary operators (`-x`, `~flags`) are one-to-one stack opcodes in IL; treating them as
+    // two-operand arithmetic misaligns the abstract stack for the rest of the basic block.
+    [Fact]
+    public void GetDataFlows_UnaryOperatorAssembly_KeepsTaintAndStackAlignment()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "AssemblyUnaryFlow", """
+using System.Diagnostics;
+
+public static class Program
+{
+    public static void Main(string[] args)
+    {
+        int count = args.Length;
+        int negated = -count;
+        int complemented = ~negated;
+        Process.Start(complemented.ToString());
+    }
+}
+""");
+
+        var dataFlowResult = ReadDataFlows(Path.Combine(outputDirectory, "AssemblyUnaryFlow.dll"));
+
+        Assert.Contains(dataFlowResult.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" });
+    }
+
+    // A validator matched as a sanitizer only reads its by-ref argument; writing the sanitized
+    // (null) taint back through the address would erase the local's real taint for later sinks.
+    [Fact]
+    public void GetDataFlows_SanitizerWithRefParameter_DoesNotClobberArgumentTaint()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "AssemblyRefSanitizerFlow", """
+using System.Diagnostics;
+
+public static class Program
+{
+    static bool TryParse(string candidate, ref string normalized)
+    {
+        normalized = candidate.Trim();
+        return normalized.Length > 0;
+    }
+
+    public static void Main(string[] args)
+    {
+        var value = args[0];
+        var parsed = TryParse("constant", ref value);
+        System.Diagnostics.Debug.WriteLine(parsed);
+        Process.Start(value);
+    }
+}
+""");
+
+        var dataFlowResult = ReadDataFlows(Path.Combine(outputDirectory, "AssemblyRefSanitizerFlow.dll"));
+
+        Assert.Contains(dataFlowResult.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" });
+    }
+
     [Fact]
     public void GetDataFlows_AssemblyOnlyExceptionRegion_PropagatesThrownTaintToCatchHandler()
     {
@@ -1844,6 +2315,46 @@ class Net11TlsSessionSample
         Assert.Contains(result.Operations, operation => operation is { Algorithm: "AES Key Wrap", OperationType: "key-wrap/unwrap" });
         Assert.Contains(result.Assets, asset => asset is { Name: "TLS", Family: "protocol" });
         Assert.Contains(result.Findings, finding => finding is { RuleId: "DOSAI-CRYPTO-EXPERIMENTAL-TLS-API", Severity: "Low" });
+    }
+
+    // .NET's post-quantum algorithms (FIPS 203/204/205) are part of the modern .NET baseline;
+    // the CBOM must classify them as strong key-agreement/signature primitives, not drop them.
+    [Fact]
+    public void CryptoAnalysis_DetectsPostQuantumAlgorithms()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "PqcSample.cs"), """
+using System.Security.Cryptography;
+
+class PqcSample
+{
+    static byte[] Sign(byte[] data)
+    {
+        using var mldsa = MLDsa.ImportFromPem(File.ReadAllText("ml-dsa.pem"));
+        return mldsa.SignData(data);
+    }
+
+    static void Encapsulate()
+    {
+        using var mlkem = MLKem.GenerateKey();
+        mlkem.Encapsulate(Span<byte>.Empty, Span<byte>.Empty);
+    }
+
+    static bool Verify(byte[] data, byte[] signature)
+    {
+        using var slhdsa = SlhDsa.ImportFromPem(File.ReadAllText("slh-dsa.pem"));
+        return slhdsa.VerifyData(data, signature);
+    }
+}
+""");
+
+        var result = CryptoAnalyzer.Analyze(tempDirectory.Path);
+
+        Assert.Contains(result.Assets, asset => asset is { Name: "ML-DSA", Family: "signature", Strength: "strong", Standard: "FIPS 204" });
+        Assert.Contains(result.Assets, asset => asset is { Name: "ML-KEM", Family: "key-agreement", Strength: "strong", Standard: "FIPS 203" });
+        Assert.Contains(result.Assets, asset => asset is { Name: "SLH-DSA", Family: "signature", Strength: "strong", Standard: "FIPS 205" });
+        Assert.Contains(result.Operations, operation => operation is { Algorithm: "ML-DSA", OperationType: "sign" });
+        Assert.Contains(result.Operations, operation => operation is { Algorithm: "ML-KEM", OperationType: "key-agreement/encapsulate" });
     }
 
     [Fact]
@@ -2978,6 +3489,150 @@ class SqlFlow
         Assert.Contains(actualMethods, m => m.Name == "register");
     }
 
+    // Module-level `let` bindings that follow a `type` declaration are module members, not type
+    // members; the line frontend must reset the class context instead of attributing them to the
+    // preceding type.
+    [Fact]
+    public void GetMethods_FSharp11MoreFeatures_ModuleFunctionsAfterTypesGetModuleClass()
+    {
+        var methodsSlice = ReadMethods(GetFilePath(FSharp11MoreFeaturesSource));
+
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "FSharp11More", Name: "origin" });
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "FSharp11More", Name: "describe" });
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "FSharp11More", Name: "compute" });
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "FSharp11More", Name: "summarize" });
+    }
+
+    // Comment prose shaped like `word (F# 11)` or declaration keywords (`inherit`, `override`,
+    // `abstract`) must not surface as method calls.
+    [Fact]
+    public void GetMethods_FSharp11MoreFeatures_CommentsAndDeclarationsProduceNoPhantomCalls()
+    {
+        var methodsSlice = ReadMethods(GetFilePath(FSharp11MoreFeaturesSource));
+
+        var calledMethods = (methodsSlice.MethodCalls ?? []).Select(call => call.CalledMethod).ToList();
+        Assert.Contains(calledMethods, name => name == "RunSynchronouslyImmediate");
+        Assert.Contains(calledMethods, name => name == "Sleep");
+        Assert.DoesNotContain(calledMethods, name => name is "inherit" or "override" or "abstract" or "member");
+        Assert.DoesNotContain(calledMethods, name => name is "constructors" or " Efficient" or "Efficient" or "interpolated" or "inheritdoc");
+    }
+
+    // A `module X =` body is fully indented; module-level `let` bindings that follow a `type`
+    // declaration must still be attributed to the module (not the type) at body indentation,
+    // and prime identifiers (`x'`, `list'`) must not be read as unterminated char literals.
+    [Fact]
+    public void GetMethods_FSharpIndentedModule_ModuleLetsAfterTypeGetModuleClass()
+    {
+        var methodsSlice = ReadMethods(GetFilePath(FSharpModuleLayoutsSource));
+
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Counter", Name: "Next" });
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Indented", Name: "transform" });
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Indented", Name: "eval" });
+        // The prime-identifier line is still a module binding (`let x'` extracts as `x`).
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Indented", Name: "x" });
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Indented", Name: "list" });
+    }
+
+    // The prime identifiers and real char literals coexist: a juxtaposition call on a
+    // prime-identifier line (`let x' = transform "seed"`) survives comment stripping, and
+    // `dash`/`newline` extract as bindings despite the char literals on their lines.
+    [Fact]
+    public void GetMethods_FSharpIndentedModule_PrimeIdentifiersDoNotSwallowCalls()
+    {
+        var methodsSlice = ReadMethods(GetFilePath(FSharpModuleLayoutsSource));
+
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Indented", Name: "dash" });
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Indented", Name: "newline" });
+        // One juxtaposition call on the `x'` line and one on the `list'` line: both lines are
+        // processed to the end (an unterminated `'` would swallow each line's remainder).
+        Assert.Equal(2, (methodsSlice.MethodCalls ?? []).Count(call => call.CalledMethod == "transform"));
+    }
+
+    // Verbatim (`@"...\"`) and triple-quoted literals span lines and carry their own escape
+    // rules; treating `\` as an escape or ending the literal early made the scanner read string
+    // body as code, and the declarations after the literal were attributed to whatever the
+    // resulting mis-lexed line looked like.
+    [Fact]
+    public void GetMethods_FSharpMultiLineStringLiterals_AreNotScannedAsCode()
+    {
+        var methodsSlice = ReadMethods(GetFilePath(FSharpModuleLayoutsSource));
+
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Indented", Name: "verbatim" });
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Indented", Name: "banner" });
+        // The declaration after the multi-line literal is still found, so the literal closed.
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Indented", Name: "afterLiterals" });
+        Assert.Contains(methodsSlice.MethodCalls ?? [], call => call.CalledMethod == "Write");
+        // Text inside the literals is string body, not code.
+        var calledMethods = (methodsSlice.MethodCalls ?? []).Select(call => call.CalledMethod).ToList();
+        Assert.DoesNotContain(calledMethods, name => name is "notAComment" or "ignored");
+    }
+
+    // Modern R (4.1+) assigns lambdas with `name <- \(args) { ... }`; the fallback line parser
+    // must treat that as a function declaration and keep comment prose out of the call list.
+    [SkippableFact]
+    public void GetMethods_ModernRSource_DetectsLambdaAssignedFunctionsAndSkipsComments()
+    {
+        SkipIfRNativeParserIsInstalled();
+        var methodsSlice = ReadMethods(GetFilePath(ModernRFeatureSource));
+
+        Assert.Contains(methodsSlice.Methods!, method => method is { Name: "render", Namespace: "R" });
+        Assert.Contains(methodsSlice.Methods!, method => method is { Name: "process", Namespace: "R" });
+        Assert.Contains(methodsSlice.Methods!, method => method is { Name: "plot_rows", Namespace: "R" });
+
+        var calls = methodsSlice.MethodCalls ?? [];
+        // Lambda-body calls are attributed to the lambda-assigned function, not the previous one.
+        Assert.Contains(calls, call => call is { CalledMethod: "lapply" } && call.SourceId?.Contains("process", StringComparison.Ordinal) == true);
+        Assert.Contains(calls, call => call is { CalledMethod: "system" } && call.SourceId?.Contains("render", StringComparison.Ordinal) == true);
+        // Comment prose shapes (`word (R 4.1+)`) must not become calls.
+        Assert.DoesNotContain(calls, call => call.CalledMethod is "syntax" or "_" or "placeholder" or "shorthand");
+    }
+
+    // A backslash inside a string literal (`pattern <- "\\d+"`) is not the lambda introducer;
+    // treating it as one renamed the enclosing function and mis-attributed its calls.
+    [SkippableFact]
+    public void GetMethods_ModernRSource_BackslashStringLiteralIsNotALambda()
+    {
+        SkipIfRNativeParserIsInstalled();
+        var methodsSlice = ReadMethods(GetFilePath(ModernRFeatureSource));
+
+        Assert.DoesNotContain(methodsSlice.Methods!, method => method is { Name: "pattern", Namespace: "R" });
+        // Calls after the backslash assignment stay attributed to the enclosing function.
+        Assert.Contains(methodsSlice.MethodCalls ?? [], call => call is { CalledMethod: "grepl" } && call.SourceId?.Contains("render", StringComparison.Ordinal) == true);
+        Assert.Contains(methodsSlice.MethodCalls ?? [], call => call is { CalledMethod: "system" } && call.SourceId?.Contains("render", StringComparison.Ordinal) == true);
+    }
+
+    // R Markdown and Quarto notebooks only contain R inside ```{r} chunks; prose and other
+    // engines' chunks must not contribute phantom functions, calls, or dependencies.
+    [Fact]
+    public void GetMethods_RNotebookSource_AnalyzesOnlyRCodeChunks()
+    {
+        var methodsSlice = ReadMethods(GetFilePath(NotebookSource));
+
+        Assert.Contains(methodsSlice.Methods!, method => method is { Name: "render", Namespace: "R" });
+        Assert.Contains(methodsSlice.Methods!, method => method is { Name: "process", Namespace: "R" });
+        Assert.Contains(methodsSlice.Dependencies ?? [], dependency => dependency is { Name: "ggplot2" });
+
+        var calls = methodsSlice.MethodCalls ?? [];
+        Assert.Contains(calls, call => call is { CalledMethod: "system" } && call.SourceId?.Contains("render", StringComparison.Ordinal) == true);
+        Assert.Contains(calls, call => call is { CalledMethod: "sum" } && call.SourceId?.Contains("process", StringComparison.Ordinal) == true);
+        // Markdown prose and the python chunk must not leak calls.
+        Assert.DoesNotContain(calls, call => call.CalledMethod is "pipeline" or "file.path" or "sum(1" or "readLines" or "os.system" or "import");
+    }
+
+    // F# scripts reference packages and files with `#r`/`#load` directives; those are the
+    // script equivalent of project references and must surface as dependencies.
+    [Fact]
+    public void GetMethods_FSharpScript_CollectsReferenceAndLoadDirectives()
+    {
+        var methodsSlice = ReadMethods(GetFilePath(FSharpScriptSource));
+
+        Assert.Contains(methodsSlice.Dependencies ?? [], dependency => dependency.Name == "Newtonsoft.Json");
+        Assert.Contains(methodsSlice.Dependencies ?? [], dependency => dependency.Name == "System.Xml");
+        Assert.Contains(methodsSlice.Dependencies ?? [], dependency => dependency.Name == "Helper.fsx");
+        Assert.Contains(methodsSlice.Methods!, method => method is { Name: "run" });
+    }
+
+
     [Fact]
     public void GetMethods_CSharpSource_PathIsDirectory_ReturnsDetails()
     {
@@ -3377,6 +4032,12 @@ class SqlFlow
     });
 
     private static bool HasNet11Sdk() => Net11SdkAvailable.Value;
+
+    // The R frontend prefers Rscript's own parser and only falls back to lexical extraction when
+    // R is absent, so tests written against the fallback must not run against the native parser -
+    // they would silently assert the wrong code path.
+    private static void SkipIfRNativeParserIsInstalled() =>
+        Skip.If(LanguageFrontendAnalyzer.IsRNativeParserAvailable, "Rscript is installed, so the managed R fallback parser is not the code path under test.");
 
     private static void WriteProjectAssets(string directory, string packageName, string version, string assemblyFileName)
     {
@@ -3828,6 +4489,13 @@ class SqlFlow
     private const string FooBarVBSource = "FooBar.vb";
     private const string HelloWorldFSharpSource = "HelloWorld.fs";
     private const string FSharp11FeaturesSource = "FSharp11Features.fs";
+    private const string FSharp11MoreFeaturesSource = "FSharp11MoreFeatures.fs";
+    private const string CSharp15FeatureSource = "CSharp15Features.cs";
+    private const string ExtensionMemberSource = "ExtensionMembers.cs";
+    private const string ModernRFeatureSource = "ModernRFeatures.R";
+    private const string NotebookSource = "Notebook.Rmd";
+    private const string FSharpScriptSource = "FSharpScript.fsx";
+    private const string FSharpModuleLayoutsSource = "FSharpModuleLayouts.fs";
     private const string FakeDLL = "Fake.dll";
     private const string sourceDirectory = "source";
     private const string fsharpSourceDirectory = "fsharp-source";

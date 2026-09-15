@@ -427,10 +427,10 @@ public sealed class FrameworkContext
             return [];
         }
 
-        return new DirectoryInfo(path).EnumerateFiles(extension, SearchOption.AllDirectories)
-            .Where(file => !IsIgnoredDirectory(file.FullName))
-            .Select(file => file.FullName)
-            .ToList();
+        // "Safe" includes hostile trees: unreadable or over-long subtrees are skipped with a
+        // console warning and the readable remainder is returned.
+        return SafeFileRead.EnumerateAllFilesSafe(path, extension)
+            .Where(file => !IsIgnoredDirectory(file));
     }
 
     internal static bool IsIgnoredDirectory(string fullPath) =>

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Reflection;
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace Depscan;
@@ -16,13 +17,19 @@ public static partial class LanguageFrontendAnalyzer
     [GeneratedRegex(@"^\s*open\s+(?:type\s+)?([\w\.]+)", RegexOptions.Compiled)]
     private static partial Regex FSharpOpen();
 
+    [GeneratedRegex(@"^\s*(#r|#load)\s+""([^""]+)""", RegexOptions.Compiled)]
+    private static partial Regex FSharpDirective();
+
     [GeneratedRegex(@"^\s*type\s+(\w+)", RegexOptions.Compiled)]
     private static partial Regex FSharpType();
 
     [GeneratedRegex(@"^\s*(?:let|member)\s+(?:rec\s+)?(?:\w+\.)?(\w+)", RegexOptions.Compiled)]
     private static partial Regex FSharpFunction();
 
-    [GeneratedRegex(@"^\s*([A-Za-z_][\w\.]*)\s*(?:<-|=)\s*function\s*\(", RegexOptions.Compiled)]
+    // The `\\(?=\()` alternative recognizes R 4.1+ lambda assignment (`name <- \(args) ...`)
+    // while rejecting string literals that merely contain backslashes (`pattern <- "\d+"`):
+    // the backslash must be the lambda introducer, immediately followed by `(`.
+    [GeneratedRegex(@"^\s*([A-Za-z_][\w\.]*)\s*(?:<-|=)\s*(?:function\s*\(|\\(?=\())", RegexOptions.Compiled)]
     private static partial Regex RFunction();
 
     [GeneratedRegex(@"(?<name>[A-Za-z_][\w\.:]*)\s*\(", RegexOptions.Compiled)]
@@ -74,37 +81,69 @@ public static partial class LanguageFrontendAnalyzer
         }
         var namespaceName = "Global";
         var className = "Module";
+        var moduleClassName = className;
         string? currentSourceId = null;
         var currentDeclarationIndent = int.MaxValue;
+        int? typeDeclarationIndent = null;
+        var lexerState = new FSharpLexerState();
         for (var i = 0; i < lines.Length; i++)
         {
             var line = lines[i];
-            var indent = line.Length - line.TrimStart().Length;
-            var module = FSharpNamespaceOrModule().Match(line);
+            var code = StripFSharpComment(line, ref lexerState);
+            if (string.IsNullOrWhiteSpace(code))
+            {
+                continue;
+            }
+            var indent = code.Length - code.TrimStart().Length;
+            var module = FSharpNamespaceOrModule().Match(code);
             if (module.Success)
             {
                 namespaceName = module.Groups[1].Value;
                 className = namespaceName.Split('.').LastOrDefault() ?? "Module";
+                moduleClassName = className;
                 currentDeclarationIndent = int.MaxValue;
+                typeDeclarationIndent = null;
                 dependencies.Add(CreateDependency(basePath, file, namespaceName, namespaceName, i + 1, Math.Max(1, line.IndexOf(namespaceName, StringComparison.Ordinal) + 1)));
                 continue;
             }
-            var open = FSharpOpen().Match(line);
+            var open = FSharpOpen().Match(code);
             if (open.Success)
             {
                 var importedNamespace = open.Groups[1].Value;
                 dependencies.Add(CreateDependency(basePath, file, importedNamespace, importedNamespace, i + 1, Math.Max(1, line.IndexOf(importedNamespace, StringComparison.Ordinal) + 1)));
                 continue;
             }
-            var type = FSharpType().Match(line);
+            // F# script directives: `#r "nuget: Package, Version"`, `#r "Assembly"`, and
+            // `#load "File.fsx"` are the script equivalent of package/project references.
+            var reference = FSharpDirective().Match(code);
+            if (reference.Success)
+            {
+                var target = reference.Groups[2].Value.Trim();
+                if (target.StartsWith("nuget:", StringComparison.OrdinalIgnoreCase))
+                {
+                    target = target["nuget:".Length..].Trim();
+                    var versionSeparator = target.IndexOf(',');
+                    if (versionSeparator > 0)
+                    {
+                        target = target[..versionSeparator].Trim();
+                    }
+                }
+                if (!string.IsNullOrWhiteSpace(target))
+                {
+                    dependencies.Add(CreateDependency(basePath, file, target, target, i + 1, Math.Max(1, line.IndexOf(target, StringComparison.Ordinal) + 1)));
+                }
+                continue;
+            }
+            var type = FSharpType().Match(code);
             if (type.Success)
             {
                 className = type.Groups[1].Value;
                 currentDeclarationIndent = int.MaxValue;
+                typeDeclarationIndent = indent;
                 continue;
             }
-            var function = FSharpFunction().Match(line);
-            if (function.Success && !IsKeyword(function.Groups[1].Value))
+            var function = FSharpFunction().Match(code);
+            if (function.Success && !IsKeyword(function.Groups[1].Value) && !IsFSharpDeclarationKeyword(function.Groups[1].Value))
             {
                 if (currentSourceId is not null && indent > currentDeclarationIndent)
                 {
@@ -112,18 +151,166 @@ public static partial class LanguageFrontendAnalyzer
                 }
 
                 var name = function.Groups[1].Value;
+                // Type members are always indented past their `type` line, so a `let` at or
+                // left of the last type declaration's indentation is module level - in both
+                // flat scripts and `module M = ...` bodies where everything is indented.
+                // Without this reset, module functions that follow a `type` declaration stay
+                // attributed to that type.
+                if (typeDeclarationIndent is { } typeIndent && indent <= typeIndent)
+                {
+                    className = moduleClassName;
+                }
                 currentSourceId = CreateId(namespaceName, className, name, file, i + 1);
                 currentDeclarationIndent = indent;
                 methods.Add(CreateMethod(basePath, file, namespaceName, className, name, moduleName, currentSourceId, i + 1, Math.Max(1, line.IndexOf(name, StringComparison.Ordinal) + 1)));
             }
 
-            foreach (Match call in Regex.Matches(line, @"\b([A-Za-z_][\w\.]*)\s+(?:\(|\""|[A-Za-z0-9_])"))
+            foreach (Match call in Regex.Matches(code, @"\b([A-Za-z_][\w\.]*)\s+(?:\(|""|[A-Za-z0-9_])"))
             {
                 var name = call.Groups[1].Value.Split('.').Last();
-                if (currentSourceId is null || IsKeyword(name)) continue;
+                if (currentSourceId is null || IsKeyword(name) || IsFSharpDeclarationKeyword(name)) continue;
                 calls.Add(CreateCall(basePath, file, currentSourceId, namespaceName, className, name, i + 1, call.Index + 1));
             }
         }
+    }
+
+    /// <summary>
+    ///     Removes `//` line comments and skips `(* ... *)` block-comment text so commented-out
+    ///     or documentation prose (for example `// Record constructors (F# 11)`) stops producing
+    ///     phantom method calls. Comment markers inside string literals are honored for all three
+    ///     F# string forms - normal (`\` escapes), verbatim (`@"..."`, where `""` is the escaped
+    ///     quote and `\` is literal), and triple-quoted (`"""..."""`, no escapes) - and both
+    ///     block comments and the multi-line string forms carry their state across lines. Block
+    ///     comments nest per the F# rules: `(*)` closes immediately (the `*` is shared), and an
+    ///     inner `(*` requires its own `*)`.
+    /// </summary>
+    private static string StripFSharpComment(string line, ref FSharpLexerState state)
+    {
+        var builder = new StringBuilder(line.Length);
+        // Continuation lines of a multi-line literal are string body by definition: they cannot
+        // hold a declaration, a directive, or a call, so their content is dropped rather than
+        // rescanned as code. Content of a literal that opens and closes on one line is kept,
+        // because `#r "nuget: ..."` and `#load "file.fsx"` are read from it.
+        var insideMultiLineLiteral = state.String is FSharpStringKind.Verbatim or FSharpStringKind.TripleQuoted;
+        for (var i = 0; i < line.Length; i++)
+        {
+            var current = line[i];
+            if (state.BlockCommentDepth > 0)
+            {
+                if (current == '(' && i + 1 < line.Length && line[i + 1] == '*')
+                {
+                    state.BlockCommentDepth++;
+                    i++;
+                }
+                else if (current == '*' && i + 1 < line.Length && line[i + 1] == ')')
+                {
+                    state.BlockCommentDepth--;
+                    i++;
+                }
+                continue;
+            }
+            if (state.String != FSharpStringKind.None)
+            {
+                if (!insideMultiLineLiteral)
+                {
+                    builder.Append(current);
+                }
+                switch (state.String)
+                {
+                    case FSharpStringKind.Normal when current == '\\' && i + 1 < line.Length:
+                        if (!insideMultiLineLiteral) builder.Append(line[i + 1]);
+                        i++;
+                        break;
+                    case FSharpStringKind.Normal when current == '"':
+                        state.String = FSharpStringKind.None;
+                        break;
+                    // A doubled quote is the verbatim escape, so it does not close the literal.
+                    case FSharpStringKind.Verbatim when current == '"' && i + 1 < line.Length && line[i + 1] == '"':
+                        if (!insideMultiLineLiteral) builder.Append(line[i + 1]);
+                        i++;
+                        break;
+                    case FSharpStringKind.Verbatim when current == '"':
+                        state.String = FSharpStringKind.None;
+                        insideMultiLineLiteral = false;
+                        break;
+                    case FSharpStringKind.TripleQuoted when current == '"' && i + 2 < line.Length && line[i + 1] == '"' && line[i + 2] == '"':
+                        i += 2;
+                        state.String = FSharpStringKind.None;
+                        insideMultiLineLiteral = false;
+                        break;
+                }
+                continue;
+            }
+            if (current == '@' && i + 1 < line.Length && line[i + 1] == '"')
+            {
+                builder.Append(line[i..(i + 2)]);
+                i++;
+                state.String = FSharpStringKind.Verbatim;
+                continue;
+            }
+            if (current == '"')
+            {
+                if (i + 2 < line.Length && line[i + 1] == '"' && line[i + 2] == '"')
+                {
+                    builder.Append(line[i..(i + 3)]);
+                    i += 2;
+                    state.String = FSharpStringKind.TripleQuoted;
+                    continue;
+                }
+                builder.Append(current);
+                state.String = FSharpStringKind.Normal;
+                continue;
+            }
+            if (current == '\'' && IsFSharpCharLiteralAt(line, i) is { } literalEnd)
+            {
+                // Consume the whole char literal ('a', '\n', '\u0041') at once; a bare `'` is
+                // the prime of an F# identifier (`x'`, `list''`), not a string opener.
+                builder.Append(line[i..(literalEnd + 1)]);
+                i = literalEnd;
+                continue;
+            }
+            if (current == '(' && i + 1 < line.Length && line[i + 1] == '*')
+            {
+                // `(*)` is a complete (empty) F# comment: the `*` is shared by the open and
+                // close tokens, so a `)` right after `(*` closes it again immediately.
+                if (i + 2 < line.Length && line[i + 2] == ')')
+                {
+                    i += 2;
+                    continue;
+                }
+                state.BlockCommentDepth++;
+                i++;
+                continue;
+            }
+            if (current == '/' && i + 1 < line.Length && line[i + 1] == '/')
+            {
+                break;
+            }
+            builder.Append(current);
+        }
+        // A normal string literal cannot span a line break, so an unterminated one is a lexing
+        // artifact; dropping it keeps the damage on its own line. Verbatim and triple-quoted
+        // literals legitimately continue, so their state is kept.
+        if (state.String == FSharpStringKind.Normal)
+        {
+            state.String = FSharpStringKind.None;
+        }
+        return builder.ToString();
+    }
+
+    private enum FSharpStringKind
+    {
+        None,
+        Normal,
+        Verbatim,
+        TripleQuoted
+    }
+
+    /// <summary>Cross-line lexer state for the F# line scanner: nested block comments and the multi-line string forms.</summary>
+    private struct FSharpLexerState
+    {
+        public int BlockCommentDepth;
+        public FSharpStringKind String;
     }
 
     private static void AnalyzeR(string basePath, string file, List<Method> methods, List<Dependency> dependencies, List<MethodCalls> calls)
@@ -138,13 +325,51 @@ public static partial class LanguageFrontendAnalyzer
         {
             return;
         }
+        // R Markdown and Quarto documents only contain R inside ```{r ...} chunks; prose and
+        // other engines' chunks (python, sql, ...) must not contribute phantom functions or
+        // calls, so notebook files are scanned chunk by chunk.
+        var isNotebook = Path.GetExtension(file).ToLowerInvariant() is ".rmd" or ".qmd";
+        var insideChunk = false;
+        var insideRChunk = false;
         var currentFunction = "script";
         var currentSourceId = CreateId("R", Path.GetFileNameWithoutExtension(file), currentFunction, file, 1);
         methods.Add(CreateMethod(basePath, file, "R", Path.GetFileNameWithoutExtension(file), currentFunction, FrontendModule, currentSourceId, 1, 1));
         for (var i = 0; i < lines.Length; i++)
         {
             var line = lines[i];
-            var function = RFunction().Match(line);
+            if (isNotebook)
+            {
+                var fence = line.TrimStart();
+                if (fence.StartsWith("```", StringComparison.Ordinal))
+                {
+                    if (insideChunk)
+                    {
+                        insideChunk = false;
+                        insideRChunk = false;
+                    }
+                    else
+                    {
+                        insideChunk = true;
+                        // The chunk header's first token is the engine: `{r}`, `{r, echo=TRUE}`,
+                        // `{r setup}`. Requiring a delimiter after the `r` keeps other engines
+                        // whose names start with r (`{rstan}`) out of the R scan.
+                        insideRChunk = Regex.IsMatch(fence, "^```\\s*\\{\\s*r[\\s,}]", RegexOptions.IgnoreCase);
+                    }
+                    continue;
+                }
+
+                if (!insideRChunk)
+                {
+                    continue;
+                }
+            }
+
+            // R only has `#` comments; stripping them keeps commented-out prose (for example
+            // `# Lambda syntax (R 4.1+)`) from producing phantom calls and keeps `#` inside
+            // string literals intact.
+            var commentIndex = IndexOfRComment(line);
+            var code = commentIndex < 0 ? line : line[..commentIndex];
+            var function = RFunction().Match(code);
             if (function.Success)
             {
                 currentFunction = function.Groups[1].Value;
@@ -152,18 +377,82 @@ public static partial class LanguageFrontendAnalyzer
                 methods.Add(CreateMethod(basePath, file, "R", Path.GetFileNameWithoutExtension(file), currentFunction, FrontendModule, currentSourceId, i + 1, Math.Max(1, line.IndexOf(currentFunction, StringComparison.Ordinal) + 1)));
             }
 
-            foreach (Match library in Regex.Matches(line, @"\b(?:library|require)\s*\(\s*['\"" ]?([A-Za-z0-9_.]+)"))
+            foreach (Match library in Regex.Matches(code, @"\b(?:library|require)\s*\(\s*['\"" ]?([A-Za-z0-9_.]+)"))
             {
                 dependencies.Add(CreateDependency(basePath, file, library.Groups[1].Value, library.Groups[1].Value, i + 1, library.Index + 1));
             }
 
-            foreach (Match call in RCall().Matches(line))
+            foreach (Match call in RCall().Matches(code))
             {
                 var name = call.Groups["name"].Value;
                 if (IsKeyword(name)) continue;
                 calls.Add(CreateCall(basePath, file, currentSourceId, "R", Path.GetFileNameWithoutExtension(file), name, i + 1, call.Index + 1));
             }
         }
+    }
+
+    /// <summary>
+    ///     If a F# char literal starts at <paramref name="start" />, returns the index of its
+    ///     closing quote; otherwise null. Content must be 1-8 characters with no whitespace -
+    ///     covering `'a'`, `'\n'`, and `'\u0041'` - so identifier primes (`x'`, `list''`) and
+    ///     an unterminated `'` are rejected instead of swallowing the rest of the line.
+    /// </summary>
+    private static int? IsFSharpCharLiteralAt(string line, int start)
+    {
+        var contentLength = 0;
+        var index = start + 1;
+        while (index < line.Length && contentLength <= 8)
+        {
+            var current = line[index];
+            if (current == '\\')
+            {
+                if (index + 1 >= line.Length) return null;
+                index += 2;
+                contentLength += 2;
+                continue;
+            }
+            if (current == '\'')
+            {
+                return contentLength >= 1 ? index : null;
+            }
+            if (char.IsWhiteSpace(current))
+            {
+                return null;
+            }
+            index++;
+            contentLength++;
+        }
+        return null;
+    }
+
+    /// <summary>Returns the index of the first R comment marker (<c>#</c>) outside a string literal, or -1.</summary>
+    private static int IndexOfRComment(string line)
+    {
+        var quote = '\0';
+        for (var i = 0; i < line.Length; i++)
+        {
+            var current = line[i];
+            if (quote != '\0')
+            {
+                if (current == '\\' && quote == '"')
+                {
+                    i++;
+                }
+                else if (current == quote)
+                {
+                    quote = '\0';
+                }
+            }
+            else if (current is '"' or '\'')
+            {
+                quote = current;
+            }
+            else if (current == '#')
+            {
+                return i;
+            }
+        }
+        return -1;
     }
 
     private static void AnalyzeCpp(string basePath, string file, List<Method> methods, List<Dependency> dependencies, List<MethodCalls> calls)
@@ -423,7 +712,7 @@ write.table(pd, file = "", sep = "\t", row.names = FALSE, col.names = TRUE, quot
         {
             return extensions.Contains(Path.GetExtension(path)) ? [path] : [];
         }
-        return Directory.EnumerateFiles(path, "*.*", SearchOption.AllDirectories)
+        return SafeFileRead.EnumerateAllFilesSafe(path)
             .Where(file => extensions.Contains(Path.GetExtension(file)));
     }
 
@@ -431,10 +720,17 @@ write.table(pd, file = "", sep = "\t", row.names = FALSE, col.names = TRUE, quot
     {
         var keywords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
-            "if", "then", "else", "elif", "for", "while", "do", "match", "with", "try", "catch", "finally", "let", "rec", "and", "fun", "function", "in", "open", "module", "type", "namespace", "return", "static", "new", "NULL", "nullptr", "sizeof", "switch", "case", "library", "require" 
+            "if", "then", "else", "elif", "for", "while", "do", "match", "with", "try", "catch", "finally", "let", "rec", "and", "fun", "function", "in", "open", "module", "type", "namespace", "return", "static", "new", "NULL", "nullptr", "sizeof", "switch", "case", "library", "require"
         };
         return keywords.Contains(word);
     }
+
+    // F# declaration keywords that head real source lines (`inherit`, `override`, `abstract`,
+    // `member`) read like calls to the line scanner but never name one. Kept separate from the
+    // shared set because the R and C++ scanners use it too, and `when` (plyr) or `use` are
+    // legitimate call names there.
+    private static bool IsFSharpDeclarationKeyword(string word) =>
+        word is "abstract" or "inherit" or "override" or "member" or "interface" or "val" or "yield" or "use" or "when" or "let" or "do" or "done" or "while" or "for" or "if" or "then" or "else" or "match";
 
     private static string SafeRelative(string basePath, string file) => Directory.Exists(basePath) ? Path.GetRelativePath(basePath, file) : Path.GetFileName(file);
 
