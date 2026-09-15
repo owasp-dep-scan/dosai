@@ -1,0 +1,32 @@
+Dosai.TestData/FSharpModuleLayouts.fs
+  h_6a4cc5cdf68def 25-35
+Dosai.Tests/DosaiTests.cs
+  h_6a4cc5cdf68def 1598-1600,1603,1649-1748,3551-3569,3572,3575,3592,3595,4036-4041
+Dosai/DataFlowAssembly.cs
+  h_6a4cc5cdf68def 404,487-516,582,605-642,658-659,692-697,900,1486
+Dosai/Dosai.cs
+  h_6a4cc5cdf68def 899,948,2794,2805,3056,3067,3316-3324,3327-3342,3345,3347
+Dosai/Frameworks/Providers/MlRuntimeProvider.cs
+  h_6a4cc5cdf68def 121-124,143,145-164
+Dosai/LanguageFrontendAnalyzer.cs
+  h_6a4cc5cdf68def 88,92,180-184,187,190-194,198,202,207,212,214,216,218,220-240,244-250,253-259,261,281,291-297,301-315
+Dosai/SafeFileRead.cs
+  h_6a4cc5cdf68def 17,31,41-47,49,51-64,68-70,72-87,92-99,102-103,106-107,114,119,123,125,127-143
+docs/LESSON3.md
+  h_6a4cc5cdf68def 96
+docs/compiler-engineering.md
+  h_6a4cc5cdf68def 84,86,196
+docs/migration-5.0.md
+  h_6a4cc5cdf68def 59-64,74-77,134-138,147-154,159-163
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "b64e5100c943073171d8702010dace4959227b2b",
+  "prompts": {},
+  "humans": {
+    "h_6a4cc5cdf68def": {
+      "author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}
