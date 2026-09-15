@@ -1594,9 +1594,9 @@ public static class Program
         Assert.Contains(dataFlowResult.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" });
     }
 
-    // Analyzing one file must survive a hostile sibling tree: the best-effort metadata sweep
-    // reports a diagnostic instead of letting an inaccessible (or over-long) directory crash
-    // the whole scan.
+    // Analyzing one file must survive a hostile sibling tree: the best-effort discovery skips
+    // the unreadable subtree, keeps enumerating its siblings, and warns on stderr instead of
+    // letting an inaccessible (or over-long) directory crash the whole scan.
     [Fact]
     public void GetDataFlows_SingleFileWithUnreadableSiblingDirectory_RemainsBestEffort()
     {
@@ -1608,6 +1608,9 @@ public static class Program
         using var tempDirectory = new TemporaryDirectory();
         var locked = Path.Combine(tempDirectory.Path, "locked");
         Directory.CreateDirectory(locked);
+        Directory.CreateDirectory(Path.Combine(tempDirectory.Path, "after"));
+        File.WriteAllText(Path.Combine(locked, "hidden.cs"), "// unreachable");
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "after", "reachable.cs"), "// ok");
         File.WriteAllText(Path.Combine(tempDirectory.Path, "Program.cs"), """
 using System.Diagnostics;
 
@@ -1622,6 +1625,20 @@ public static class Program
         File.SetUnixFileMode(locked, UnixFileMode.None);
         try
         {
+            // Root (the default in SDK container images) bypasses permission bits, so the
+            // lock is only meaningful when the mode is actually enforced for this user.
+            var permissionsEnforced = !File.Exists(Path.Combine(locked, "hidden.cs"));
+            if (permissionsEnforced)
+            {
+                // Partial discovery is observable: the sibling enumerated after the locked
+                // subtree is still found, which distinguishes skip-and-continue from
+                // abort-on-error.
+                var discovered = SafeFileRead.EnumerateAllFilesSafe(tempDirectory.Path);
+                Assert.Contains(discovered, file => file.EndsWith("Program.cs", StringComparison.Ordinal));
+                Assert.Contains(discovered, file => file.EndsWith(Path.Combine("after", "reachable.cs"), StringComparison.Ordinal));
+                Assert.DoesNotContain(discovered, file => file.EndsWith("hidden.cs", StringComparison.Ordinal));
+            }
+
             var result = DataFlowAnalyzer.Analyze(tempDirectory.Path);
 
             Assert.Contains(result.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" });
@@ -1630,6 +1647,64 @@ public static class Program
         {
             new DirectoryInfo(locked).UnixFileMode = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
         }
+    }
+
+    // Unary operators (`-x`, `~flags`) are one-to-one stack opcodes in IL; treating them as
+    // two-operand arithmetic misaligns the abstract stack for the rest of the basic block.
+    [Fact]
+    public void GetDataFlows_UnaryOperatorAssembly_KeepsTaintAndStackAlignment()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "AssemblyUnaryFlow", """
+using System.Diagnostics;
+
+public static class Program
+{
+    public static void Main(string[] args)
+    {
+        int count = args.Length;
+        int negated = -count;
+        int complemented = ~negated;
+        Process.Start(complemented.ToString());
+    }
+}
+""");
+
+        var dataFlowResult = ReadDataFlows(Path.Combine(outputDirectory, "AssemblyUnaryFlow.dll"));
+
+        Assert.Contains(dataFlowResult.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" });
+    }
+
+    // A validator matched as a sanitizer only reads its by-ref argument; writing the sanitized
+    // (null) taint back through the address would erase the local's real taint for later sinks.
+    [Fact]
+    public void GetDataFlows_SanitizerWithRefParameter_DoesNotClobberArgumentTaint()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "AssemblyRefSanitizerFlow", """
+using System.Diagnostics;
+
+public static class Program
+{
+    static bool TryParse(string candidate, ref string normalized)
+    {
+        normalized = candidate.Trim();
+        return normalized.Length > 0;
+    }
+
+    public static void Main(string[] args)
+    {
+        var value = args[0];
+        var parsed = TryParse("constant", ref value);
+        System.Diagnostics.Debug.WriteLine(parsed);
+        Process.Start(value);
+    }
+}
+""");
+
+        var dataFlowResult = ReadDataFlows(Path.Combine(outputDirectory, "AssemblyRefSanitizerFlow.dll"));
+
+        Assert.Contains(dataFlowResult.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" });
     }
 
     [Fact]
@@ -3345,6 +3420,37 @@ class SqlFlow
         Assert.DoesNotContain(calledMethods, name => name is "constructors" or " Efficient" or "Efficient" or "interpolated" or "inheritdoc");
     }
 
+    // A `module X =` body is fully indented; module-level `let` bindings that follow a `type`
+    // declaration must still be attributed to the module (not the type) at body indentation,
+    // and prime identifiers (`x'`, `list'`) must not be read as unterminated char literals.
+    [Fact]
+    public void GetMethods_FSharpIndentedModule_ModuleLetsAfterTypeGetModuleClass()
+    {
+        var methodsSlice = ReadMethods(GetFilePath(FSharpModuleLayoutsSource));
+
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Counter", Name: "Next" });
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Indented", Name: "transform" });
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Indented", Name: "eval" });
+        // The prime-identifier line is still a module binding (`let x'` extracts as `x`).
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Indented", Name: "x" });
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Indented", Name: "list" });
+    }
+
+    // The prime identifiers and real char literals coexist: a juxtaposition call on a
+    // prime-identifier line (`let x' = transform "seed"`) survives comment stripping, and
+    // `dash`/`newline` extract as bindings despite the char literals on their lines.
+    [Fact]
+    public void GetMethods_FSharpIndentedModule_PrimeIdentifiersDoNotSwallowCalls()
+    {
+        var methodsSlice = ReadMethods(GetFilePath(FSharpModuleLayoutsSource));
+
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Indented", Name: "dash" });
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Indented", Name: "newline" });
+        // One juxtaposition call on the `x'` line and one on the `list'` line: both lines are
+        // processed to the end (an unterminated `'` would swallow each line's remainder).
+        Assert.Equal(2, (methodsSlice.MethodCalls ?? []).Count(call => call.CalledMethod == "transform"));
+    }
+
     // Modern R (4.1+) assigns lambdas with `name <- \(args) { ... }`; the fallback line parser
     // must treat that as a function declaration and keep comment prose out of the call list.
     [Fact]
@@ -3362,6 +3468,19 @@ class SqlFlow
         Assert.Contains(calls, call => call is { CalledMethod: "system" } && call.SourceId?.Contains("render", StringComparison.Ordinal) == true);
         // Comment prose shapes (`word (R 4.1+)`) must not become calls.
         Assert.DoesNotContain(calls, call => call.CalledMethod is "syntax" or "_" or "placeholder" or "shorthand");
+    }
+
+    // A backslash inside a string literal (`pattern <- "\\d+"`) is not the lambda introducer;
+    // treating it as one renamed the enclosing function and mis-attributed its calls.
+    [Fact]
+    public void GetMethods_ModernRSource_BackslashStringLiteralIsNotALambda()
+    {
+        var methodsSlice = ReadMethods(GetFilePath(ModernRFeatureSource));
+
+        Assert.DoesNotContain(methodsSlice.Methods!, method => method is { Name: "pattern", Namespace: "R" });
+        // Calls after the backslash assignment stay attributed to the enclosing function.
+        Assert.Contains(methodsSlice.MethodCalls ?? [], call => call is { CalledMethod: "grepl" } && call.SourceId?.Contains("render", StringComparison.Ordinal) == true);
+        Assert.Contains(methodsSlice.MethodCalls ?? [], call => call is { CalledMethod: "system" } && call.SourceId?.Contains("render", StringComparison.Ordinal) == true);
     }
 
     // R Markdown and Quarto notebooks only contain R inside ```{r} chunks; prose and other
@@ -4252,6 +4371,7 @@ class SqlFlow
     private const string ModernRFeatureSource = "ModernRFeatures.R";
     private const string NotebookSource = "Notebook.Rmd";
     private const string FSharpScriptSource = "FSharpScript.fsx";
+    private const string FSharpModuleLayoutsSource = "FSharpModuleLayouts.fs";
     private const string FakeDLL = "Fake.dll";
     private const string sourceDirectory = "source";
     private const string fsharpSourceDirectory = "fsharp-source";

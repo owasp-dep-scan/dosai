@@ -39,47 +39,39 @@ internal static class AssemblyScope
         }
 
         var applicationAssemblyNames = GetApplicationAssemblyNames(path, diagnostics);
-        var candidates = new List<FileInfo>();
+        var candidates = new List<string>();
         var hasSourceFiles = false;
-        var root = new DirectoryInfo(path);
-        // Discovery is best-effort: unreadable or over-long subtrees must degrade to the
-        // readable remainder instead of crashing the scan with the assemblies found so far.
-        try
+        // Discovery is best-effort: unreadable or over-long subtrees are skipped and reported,
+        // and the scan continues with the readable remainder.
+        foreach (var file in SafeFileRead.EnumerateAllFilesSafe(path, "*.*", diagnostics))
         {
-            foreach (var file in root.EnumerateFiles("*.*", SearchOption.AllDirectories))
+            var extension = Path.GetExtension(file);
+            if (IsSupportedSourceExtension(extension))
             {
-                var extension = file.Extension;
-                if (IsSupportedSourceExtension(extension))
-                {
-                    hasSourceFiles = true;
-                    continue;
-                }
-
-                if (!IsAssemblyExtension(extension))
-                {
-                    continue;
-                }
-
-                var relativePath = Path.GetRelativePath(path, file.FullName);
-                if (!includeBuildArtifacts && HasDirectorySegment(relativePath, ObjSegment))
-                {
-                    continue;
-                }
-
-                candidates.Add(file);
+                hasSourceFiles = true;
+                continue;
             }
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PathTooLongException or DirectoryNotFoundException)
-        {
-            diagnostics?.Invoke($"Assembly discovery under {path} stopped early: {ex.Message}");
+
+            if (!IsAssemblyExtension(extension))
+            {
+                continue;
+            }
+
+            var relativePath = Path.GetRelativePath(path, file);
+            if (!includeBuildArtifacts && HasDirectorySegment(relativePath, ObjSegment))
+            {
+                continue;
+            }
+
+            candidates.Add(file);
         }
 
         return candidates
-            .Where(file => includeBuildArtifacts || !excludeBinWhenSourceFilesPresent || !hasSourceFiles || !HasDirectorySegment(Path.GetRelativePath(path, file.FullName), BinSegment))
+            .Where(file => includeBuildArtifacts || !excludeBinWhenSourceFilesPresent || !hasSourceFiles || !HasDirectorySegment(Path.GetRelativePath(path, file), BinSegment))
             .Where(file => applicationAssemblyNames.Count == 0
-                ? IsLikelyApplicationAssembly(file.Name)
-                : applicationAssemblyNames.Contains(Path.GetFileNameWithoutExtension(file.Name)))
-            .ToDictionary(file => Path.GetFullPath(file.FullName), file => file.FullName, StringComparer.OrdinalIgnoreCase)
+                ? IsLikelyApplicationAssembly(Path.GetFileName(file))
+                : applicationAssemblyNames.Contains(Path.GetFileNameWithoutExtension(file)))
+            .ToDictionary(file => Path.GetFullPath(file), file => file, StringComparer.OrdinalIgnoreCase)
             .Values
             .ToList();
     }

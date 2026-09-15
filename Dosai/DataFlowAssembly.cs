@@ -531,17 +531,22 @@ public static partial class DataFlowAnalyzer
     }
 
     /// <summary>
-    ///     Conversion opcodes that re-package the same value on the evaluation stack: downcasts
+    ///     One-to-one opcodes that re-package the same value on the evaluation stack: downcasts
     ///     (<c>castclass</c>), pattern type tests (<c>isinst</c>), boxing/unboxing, array length
-    ///     (<c>ldlen</c>, whose result derives from the array), and numeric conversions
-    ///     (<c>conv.*</c>). Dropping the operand's taint here erased every object-typed dispatch
-    ///     from compiled-code flows - C# 15 union matching, closed-hierarchy switches, and
-    ///     <c>is</c>-pattern bindings all lower to <c>isinst</c> before reading the case payload,
-    ///     and `args.Length` arithmetic starts at <c>ldlen</c>.
+    ///     (<c>ldlen</c>, whose result derives from the array), numeric conversions
+    ///     (<c>conv.*</c>), and the unary <c>neg</c>/<c>not</c>. Every opcode here must pop
+    ///     exactly one value and push exactly one: the interpreters implement this class as
+    ///     pop-then-push, and a two-operand opcode listed here (or vice versa) misaligns the
+    ///     abstract stack for the rest of the basic block. Dropping the operand's taint on these
+    ///     erased every object-typed dispatch from compiled-code flows - C# 15 union matching,
+    ///     closed-hierarchy switches, and <c>is</c>-pattern bindings all lower to
+    ///     <c>isinst</c> before reading the case payload, and `args.Length` arithmetic starts
+    ///     at <c>ldlen</c>.
     /// </summary>
     private static bool IsTaintPreservingConversion(OpCode opCode) =>
         opCode == OpCodes.Castclass || opCode == OpCodes.Isinst || opCode == OpCodes.Box || opCode == OpCodes.Unbox || opCode == OpCodes.Unbox_Any ||
         opCode == OpCodes.Ldlen ||
+        opCode == OpCodes.Neg || opCode == OpCodes.Not ||
         opCode == OpCodes.Conv_I1 || opCode == OpCodes.Conv_I2 || opCode == OpCodes.Conv_I4 || opCode == OpCodes.Conv_I8 ||
         opCode == OpCodes.Conv_U1 || opCode == OpCodes.Conv_U2 || opCode == OpCodes.Conv_U4 || opCode == OpCodes.Conv_U8 ||
         opCode == OpCodes.Conv_R4 || opCode == OpCodes.Conv_R8 || opCode == OpCodes.Conv_I || opCode == OpCodes.Conv_U ||
@@ -553,10 +558,11 @@ public static partial class DataFlowAnalyzer
         opCode == OpCodes.Conv_Ovf_I_Un || opCode == OpCodes.Conv_Ovf_U_Un;
 
     /// <summary>
-    ///     Arithmetic and bitwise opcodes. The result derives from both operands, so the source
-    ///     walker's behavior (taint survives binary operators like `args.Length + 1`) must be
-    ///     matched in IL, where `add`-family opcodes would otherwise pop both taints and push
-    ///     null. Comparisons are excluded: their bool result does not carry the operand value.
+    ///     Two-operand arithmetic and bitwise opcodes: the result derives from both operands, so
+    ///     the source walker's behavior (taint survives binary operators like `args.Length + 1`)
+    ///     must be matched in IL, where `add`-family opcodes would otherwise pop both taints and
+    ///     push null. Comparisons are excluded: their bool result does not carry the operand
+    ///     value; unary operators live in <see cref="IsTaintPreservingConversion" />.
     /// </summary>
     private static bool IsTaintCombiningArithmetic(OpCode opCode) =>
         opCode == OpCodes.Add || opCode == OpCodes.Add_Ovf || opCode == OpCodes.Add_Ovf_Un ||
@@ -564,8 +570,7 @@ public static partial class DataFlowAnalyzer
         opCode == OpCodes.Mul || opCode == OpCodes.Mul_Ovf || opCode == OpCodes.Mul_Ovf_Un ||
         opCode == OpCodes.Div || opCode == OpCodes.Div_Un || opCode == OpCodes.Rem || opCode == OpCodes.Rem_Un ||
         opCode == OpCodes.And || opCode == OpCodes.Or || opCode == OpCodes.Xor ||
-        opCode == OpCodes.Shl || opCode == OpCodes.Shr || opCode == OpCodes.Shr_Un ||
-        opCode == OpCodes.Neg || opCode == OpCodes.Not;
+        opCode == OpCodes.Shl || opCode == OpCodes.Shr || opCode == OpCodes.Shr_Un;
 
     private static void ProcessAssemblyCall(MetadataReader reader, AssemblyInstruction instruction, OpCode opCode, AssemblyMethodInfo currentMethod, string assemblyPath, AssemblyDataFlowContext context, AssemblyMethodState state, IReadOnlyDictionary<string, AssemblyMethodSummary> summaries)
     {
@@ -622,17 +627,22 @@ public static partial class DataFlowAnalyzer
         // Deconstruct calls - every positional pattern, including C# 15 union and closed-hierarchy
         // switch arms and `is Positional(...)` bindings - move the receiver's payload into `out`
         // locals, so the combined taint entering the callee is stored into the addressed slots.
-        // A null combined taint also writes: the callee definitely assigns the slot.
-        foreach (var argumentTaint in argumentTaints)
+        // A null combined taint also writes: the callee definitely assigns the slot. Sanitizers
+        // are the exception: a validator taking its argument by ref only reads it, and writing
+        // the (null) sanitized taint back would erase the slot's real taint for later sinks.
+        if (sanitizerPatterns.Count == 0)
         {
-            if (argumentTaint is not { IsAddress: true } address) continue;
-            if (address.LocalSlot is { } localSlot)
+            foreach (var argumentTaint in argumentTaints)
             {
-                state.Locals[localSlot] = combined;
-            }
-            else if (address.ArgumentSlot is { } argumentSlot)
-            {
-                state.Arguments[argumentSlot] = combined;
+                if (argumentTaint is not { IsAddress: true } address) continue;
+                if (address.LocalSlot is { } localSlot)
+                {
+                    state.Locals[localSlot] = combined;
+                }
+                else if (address.ArgumentSlot is { } argumentSlot)
+                {
+                    state.Arguments[argumentSlot] = combined;
+                }
             }
         }
 

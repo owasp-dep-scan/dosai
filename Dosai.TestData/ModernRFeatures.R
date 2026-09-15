@@ -11,6 +11,8 @@ render <- function(input) {
   cmd <- input$path |>
     file.path("bin") |>
     basename()
+  pattern <- "\\d+"
+  grepl(pattern, cmd)
   system(cmd)
 }
 

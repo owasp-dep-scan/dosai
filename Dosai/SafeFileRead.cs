@@ -34,23 +34,64 @@ internal static class SafeFileRead
     }
 
     /// <summary>
-    ///     Recursive file enumeration that survives hostile trees: unreadable, over-long, or
-    ///     disappearing subtrees degrade to the files gathered so far. Analysis inputs can be
-    ///     anywhere - including shared temp directories - so discovery must never crash the scan.
+    ///     Recursive file enumeration that survives hostile trees: an unreadable, over-long, or
+    ///     disappearing subtree is reported, skipped, and enumeration continues with its
+    ///     siblings, so only the offending subtree is lost instead of everything after it.
+    ///     Analysis inputs can be anywhere - including shared temp directories - so discovery
+    ///     must never crash the scan. Reparse points are not followed, preventing symlink
+    ///     cycles. Callers with a diagnostics channel pass <paramref name="reportDiagnostic" />;
+    ///     the default prints a console warning like the file-read helpers above.
     /// </summary>
-    public static IReadOnlyList<string> EnumerateAllFilesSafe(string root, string searchPattern = "*.*")
+    public static IReadOnlyList<string> EnumerateAllFilesSafe(string root, string searchPattern = "*.*", Action<string>? reportDiagnostic = null)
     {
         var files = new List<string>();
+        var report = reportDiagnostic ?? (message => Console.WriteLine($"Warning: {message}"));
+        EnumerateDirectory(new DirectoryInfo(root), searchPattern, files, report, depth: 0);
+        return files;
+    }
+
+    private const int MaxEnumerationDepth = 128;
+
+    private static void EnumerateDirectory(DirectoryInfo directory, string searchPattern, List<string> files, Action<string> report, int depth)
+    {
+        if (depth > MaxEnumerationDepth)
+        {
+            report($"Directory enumeration depth limit reached at {directory.FullName}; deeper files are skipped.");
+            return;
+        }
+
+        IEnumerable<FileInfo> fileEntries;
+        IEnumerable<DirectoryInfo> subdirectories;
         try
         {
-            foreach (var file in Directory.EnumerateFiles(root, searchPattern, SearchOption.AllDirectories))
-            {
-                files.Add(file);
-            }
+            // Materialize inside the try: the lazy enumerators throw during iteration.
+            fileEntries = directory.EnumerateFiles(searchPattern, SearchOption.TopDirectoryOnly).ToList();
+            subdirectories = directory.EnumerateDirectories().ToList();
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PathTooLongException or DirectoryNotFoundException)
         {
+            report($"Skipping unreadable directory {directory.FullName}: {ex.Message}");
+            return;
         }
-        return files;
+
+        foreach (var file in fileEntries)
+        {
+            files.Add(file.FullName);
+        }
+        foreach (var subdirectory in subdirectories)
+        {
+            try
+            {
+                if (subdirectory.Attributes.HasFlag(FileAttributes.ReparsePoint))
+                {
+                    continue;
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or FileNotFoundException or DirectoryNotFoundException)
+            {
+                continue;
+            }
+            EnumerateDirectory(subdirectory, searchPattern, files, report, depth + 1);
+        }
     }
 }

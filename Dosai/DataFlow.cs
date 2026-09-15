@@ -954,29 +954,25 @@ public static partial class DataFlowAnalyzer
         }
 
         // Enumeration is best-effort: scanned trees can contain unreadable or over-long
-        // subtrees, and a scan must degrade to the readable remainder instead of crashing.
+        // subtrees; those are skipped with a console warning and the readable remainder is
+        // returned instead of crashing the scan.
         var sourceFiles = new List<string>();
-        try
+        foreach (var file in SafeFileRead.EnumerateAllFilesSafe(path))
         {
-            foreach (var file in new DirectoryInfo(path).EnumerateFiles("*.*", SearchOption.AllDirectories))
+            var extension = Path.GetExtension(file);
+            if (!extension.Equals(Constants.CSharpSourceExtension, StringComparison.OrdinalIgnoreCase) &&
+                !extension.Equals(Constants.VBSourceExtension, StringComparison.OrdinalIgnoreCase) &&
+                !IsLanguageFrontendExtension(extension))
             {
-                if (!file.Extension.Equals(Constants.CSharpSourceExtension, StringComparison.OrdinalIgnoreCase) &&
-                    !file.Extension.Equals(Constants.VBSourceExtension, StringComparison.OrdinalIgnoreCase) &&
-                    !IsLanguageFrontendExtension(file.Extension))
-                {
-                    continue;
-                }
-                if (file.FullName.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase) ||
-                    file.FullName.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase) ||
-                    file.Name.EndsWith($".g{file.Extension}", StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-                sourceFiles.Add(file.FullName);
+                continue;
             }
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PathTooLongException or DirectoryNotFoundException)
-        {
+            if (file.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase) ||
+                file.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase) ||
+                Path.GetFileName(file).EndsWith($".g{extension}", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+            sourceFiles.Add(file);
         }
         return sourceFiles;
     }
@@ -1241,20 +1237,12 @@ public static partial class DataFlowAnalyzer
         if (!string.IsNullOrWhiteSpace(rootDirectory) && Directory.Exists(rootDirectory))
         {
             // The reference sweep is best-effort: an input file can live anywhere, including
-            // shared temp directories whose trees contain paths beyond the OS limit, cycles,
-            // or unreadable subtrees. Enumeration is lazy, so the guard keeps every reference
-            // gathered before the failure and reports one diagnostic instead of crashing the
-            // whole scan.
-            try
+            // shared temp directories whose trees contain paths beyond the OS limit or
+            // unreadable subtrees. Unreadable subtrees are skipped and reported; the scan
+            // continues with the readable remainder.
+            foreach (var assemblyPath in SafeFileRead.EnumerateAllFilesSafe(rootDirectory, "*.dll", diagnostics.Add).Where(IsManagedAssembly))
             {
-                foreach (var assemblyPath in Directory.EnumerateFiles(rootDirectory, "*.dll", SearchOption.AllDirectories).Where(IsManagedAssembly))
-                {
-                    AddReference(assemblyPath);
-                }
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PathTooLongException or DirectoryNotFoundException)
-            {
-                diagnostics.Add($"Metadata reference sweep under {rootDirectory} stopped early: {ex.Message}");
+                AddReference(assemblyPath);
             }
         }
 

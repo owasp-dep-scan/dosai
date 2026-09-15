@@ -83,7 +83,7 @@ When enumerating source files from a directory, Dosai excludes `bin` and `obj` d
 
 Members declared in a C# 14+ `extension` block are contained in a compiler-synthesized nested type whose metadata name is empty, so the inventory walks outward to the nearest named type and attributes them to the enclosing static class.
 
-All recursive discovery enumerations (sources, assemblies, framework files, metadata references) are best-effort: an input tree can contain unreadable, over-long, or disappearing subtrees, and discovery keeps what it gathered and reports a diagnostic instead of crashing the scan.
+All recursive discovery enumerations (sources, assemblies, framework files, metadata references) share `SafeFileRead.EnumerateAllFilesSafe`: a per-directory recursive walker that skips an unreadable or over-long subtree, keeps enumerating its siblings, does not follow reparse points, and reports the skip through the caller's diagnostics channel where one exists (`Diagnostics[]` for the metadata reference sweep and assembly discovery) or a console warning otherwise.
 
 ## Stable method identities
 

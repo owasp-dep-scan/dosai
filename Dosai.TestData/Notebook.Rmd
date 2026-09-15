@@ -25,6 +25,14 @@ import os
 os.system("nope")
 ```
 
+An rstan chunk: its engine name starts with `r` but it is not the R engine, so nothing inside
+may leak into the R scan.
+
+```{rstan}
+file.path("stan", "only")
+sum(1, 2)
+```
+
 ```{r}
 process <- \(rows) {
   sum(rows)

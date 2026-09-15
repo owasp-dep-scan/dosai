@@ -1949,7 +1949,7 @@ public static class Dosai
                             Assembly = eventSymbol.ContainingAssembly.ToDisplayString(),
                             Module = eventSymbol.ContainingModule.ToDisplayString(),
                             Namespace = eventSymbol.ContainingNamespace.ToDisplayString(),
-                            ClassName = eventSymbol.ContainingType.Name,
+                            ClassName = GetNamedContainingTypeName(eventSymbol),
                             Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
                             Name = eventSymbol.Name,
                             Type = eventSymbol.Type.Name,
@@ -2006,7 +2006,7 @@ public static class Dosai
                             Assembly = variableSymbol?.ContainingAssembly.ToDisplayString() ?? model?.Compilation.Assembly.ToDisplayString(),
                             Module = variableSymbol?.ContainingModule.ToDisplayString() ?? model?.Compilation.Assembly.Modules.FirstOrDefault()?.ToDisplayString(),
                             Namespace = variableSymbol?.ContainingNamespace.ToDisplayString() ?? model?.Compilation.Assembly.Name,
-                            ClassName = variableSymbol?.ContainingType.Name ?? GetContainingTypeName(eventFieldDeclaration),
+                            ClassName = variableSymbol is null ? GetContainingTypeName(eventFieldDeclaration) : GetNamedContainingTypeName(variableSymbol),
                             Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
                             Name = variable.Identifier.Text,
                             Type = typeSymbol?.Name ?? type.ToString(),
@@ -2061,7 +2061,7 @@ public static class Dosai
                             Assembly = eventSymbol.ContainingAssembly.ToDisplayString(),
                             Module = eventSymbol.ContainingModule.ToDisplayString(),
                             Namespace = eventSymbol.ContainingNamespace.ToDisplayString(),
-                            ClassName = eventSymbol.ContainingType.Name,
+                            ClassName = GetNamedContainingTypeName(eventSymbol),
                             Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
                             Name = eventSymbol.Name,
                             Type = eventSymbol.Type.Name,
@@ -2186,7 +2186,7 @@ public static class Dosai
                                 Assembly = constructorSymbol.ContainingAssembly.ToDisplayString(),
                                 Module = constructorSymbol.ContainingModule.ToDisplayString(),
                                 Namespace = constructorSymbol.ContainingNamespace.ToDisplayString(),
-                                ClassName = constructorSymbol.ContainingType.Name,
+                                ClassName = GetNamedContainingTypeName(constructorSymbol),
                                 Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
                                 Name = constructorSymbol.ContainingType.Name,
                                 ReturnType = "Void",
@@ -3313,22 +3313,22 @@ public static class Dosai
         if (fileAttributes.HasFlag(FileAttributes.Directory))
         {
             var sourceExtensions = new HashSet<string>([Constants.CSharpSourceExtension, Constants.VBSourceExtension, Constants.FSharpSourceExtension], StringComparer.OrdinalIgnoreCase);
-            // Best-effort discovery: an unreadable or over-long subtree degrades to the files
-            // gathered so far instead of crashing the inspection.
-            try
+            // Best-effort discovery: unreadable or over-long subtrees are skipped with a
+            // console warning; the inspection continues with the readable remainder.
+            foreach (var extension in fileExtensions)
             {
-                filesToInspect.AddRange(
-                    from extension in fileExtensions
-                    from inputFile in new DirectoryInfo(path).EnumerateFiles($"*{extension}", SearchOption.AllDirectories)
-                    let isSourceExtension = sourceExtensions.Contains(extension)
-                    let relativePath = Path.GetRelativePath(path, inputFile.FullName)
-                    where !HasDirectorySegment(relativePath, "obj")
-                          && (!isSourceExtension || !HasDirectorySegment(relativePath, "bin"))
-                          && !inputFile.FullName.EndsWith($".g{extension}", StringComparison.OrdinalIgnoreCase)
-                    select inputFile.FullName);
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PathTooLongException or DirectoryNotFoundException)
-            {
+                var isSourceExtension = sourceExtensions.Contains(extension);
+                foreach (var inputFile in SafeFileRead.EnumerateAllFilesSafe(path, $"*{extension}"))
+                {
+                    var relativePath = Path.GetRelativePath(path, inputFile);
+                    if (HasDirectorySegment(relativePath, "obj") ||
+                        (isSourceExtension && HasDirectorySegment(relativePath, "bin")) ||
+                        inputFile.EndsWith($".g{extension}", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+                    filesToInspect.Add(inputFile);
+                }
             }
         }
         else

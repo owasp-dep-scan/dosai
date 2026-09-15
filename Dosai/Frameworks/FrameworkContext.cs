@@ -427,23 +427,10 @@ public sealed class FrameworkContext
             return [];
         }
 
-        // "Safe" must include hostile trees: unreadable or over-long subtrees degrade to the
-        // readable remainder instead of throwing out of a discovery pass.
-        var files = new List<string>();
-        try
-        {
-            foreach (var file in new DirectoryInfo(path).EnumerateFiles(extension, SearchOption.AllDirectories))
-            {
-                if (!IsIgnoredDirectory(file.FullName))
-                {
-                    files.Add(file.FullName);
-                }
-            }
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PathTooLongException or DirectoryNotFoundException)
-        {
-        }
-        return files;
+        // "Safe" includes hostile trees: unreadable or over-long subtrees are skipped with a
+        // console warning and the readable remainder is returned.
+        return SafeFileRead.EnumerateAllFilesSafe(path, extension)
+            .Where(file => !IsIgnoredDirectory(file));
     }
 
     internal static bool IsIgnoredDirectory(string fullPath) =>

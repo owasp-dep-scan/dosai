@@ -37,6 +37,7 @@
   <None Include="./../Dosai.TestData/ModernRFeatures.R" CopyToOutputDirectory="PreserveNewest" />
   <None Include="./../Dosai.TestData/Notebook.Rmd" CopyToOutputDirectory="PreserveNewest" />
   <None Include="./../Dosai.TestData/FSharpScript.fsx" CopyToOutputDirectory="PreserveNewest" />
+  <None Include="./../Dosai.TestData/FSharpModuleLayouts.fs" CopyToOutputDirectory="PreserveNewest" />
 
   </ItemGroup>
 

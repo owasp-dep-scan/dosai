@@ -144,7 +144,11 @@ The following bugs are fixed. All of them could **remove** or corrupt results in
 - **Hostile input directories crashed scans.** Recursive enumeration for sources, assemblies,
   framework files, and metadata references threw on unreadable or over-long subtrees (a
   `--path` pointing into a shared temp directory hit `PathTooLongException`). All discovery is
-  now best-effort: it keeps what it gathered and reports a diagnostic.
+  now best-effort: an unreadable subtree is skipped while enumeration continues with its
+  siblings, so only the offending subtree is lost instead of everything after it. The metadata
+  reference sweep and assembly discovery report the skipped directory in `Diagnostics[]`; the
+  remaining discovery sites print a console warning, following the existing file-read
+  convention.
 
 ## Nothing to change in queries or exports
 

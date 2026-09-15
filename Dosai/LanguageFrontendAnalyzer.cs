@@ -26,7 +26,10 @@ public static partial class LanguageFrontendAnalyzer
     [GeneratedRegex(@"^\s*(?:let|member)\s+(?:rec\s+)?(?:\w+\.)?(\w+)", RegexOptions.Compiled)]
     private static partial Regex FSharpFunction();
 
-    [GeneratedRegex(@"^\s*([A-Za-z_][\w\.]*)\s*(?:<-|=)\s*(?:function\s*\(|\\)", RegexOptions.Compiled)]
+    // The `\\(?=\()` alternative recognizes R 4.1+ lambda assignment (`name <- \(args) ...`)
+    // while rejecting string literals that merely contain backslashes (`pattern <- "\d+"`):
+    // the backslash must be the lambda introducer, immediately followed by `(`.
+    [GeneratedRegex(@"^\s*([A-Za-z_][\w\.]*)\s*(?:<-|=)\s*(?:function\s*\(|\\(?=\())", RegexOptions.Compiled)]
     private static partial Regex RFunction();
 
     [GeneratedRegex(@"(?<name>[A-Za-z_][\w\.:]*)\s*\(", RegexOptions.Compiled)]
@@ -81,6 +84,7 @@ public static partial class LanguageFrontendAnalyzer
         var moduleClassName = className;
         string? currentSourceId = null;
         var currentDeclarationIndent = int.MaxValue;
+        int? typeDeclarationIndent = null;
         var blockCommentDepth = 0;
         for (var i = 0; i < lines.Length; i++)
         {
@@ -98,6 +102,7 @@ public static partial class LanguageFrontendAnalyzer
                 className = namespaceName.Split('.').LastOrDefault() ?? "Module";
                 moduleClassName = className;
                 currentDeclarationIndent = int.MaxValue;
+                typeDeclarationIndent = null;
                 dependencies.Add(CreateDependency(basePath, file, namespaceName, namespaceName, i + 1, Math.Max(1, line.IndexOf(namespaceName, StringComparison.Ordinal) + 1)));
                 continue;
             }
@@ -134,10 +139,11 @@ public static partial class LanguageFrontendAnalyzer
             {
                 className = type.Groups[1].Value;
                 currentDeclarationIndent = int.MaxValue;
+                typeDeclarationIndent = indent;
                 continue;
             }
             var function = FSharpFunction().Match(code);
-            if (function.Success && !IsKeyword(function.Groups[1].Value))
+            if (function.Success && !IsKeyword(function.Groups[1].Value) && !IsFSharpDeclarationKeyword(function.Groups[1].Value))
             {
                 if (currentSourceId is not null && indent > currentDeclarationIndent)
                 {
@@ -145,10 +151,12 @@ public static partial class LanguageFrontendAnalyzer
                 }
 
                 var name = function.Groups[1].Value;
-                // A column-0 `let` can only be module level; F# type members are indented and
-                // start with `member`. Without this, module functions that follow a `type`
-                // declaration stay attributed to that type.
-                if (indent == 0)
+                // Type members are always indented past their `type` line, so a `let` at or
+                // left of the last type declaration's indentation is module level - in both
+                // flat scripts and `module M = ...` bodies where everything is indented.
+                // Without this reset, module functions that follow a `type` declaration stay
+                // attributed to that type.
+                if (typeDeclarationIndent is { } typeIndent && indent <= typeIndent)
                 {
                     className = moduleClassName;
                 }
@@ -160,7 +168,7 @@ public static partial class LanguageFrontendAnalyzer
             foreach (Match call in Regex.Matches(code, @"\b([A-Za-z_][\w\.]*)\s+(?:\(|""|[A-Za-z0-9_])"))
             {
                 var name = call.Groups[1].Value.Split('.').Last();
-                if (currentSourceId is null || IsKeyword(name)) continue;
+                if (currentSourceId is null || IsKeyword(name) || IsFSharpDeclarationKeyword(name)) continue;
                 calls.Add(CreateCall(basePath, file, currentSourceId, namespaceName, className, name, i + 1, call.Index + 1));
             }
         }
@@ -207,10 +215,18 @@ public static partial class LanguageFrontendAnalyzer
                 }
                 continue;
             }
-            if (current is '"' or '\'')
+            if (current == '"')
             {
                 quote = current;
                 builder.Append(current);
+                continue;
+            }
+            if (current == '\'' && IsFSharpCharLiteralAt(line, i) is { } literalEnd)
+            {
+                // Consume the whole char literal ('a', '\n', '\u0041') at once; a bare `'` is
+                // the prime of an F# identifier (`x'`, `list''`), not a string opener.
+                builder.Append(line[i..(literalEnd + 1)]);
+                i = literalEnd;
                 continue;
             }
             if (current == '(' && i + 1 < line.Length && line[i + 1] == '*')
@@ -272,7 +288,10 @@ public static partial class LanguageFrontendAnalyzer
                     else
                     {
                         insideChunk = true;
-                        insideRChunk = Regex.IsMatch(fence, "^```\\s*\\{\\s*r", RegexOptions.IgnoreCase);
+                        // The chunk header's first token is the engine: `{r}`, `{r, echo=TRUE}`,
+                        // `{r setup}`. Requiring a delimiter after the `r` keeps other engines
+                        // whose names start with r (`{rstan}`) out of the R scan.
+                        insideRChunk = Regex.IsMatch(fence, "^```\\s*\\{\\s*r[\\s,}]", RegexOptions.IgnoreCase);
                     }
                     continue;
                 }
@@ -308,6 +327,40 @@ public static partial class LanguageFrontendAnalyzer
                 calls.Add(CreateCall(basePath, file, currentSourceId, "R", Path.GetFileNameWithoutExtension(file), name, i + 1, call.Index + 1));
             }
         }
+    }
+
+    /// <summary>
+    ///     If a F# char literal starts at <paramref name="start" />, returns the index of its
+    ///     closing quote; otherwise null. Content must be 1-8 characters with no whitespace -
+    ///     covering `'a'`, `'\n'`, and `'\u0041'` - so identifier primes (`x'`, `list''`) and
+    ///     an unterminated `'` are rejected instead of swallowing the rest of the line.
+    /// </summary>
+    private static int? IsFSharpCharLiteralAt(string line, int start)
+    {
+        var contentLength = 0;
+        var index = start + 1;
+        while (index < line.Length && contentLength <= 8)
+        {
+            var current = line[index];
+            if (current == '\\')
+            {
+                if (index + 1 >= line.Length) return null;
+                index += 2;
+                contentLength += 2;
+                continue;
+            }
+            if (current == '\'')
+            {
+                return contentLength >= 1 ? index : null;
+            }
+            if (char.IsWhiteSpace(current))
+            {
+                return null;
+            }
+            index++;
+            contentLength++;
+        }
+        return null;
     }
 
     /// <summary>Returns the index of the first R comment marker (<c>#</c>) outside a string literal, or -1.</summary>
@@ -605,13 +658,17 @@ write.table(pd, file = "", sep = "\t", row.names = FALSE, col.names = TRUE, quot
     {
         var keywords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
-            "if", "then", "else", "elif", "for", "while", "do", "match", "with", "try", "catch", "finally", "let", "rec", "and", "fun", "function", "in", "open", "module", "type", "namespace", "return", "static", "new", "NULL", "nullptr", "sizeof", "switch", "case", "library", "require",
-            // F# declaration keywords that head real source lines (`inherit`, `override`,
-            // `abstract`, `member`) read like calls to the line scanner but never name one.
-            "abstract", "inherit", "override", "member", "interface", "val", "yield", "use", "when"
+            "if", "then", "else", "elif", "for", "while", "do", "match", "with", "try", "catch", "finally", "let", "rec", "and", "fun", "function", "in", "open", "module", "type", "namespace", "return", "static", "new", "NULL", "nullptr", "sizeof", "switch", "case", "library", "require"
         };
         return keywords.Contains(word);
     }
+
+    // F# declaration keywords that head real source lines (`inherit`, `override`, `abstract`,
+    // `member`) read like calls to the line scanner but never name one. Kept separate from the
+    // shared set because the R and C++ scanners use it too, and `when` (plyr) or `use` are
+    // legitimate call names there.
+    private static bool IsFSharpDeclarationKeyword(string word) =>
+        word is "abstract" or "inherit" or "override" or "member" or "interface" or "val" or "yield" or "use" or "when" or "let" or "do" or "done" or "while" or "for" or "if" or "then" or "else" or "match";
 
     private static string SafeRelative(string basePath, string file) => Directory.Exists(basePath) ? Path.GetRelativePath(basePath, file) : Path.GetFileName(file);
 
