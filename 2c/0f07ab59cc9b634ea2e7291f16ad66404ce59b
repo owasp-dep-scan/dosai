@@ -1,0 +1,40 @@
+Dosai.TestData/FSharpModuleLayouts.fs
+  h_6a4cc5cdf68def 1-26
+Dosai.TestData/ModernRFeatures.R
+  h_6a4cc5cdf68def 14-15
+Dosai.TestData/Notebook.Rmd
+  h_6a4cc5cdf68def 28-35
+Dosai.Tests/Dosai.Tests.csproj
+  h_6a4cc5cdf68def 40
+Dosai.Tests/DosaiTests.cs
+  h_6a4cc5cdf68def 1597-1599,1611-1613,1628-1641,1652-1709,3423-3453,3473-3485,4374
+Dosai/AssemblyScope.cs
+  h_6a4cc5cdf68def 42,44-46,48-49,51-53,55-58,60-63,65-66,70,72-74
+Dosai/DataFlow.cs
+  h_6a4cc5cdf68def 957-958,960,962-965,967,969-975,1240-1243,1245
+Dosai/DataFlowAssembly.cs
+  h_6a4cc5cdf68def 534,536-544,549,561-565,573,630-633,635,637-645
+Dosai/Dosai.cs
+  h_6a4cc5cdf68def 1952,2009,2064,2189,3316-3318,3320-3331
+Dosai/Frameworks/FrameworkContext.cs
+  h_6a4cc5cdf68def 430-433
+Dosai/LanguageFrontendAnalyzer.cs
+  h_6a4cc5cdf68def 29-32,87,105,142,146,154-159,171,218,224-231,291-294,332-365,661,666-672
+Dosai/SafeFileRead.cs
+  h_6a4cc5cdf68def 37-43,45,48-64,67-69,73-94
+docs/compiler-engineering.md
+  h_6a4cc5cdf68def 86
+docs/migration-5.0.md
+  h_6a4cc5cdf68def 147-151
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "2c0f07ab59cc9b634ea2e7291f16ad66404ce59b",
+  "prompts": {},
+  "humans": {
+    "h_6a4cc5cdf68def": {
+      "author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}
