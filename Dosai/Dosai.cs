@@ -896,7 +896,7 @@ public static class Dosai
     /// <returns>List of assembly information</returns>
     private static List<AssemblyInformation> GetAssemblyInformation(string path)
     {
-        var assembliesToInspect = AssemblyScope.ScopeApplicationAssemblies(path, GetFilesToInspect(path, Constants.AssemblyExtension, Constants.ExeExtension), message => Console.WriteLine($"Warning: {message}"));
+        var assembliesToInspect = AssemblyScope.ScopeApplicationAssemblies(path, GetFilesToInspect(path, Constants.AssemblyExtension, Constants.ExeExtension), message => Console.Error.WriteLine($"Warning: {message}"));
         List<AssemblyInformation> assemblyInformation = [];
         List<string> failedAssemblies = [];
 
@@ -945,7 +945,7 @@ public static class Dosai
     /// <returns>List of assembly methods</returns>
     private static List<Method> GetAssemblyMethods(string path)
     {
-        var assembliesToInspect = AssemblyScope.ScopeApplicationAssemblies(path, GetFilesToInspect(path, Constants.AssemblyExtension, Constants.ExeExtension), message => Console.WriteLine($"Warning: {message}"));
+        var assembliesToInspect = AssemblyScope.ScopeApplicationAssemblies(path, GetFilesToInspect(path, Constants.AssemblyExtension, Constants.ExeExtension), message => Console.Error.WriteLine($"Warning: {message}"));
         var assemblyMethods = new List<Method>();
         var processedAssemblyIdentities = new HashSet<string>();
         var sharedFrameworkDirs = GetSharedFrameworkProbingPaths();
@@ -2791,7 +2791,7 @@ public static class Dosai
                 Assembly = targetMethod.ContainingAssembly?.ToDisplayString() ?? string.Empty,
                 Module = targetMethod.ContainingModule?.ToDisplayString() ?? string.Empty,
                 Namespace = targetMethod.ContainingNamespace?.ToDisplayString() ?? string.Empty,
-                ClassName = targetMethod.ContainingType?.Name ?? string.Empty,
+                ClassName = GetNamedContainingTypeName(targetMethod),
                 CalledMethod = calledMethod,
                 LineNumber = location.Line + 1,
                 ColumnNumber = location.Character + 1,
@@ -2802,7 +2802,7 @@ public static class Dosai
                 TargetId = targetId,
                 CallerMethod = callerSymbol.Name,
                 CallerNamespace = callerSymbol.ContainingNamespace?.ToDisplayString() ?? string.Empty,
-                CallerClass = callerSymbol.ContainingType?.Name ?? string.Empty,
+                CallerClass = GetNamedContainingTypeName(callerSymbol),
                 IsInternal = isInternal && !isInMetadata,
                 EvidenceKind = AnalysisEvidenceKind.SourceRoslynDirect,
                 Evidence =
@@ -3053,7 +3053,7 @@ public static class Dosai
                 Assembly = targetMethod.ContainingAssembly?.ToDisplayString() ?? string.Empty,
                 Module = targetMethod.ContainingModule?.ToDisplayString() ?? string.Empty,
                 Namespace = targetMethod.ContainingNamespace?.ToDisplayString() ?? string.Empty,
-                ClassName = targetMethod.ContainingType?.Name ?? string.Empty,
+                ClassName = GetNamedContainingTypeName(targetMethod),
                 CalledMethod = targetMethod.MethodKind == MethodKind.Constructor ? targetMethod.ContainingType?.Name ?? targetMethod.Name : NormalizeSymbolName(targetMethod.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat)),
                 LineNumber = location.Line + 1,
                 ColumnNumber = location.Character + 1,
@@ -3064,7 +3064,7 @@ public static class Dosai
                 TargetId = targetId,
                 CallerMethod = callerSymbol.Name,
                 CallerNamespace = callerSymbol.ContainingNamespace?.ToDisplayString() ?? string.Empty,
-                CallerClass = callerSymbol.ContainingType?.Name ?? string.Empty,
+                CallerClass = GetNamedContainingTypeName(callerSymbol),
                 IsInternal = (isInSource || SymbolEqualityComparer.Default.Equals(targetMethod.ContainingAssembly, model.Compilation.Assembly)) && !isInMetadata,
                 EvidenceKind = evidenceKind,
                 DispatchConfidence = dispatchConfidence,
@@ -3313,21 +3313,38 @@ public static class Dosai
         if (fileAttributes.HasFlag(FileAttributes.Directory))
         {
             var sourceExtensions = new HashSet<string>([Constants.CSharpSourceExtension, Constants.VBSourceExtension, Constants.FSharpSourceExtension], StringComparer.OrdinalIgnoreCase);
-            // Best-effort discovery: unreadable or over-long subtrees are skipped with a
-            // console warning; the inspection continues with the readable remainder.
+            // One walk for every requested extension: repeating the recursive enumeration per
+            // extension multiplied both the I/O and the warnings a hostile tree produces. Results
+            // are bucketed so the caller still sees them grouped by extension, in the requested
+            // order, and only matching paths are held.
+            var buckets = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
             foreach (var extension in fileExtensions)
             {
-                var isSourceExtension = sourceExtensions.Contains(extension);
-                foreach (var inputFile in SafeFileRead.EnumerateAllFilesSafe(path, $"*{extension}"))
+                buckets.TryAdd(extension, []);
+            }
+            // Best-effort discovery: unreadable or over-long subtrees are skipped with a
+            // console warning; the inspection continues with the readable remainder.
+            foreach (var inputFile in SafeFileRead.EnumerateAllFilesSafe(path))
+            {
+                var extension = Path.GetExtension(inputFile);
+                if (!buckets.TryGetValue(extension, out var bucket))
                 {
-                    var relativePath = Path.GetRelativePath(path, inputFile);
-                    if (HasDirectorySegment(relativePath, "obj") ||
-                        (isSourceExtension && HasDirectorySegment(relativePath, "bin")) ||
-                        inputFile.EndsWith($".g{extension}", StringComparison.OrdinalIgnoreCase))
-                    {
-                        continue;
-                    }
-                    filesToInspect.Add(inputFile);
+                    continue;
+                }
+                var relativePath = Path.GetRelativePath(path, inputFile);
+                if (HasDirectorySegment(relativePath, "obj") ||
+                    (sourceExtensions.Contains(extension) && HasDirectorySegment(relativePath, "bin")) ||
+                    inputFile.EndsWith($".g{extension}", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                bucket.Add(inputFile);
+            }
+            foreach (var extension in fileExtensions)
+            {
+                if (buckets.Remove(extension, out var bucket))
+                {
+                    filesToInspect.AddRange(bucket);
                 }
             }
         }

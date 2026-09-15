@@ -85,11 +85,11 @@ public static partial class LanguageFrontendAnalyzer
         string? currentSourceId = null;
         var currentDeclarationIndent = int.MaxValue;
         int? typeDeclarationIndent = null;
-        var blockCommentDepth = 0;
+        var lexerState = new FSharpLexerState();
         for (var i = 0; i < lines.Length; i++)
         {
             var line = lines[i];
-            var code = StripFSharpComment(line, ref blockCommentDepth);
+            var code = StripFSharpComment(line, ref lexerState);
             if (string.IsNullOrWhiteSpace(code))
             {
                 continue;
@@ -177,48 +177,88 @@ public static partial class LanguageFrontendAnalyzer
     /// <summary>
     ///     Removes `//` line comments and skips `(* ... *)` block-comment text so commented-out
     ///     or documentation prose (for example `// Record constructors (F# 11)`) stops producing
-    ///     phantom method calls. Comment markers inside string literals are honored, and block
-    ///     comments nest per the F# rules - `(*)` closes immediately (the `*` is shared), and an
+    ///     phantom method calls. Comment markers inside string literals are honored for all three
+    ///     F# string forms - normal (`\` escapes), verbatim (`@"..."`, where `""` is the escaped
+    ///     quote and `\` is literal), and triple-quoted (`"""..."""`, no escapes) - and both
+    ///     block comments and the multi-line string forms carry their state across lines. Block
+    ///     comments nest per the F# rules: `(*)` closes immediately (the `*` is shared), and an
     ///     inner `(*` requires its own `*)`.
     /// </summary>
-    private static string StripFSharpComment(string line, ref int blockCommentDepth)
+    private static string StripFSharpComment(string line, ref FSharpLexerState state)
     {
         var builder = new StringBuilder(line.Length);
-        var quote = '\0';
+        // Continuation lines of a multi-line literal are string body by definition: they cannot
+        // hold a declaration, a directive, or a call, so their content is dropped rather than
+        // rescanned as code. Content of a literal that opens and closes on one line is kept,
+        // because `#r "nuget: ..."` and `#load "file.fsx"` are read from it.
+        var insideMultiLineLiteral = state.String is FSharpStringKind.Verbatim or FSharpStringKind.TripleQuoted;
         for (var i = 0; i < line.Length; i++)
         {
             var current = line[i];
-            if (blockCommentDepth > 0)
+            if (state.BlockCommentDepth > 0)
             {
                 if (current == '(' && i + 1 < line.Length && line[i + 1] == '*')
                 {
-                    blockCommentDepth++;
+                    state.BlockCommentDepth++;
                     i++;
                 }
                 else if (current == '*' && i + 1 < line.Length && line[i + 1] == ')')
                 {
-                    blockCommentDepth--;
+                    state.BlockCommentDepth--;
                     i++;
                 }
                 continue;
             }
-            if (quote != '\0')
+            if (state.String != FSharpStringKind.None)
             {
-                builder.Append(current);
-                if (current == '\\' && quote == '"' && i + 1 < line.Length)
+                if (!insideMultiLineLiteral)
                 {
-                    builder.Append(line[++i]);
+                    builder.Append(current);
                 }
-                else if (current == quote)
+                switch (state.String)
                 {
-                    quote = '\0';
+                    case FSharpStringKind.Normal when current == '\\' && i + 1 < line.Length:
+                        if (!insideMultiLineLiteral) builder.Append(line[i + 1]);
+                        i++;
+                        break;
+                    case FSharpStringKind.Normal when current == '"':
+                        state.String = FSharpStringKind.None;
+                        break;
+                    // A doubled quote is the verbatim escape, so it does not close the literal.
+                    case FSharpStringKind.Verbatim when current == '"' && i + 1 < line.Length && line[i + 1] == '"':
+                        if (!insideMultiLineLiteral) builder.Append(line[i + 1]);
+                        i++;
+                        break;
+                    case FSharpStringKind.Verbatim when current == '"':
+                        state.String = FSharpStringKind.None;
+                        insideMultiLineLiteral = false;
+                        break;
+                    case FSharpStringKind.TripleQuoted when current == '"' && i + 2 < line.Length && line[i + 1] == '"' && line[i + 2] == '"':
+                        i += 2;
+                        state.String = FSharpStringKind.None;
+                        insideMultiLineLiteral = false;
+                        break;
                 }
+                continue;
+            }
+            if (current == '@' && i + 1 < line.Length && line[i + 1] == '"')
+            {
+                builder.Append(line[i..(i + 2)]);
+                i++;
+                state.String = FSharpStringKind.Verbatim;
                 continue;
             }
             if (current == '"')
             {
-                quote = current;
+                if (i + 2 < line.Length && line[i + 1] == '"' && line[i + 2] == '"')
+                {
+                    builder.Append(line[i..(i + 3)]);
+                    i += 2;
+                    state.String = FSharpStringKind.TripleQuoted;
+                    continue;
+                }
                 builder.Append(current);
+                state.String = FSharpStringKind.Normal;
                 continue;
             }
             if (current == '\'' && IsFSharpCharLiteralAt(line, i) is { } literalEnd)
@@ -238,7 +278,7 @@ public static partial class LanguageFrontendAnalyzer
                     i += 2;
                     continue;
                 }
-                blockCommentDepth++;
+                state.BlockCommentDepth++;
                 i++;
                 continue;
             }
@@ -248,7 +288,29 @@ public static partial class LanguageFrontendAnalyzer
             }
             builder.Append(current);
         }
+        // A normal string literal cannot span a line break, so an unterminated one is a lexing
+        // artifact; dropping it keeps the damage on its own line. Verbatim and triple-quoted
+        // literals legitimately continue, so their state is kept.
+        if (state.String == FSharpStringKind.Normal)
+        {
+            state.String = FSharpStringKind.None;
+        }
         return builder.ToString();
+    }
+
+    private enum FSharpStringKind
+    {
+        None,
+        Normal,
+        Verbatim,
+        TripleQuoted
+    }
+
+    /// <summary>Cross-line lexer state for the F# line scanner: nested block comments and the multi-line string forms.</summary>
+    private struct FSharpLexerState
+    {
+        public int BlockCommentDepth;
+        public FSharpStringKind String;
     }
 
     private static void AnalyzeR(string basePath, string file, List<Method> methods, List<Dependency> dependencies, List<MethodCalls> calls)

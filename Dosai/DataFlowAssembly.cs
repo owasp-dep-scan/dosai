@@ -401,7 +401,7 @@ public static partial class DataFlowAnalyzer
                 continue;
             }
 
-            if (opCode == OpCodes.Ldelem || opCode == OpCodes.Ldelem_I || opCode == OpCodes.Ldelem_I1 || opCode == OpCodes.Ldelem_I2 || opCode == OpCodes.Ldelem_I4 || opCode == OpCodes.Ldelem_I8 || opCode == OpCodes.Ldelem_R4 || opCode == OpCodes.Ldelem_R8 || opCode == OpCodes.Ldelem_Ref || opCode == OpCodes.Ldelem_U1 || opCode == OpCodes.Ldelem_U2 || opCode == OpCodes.Ldelem_U4)
+            if (IsArrayElementLoad(opCode))
             {
                 _ = state.Pop(); // index
                 state.Push(state.Pop()); // array/reference
@@ -484,6 +484,36 @@ public static partial class DataFlowAnalyzer
                 continue;
             }
 
+            // Reads and writes through a managed pointer, the other half of the address markers
+            // above: `ldind`/`ldobj` load the pointee's taint, `stind`/`stobj` store into the
+            // addressed slot. Without these, a `ref` local read (`ref var slot = ref value;
+            // Process.Start(slot);`) lost the taint the marker was carrying.
+            if (IsIndirectLoad(opCode))
+            {
+                state.Push(ResolveAddressTaint(state.Pop(), state));
+                EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
+                continue;
+            }
+
+            if (IsIndirectStore(opCode))
+            {
+                var storedTaint = state.Pop();
+                var addressTaint = state.Pop();
+                if (addressTaint is { IsAddress: true } target)
+                {
+                    if (target.LocalSlot is { } indirectLocalSlot)
+                    {
+                        state.Locals[indirectLocalSlot] = storedTaint;
+                    }
+                    else if (target.ArgumentSlot is { } indirectArgumentSlot)
+                    {
+                        state.Arguments[indirectArgumentSlot] = storedTaint;
+                    }
+                }
+                EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
+                continue;
+            }
+
             if (opCode == OpCodes.Dup)
             {
                 state.Push(state.Stack.Count > 0 ? state.Stack[^1] : null);
@@ -549,7 +579,7 @@ public static partial class DataFlowAnalyzer
         opCode == OpCodes.Neg || opCode == OpCodes.Not ||
         opCode == OpCodes.Conv_I1 || opCode == OpCodes.Conv_I2 || opCode == OpCodes.Conv_I4 || opCode == OpCodes.Conv_I8 ||
         opCode == OpCodes.Conv_U1 || opCode == OpCodes.Conv_U2 || opCode == OpCodes.Conv_U4 || opCode == OpCodes.Conv_U8 ||
-        opCode == OpCodes.Conv_R4 || opCode == OpCodes.Conv_R8 || opCode == OpCodes.Conv_I || opCode == OpCodes.Conv_U ||
+        opCode == OpCodes.Conv_R4 || opCode == OpCodes.Conv_R8 || opCode == OpCodes.Conv_R_Un || opCode == OpCodes.Conv_I || opCode == OpCodes.Conv_U ||
         opCode == OpCodes.Conv_Ovf_I1 || opCode == OpCodes.Conv_Ovf_I2 || opCode == OpCodes.Conv_Ovf_I4 || opCode == OpCodes.Conv_Ovf_I8 ||
         opCode == OpCodes.Conv_Ovf_U1 || opCode == OpCodes.Conv_Ovf_U2 || opCode == OpCodes.Conv_Ovf_U4 || opCode == OpCodes.Conv_Ovf_U8 ||
         opCode == OpCodes.Conv_Ovf_I || opCode == OpCodes.Conv_Ovf_U ||
@@ -572,6 +602,44 @@ public static partial class DataFlowAnalyzer
         opCode == OpCodes.And || opCode == OpCodes.Or || opCode == OpCodes.Xor ||
         opCode == OpCodes.Shl || opCode == OpCodes.Shr || opCode == OpCodes.Shr_Un;
 
+    /// <summary>
+    ///     Array element loads, all of which pop (array, index) and push one value whose taint is
+    ///     the array's. <c>ldelema</c> belongs here rather than with <c>ldloca</c>/<c>ldarga</c>:
+    ///     it pushes the address of an element, but an element has no local or argument slot to
+    ///     write back into, so the array's taint is forwarded as a value instead. A callee that
+    ///     writes through it (`Deconstruct` on `items[i]`, `ref items[i]`) therefore still reads
+    ///     the array's taint for that position.
+    /// </summary>
+    private static bool IsArrayElementLoad(OpCode opCode) =>
+        opCode == OpCodes.Ldelem || opCode == OpCodes.Ldelem_I || opCode == OpCodes.Ldelem_I1 || opCode == OpCodes.Ldelem_I2 ||
+        opCode == OpCodes.Ldelem_I4 || opCode == OpCodes.Ldelem_I8 || opCode == OpCodes.Ldelem_R4 || opCode == OpCodes.Ldelem_R8 ||
+        opCode == OpCodes.Ldelem_Ref || opCode == OpCodes.Ldelem_U1 || opCode == OpCodes.Ldelem_U2 || opCode == OpCodes.Ldelem_U4 ||
+        opCode == OpCodes.Ldelema;
+
+    /// <summary>Loads through a managed pointer: pops one address, pushes the pointee's value.</summary>
+    private static bool IsIndirectLoad(OpCode opCode) =>
+        opCode == OpCodes.Ldind_I || opCode == OpCodes.Ldind_I1 || opCode == OpCodes.Ldind_I2 || opCode == OpCodes.Ldind_I4 ||
+        opCode == OpCodes.Ldind_I8 || opCode == OpCodes.Ldind_U1 || opCode == OpCodes.Ldind_U2 || opCode == OpCodes.Ldind_U4 ||
+        opCode == OpCodes.Ldind_R4 || opCode == OpCodes.Ldind_R8 || opCode == OpCodes.Ldind_Ref || opCode == OpCodes.Ldobj;
+
+    /// <summary>Stores through a managed pointer: pops (address, value) and writes the pointee.</summary>
+    private static bool IsIndirectStore(OpCode opCode) =>
+        opCode == OpCodes.Stind_I || opCode == OpCodes.Stind_I1 || opCode == OpCodes.Stind_I2 || opCode == OpCodes.Stind_I4 ||
+        opCode == OpCodes.Stind_I8 || opCode == OpCodes.Stind_R4 || opCode == OpCodes.Stind_R8 || opCode == OpCodes.Stind_Ref ||
+        opCode == OpCodes.Stobj;
+
+    /// <summary>
+    ///     Address markers only say where a by-ref callee reads or writes; for taint purposes the
+    ///     value is the one currently in the referenced slot (`count.ToString()` receives
+    ///     `ldloca count`, whose pointee carries the arithmetic taint). Non-markers pass through.
+    /// </summary>
+    private static AssemblyTaint? ResolveAddressTaint(AssemblyTaint? taint, AssemblyMethodState state) => taint switch
+    {
+        { IsAddress: true, LocalSlot: { } slot } => state.Locals.TryGetValue(slot, out var localTaint) ? localTaint : null,
+        { IsAddress: true, ArgumentSlot: { } slot } => state.Arguments.TryGetValue(slot, out var argumentTaint) ? argumentTaint : null,
+        _ => taint
+    };
+
     private static void ProcessAssemblyCall(MetadataReader reader, AssemblyInstruction instruction, OpCode opCode, AssemblyMethodInfo currentMethod, string assemblyPath, AssemblyDataFlowContext context, AssemblyMethodState state, IReadOnlyDictionary<string, AssemblyMethodSummary> summaries)
     {
         if (instruction.Operand is not int token || ResolveMember(reader, token) is not { } member)
@@ -587,17 +655,8 @@ public static partial class DataFlowAnalyzer
         }
         argumentTaints.Reverse();
         var receiverTaint = member.HasThis && opCode != OpCodes.Newobj ? state.Pop() : null;
-        // Address markers only say where a by-ref callee reads/writes; for taint purposes the
-        // callee sees the value in the referenced slot (`count.ToString()` receives `ldloca
-        // count`, whose pointee carries the arithmetic taint).
-        AssemblyTaint? ResolveAddress(AssemblyTaint? taint) => taint switch
-        {
-            { IsAddress: true, LocalSlot: { } slot } => state.Locals.TryGetValue(slot, out var localTaint) ? localTaint : null,
-            { IsAddress: true, ArgumentSlot: { } slot } => state.Arguments.TryGetValue(slot, out var argumentTaint) ? argumentTaint : null,
-            _ => taint
-        };
-        var resolvedArguments = argumentTaints.Select(ResolveAddress).ToList();
-        var resolvedReceiver = ResolveAddress(receiverTaint);
+        var resolvedArguments = argumentTaints.Select(taint => ResolveAddressTaint(taint, state)).ToList();
+        var resolvedReceiver = ResolveAddressTaint(receiverTaint, state);
         var allTaints = resolvedArguments.Concat([resolvedReceiver]).Where(taint => taint is not null).Cast<AssemblyTaint>().ToList();
 
         var sourcePatterns = context.MatchSource(member).ToList();
@@ -630,6 +689,12 @@ public static partial class DataFlowAnalyzer
         // A null combined taint also writes: the callee definitely assigns the slot. Sanitizers
         // are the exception: a validator taking its argument by ref only reads it, and writing
         // the (null) sanitized taint back would erase the slot's real taint for later sinks.
+        //
+        // This over-approximates deliberately, and the limitation is documented for consumers:
+        // IL alone does not say which parameter a callee copied into which `out` slot, so every
+        // by-ref slot receives the union of the arguments and receiver. `Deconstruct` is exact
+        // under that rule, while `map.TryGetValue(taintedKey, out value)` taints `value` from the
+        // key. Over-tainting keeps binary flows visible; under-tainting would hide them.
         if (sanitizerPatterns.Count == 0)
         {
             foreach (var argumentTaint in argumentTaints)
@@ -832,7 +897,7 @@ public static partial class DataFlowAnalyzer
                 continue;
             }
 
-            if (opCode == OpCodes.Ldelem || opCode == OpCodes.Ldelem_I || opCode == OpCodes.Ldelem_I1 || opCode == OpCodes.Ldelem_I2 || opCode == OpCodes.Ldelem_I4 || opCode == OpCodes.Ldelem_I8 || opCode == OpCodes.Ldelem_R4 || opCode == OpCodes.Ldelem_R8 || opCode == OpCodes.Ldelem_Ref || opCode == OpCodes.Ldelem_U1 || opCode == OpCodes.Ldelem_U2 || opCode == OpCodes.Ldelem_U4)
+            if (IsArrayElementLoad(opCode))
             {
                 _ = state.Pop();
                 state.Push(state.Pop());
@@ -1418,7 +1483,7 @@ public static partial class DataFlowAnalyzer
                 continue;
             }
 
-            if (opCode == OpCodes.Ldelem || opCode == OpCodes.Ldelem_I || opCode == OpCodes.Ldelem_I1 || opCode == OpCodes.Ldelem_I2 || opCode == OpCodes.Ldelem_I4 || opCode == OpCodes.Ldelem_I8 || opCode == OpCodes.Ldelem_R4 || opCode == OpCodes.Ldelem_R8 || opCode == OpCodes.Ldelem_Ref || opCode == OpCodes.Ldelem_U1 || opCode == OpCodes.Ldelem_U2 || opCode == OpCodes.Ldelem_U4)
+            if (IsArrayElementLoad(opCode))
             {
                 // Pops (index, array) and pushes the array element: the element's taint is the
                 // array's taint, so the surviving marker is the array's slot.

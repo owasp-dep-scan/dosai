@@ -14,7 +14,7 @@ internal static class SafeFileRead
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            Console.WriteLine($"Warning: skipping unreadable source file {path}: {ex.Message}");
+            Console.Error.WriteLine($"Warning: skipping unreadable source file {path}: {ex.Message}");
             content = string.Empty;
             return false;
         }
@@ -28,7 +28,7 @@ internal static class SafeFileRead
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            Console.WriteLine($"Warning: skipping unreadable source file {path}: {ex.Message}");
+            Console.Error.WriteLine($"Warning: skipping unreadable source file {path}: {ex.Message}");
             return null;
         }
     }
@@ -38,60 +38,109 @@ internal static class SafeFileRead
     ///     disappearing subtree is reported, skipped, and enumeration continues with its
     ///     siblings, so only the offending subtree is lost instead of everything after it.
     ///     Analysis inputs can be anywhere - including shared temp directories - so discovery
-    ///     must never crash the scan. Reparse points are not followed, preventing symlink
-    ///     cycles. Callers with a diagnostics channel pass <paramref name="reportDiagnostic" />;
-    ///     the default prints a console warning like the file-read helpers above.
+    ///     must never crash the scan. Symbolic links and junctions are followed, because linked
+    ///     source and dependency directories are a normal repository layout and skipping them
+    ///     would silently drop results; a link that re-enters an already visited directory is
+    ///     skipped instead, so cycles terminate. Enumeration is lazy per directory: callers
+    ///     filter as they go and never hold a whole tree in memory. Callers with a diagnostics
+    ///     channel pass <paramref name="reportDiagnostic" />; the default writes a console
+    ///     warning to stderr, keeping stdout free for the MCP server's JSON-RPC stream.
     /// </summary>
-    public static IReadOnlyList<string> EnumerateAllFilesSafe(string root, string searchPattern = "*.*", Action<string>? reportDiagnostic = null)
+    public static IEnumerable<string> EnumerateAllFilesSafe(string root, string searchPattern = "*.*", Action<string>? reportDiagnostic = null)
     {
-        var files = new List<string>();
-        var report = reportDiagnostic ?? (message => Console.WriteLine($"Warning: {message}"));
-        EnumerateDirectory(new DirectoryInfo(root), searchPattern, files, report, depth: 0);
-        return files;
+        // An iterator body, so the visited-directory and reported-message sets are rebuilt on
+        // every enumeration; captured state would make a second pass over the same enumerable
+        // return nothing.
+        var reported = new HashSet<string>(StringComparer.Ordinal);
+        var report = reportDiagnostic ?? ReportToStandardError;
+        // One report per distinct message: a hostile directory is a single fact, and several
+        // discovery passes walk the same tree.
+        foreach (var file in EnumerateDirectory(new DirectoryInfo(root), searchPattern, message =>
+        {
+            if (reported.Add(message)) report(message);
+        }, new HashSet<string>(PathComparer), depth: 0))
+        {
+            yield return file;
+        }
     }
 
     private const int MaxEnumerationDepth = 128;
+    private const int MaxRememberedWarnings = 1024;
+    private static readonly StringComparer PathComparer = OperatingSystem.IsLinux() ? StringComparer.Ordinal : StringComparer.OrdinalIgnoreCase;
+    private static readonly HashSet<string> ReportedWarnings = new(StringComparer.Ordinal);
 
-    private static void EnumerateDirectory(DirectoryInfo directory, string searchPattern, List<string> files, Action<string> report, int depth)
+    // Every discovery pass builds its own reporter, so process-wide de-duplication is what keeps
+    // one unreadable directory from printing once per pass. Bounded so a tree full of distinct
+    // failures cannot grow the set without limit.
+    private static void ReportToStandardError(string message)
+    {
+        lock (ReportedWarnings)
+        {
+            if (ReportedWarnings.Count < MaxRememberedWarnings && !ReportedWarnings.Add(message))
+            {
+                return;
+            }
+        }
+        Console.Error.WriteLine($"Warning: {message}");
+    }
+
+    private static IEnumerable<string> EnumerateDirectory(DirectoryInfo directory, string searchPattern, Action<string> report, HashSet<string> visited, int depth)
     {
         if (depth > MaxEnumerationDepth)
         {
             report($"Directory enumeration depth limit reached at {directory.FullName}; deeper files are skipped.");
-            return;
+            yield break;
         }
 
-        IEnumerable<FileInfo> fileEntries;
-        IEnumerable<DirectoryInfo> subdirectories;
+        if (!visited.Add(ResolveDirectoryIdentity(directory)))
+        {
+            // A link back into a directory already being walked; its files are reported through
+            // the path that reached them first.
+            yield break;
+        }
+
+        List<FileInfo> fileEntries;
+        List<DirectoryInfo> subdirectories;
         try
         {
-            // Materialize inside the try: the lazy enumerators throw during iteration.
+            // Materialize inside the try: the lazy enumerators throw during iteration, and
+            // `yield return` cannot live inside a try that has a catch clause.
             fileEntries = directory.EnumerateFiles(searchPattern, SearchOption.TopDirectoryOnly).ToList();
             subdirectories = directory.EnumerateDirectories().ToList();
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PathTooLongException or DirectoryNotFoundException)
         {
             report($"Skipping unreadable directory {directory.FullName}: {ex.Message}");
-            return;
+            yield break;
         }
 
         foreach (var file in fileEntries)
         {
-            files.Add(file.FullName);
+            yield return file.FullName;
         }
         foreach (var subdirectory in subdirectories)
         {
-            try
+            foreach (var file in EnumerateDirectory(subdirectory, searchPattern, report, visited, depth + 1))
             {
-                if (subdirectory.Attributes.HasFlag(FileAttributes.ReparsePoint))
-                {
-                    continue;
-                }
+                yield return file;
             }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or FileNotFoundException or DirectoryNotFoundException)
-            {
-                continue;
-            }
-            EnumerateDirectory(subdirectory, searchPattern, files, report, depth + 1);
+        }
+    }
+
+    /// <summary>
+    ///     Identity used for cycle detection: the final link target where the directory is a
+    ///     link, otherwise its own full path. Resolution is best-effort - a broken or racing
+    ///     link falls back to the path, which still terminates because the depth limit applies.
+    /// </summary>
+    private static string ResolveDirectoryIdentity(DirectoryInfo directory)
+    {
+        try
+        {
+            return directory.ResolveLinkTarget(returnFinalTarget: true)?.FullName ?? directory.FullName;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return directory.FullName;
         }
     }
 }

@@ -56,9 +56,12 @@ The rest of the C# 15 feature set parses and analyzes like ordinary code:
 
 - `closed` hierarchies (`public closed record class GateState;`) with exhaustive switch arms;
   payload bindings in those arms receive taint exactly like union case payloads.
-- Extension indexers (`extension(IEnumerable<int> s) { public int this[int i] => ...; }`) are
-  inventoried, and indexer use sites resolve in the call graph to the lowered
-  `extension(...).this[int]` member.
+- Extension indexers (`extension(IEnumerable<int> s) { public int this[int i] => ...; }`) parse, and
+  indexer use sites resolve in the call graph to the lowered
+  `extension(...).this[int]` member. In source mode the accessor is not an inventory entry, since
+  indexers do not appear in `Methods[]` or `Properties[]`; assembly mode lists the lowered
+  `get_Item`. Either way the call graph node reports the enclosing static class rather than the
+  synthesized container's empty name.
 - Collection expression arguments (`[with(capacity: n), .. values]`) propagate element taint to
   the collection and through indexer reads (`names[0]`).
 - Labeled `break`/`continue` (`outer: for (...) { continue outer; }`) do not disturb slice
@@ -68,9 +71,10 @@ The rest of the C# 15 feature set parses and analyzes like ordinary code:
   and inventory without requiring the updated safety rules.
 
 Members declared in an `extension` block (C# 14 methods/properties, C# 15 indexers) are now
-attributed to the enclosing static class in `Methods[].ClassName`. They are contained in a
-compiler-synthesized nested type with no metadata name, so 4.1.0 reported an empty class name
-for them.
+attributed to the enclosing static class in `Methods[].ClassName`, in `MethodCalls[].ClassName` and
+`CallerClass`, and in `CallGraph.Nodes[].ClassName` with its `Identity.ClassName`. They are
+contained in a compiler-synthesized nested type with no metadata name, so 4.1.0 reported an empty
+class name for them.
 
 ### Crypto and CBOM
 
@@ -127,7 +131,11 @@ The following bugs are fixed. All of them could **remove** or corrupt results in
 - **`out`/by-ref parameters did not write back in IL.** Positional patterns lower to a
   `Deconstruct` call with `ldloca` of the bound local; the local never received the payload
   taint. `ldloca`/`ldarga` now push an address marker and calls write the callee-side taint
-  back through the addressed slots.
+  back through the addressed slots. Reads and writes through those markers (`ldind`/`ldobj`,
+  `stind`/`stobj`) follow the pointee, and `ldelema` forwards the array's taint because an array
+  element has no slot. The write-back is deliberately over-approximate: IL does not record which
+  parameter a callee copied into which `out` slot, so each by-ref slot receives the union of the
+  arguments and receiver.
 - **R lambda-assigned functions were invisible.** `name <- \(args) { ... }` (R 4.1+ shorthand)
   was not recognized as a function declaration by the fallback parser; its calls were
   attributed to the previous function.
@@ -136,19 +144,23 @@ The following bugs are fixed. All of them could **remove** or corrupt results in
   calls, and dependencies. Only `` ```{r} `` chunks are analyzed now.
 - **F# and R comment prose produced phantom calls.** `// Record constructors (F# 11)` and
   `# Lambda syntax (R 4.1+)` matched the call regexes. Comments are stripped (quote-aware,
-  nested `(* *)` for F#) before extraction.
-- **F# module functions after a `type` were misattributed.** A column-0 `let` following a type
-  declaration is module-level; the line frontend now resets the class context so
-  `Methods[].ClassName` is the module, not the preceding type. F# script directives (`#r
-  "nuget: ..."`, `#load "file.fsx"`) are collected as `Dependencies[]`.
+  nested `(* *)` for F#) before extraction. All three F# string forms are recognised - normal,
+  verbatim (`@"...\"`), and triple-quoted - and the multi-line forms carry state across lines, so
+  their body is no longer read as code.
+- **F# module functions after a `type` were misattributed.** A `let` at or left of the enclosing
+  `type` declaration's indentation is module-level - in flat scripts and in indented `module M =`
+  bodies alike; the line frontend now resets the class context so `Methods[].ClassName` is the
+  module, not the preceding type. F# script directives (`#r "nuget: ..."`, `#load "file.fsx"`)
+  are collected as `Dependencies[]`.
 - **Hostile input directories crashed scans.** Recursive enumeration for sources, assemblies,
   framework files, and metadata references threw on unreadable or over-long subtrees (a
   `--path` pointing into a shared temp directory hit `PathTooLongException`). All discovery is
   now best-effort: an unreadable subtree is skipped while enumeration continues with its
-  siblings, so only the offending subtree is lost instead of everything after it. The metadata
-  reference sweep and assembly discovery report the skipped directory in `Diagnostics[]`; the
-  remaining discovery sites print a console warning, following the existing file-read
-  convention.
+  siblings, so only the offending subtree is lost instead of everything after it. Linked
+  directories are still followed - only a link that re-enters a directory already walked is
+  skipped - so a symlinked source tree keeps contributing results. The metadata reference sweep
+  and assembly discovery report the skipped directory in `Diagnostics[]`; the remaining discovery
+  sites warn on stderr, leaving stdout to the MCP server's JSON-RPC stream.
 
 ## Nothing to change in queries or exports
 

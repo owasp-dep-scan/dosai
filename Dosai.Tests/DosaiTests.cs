@@ -1595,15 +1595,12 @@ public static class Program
     }
 
     // Analyzing one file must survive a hostile sibling tree: the best-effort discovery skips
-    // the unreadable subtree, keeps enumerating its siblings, and warns on stderr instead of
-    // letting an inaccessible (or over-long) directory crash the whole scan.
-    [Fact]
+    // the unreadable subtree, keeps enumerating its siblings, and warns instead of letting an
+    // inaccessible (or over-long) directory crash the whole scan.
+    [SkippableFact]
     public void GetDataFlows_SingleFileWithUnreadableSiblingDirectory_RemainsBestEffort()
     {
-        if (OperatingSystem.IsWindows())
-        {
-            return;
-        }
+        Skip.If(OperatingSystem.IsWindows(), "The unreadable-directory setup relies on Unix permission bits.");
 
         using var tempDirectory = new TemporaryDirectory();
         var locked = Path.Combine(tempDirectory.Path, "locked");
@@ -1647,6 +1644,106 @@ public static class Program
         {
             new DirectoryInfo(locked).UnixFileMode = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
         }
+    }
+
+    // Linked source directories are a normal repository layout, so discovery follows them; only
+    // a link that re-enters a directory already walked is skipped. Pruning every link silently
+    // dropped the files behind it.
+    [SkippableFact]
+    public void GetMethods_SourceBehindDirectorySymlink_IsStillAnalyzed()
+    {
+        Skip.If(OperatingSystem.IsWindows(), "Creating directory links needs elevation on Windows.");
+
+        using var tempDirectory = new TemporaryDirectory();
+        var real = Path.Combine(tempDirectory.Path, "real");
+        var tree = Path.Combine(tempDirectory.Path, "tree");
+        Directory.CreateDirectory(real);
+        Directory.CreateDirectory(tree);
+        File.WriteAllText(Path.Combine(real, "Linked.cs"), """
+public static class Linked
+{
+    public static string Run(string value) => value;
+}
+""");
+        Directory.CreateSymbolicLink(Path.Combine(tree, "linked"), real);
+
+        var methodsSlice = ReadMethods(tree);
+
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Linked", Name: "Run" });
+    }
+
+    // A link pointing back at an ancestor is a cycle; enumeration must terminate and still
+    // report each file once.
+    [SkippableFact]
+    public void EnumerateAllFilesSafe_SymlinkCycle_TerminatesWithoutRepeating()
+    {
+        Skip.If(OperatingSystem.IsWindows(), "Creating directory links needs elevation on Windows.");
+
+        using var tempDirectory = new TemporaryDirectory();
+        var nested = Path.Combine(tempDirectory.Path, "nested");
+        Directory.CreateDirectory(nested);
+        File.WriteAllText(Path.Combine(nested, "Cycle.cs"), "// cycle");
+        Directory.CreateSymbolicLink(Path.Combine(nested, "loop"), tempDirectory.Path);
+
+        var discovered = SafeFileRead.EnumerateAllFilesSafe(tempDirectory.Path).ToList();
+
+        Assert.Equal(1, discovered.Count(file => file.EndsWith("Cycle.cs", StringComparison.Ordinal)));
+    }
+
+    // Discovery warnings must not reach stdout: the MCP server writes line-delimited JSON-RPC
+    // there, and a warning line in that stream is a protocol error for strict clients.
+    [SkippableFact]
+    public void EnumerateAllFilesSafe_UnreadableDirectory_WarnsOnStandardErrorOnly()
+    {
+        Skip.If(OperatingSystem.IsWindows(), "The unreadable-directory setup relies on Unix permission bits.");
+
+        using var tempDirectory = new TemporaryDirectory();
+        var locked = Path.Combine(tempDirectory.Path, $"locked-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(locked);
+        File.WriteAllText(Path.Combine(locked, "hidden.cs"), "// unreachable");
+        File.SetUnixFileMode(locked, UnixFileMode.None);
+        Skip.If(File.Exists(Path.Combine(locked, "hidden.cs")), "Permission bits are not enforced for this user (root).");
+        var capturedOut = new StringWriter();
+        var capturedError = new StringWriter();
+        lock (ConsoleOutputLock)
+        {
+            var originalOut = Console.Out;
+            var originalError = Console.Error;
+            try
+            {
+                Console.SetOut(capturedOut);
+                Console.SetError(capturedError);
+                _ = SafeFileRead.EnumerateAllFilesSafe(tempDirectory.Path).ToList();
+            }
+            finally
+            {
+                Console.SetOut(originalOut);
+                Console.SetError(originalError);
+                new DirectoryInfo(locked).UnixFileMode = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+            }
+        }
+
+        Assert.Contains(locked, capturedError.ToString(), StringComparison.Ordinal);
+        // The unique directory name keeps this assertion immune to output from other tests.
+        Assert.DoesNotContain(locked, capturedOut.ToString(), StringComparison.Ordinal);
+    }
+
+    // Extension-block members reach the call graph through their use sites; the synthesized
+    // container's empty metadata name must not leak into node or identity class names, which
+    // stayed blank for extension indexers even after the inventory was fixed.
+    [Fact]
+    public void GetMethods_ExtensionBlockIndexerUse_CallGraphNodeKeepsContainingClassName()
+    {
+        var methodsSlice = ReadMethods(GetFilePath(ExtensionMemberSource));
+
+        var indexerNodes = methodsSlice.CallGraph!.Nodes.Where(node => node.Name == "get_Item").ToList();
+        Assert.NotEmpty(indexerNodes);
+        Assert.All(indexerNodes, node =>
+        {
+            Assert.Equal("SequenceHelpers", node.ClassName);
+            Assert.Equal("SequenceHelpers", node.Identity?.ClassName);
+        });
+        Assert.All(methodsSlice.CallGraph.Nodes.Where(node => !node.IsExternal), node => Assert.False(string.IsNullOrWhiteSpace(node.ClassName)));
     }
 
     // Unary operators (`-x`, `~flags`) are one-to-one stack opcodes in IL; treating them as
@@ -3451,11 +3548,31 @@ class SqlFlow
         Assert.Equal(2, (methodsSlice.MethodCalls ?? []).Count(call => call.CalledMethod == "transform"));
     }
 
+    // Verbatim (`@"...\"`) and triple-quoted literals span lines and carry their own escape
+    // rules; treating `\` as an escape or ending the literal early made the scanner read string
+    // body as code, and the declarations after the literal were attributed to whatever the
+    // resulting mis-lexed line looked like.
+    [Fact]
+    public void GetMethods_FSharpMultiLineStringLiterals_AreNotScannedAsCode()
+    {
+        var methodsSlice = ReadMethods(GetFilePath(FSharpModuleLayoutsSource));
+
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Indented", Name: "verbatim" });
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Indented", Name: "banner" });
+        // The declaration after the multi-line literal is still found, so the literal closed.
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Indented", Name: "afterLiterals" });
+        Assert.Contains(methodsSlice.MethodCalls ?? [], call => call.CalledMethod == "Write");
+        // Text inside the literals is string body, not code.
+        var calledMethods = (methodsSlice.MethodCalls ?? []).Select(call => call.CalledMethod).ToList();
+        Assert.DoesNotContain(calledMethods, name => name is "notAComment" or "ignored");
+    }
+
     // Modern R (4.1+) assigns lambdas with `name <- \(args) { ... }`; the fallback line parser
     // must treat that as a function declaration and keep comment prose out of the call list.
-    [Fact]
+    [SkippableFact]
     public void GetMethods_ModernRSource_DetectsLambdaAssignedFunctionsAndSkipsComments()
     {
+        SkipIfRNativeParserIsInstalled();
         var methodsSlice = ReadMethods(GetFilePath(ModernRFeatureSource));
 
         Assert.Contains(methodsSlice.Methods!, method => method is { Name: "render", Namespace: "R" });
@@ -3472,9 +3589,10 @@ class SqlFlow
 
     // A backslash inside a string literal (`pattern <- "\\d+"`) is not the lambda introducer;
     // treating it as one renamed the enclosing function and mis-attributed its calls.
-    [Fact]
+    [SkippableFact]
     public void GetMethods_ModernRSource_BackslashStringLiteralIsNotALambda()
     {
+        SkipIfRNativeParserIsInstalled();
         var methodsSlice = ReadMethods(GetFilePath(ModernRFeatureSource));
 
         Assert.DoesNotContain(methodsSlice.Methods!, method => method is { Name: "pattern", Namespace: "R" });
@@ -3914,6 +4032,12 @@ class SqlFlow
     });
 
     private static bool HasNet11Sdk() => Net11SdkAvailable.Value;
+
+    // The R frontend prefers Rscript's own parser and only falls back to lexical extraction when
+    // R is absent, so tests written against the fallback must not run against the native parser -
+    // they would silently assert the wrong code path.
+    private static void SkipIfRNativeParserIsInstalled() =>
+        Skip.If(LanguageFrontendAnalyzer.IsRNativeParserAvailable, "Rscript is installed, so the managed R fallback parser is not the code path under test.");
 
     private static void WriteProjectAssets(string directory, string packageName, string version, string assemblyFileName)
     {

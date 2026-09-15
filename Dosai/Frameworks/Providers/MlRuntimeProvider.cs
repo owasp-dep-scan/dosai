@@ -118,8 +118,10 @@ public sealed class MlRuntimeProvider : IFrameworkProvider
                 continue;
             }
 
-            var artifact = Directory.GetFiles(Path.GetDirectoryName(artifactPath)!, name).FirstOrDefault();
-            var size = artifact is null ? 0 : new FileInfo(artifact).Length;
+            // Sizing a model artifact is best-effort like the rest of discovery: an unreadable
+            // directory or a file that vanished mid-scan reports size 0 instead of failing the
+            // framework pass.
+            var size = TryGetArtifactLength(artifactPath, name);
             results.AiComponents.Add(new AiComponent
             {
                 Id = id,
@@ -138,9 +140,28 @@ public sealed class MlRuntimeProvider : IFrameworkProvider
         }
     }
 
-    private static void AddModelArtifact(FrameworkContext ctx, FrameworkResults results, string artifactName, string filePath, int line, string reference, string deployment)
+    private static long TryGetArtifactLength(string artifactPath, string name)
     {
-        var id = FrameworkIds.Ai("model", "local", Path.GetFileName(artifactName));
+        try
+        {
+            var directory = Path.GetDirectoryName(artifactPath);
+            if (string.IsNullOrEmpty(directory))
+            {
+                return 0;
+            }
+            // Matched by enumeration rather than by path so a case-insensitive filesystem still
+            // resolves the artifact recorded during discovery.
+            var artifact = Directory.EnumerateFiles(directory, name).FirstOrDefault();
+            return artifact is null ? 0 : new FileInfo(artifact).Length;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            return 0;
+        }
+    }
+
+    private static void AddModelArtifact(FrameworkContext ctx, FrameworkResults results, string artifactName, string filePath, int line, string reference, string deployment)
+    {        var id = FrameworkIds.Ai("model", "local", Path.GetFileName(artifactName));
         if (results.AiComponents.Any(component => component.Id == id))
         {
             return;

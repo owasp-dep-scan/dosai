@@ -22,5 +22,16 @@ module Sample.Indented =
     let dash = '-'
     let newline = '\n'
 
+    // Verbatim and triple-quoted literals span lines and use their own escapes, so the scanner
+    // must not treat `\` as an escape in the verbatim form nor end the triple-quoted form early.
+    // Text inside them (`// notAComment ignored()`) is string content, never code.
+    let verbatim = @"C:\tools\"
+    let banner = """
+        // notAComment ignored()
+        """
+
+    let afterLiterals () =
+        Console.Write "tail"
+
     let eval () =
         Console.WriteLine(list'.Length + (int dash + (int newline)))
