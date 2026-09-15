@@ -953,14 +953,32 @@ public static partial class DataFlowAnalyzer
                 : [];
         }
 
-        return new DirectoryInfo(path)
-            .EnumerateFiles("*.*", SearchOption.AllDirectories)
-            .Where(file => file.Extension.Equals(Constants.CSharpSourceExtension, StringComparison.OrdinalIgnoreCase) || file.Extension.Equals(Constants.VBSourceExtension, StringComparison.OrdinalIgnoreCase) || IsLanguageFrontendExtension(file.Extension))
-            .Where(file => !file.FullName.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase))
-            .Where(file => !file.FullName.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase))
-            .Where(file => !file.Name.EndsWith($".g{file.Extension}", StringComparison.OrdinalIgnoreCase))
-            .Select(file => file.FullName)
-            .ToList();
+        // Enumeration is best-effort: scanned trees can contain unreadable or over-long
+        // subtrees, and a scan must degrade to the readable remainder instead of crashing.
+        var sourceFiles = new List<string>();
+        try
+        {
+            foreach (var file in new DirectoryInfo(path).EnumerateFiles("*.*", SearchOption.AllDirectories))
+            {
+                if (!file.Extension.Equals(Constants.CSharpSourceExtension, StringComparison.OrdinalIgnoreCase) &&
+                    !file.Extension.Equals(Constants.VBSourceExtension, StringComparison.OrdinalIgnoreCase) &&
+                    !IsLanguageFrontendExtension(file.Extension))
+                {
+                    continue;
+                }
+                if (file.FullName.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase) ||
+                    file.FullName.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase) ||
+                    file.Name.EndsWith($".g{file.Extension}", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                sourceFiles.Add(file.FullName);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PathTooLongException or DirectoryNotFoundException)
+        {
+        }
+        return sourceFiles;
     }
 
     private static bool IsLanguageFrontendExtension(string extension) => extension.Equals(Constants.FSharpSourceExtension, StringComparison.OrdinalIgnoreCase) ||
@@ -1222,9 +1240,21 @@ public static partial class DataFlowAnalyzer
         var rootDirectory = Directory.Exists(path) ? path : Path.GetDirectoryName(path);
         if (!string.IsNullOrWhiteSpace(rootDirectory) && Directory.Exists(rootDirectory))
         {
-            foreach (var assemblyPath in Directory.EnumerateFiles(rootDirectory, "*.dll", SearchOption.AllDirectories).Where(IsManagedAssembly))
+            // The reference sweep is best-effort: an input file can live anywhere, including
+            // shared temp directories whose trees contain paths beyond the OS limit, cycles,
+            // or unreadable subtrees. Enumeration is lazy, so the guard keeps every reference
+            // gathered before the failure and reports one diagnostic instead of crashing the
+            // whole scan.
+            try
             {
-                AddReference(assemblyPath);
+                foreach (var assemblyPath in Directory.EnumerateFiles(rootDirectory, "*.dll", SearchOption.AllDirectories).Where(IsManagedAssembly))
+                {
+                    AddReference(assemblyPath);
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PathTooLongException or DirectoryNotFoundException)
+            {
+                diagnostics.Add($"Metadata reference sweep under {rootDirectory} stopped early: {ex.Message}");
             }
         }
 

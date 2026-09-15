@@ -63,10 +63,11 @@ All C# parsing goes through one helper (`CSharpSourceParser`), which parses with
 `LanguageVersion.Preview` - the widest grammar the referenced compiler accepts. Analyzed source
 is not ours to constrain: a project can target a language version newer than the compiler Dosai
 references, and source that fails to parse disappears from the inventory, call graph, and
-data-flow results without an error. C# 15 union declarations are the current example - the
-Roslyn 5.9.0 line parses them only under `Preview`, because its `Default` is still C# 14.
-Preview only widens the accepted grammar; it does not change the meaning of source that already
-parsed.
+data-flow results without an error. C# 15 syntax - union declarations, `closed` hierarchies,
+extension indexers, collection expression arguments, labeled `break`/`continue`, and the
+`unsafe(...)`/pointer-relaxation shapes - is the current example; the Roslyn 5.9.0 line parses
+them only under `Preview`, because its `Default` is still C# 14. Preview only widens the
+accepted grammar; it does not change the meaning of source that already parsed.
 
 References are populated from:
 
@@ -79,6 +80,10 @@ This improves cross-file symbol resolution compared with one-file compilations. 
 Top-level statements (the default `dotnet new console` template) have no declared `Main`, so the method inventory reports the compiler-synthesized `<Main>$` like any method, the entry-point list carries a `Cli` entry whose `MethodId` matches the call graph node, and `args` is seeded as a taint source. Declared `Main` variants (`async Task`, `Task<int>`, `int`) follow the same path.
 
 When enumerating source files from a directory, Dosai excludes `bin` and `obj` directories relative to the inspected root. Source-mode checks use the same C#, VB, and F# source enumeration rules so VB-only and F#-only trees are treated as source analysis. Assembly discovery keeps app output directories valid because binary-only users often point directly at `bin/Debug/...` or publish directories.
+
+Members declared in a C# 14+ `extension` block are contained in a compiler-synthesized nested type whose metadata name is empty, so the inventory walks outward to the nearest named type and attributes them to the enclosing static class.
+
+All recursive discovery enumerations (sources, assemblies, framework files, metadata references) are best-effort: an input tree can contain unreadable, over-long, or disappearing subtrees, and discovery keeps what it gathered and reports a diagnostic instead of crashing the scan.
 
 ## Stable method identities
 
@@ -187,6 +192,8 @@ flowchart LR
 Assembly analysis reads managed method bodies without intentionally executing target code. The methods command uses IL call instructions, constructor calls, delegate target loads, event accessors, generated async/iterator state-machine mappings, and the shared dispatch resolver to add binary call graph evidence. Unknown or malformed IL opcodes stop decoding the current method body safely instead of desynchronizing later instruction reads. `switch` operands validate and bound their target count before allocation so malformed IL cannot force large arrays or out-of-range reads. Re-added call graph nodes merge evidence and missing identity fields into existing nodes so generated-state, delegate, source signature, and assembly signature observations are preserved through combined source and binary enrichment. External member-reference nodes use module/file metadata derived from the referenced assembly name instead of the caller assembly path. Portable PDB sequence points are resolved with raw zero-based IL offsets, with display-safe fallback line numbers when no sequence point is available.
 
 The assembly data-flow pass uses a bounded worklist over decoded IL. It follows branch, switch, fallthrough, and exception-region successors. Catch and filter handlers receive exception-object stack state when it is available, while finally and fault handlers preserve local and argument state with handler stack semantics. This lets taint reach sinks that run from exception paths without treating those edges as direct source syntax.
+
+Opcode-level taint semantics mirror the source walker's expression rules. Value-re-packaging conversions preserve their operand's taint: `castclass`, `isinst`, `box`, `unbox`/`unbox.any`, `ldlen` (the length derives from the array), and the `conv.*` family. The `add`-family arithmetic and bitwise opcodes combine their operands' taint, matching source-mode binary expressions; comparisons do not, because a bool result does not carry the operand value. `ldloca`/`ldarga` push an address marker instead of taint — a call sees the pointee's taint for that argument or receiver position, and a by-ref/out parameter writes the callee-side combined taint back into the addressed local or argument slot. That write-back is what makes compiler-lowered positional patterns visible: `state is GateOpen(var cmd)` and every union or closed-hierarchy switch arm become `isinst` followed by a `Deconstruct` call taking `ldloca cmd`.
 
 Binary signatures are decoded from metadata blobs for method identity, summary replay, and dispatch matching. The decoder handles common constructed generic types and method specifications, arrays, byrefs, pointers, generic type and method parameters, nested type specifications, and custom modifier wrappers. Assembly data-flow summaries include decoded parameter types in method symbols so overloads with the same arity do not merge, and those symbols are parsed back into namespace, class, and method fields for `MethodIdentity`. IL local and argument operands are normalized so both short and two-byte InlineVar forms participate in delegate tracking and data-flow propagation. Sink slices use stable tainted argument labels such as `arg0` or `receiver` when source expressions are unavailable from IL. Assembly-derived data-flow node de-duplication is scoped by assembly path because metadata tokens and IL offsets are only unique within one binary. The output remains best-effort because some runtime substitutions are not available from IL alone.
 

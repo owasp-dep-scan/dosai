@@ -42,27 +42,36 @@ internal static class AssemblyScope
         var candidates = new List<FileInfo>();
         var hasSourceFiles = false;
         var root = new DirectoryInfo(path);
-        foreach (var file in root.EnumerateFiles("*.*", SearchOption.AllDirectories))
+        // Discovery is best-effort: unreadable or over-long subtrees must degrade to the
+        // readable remainder instead of crashing the scan with the assemblies found so far.
+        try
         {
-            var extension = file.Extension;
-            if (IsSupportedSourceExtension(extension))
+            foreach (var file in root.EnumerateFiles("*.*", SearchOption.AllDirectories))
             {
-                hasSourceFiles = true;
-                continue;
-            }
+                var extension = file.Extension;
+                if (IsSupportedSourceExtension(extension))
+                {
+                    hasSourceFiles = true;
+                    continue;
+                }
 
-            if (!IsAssemblyExtension(extension))
-            {
-                continue;
-            }
+                if (!IsAssemblyExtension(extension))
+                {
+                    continue;
+                }
 
-            var relativePath = Path.GetRelativePath(path, file.FullName);
-            if (!includeBuildArtifacts && HasDirectorySegment(relativePath, ObjSegment))
-            {
-                continue;
-            }
+                var relativePath = Path.GetRelativePath(path, file.FullName);
+                if (!includeBuildArtifacts && HasDirectorySegment(relativePath, ObjSegment))
+                {
+                    continue;
+                }
 
-            candidates.Add(file);
+                candidates.Add(file);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PathTooLongException or DirectoryNotFoundException)
+        {
+            diagnostics?.Invoke($"Assembly discovery under {path} stopped early: {ex.Message}");
         }
 
         return candidates

@@ -213,6 +213,23 @@ public static partial class DataFlowAnalyzer
                         continue;
                     }
 
+                    if (IsTaintPreservingConversion(instruction.OpCode))
+                    {
+                        // Re-packages the same value; the taint already on top of the stack stays.
+                        continue;
+                    }
+
+                    if (IsTaintCombiningArithmetic(instruction.OpCode) && stack.Count >= 2)
+                    {
+                        var right = stack[^1];
+                        stack.RemoveAt(stack.Count - 1);
+                        var left = stack[^1];
+                        stack.RemoveAt(stack.Count - 1);
+                        var operands = new[] { left, right }.Where(taint => taint is { IsAddress: false }).Cast<AssemblyTaint>().ToList();
+                        stack.Add(CombineAssemblyTaints(operands));
+                        continue;
+                    }
+
                     if (instruction.OpCode == OpCodes.Stfld || instruction.OpCode == OpCodes.Stsfld)
                     {
                         var valueTaint = stack.Count == 0 ? null : stack[^1];
@@ -322,7 +339,7 @@ public static partial class DataFlowAnalyzer
             if (TryGetStlocIndex(opCode, instruction.Operand, out var stlocIndex))
             {
                 var localTaint = state.Pop();
-                if (localTaint is not null)
+                if (localTaint is { IsAddress: false })
                 {
                     var localName = sourceMap.GetLocalName(methodInfo.MetadataToken, stlocIndex, instruction.Offset) ?? $"local_{stlocIndex}";
                     var assignmentNode = context.AddNode("Assignment", localName, methodInfo, assemblyPath, isSource: false, isSink: false, [], null, $"{methodInfo.Symbol}.{localName}", null, localName, instruction.Offset);
@@ -453,6 +470,20 @@ public static partial class DataFlowAnalyzer
                 continue;
             }
 
+            if (TryGetLdlocaIndex(opCode, instruction.Operand, out var ldlocaIndex))
+            {
+                state.Push(AssemblyTaint.LocalAddress(ldlocaIndex));
+                EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
+                continue;
+            }
+
+            if (TryGetLdargaIndex(opCode, instruction.Operand, out var ldargaIndex))
+            {
+                state.Push(AssemblyTaint.ArgumentAddress(ldargaIndex));
+                EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
+                continue;
+            }
+
             if (opCode == OpCodes.Dup)
             {
                 state.Push(state.Stack.Count > 0 ? state.Stack[^1] : null);
@@ -477,10 +508,64 @@ public static partial class DataFlowAnalyzer
                 continue;
             }
 
+            if (IsTaintPreservingConversion(opCode))
+            {
+                state.Push(state.Pop());
+                EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
+                continue;
+            }
+
+            if (IsTaintCombiningArithmetic(opCode))
+            {
+                var right = state.Pop();
+                var left = state.Pop();
+                var operands = new[] { left, right }.Where(taint => taint is { IsAddress: false }).Cast<AssemblyTaint>().ToList();
+                state.Push(CombineAssemblyTaints(operands));
+                EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
+                continue;
+            }
+
             ApplyDefaultStackBehaviour(opCode, state);
             EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
         }
     }
+
+    /// <summary>
+    ///     Conversion opcodes that re-package the same value on the evaluation stack: downcasts
+    ///     (<c>castclass</c>), pattern type tests (<c>isinst</c>), boxing/unboxing, array length
+    ///     (<c>ldlen</c>, whose result derives from the array), and numeric conversions
+    ///     (<c>conv.*</c>). Dropping the operand's taint here erased every object-typed dispatch
+    ///     from compiled-code flows - C# 15 union matching, closed-hierarchy switches, and
+    ///     <c>is</c>-pattern bindings all lower to <c>isinst</c> before reading the case payload,
+    ///     and `args.Length` arithmetic starts at <c>ldlen</c>.
+    /// </summary>
+    private static bool IsTaintPreservingConversion(OpCode opCode) =>
+        opCode == OpCodes.Castclass || opCode == OpCodes.Isinst || opCode == OpCodes.Box || opCode == OpCodes.Unbox || opCode == OpCodes.Unbox_Any ||
+        opCode == OpCodes.Ldlen ||
+        opCode == OpCodes.Conv_I1 || opCode == OpCodes.Conv_I2 || opCode == OpCodes.Conv_I4 || opCode == OpCodes.Conv_I8 ||
+        opCode == OpCodes.Conv_U1 || opCode == OpCodes.Conv_U2 || opCode == OpCodes.Conv_U4 || opCode == OpCodes.Conv_U8 ||
+        opCode == OpCodes.Conv_R4 || opCode == OpCodes.Conv_R8 || opCode == OpCodes.Conv_I || opCode == OpCodes.Conv_U ||
+        opCode == OpCodes.Conv_Ovf_I1 || opCode == OpCodes.Conv_Ovf_I2 || opCode == OpCodes.Conv_Ovf_I4 || opCode == OpCodes.Conv_Ovf_I8 ||
+        opCode == OpCodes.Conv_Ovf_U1 || opCode == OpCodes.Conv_Ovf_U2 || opCode == OpCodes.Conv_Ovf_U4 || opCode == OpCodes.Conv_Ovf_U8 ||
+        opCode == OpCodes.Conv_Ovf_I || opCode == OpCodes.Conv_Ovf_U ||
+        opCode == OpCodes.Conv_Ovf_I1_Un || opCode == OpCodes.Conv_Ovf_I2_Un || opCode == OpCodes.Conv_Ovf_I4_Un || opCode == OpCodes.Conv_Ovf_I8_Un ||
+        opCode == OpCodes.Conv_Ovf_U1_Un || opCode == OpCodes.Conv_Ovf_U2_Un || opCode == OpCodes.Conv_Ovf_U4_Un || opCode == OpCodes.Conv_Ovf_U8_Un ||
+        opCode == OpCodes.Conv_Ovf_I_Un || opCode == OpCodes.Conv_Ovf_U_Un;
+
+    /// <summary>
+    ///     Arithmetic and bitwise opcodes. The result derives from both operands, so the source
+    ///     walker's behavior (taint survives binary operators like `args.Length + 1`) must be
+    ///     matched in IL, where `add`-family opcodes would otherwise pop both taints and push
+    ///     null. Comparisons are excluded: their bool result does not carry the operand value.
+    /// </summary>
+    private static bool IsTaintCombiningArithmetic(OpCode opCode) =>
+        opCode == OpCodes.Add || opCode == OpCodes.Add_Ovf || opCode == OpCodes.Add_Ovf_Un ||
+        opCode == OpCodes.Sub || opCode == OpCodes.Sub_Ovf || opCode == OpCodes.Sub_Ovf_Un ||
+        opCode == OpCodes.Mul || opCode == OpCodes.Mul_Ovf || opCode == OpCodes.Mul_Ovf_Un ||
+        opCode == OpCodes.Div || opCode == OpCodes.Div_Un || opCode == OpCodes.Rem || opCode == OpCodes.Rem_Un ||
+        opCode == OpCodes.And || opCode == OpCodes.Or || opCode == OpCodes.Xor ||
+        opCode == OpCodes.Shl || opCode == OpCodes.Shr || opCode == OpCodes.Shr_Un ||
+        opCode == OpCodes.Neg || opCode == OpCodes.Not;
 
     private static void ProcessAssemblyCall(MetadataReader reader, AssemblyInstruction instruction, OpCode opCode, AssemblyMethodInfo currentMethod, string assemblyPath, AssemblyDataFlowContext context, AssemblyMethodState state, IReadOnlyDictionary<string, AssemblyMethodSummary> summaries)
     {
@@ -497,7 +582,18 @@ public static partial class DataFlowAnalyzer
         }
         argumentTaints.Reverse();
         var receiverTaint = member.HasThis && opCode != OpCodes.Newobj ? state.Pop() : null;
-        var allTaints = argumentTaints.Concat([receiverTaint]).Where(taint => taint is not null).Cast<AssemblyTaint>().ToList();
+        // Address markers only say where a by-ref callee reads/writes; for taint purposes the
+        // callee sees the value in the referenced slot (`count.ToString()` receives `ldloca
+        // count`, whose pointee carries the arithmetic taint).
+        AssemblyTaint? ResolveAddress(AssemblyTaint? taint) => taint switch
+        {
+            { IsAddress: true, LocalSlot: { } slot } => state.Locals.TryGetValue(slot, out var localTaint) ? localTaint : null,
+            { IsAddress: true, ArgumentSlot: { } slot } => state.Arguments.TryGetValue(slot, out var argumentTaint) ? argumentTaint : null,
+            _ => taint
+        };
+        var resolvedArguments = argumentTaints.Select(ResolveAddress).ToList();
+        var resolvedReceiver = ResolveAddress(receiverTaint);
+        var allTaints = resolvedArguments.Concat([resolvedReceiver]).Where(taint => taint is not null).Cast<AssemblyTaint>().ToList();
 
         var sourcePatterns = context.MatchSource(member).ToList();
         if (sourcePatterns.Count > 0)
@@ -518,15 +614,33 @@ public static partial class DataFlowAnalyzer
         {
             var sinkNode = context.AddNode("Sink", member.Name, currentMethod, assemblyPath, isSource: false, isSink: true, sinkPatterns, sinkPatterns.FirstOrDefault()?.Category, member.Symbol, member.ContainingType, member.Symbol, instruction.Offset);
             context.AddEdges(combined.NodeIds, sinkNode.Id, opCode == OpCodes.Newobj ? "AssemblySinkObjectCreation" : "AssemblySinkCall", currentMethod, assemblyPath, instruction.Offset, member.Name);
-            var sinkArgumentIndex = argumentTaints.FindIndex(taint => taint is not null);
-            context.AddSlice(combined, sinkNode, sinkPatterns.FirstOrDefault(), GetSinkArgumentLabel(argumentTaints, receiverTaint, sinkArgumentIndex), sinkArgumentIndex >= 0 ? sinkArgumentIndex : -1);
+            var sinkArgumentIndex = resolvedArguments.FindIndex(taint => taint is not null);
+            context.AddSlice(combined, sinkNode, sinkPatterns.FirstOrDefault(), GetSinkArgumentLabel(resolvedArguments, resolvedReceiver, sinkArgumentIndex), sinkArgumentIndex >= 0 ? sinkArgumentIndex : -1);
+        }
+
+        // By-ref/out parameters: the callee writes through the pushed address. Compiler-generated
+        // Deconstruct calls - every positional pattern, including C# 15 union and closed-hierarchy
+        // switch arms and `is Positional(...)` bindings - move the receiver's payload into `out`
+        // locals, so the combined taint entering the callee is stored into the addressed slots.
+        // A null combined taint also writes: the callee definitely assigns the slot.
+        foreach (var argumentTaint in argumentTaints)
+        {
+            if (argumentTaint is not { IsAddress: true } address) continue;
+            if (address.LocalSlot is { } localSlot)
+            {
+                state.Locals[localSlot] = combined;
+            }
+            else if (address.ArgumentSlot is { } argumentSlot)
+            {
+                state.Arguments[argumentSlot] = combined;
+            }
         }
 
         if (summaries.TryGetValue(member.Symbol, out var summary))
         {
-            foreach (var sinkParameterIndex in summary.SinkParameterIndexes.Where(index => index >= 0 && index < argumentTaints.Count && argumentTaints[index] is not null))
+            foreach (var sinkParameterIndex in summary.SinkParameterIndexes.Where(index => index >= 0 && index < resolvedArguments.Count && resolvedArguments[index] is not null))
             {
-                var taint = argumentTaints[sinkParameterIndex]!;
+                var taint = resolvedArguments[sinkParameterIndex]!;
                 var summaryPattern = new DataFlowPattern
                 {
                     Target = DataFlowPatternTarget.Sink,
@@ -550,8 +664,8 @@ public static partial class DataFlowAnalyzer
         if (summaries.TryGetValue(member.Symbol, out var returnSummary))
         {
             var returnTaints = returnSummary.ReturnParameterIndexes
-                .Where(index => index >= 0 && index < argumentTaints.Count)
-                .Select(index => argumentTaints[index])
+                .Where(index => index >= 0 && index < resolvedArguments.Count)
+                .Select(index => resolvedArguments[index])
                 .Where(taint => taint is not null)
                 .Cast<AssemblyTaint>()
                 .ToList();
@@ -588,7 +702,7 @@ public static partial class DataFlowAnalyzer
             ? $"arg{sinkArgumentIndex}"
             : receiverTaint is not null
                 ? "receiver"
-                : argumentTaints.Select((taint, index) => (taint, index)).FirstOrDefault(valueTuple => valueTuple.taint is not null) is
+                : argumentTaints.Select((taint, index) => (taint, index)).FirstOrDefault(valueTuple => valueTuple.taint is { IsAddress: false }) is
                 {
                     taint: not null
                 } item
@@ -746,6 +860,23 @@ public static partial class DataFlowAnalyzer
                         summary.AddReturnParameter(index);
                     }
                 }
+                continue;
+            }
+
+            if (IsTaintPreservingConversion(opCode))
+            {
+                state.Push(state.Pop());
+                EnqueueSummarySuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
+                continue;
+            }
+
+            if (IsTaintCombiningArithmetic(opCode))
+            {
+                var right = state.Pop();
+                var left = state.Pop();
+                var parameterIndexes = new[] { left, right }.OfType<AssemblySummaryTaint>().SelectMany(taint => taint.ParameterIndexes).Distinct().ToList();
+                state.Push(parameterIndexes.Count > 0 ? new AssemblySummaryTaint(parameterIndexes) : null);
+                EnqueueSummarySuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
                 continue;
             }
 
@@ -1604,6 +1735,18 @@ public static partial class DataFlowAnalyzer
         return index >= 0;
     }
 
+    private static bool TryGetLdlocaIndex(OpCode opCode, object? operand, out int index)
+    {
+        index = operand is int value && opCode == OpCodes.Ldloca ? value : operand is byte shortValue && opCode == OpCodes.Ldloca_S ? shortValue : -1;
+        return index >= 0;
+    }
+
+    private static bool TryGetLdargaIndex(OpCode opCode, object? operand, out int index)
+    {
+        index = operand is int value && opCode == OpCodes.Ldarga ? value : operand is byte shortValue && opCode == OpCodes.Ldarga_S ? shortValue : -1;
+        return index >= 0;
+    }
+
     private static bool TryGetStlocIndex(OpCode opCode, object? operand, out int index)
     {
         index = opCode == OpCodes.Stloc_0 ? 0 : opCode == OpCodes.Stloc_1 ? 1 : opCode == OpCodes.Stloc_2 ? 2 : opCode == OpCodes.Stloc_3 ? 3 : operand is int value && opCode == OpCodes.Stloc ? value : operand is byte shortValue && opCode == OpCodes.Stloc_S ? shortValue : -1;
@@ -2070,8 +2213,16 @@ public static partial class DataFlowAnalyzer
     }
 
     private sealed record AssemblySummaryTaint(List<int> ParameterIndexes);
-    private sealed record AssemblyTaint(List<string> NodeIds, List<string> TaintKinds, List<string> FieldPaths)
+    private sealed record AssemblyTaint(List<string> NodeIds, List<string> TaintKinds, List<string> FieldPaths, int? LocalSlot = null, int? ArgumentSlot = null)
     {
+        /// <summary>
+        ///     True for the marker pushed by <c>ldloca</c>/<c>ldarga</c>: the value is the address
+        ///     of a local or argument, not a taint. A call with a by-ref parameter writes the
+        ///     callee-side taint back through that address.
+        /// </summary>
+        public bool IsAddress => LocalSlot is not null || ArgumentSlot is not null;
+        public static AssemblyTaint LocalAddress(int slot) => new([], [], [], LocalSlot: slot);
+        public static AssemblyTaint ArgumentAddress(int slot) => new([], [], [], ArgumentSlot: slot);
         public AssemblyTaint Append(string nodeId)
         {
             if (NodeIds.Contains(nodeId, StringComparer.Ordinal))
@@ -2082,6 +2233,13 @@ public static partial class DataFlowAnalyzer
         }
     }
 
-    private static string TaintSignature(AssemblyTaint? taint) => taint is null ? "_" : string.Join('+', taint.NodeIds.Order(StringComparer.Ordinal));
+    private static string TaintSignature(AssemblyTaint? taint) => taint switch
+    {
+        null => "_",
+        // Address markers must stay distinguishable in the visit signature or two states
+        // pointing at different slots collapse into one and a local loses its write.
+        { IsAddress: true } address => $"addr:{address.LocalSlot ?? -1}:{address.ArgumentSlot ?? -1}",
+        _ => string.Join('+', taint.NodeIds.Order(StringComparer.Ordinal))
+    };
     private static string SummaryTaintSignature(AssemblySummaryTaint? taint) => taint is null ? "_" : string.Join('+', taint.ParameterIndexes.Order());
 }

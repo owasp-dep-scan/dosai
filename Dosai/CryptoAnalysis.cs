@@ -430,7 +430,7 @@ public static class CryptoAnalyzer
         }
         else
         {
-            names.AddRange(Regex.Matches(line, @"\b(AesGcm|AesCcm|Aes|DES|TripleDES|RC2|MD5|SHA1|SHA256|SHA384|SHA512|RSA|DSA|ECDsa|ECDiffieHellman|HMACSHA256|HMACSHA384|HMACSHA512|Rfc2898DeriveBytes|RandomNumberGenerator|RNGCryptoServiceProvider|X509Certificate2|SslStream|SslProtocols|EncryptKeyWrap|DecryptKeyWrap|TryDecryptKeyWrap|GetKeyWrapLength|TlsContext|TlsSession|TlsBufferSession|TlsSocketSession|TlsOperationStatus|System\.Random|Random|CipherMode\.ECB|SecurityAlgorithms\.None)\b").Select(match => match.Value));
+            names.AddRange(Regex.Matches(line, @"\b(AesGcm|AesCcm|Aes|DES|TripleDES|RC2|MD5|SHA1|SHA256|SHA384|SHA512|RSA|DSA|ECDsa|ECDiffieHellman|HMACSHA256|HMACSHA384|HMACSHA512|Rfc2898DeriveBytes|RandomNumberGenerator|RNGCryptoServiceProvider|X509Certificate2|SslStream|SslProtocols|EncryptKeyWrap|DecryptKeyWrap|TryDecryptKeyWrap|GetKeyWrapLength|TlsContext|TlsSession|TlsBufferSession|TlsSocketSession|TlsOperationStatus|MLDsa|MLKem|SlhDsa|System\.Random|Random|CipherMode\.ECB|SecurityAlgorithms\.None)\b").Select(match => match.Value));
         }
 
         return names.Where(name => !string.IsNullOrWhiteSpace(name)).Distinct(StringComparer.OrdinalIgnoreCase);
@@ -813,6 +813,11 @@ public static class CryptoAnalyzer
             return Classify(symbol.Contains("Triple", StringComparison.OrdinalIgnoreCase) ? "3DES" : "DES/RC2/RC4", "symmetric", "weak", rule: "DOSAI-CRYPTO-WEAK-CIPHER", severity: "High", summary: "Weak or legacy symmetric cipher was detected.", recommendation: "Use AES-GCM or another approved authenticated encryption mode.");
         if (HasCryptoToken(symbolText, "AesGcm", "AES_gcm", "EVP_aes_256_gcm")) return Classify("AES-GCM", "symmetric", "strong", "encrypt/decrypt", "NIST");
         if (HasCryptoToken(symbolText, "AesCcm", "AES_ccm")) return Classify("AES-CCM", "symmetric", "strong", "encrypt/decrypt", "NIST");
+        // .NET's post-quantum algorithms (FIPS 203/204/205) - previewed with .NET 10 and part
+        // of the .NET 11 baseline - are strong primitives and belong in the CBOM like any other.
+        if (HasCryptoToken(symbolText, "MLKem")) return Classify("ML-KEM", "key-agreement", "strong", "key-agreement/encapsulate", "FIPS 203");
+        if (HasCryptoToken(symbolText, "MLDsa")) return Classify("ML-DSA", "signature", "strong", "sign", "FIPS 204");
+        if (HasCryptoToken(symbolText, "SlhDsa")) return Classify("SLH-DSA", "signature", "strong", "sign", "FIPS 205");
         // AES Key Wrap (RFC 3394), introduced by the Aes key-wrap methods in .NET 11; must be
         // classified before the generic Aes branch so the key-wrap purpose is preserved.
         if (HasCryptoToken(symbolText, "EncryptKeyWrap", "DecryptKeyWrap", "TryDecryptKeyWrap", "GetKeyWrapLength", "AES_wrap_key")) return Classify("AES Key Wrap", "key-wrap", "strong", "key-wrap/unwrap", "RFC 3394");
@@ -946,7 +951,7 @@ public static class CryptoAnalyzer
             return extensions.Contains(Path.GetExtension(path)) ? [path] : [];
         }
 
-        return Directory.EnumerateFiles(path, "*.*", SearchOption.AllDirectories)
+        return SafeFileRead.EnumerateAllFilesSafe(path)
             .Where(file => extensions.Contains(Path.GetExtension(file)))
             .Where(file => !file.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase))
             .Where(file => !file.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase))
@@ -974,7 +979,7 @@ public static class CryptoAnalyzer
         var root = Directory.Exists(path) ? path : Path.GetDirectoryName(path);
         if (!string.IsNullOrWhiteSpace(root) && Directory.Exists(root))
         {
-            foreach (var assembly in Directory.EnumerateFiles(root, "*.dll", SearchOption.AllDirectories)) AddReference(assembly);
+            foreach (var assembly in SafeFileRead.EnumerateAllFilesSafe(root, "*.dll")) AddReference(assembly);
         }
         return references.Values.ToList();
     }

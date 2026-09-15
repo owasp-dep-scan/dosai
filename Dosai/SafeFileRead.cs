@@ -32,4 +32,25 @@ internal static class SafeFileRead
             return null;
         }
     }
+
+    /// <summary>
+    ///     Recursive file enumeration that survives hostile trees: unreadable, over-long, or
+    ///     disappearing subtrees degrade to the files gathered so far. Analysis inputs can be
+    ///     anywhere - including shared temp directories - so discovery must never crash the scan.
+    /// </summary>
+    public static IReadOnlyList<string> EnumerateAllFilesSafe(string root, string searchPattern = "*.*")
+    {
+        var files = new List<string>();
+        try
+        {
+            foreach (var file in Directory.EnumerateFiles(root, searchPattern, SearchOption.AllDirectories))
+            {
+                files.Add(file);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PathTooLongException or DirectoryNotFoundException)
+        {
+        }
+        return files;
+    }
 }

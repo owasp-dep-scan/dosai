@@ -31,6 +31,12 @@
   <None Include="./../Dosai.TestData/HelloWorld.fs" CopyToOutputDirectory="PreserveNewest" />
   <None Include="./../Dosai.TestData/UnionTypes.cs" CopyToOutputDirectory="PreserveNewest" />
   <None Include="./../Dosai.TestData/FSharp11Features.fs" CopyToOutputDirectory="PreserveNewest" />
+  <None Include="./../Dosai.TestData/CSharp15Features.cs" CopyToOutputDirectory="PreserveNewest" />
+  <None Include="./../Dosai.TestData/ExtensionMembers.cs" CopyToOutputDirectory="PreserveNewest" />
+  <None Include="./../Dosai.TestData/FSharp11MoreFeatures.fs" CopyToOutputDirectory="PreserveNewest" />
+  <None Include="./../Dosai.TestData/ModernRFeatures.R" CopyToOutputDirectory="PreserveNewest" />
+  <None Include="./../Dosai.TestData/Notebook.Rmd" CopyToOutputDirectory="PreserveNewest" />
+  <None Include="./../Dosai.TestData/FSharpScript.fsx" CopyToOutputDirectory="PreserveNewest" />
 
   </ItemGroup>
 

@@ -1351,7 +1351,7 @@ public static class Dosai
             Assembly = assembly?.ToDisplayString() ?? "",
             Module = module?.ToDisplayString() ?? "",
             Namespace = containingNamespace?.ToDisplayString() ?? "",
-            ClassName = containingType?.Name ?? "",
+            ClassName = GetNamedContainingTypeName(methodSymbol),
             Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
             Name = methodSymbol.Name,
             ReturnType = methodSymbol.ReturnType.ToDisplayString(),
@@ -1536,7 +1536,7 @@ public static class Dosai
                             Assembly = methodSymbol.ContainingAssembly.ToDisplayString(),
                             Module = methodSymbol.ContainingModule.ToDisplayString(),
                             Namespace = methodSymbol.ContainingNamespace.ToDisplayString(),
-                            ClassName = methodSymbol.ContainingType.Name,
+                            ClassName = GetNamedContainingTypeName(methodSymbol),
                             Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
                             Name = methodSymbol.Name,
                             ReturnType = methodSymbol.ReturnType.ToDisplayString(),
@@ -1695,7 +1695,7 @@ public static class Dosai
                             Assembly = propertySymbol.ContainingAssembly.ToDisplayString(),
                             Module = propertySymbol.ContainingModule.ToDisplayString(),
                             Namespace = propertySymbol.ContainingNamespace.ToDisplayString(),
-                            ClassName = propertySymbol.ContainingType.Name,
+                            ClassName = GetNamedContainingTypeName(propertySymbol),
                             Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
                             Name = propertySymbol.Name,
                             Type = propertySymbol.Type.Name,
@@ -1762,7 +1762,7 @@ public static class Dosai
                             Assembly = propertySymbol.ContainingAssembly.ToDisplayString(),
                             Module = propertySymbol.ContainingModule.ToDisplayString(),
                             Namespace = propertySymbol.ContainingNamespace.ToDisplayString(),
-                            ClassName = propertySymbol.ContainingType.Name,
+                            ClassName = GetNamedContainingTypeName(propertySymbol),
                             Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
                             Name = propertySymbol.Name,
                             Type = propertySymbol.Type.Name,
@@ -2696,6 +2696,26 @@ public static class Dosai
         return "";
     }
 
+    /// <summary>
+    ///     Name of the nearest named declaring type of a symbol. Members declared in a C# 14+
+    ///     <c>extension</c> block (methods, properties, C# 15 extension indexers) are contained in
+    ///     a compiler-synthesized nested type whose metadata <see cref="INamedTypeSymbol.Name" />
+    ///     is empty - it only renders as <c>extension(...)</c> in display strings. Walking outward
+    ///     attributes those members to the enclosing static class, so the inventory keeps the
+    ///     grouping callers expect instead of an empty class name.
+    /// </summary>
+    private static string GetNamedContainingTypeName(ISymbol symbol)
+    {
+        for (var containingType = symbol.ContainingType; containingType is not null; containingType = containingType.ContainingType)
+        {
+            if (!string.IsNullOrEmpty(containingType.Name))
+            {
+                return containingType.Name;
+            }
+        }
+        return string.Empty;
+    }
+
     private sealed class MethodCallOperationWalker(SemanticModel model, DispatchResolver.SourceIndex dispatchIndex, List<MethodCalls> methodCalls, string basePath, string sourceFilePath, string fileName) : DataFlowAnalyzer.DepthBoundedOperationWalker
     {
         public override void VisitInvocation(IInvocationOperation operation)
@@ -3293,15 +3313,23 @@ public static class Dosai
         if (fileAttributes.HasFlag(FileAttributes.Directory))
         {
             var sourceExtensions = new HashSet<string>([Constants.CSharpSourceExtension, Constants.VBSourceExtension, Constants.FSharpSourceExtension], StringComparer.OrdinalIgnoreCase);
-            filesToInspect.AddRange(
-                from extension in fileExtensions 
-                from inputFile in new DirectoryInfo(path).EnumerateFiles($"*{extension}", SearchOption.AllDirectories)
-                let isSourceExtension = sourceExtensions.Contains(extension)
-                let relativePath = Path.GetRelativePath(path, inputFile.FullName)
-                where !HasDirectorySegment(relativePath, "obj")
-                      && (!isSourceExtension || !HasDirectorySegment(relativePath, "bin"))
-                      && !inputFile.FullName.EndsWith($".g{extension}", StringComparison.OrdinalIgnoreCase) 
-                select inputFile.FullName);
+            // Best-effort discovery: an unreadable or over-long subtree degrades to the files
+            // gathered so far instead of crashing the inspection.
+            try
+            {
+                filesToInspect.AddRange(
+                    from extension in fileExtensions
+                    from inputFile in new DirectoryInfo(path).EnumerateFiles($"*{extension}", SearchOption.AllDirectories)
+                    let isSourceExtension = sourceExtensions.Contains(extension)
+                    let relativePath = Path.GetRelativePath(path, inputFile.FullName)
+                    where !HasDirectorySegment(relativePath, "obj")
+                          && (!isSourceExtension || !HasDirectorySegment(relativePath, "bin"))
+                          && !inputFile.FullName.EndsWith($".g{extension}", StringComparison.OrdinalIgnoreCase)
+                    select inputFile.FullName);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PathTooLongException or DirectoryNotFoundException)
+            {
+            }
         }
         else
         {
