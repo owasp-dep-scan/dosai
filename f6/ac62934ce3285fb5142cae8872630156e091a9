@@ -1,0 +1,58 @@
+Dosai.TestData/CSharp15Features.cs
+  h_6a4cc5cdf68def 1-115
+Dosai.TestData/Dosai.TestData.CSharp.csproj
+  h_6a4cc5cdf68def 7,12-13
+Dosai.TestData/ExtensionMembers.cs
+  h_6a4cc5cdf68def 1-36
+Dosai.TestData/FSharp11MoreFeatures.fs
+  h_6a4cc5cdf68def 1-52
+Dosai.TestData/FSharpScript.fsx
+  h_6a4cc5cdf68def 1-12
+Dosai.TestData/ModernRFeatures.R
+  h_6a4cc5cdf68def 1-29
+Dosai.TestData/Notebook.Rmd
+  h_6a4cc5cdf68def 1-32
+Dosai.Tests/Dosai.Tests.csproj
+  h_6a4cc5cdf68def 34-39
+Dosai.Tests/DosaiTests.cs
+  h_6a4cc5cdf68def 1336-1634,2148-2187,3320-3398,4249-4254
+Dosai/ApiEndpoint.cs
+  h_6a4cc5cdf68def 227-231
+Dosai/AssemblyScope.cs
+  h_6a4cc5cdf68def 45-47,49,51-56,58-61,63-67,69-74
+Dosai/CryptoAnalysis.cs
+  h_6a4cc5cdf68def 433,816-820,954,982
+Dosai/DataFlow.cs
+  h_6a4cc5cdf68def 956-981,1243-1255,1257
+Dosai/DataFlowAssembly.cs
+  h_6a4cc5cdf68def 216-232,342,473-486,511-527,533-569,585-596,617-636,641,643,667-668,705,866-882,1738-1749,2216,2218-2225,2236-2243
+Dosai/Dosai.cs
+  h_6a4cc5cdf68def 1354,1539,1698,1765,2699-2718,3316-3332
+Dosai/Frameworks/FrameworkContext.cs
+  h_6a4cc5cdf68def 430-446
+Dosai/LanguageFrontendAnalyzer.cs
+  h_6a4cc5cdf68def 3,20-22,29,81,84,88-94,99,104,111-132,139,148-154,160,169-237,250-255,262-291,299,304,313-342,600,608-611
+Dosai/SafeFileRead.cs
+  h_6a4cc5cdf68def 35-55
+README.md
+  h_6a4cc5cdf68def 99,105,107
+docs/LESSON3.md
+  h_6a4cc5cdf68def 96-97
+docs/compiler-engineering.md
+  h_6a4cc5cdf68def 66-70,84-87,196-197
+docs/crypto-cbom.md
+  h_6a4cc5cdf68def 41
+docs/migration-5.0.md
+  h_6a4cc5cdf68def 53-74,81-85,100-102,106-107,120-147
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "f6ac62934ce3285fb5142cae8872630156e091a9",
+  "prompts": {},
+  "humans": {
+    "h_6a4cc5cdf68def": {
+      "author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}
