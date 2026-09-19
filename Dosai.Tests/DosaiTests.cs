@@ -1275,6 +1275,76 @@ public static class Program
         Assert.False(Directory.Exists(outputDirectory));
     }
 
+    // A self-contained deployment bundles the runtime directly in the application directory:
+    // there is no shared/<framework>/<version> layout to walk, and the `dotnet` resolved from
+    // PATH may belong to an older machine install. The probe list must lead with the bundled
+    // runtime so its System.Runtime wins over an older shared one.
+    [Fact]
+    public void GetSharedFrameworkProbingPaths_SelfContainedRuntimeDirectory_ProbesBundledRuntimeFirst()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var selfContainedDir = Path.Combine(tempDirectory.Path, "publish");
+        Directory.CreateDirectory(selfContainedDir);
+        File.WriteAllText(Path.Combine(selfContainedDir, "System.Runtime.dll"), "stub");
+        var olderVersion = $"{Math.Max(Environment.Version.Major - 2, 1)}.0.0";
+        var netCoreAppRoot = Path.Combine(tempDirectory.Path, "shared", "Microsoft.NETCore.App");
+        var olderVersionDir = Path.Combine(netCoreAppRoot, olderVersion);
+        Directory.CreateDirectory(olderVersionDir);
+
+        var probePaths = Depscan.Dosai.GetSharedFrameworkProbingPaths(selfContainedDir, [Path.Combine(tempDirectory.Path, "shared")]);
+
+        Assert.NotEmpty(probePaths);
+        Assert.Equal(Path.GetFullPath(selfContainedDir), probePaths[0]);
+        Assert.DoesNotContain(Path.GetFullPath(olderVersionDir), probePaths);
+    }
+
+    // Framework-dependent install: the running version directory ranks first and the remaining
+    // shared versions sort newest-first, so references resolve from a superset framework
+    // instead of whatever directory order happened to enumerate first.
+    [Fact]
+    public void GetSharedFrameworkProbingPaths_FrameworkDependent_RanksRunningVersionFirstThenNewest()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var major = Environment.Version.Major;
+        var versions = new[] { $"{major}.0.0", $"{major + 1}.0.0" };
+        var netCoreAppRoot = Path.Combine(tempDirectory.Path, "shared", "Microsoft.NETCore.App");
+        foreach (var version in versions)
+        {
+            Directory.CreateDirectory(Path.Combine(netCoreAppRoot, version));
+        }
+        var runningDir = Path.Combine(netCoreAppRoot, $"{major}.0.0");
+
+        var probePaths = Depscan.Dosai.GetSharedFrameworkProbingPaths(runningDir, Enumerable.Empty<string>());
+
+        Assert.Equal(Path.GetFullPath(runningDir), probePaths[0]);
+        Assert.Equal(Path.GetFullPath(Path.Combine(netCoreAppRoot, $"{major + 1}.0.0")), probePaths[1]);
+    }
+
+    // Shared frameworks older than the running runtime must not be probed: their older
+    // System.Runtime would shadow the runtime actually hosting the process and drop types it
+    // understands. Skipping them is what saves a single-file self-contained dosai (bundled
+    // runtime, no loose System.Runtime.dll anywhere to probe) on a machine whose PATH only
+    // offers an older dotnet: probing misses and the loader falls back to the Default
+    // context's already-loaded bundled assemblies.
+    [Fact]
+    public void GetSharedFrameworkProbingPaths_OlderThanRunningRuntime_AreExcluded()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var major = Environment.Version.Major;
+        var olderVersion = $"{Math.Max(major - 2, 1)}.0.0";
+        var newerVersion = $"{major + 1}.0.0";
+        var netCoreAppRoot = Path.Combine(tempDirectory.Path, "shared", "Microsoft.NETCore.App");
+        Directory.CreateDirectory(Path.Combine(netCoreAppRoot, olderVersion));
+        Directory.CreateDirectory(Path.Combine(netCoreAppRoot, newerVersion));
+        var bundleDir = Path.Combine(tempDirectory.Path, "app");
+        Directory.CreateDirectory(bundleDir); // no System.Runtime.dll: single-file layout
+
+        var probePaths = Depscan.Dosai.GetSharedFrameworkProbingPaths(bundleDir, [Path.Combine(tempDirectory.Path, "shared")]);
+
+        Assert.Contains(Path.GetFullPath(Path.Combine(netCoreAppRoot, newerVersion)), probePaths);
+        Assert.DoesNotContain(Path.GetFullPath(Path.Combine(netCoreAppRoot, olderVersion)), probePaths);
+    }
+
     // The assembly pipeline must handle .NET 11 assemblies produced from union declarations,
     // whose lowered metadata shape differs from plain records and classes.
     [SkippableFact]
@@ -2418,6 +2488,7 @@ class CryptoSample
         var cdx = CryptoAnalyzer.GetCryptoAnalysis(tempDirectory.Path, "cyclonedx");
         using var document = JsonDocument.Parse(cdx);
         Assert.Equal("CycloneDX", document.RootElement.GetProperty("bomFormat").GetString());
+        Assert.Equal("http://cyclonedx.org/schema/bom-1.6.schema.json", document.RootElement.GetProperty("$schema").GetString());
         var components = document.RootElement.GetProperty("components").EnumerateArray().ToList();
         Assert.True(components.Count >= 1);
         Assert.Contains(components, component => HasProperty(component, "dosai:crypto:evidenceType", "asset"));
@@ -2426,6 +2497,56 @@ class CryptoSample
         Assert.Contains(components, component => HasProperty(component, "dosai:crypto:dataFlowSliceIds"));
         Assert.Contains(document.RootElement.GetProperty("vulnerabilities").EnumerateArray(), vulnerability => HasProperty(vulnerability, "dosai:crypto:dataFlowSliceIds"));
         Assert.True(document.RootElement.GetProperty("dependencies").GetArrayLength() >= 1);
+
+        // Schema validity: components and vulnerabilities reference themselves with the
+        // hyphenated bom-ref key, cryptographic-asset components carry
+        // cryptoProperties.assetType from the CycloneDX enum, and every graph reference
+        // (affects, dependencies) resolves to an emitted component.
+        var bomRefs = new HashSet<string>();
+        foreach (var component in components)
+        {
+            Assert.True(component.TryGetProperty("bom-ref", out var bomRef));
+            Assert.False(component.TryGetProperty("bomRef", out _));
+            bomRefs.Add(bomRef.GetString()!);
+        }
+        var cryptoAssetComponents = components.Where(component => component.GetProperty("type").GetString() == "cryptographic-asset").ToList();
+        Assert.Contains(cryptoAssetComponents, component => component.GetProperty("cryptoProperties").GetProperty("assetType").GetString() == "algorithm");
+        foreach (var cryptoAssetComponent in cryptoAssetComponents)
+        {
+            var assetType = cryptoAssetComponent.GetProperty("cryptoProperties").GetProperty("assetType").GetString();
+            Assert.Contains(assetType, new[] { "algorithm", "certificate", "protocol", "related-crypto-material" });
+        }
+        // MD5 and TLS appear once per detected location, so assert on matching members
+        // instead of Single: the cryptoProperties mapping must hold for every copy.
+        Assert.Contains(cryptoAssetComponents, component =>
+            component.GetProperty("name").GetString() == "MD5" &&
+            component.GetProperty("cryptoProperties").GetProperty("assetType").GetString() == "algorithm" &&
+            component.GetProperty("cryptoProperties").GetProperty("algorithmProperties").GetProperty("primitive").GetString() == "hash");
+        Assert.Contains(cryptoAssetComponents, component =>
+            component.GetProperty("name").GetString() == "TLS" &&
+            component.GetProperty("cryptoProperties").GetProperty("assetType").GetString() == "protocol" &&
+            component.GetProperty("cryptoProperties").GetProperty("protocolProperties").GetProperty("type").GetString() == "tls" &&
+            component.GetProperty("cryptoProperties").GetProperty("protocolProperties").GetProperty("version").GetString() == "SSL 3.0");
+        foreach (var vulnerability in document.RootElement.GetProperty("vulnerabilities").EnumerateArray())
+        {
+            Assert.True(vulnerability.TryGetProperty("bom-ref", out _));
+            Assert.False(vulnerability.TryGetProperty("bomRef", out _));
+            foreach (var affected in vulnerability.GetProperty("affects").EnumerateArray())
+            {
+                Assert.Contains(affected.GetProperty("ref").GetString()!, bomRefs);
+            }
+        }
+        foreach (var dependency in document.RootElement.GetProperty("dependencies").EnumerateArray())
+        {
+            Assert.Contains(dependency.GetProperty("ref").GetString()!, bomRefs);
+            if (dependency.TryGetProperty("dependsOn", out var dependsOn))
+            {
+                foreach (var target in dependsOn.EnumerateArray())
+                {
+                    Assert.Contains(target.GetString()!, bomRefs);
+                }
+            }
+        }
 
         static bool HasProperty(JsonElement component, string name, string? value = null)
         {

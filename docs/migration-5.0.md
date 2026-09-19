@@ -237,3 +237,10 @@ The following bugs are fixed. All of them could **remove** or corrupt results in
 Field names, identifier formats (`Metadata`, `SourceSignature`, method ids), severity and
 confidence vocabularies, graph export attributes, the query language, and the CycloneDX property
 names are unchanged from 4.1.0.
+
+One corrective exception: `crypto --format cyclonedx` now emits schema-valid CycloneDX 1.6.
+The previously invalid `bomRef` key became `bom-ref`, the document declares `$schema`, and
+`cryptographic-asset` components carry `cryptoProperties.assetType` (plus
+`algorithmProperties.primitive` / `protocolProperties.type` where the evidence maps). The
+`dosai:crypto:*` property names are unchanged, and consumers of the native `--format dosai`
+output are not affected.
