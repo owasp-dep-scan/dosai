@@ -1,7 +1,9 @@
 # Modern R source exercising the post-4.0 language baseline: the native pipe `|>` with the
-# `_` placeholder (R 4.2+) in named arguments, and lambda-assigned functions using the `\(x)`
-# shorthand (R 4.1+). The fallback line parser must recognize `name <- \(args) {` as a
-# function declaration, attribute calls to the enclosing function, and ignore the comment
+# `_` placeholder (R 4.2+) in named arguments, lambda-assigned functions using the `\(x)`
+# shorthand (R 4.1+), the null-coalescing `%||%` operator (R 4.4+), the `%notin%` operator
+# (R 4.6+), and the `declare()` primitive (R 4.4+). The fallback line parser must recognize
+# `name <- \(args) {` as a function declaration, attribute calls to the enclosing function,
+# keep the infix `%op%` tokens from producing phantom calls, and ignore the comment
 # prose (shapes like `word (R 4.1+)`) instead of reporting them as calls.
 
 library(jsonlite)
@@ -12,7 +14,11 @@ render <- function(input) {
     file.path("bin") |>
     basename()
   pattern <- "\\d+"
-  grepl(pattern, cmd)
+  if (grepl(pattern, cmd) && "safe" %notin% c("no")) {
+    message("checked")
+  }
+  defaults <- input$options %||% list()
+  declare("dosai.checked", TRUE)
   system(cmd)
 }
 

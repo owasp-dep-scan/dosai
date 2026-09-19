@@ -60,14 +60,29 @@ Dosai now creates per-language compilations from all source files in the inspect
 - VB.NET: `VisualBasicCompilation.Create("Dosai.SourceAnalysis.VisualBasic", ...)`
 
 All C# parsing goes through one helper (`CSharpSourceParser`), which parses with
-`LanguageVersion.Preview` - the widest grammar the referenced compiler accepts. Analyzed source
-is not ours to constrain: a project can target a language version newer than the compiler Dosai
-references, and source that fails to parse disappears from the inventory, call graph, and
-data-flow results without an error. C# 15 syntax - union declarations, `closed` hierarchies,
-extension indexers, collection expression arguments, labeled `break`/`continue`, and the
-`unsafe(...)`/pointer-relaxation shapes - is the current example; the Roslyn 5.9.0 line parses
-them only under `Preview`, because its `Default` is still C# 14. Preview only widens the
-accepted grammar; it does not change the meaning of source that already parsed.
+`LanguageVersion.Preview` - the widest grammar the referenced compiler accepts - plus the
+`FileBasedProgram` parser feature, so the `#:` directives of file-based apps
+(`dotnet run app.cs`) parse as trivia instead of reporting CS9298 on every directive line.
+The parse options also define `FrameworkPreprocessorDefines.ModernNet` (`NET`, `NET11_0`, and
+the `NETx_0_OR_GREATER` chain), so `#if NET8_0_OR_GREATER`-style multi-target guards analyze as
+visible code instead of becoming disabled text; `DEBUG`/`TRACE` and the legacy
+`NETFRAMEWORK`/`NETSTANDARD` families stay undefined, matching a Release-shaped build against
+the latest .NET target. The F# line frontend's conditional-region tracking resolves conditions
+against the same set, so both pipelines select the same branches.
+Analyzed source is not ours to constrain: a project can target a language version newer than the
+compiler Dosai references, and source that fails to parse disappears from the inventory, call
+graph, and data-flow results without an error. C# 15 syntax - union declarations, `closed`
+hierarchies, extension indexers, collection expression arguments, labeled `break`/`continue`,
+the `unsafe(...)`/pointer-relaxation shapes, and the `safe` modifier on extern members and
+explicit-layout fields - is the current example; the Roslyn 5.9.0 line parses them only under
+`Preview`, because its `Default` is still C# 14. Preview only widens the accepted grammar; it
+does not change the meaning of source that already parsed.
+
+File-based apps are analyzed like any other C# file: the `#:` directives become trivia, the
+top-level statements report the compiler-synthesized `<Main>$` entry point, and a `#:package
+Id@Version` directive surfaces in `Dependencies[]` (namespace `nuget`, module `FileBasedApp`)
+the way `#r "nuget: ..."` does for F# scripts, because a file-based app declares its NuGet
+references nowhere else.
 
 References are populated from:
 

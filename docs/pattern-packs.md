@@ -57,6 +57,9 @@ These patterns are always loaded before optional packs.
 | -------- | ---------- | ---------------------------------------------------------------------------------------------------------- | ----------------- | -------------------------------------- |
 | `Method` | `Contains` | `System.Diagnostics.Process.Start`                                                                         | `command`         | Process execution.                     |
 | `Type`   | `Contains` | `System.Diagnostics.ProcessStartInfo`                                                                      | `command`         | Process execution configuration.       |
+| `Method` | `Contains` | `System.Diagnostics.Process.Run`                                                                            | `command`         | .NET 11 run-and-capture helpers (`Run`, `RunAsync`, `RunAndCaptureText`, `RunAndCaptureTextAsync`). |
+| `Method` | `Contains` | `System.Diagnostics.Process.StartAndForget`                                                                | `command`         | .NET 11 fire-and-forget process launch. |
+| `Method` | `Contains` | `Microsoft.Win32.SafeHandles.SafeProcessHandle.Start`                                                      | `command`         | .NET 11 process launch via safe handle. |
 | `Method` | `Contains` | `System.IO.File.`, `System.IO.Directory.`, `System.IO.FileStream`, `System.IO.Path.Combine`                | `file`            | File and path operations.              |
 | `Name`   | `Exact`    | `SaveAs`, `CopyTo`                                                                                         | `file`            | Upload/file copy helpers.              |
 | `Code`   | `Contains` | `SaveAs(`, `CopyTo(`, `Server.MapPath`                                                                     | `file`            | Legacy file operation fallback.        |

@@ -38,7 +38,15 @@ dotnet test ./Dosai.sln
 - Prefer Roslyn `IOperation` over syntax-only analysis when semantic accuracy matters.
 - Parse C# only through `CSharpSourceParser.Parse`. Analyzed source may use a newer language
   version than the referenced compiler's default, and a parse error silently drops the file from
-  every result, so the accepted language version stays a single decision.
+  every result, so the accepted language version stays a single decision. The parser also
+  enables the `FileBasedProgram` feature so file-based app `#:` directives parse as trivia;
+  `#:package` lines surface as dependencies in `GetSourceMethods`.
+- Conditional compilation resolves against `FrameworkPreprocessorDefines.ModernNet` in both
+  pipelines (`CSharpSourceParser` parse options; the F# line frontend's `#if`/`#elif` tracking):
+  `NET`, `NET11_0`, and the `NETx_0_OR_GREATER` chain are defined so multi-target guards stay
+  visible, while `DEBUG`/`TRACE` and the legacy `NETFRAMEWORK`/`NETSTANDARD` families are not -
+  a Release-shaped modern-target build. The F# frontend also ignores `#:`-prefixed lines
+  (FS-1337). Bump the ceiling with `TargetFramework`.
 - Never leave an inspected file locked. Metadata readers open with
   `FileShare.ReadWrite | FileShare.Delete`, and inspected assemblies are loaded by value
   (`InspectionAssemblyLoadContext`), because a mapped path stays locked on Windows for the

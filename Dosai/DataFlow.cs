@@ -894,6 +894,12 @@ public static partial class DataFlowAnalyzer
         [
             new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "System.Diagnostics.Process.Start", Match = DataFlowMatchKind.Contains, Category = "command", Description = "Process execution" },
             new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Type, Pattern = "System.Diagnostics.ProcessStartInfo", Match = DataFlowMatchKind.Contains, Category = "command", Description = "Process execution configuration" },
+            // .NET 11 process-launch surface: `Run` covers Run/RunAsync/RunAndCaptureText/RunAndCaptureTextAsync
+            // because the pattern is a Contains match on the method symbol; StartAndForget and the
+            // SafeProcessHandle factory are separate methods a tainted command must not bypass.
+            new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "System.Diagnostics.Process.Run", Match = DataFlowMatchKind.Contains, Category = "command", Description = "Process execution (.NET 11 run-and-capture helpers)" },
+            new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "System.Diagnostics.Process.StartAndForget", Match = DataFlowMatchKind.Contains, Category = "command", Description = "Fire-and-forget process launch" },
+            new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "Microsoft.Win32.SafeHandles.SafeProcessHandle.Start", Match = DataFlowMatchKind.Contains, Category = "command", Description = "Process launch via safe handle" },
             new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "System.IO.File.", Match = DataFlowMatchKind.Contains, Category = "file", Description = "File system operation" },
             new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "System.IO.Directory.", Match = DataFlowMatchKind.Contains, Category = "file", Description = "Directory operation" },
             new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "System.IO.FileStream", Match = DataFlowMatchKind.Contains, Category = "file", Description = "File stream operation" },
@@ -1782,6 +1788,43 @@ public static partial class DataFlowAnalyzer
             }
             base.VisitMethodBodyOperation(operation);
             _currentMethod = previousMethod;
+        }
+
+        /// <summary>
+        ///     Seeds inline lambda handler parameters from framework seeds only - minimal-API
+        ///     handlers, including .NET 11's union-typed JSON bodies, are anonymous functions, so
+        ///     <see cref="SeedMethodParameters" /> never reaches them. Matching is anchored to the
+        ///     parameter's own (file, name, line), so query lambdas and LINQ projections stay
+        ///     untouched: pattern matching stays off lambda parameters entirely, keeping the
+        ///     phantom-source behavior documented there.
+        /// </summary>
+        public override void VisitAnonymousFunction(IAnonymousFunctionOperation operation)
+        {
+            var lambda = operation.Symbol;
+            if (lambda is not null && _frameworkSeeds is not null)
+            {
+                foreach (var parameter in lambda.Parameters)
+                {
+                    var parameterLine = parameter.Locations.FirstOrDefault()?.GetLineSpan().StartLinePosition.Line + 1;
+                    if (parameterLine is not { } line || _frameworkSeeds.FindAtLine(Path.GetFileName(sourceFilePath), parameter.Name, line) is not { } seed)
+                    {
+                        continue;
+                    }
+
+                    var parameterSyntax = parameter.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax();
+                    var seedNode = graph.AddNode("Source", parameter.Name, parameterSyntax ?? operation.Syntax, model, basePath, sourceFilePath, lambda,
+                        isSource: true,
+                        isSink: false,
+                        matchedPatterns: [],
+                        category: seed.TaintKind,
+                        symbol: parameter.ToDisplayString(),
+                        typeName: Normalize(parameter.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)),
+                        code: parameter.Name);
+                    _taintedSymbols[SymbolKey(parameter)] = new TaintTrace([seedNode.Id], [seed.TaintKind, seed.BindingSource], []);
+                }
+            }
+
+            base.VisitAnonymousFunction(operation);
         }
 
         public override void VisitBlock(IBlockOperation operation)
@@ -3856,12 +3899,22 @@ public static partial class DataFlowAnalyzer
 /// </summary>
 public sealed class FrameworkTaintSeedIndex
 {
+    /// <summary>Sentinel method name for inline lambda handler seeds; resolved by line anchor, not method name.</summary>
+    public const string LambdaHandlerMethodName = "<lambda>";
+
     private readonly Dictionary<string, List<Frameworks.FrameworkTaintSeed>> _byMethod = new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<Frameworks.FrameworkTaintSeed> _lineAnchored = [];
 
     public FrameworkTaintSeedIndex(IEnumerable<Frameworks.FrameworkTaintSeed> seeds)
     {
         foreach (var seed in seeds)
         {
+            if (seed.MethodName == LambdaHandlerMethodName)
+            {
+                _lineAnchored.Add(seed);
+                continue;
+            }
+
             var key = Key(seed.FileName, seed.MethodName);
             if (!_byMethod.TryGetValue(key, out var list))
             {
@@ -3896,6 +3949,19 @@ public sealed class FrameworkTaintSeedIndex
         return candidates.FirstOrDefault(seed => seed.MethodSignature is not null && seed.MethodSignature == signature)
                ?? candidates.FirstOrDefault(seed => seed.MethodSignature is null && (seed.ClassName is null || seed.ClassName == className));
     }
+
+    /// <summary>
+    ///     Resolves a seed for a lambda handler parameter: file name, parameter name, and the
+    ///     parameter's own line, exactly as the provider anchored them. Inline minimal-API handlers
+    ///     have no method name to key on - their semantic symbol is compiler-synthesized - so the
+    ///     line anchor is the discriminator. A same-line name collision (two handlers' parameters
+    ///     on one line) is not a realistic shape.
+    /// </summary>
+    public Frameworks.FrameworkTaintSeed? FindAtLine(string? fileName, string parameterName, int lineNumber) =>
+        fileName is null ? null : _lineAnchored.FirstOrDefault(seed =>
+            string.Equals(seed.FileName, fileName, StringComparison.OrdinalIgnoreCase) &&
+            seed.ParameterName.Equals(parameterName, StringComparison.Ordinal) &&
+            seed.LineNumber == lineNumber);
 
     private static string Key(string? fileName, string methodName) => $"{fileName}|{methodName}";
 }

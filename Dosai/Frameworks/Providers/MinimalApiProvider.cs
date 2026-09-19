@@ -187,9 +187,13 @@ public sealed class MinimalApiProvider : IFrameworkProvider
     }
 
     /// <summary>
-    ///     Seeds the parameters of a Map* handler method group (`MapGet("/x", GetAllItems)`):
-    ///     minimal-API binding pulls route/query/header/body values, so every handler parameter
-    ///     (except cancellation tokens) is attacker-influenced, exactly like a controller action.
+    ///     Seeds the parameters of a Map* handler: a method group (`MapGet("/x", GetAllItems)`) or
+    ///     an inline lambda (`MapPost("/x", (PetUnion pet) => ...)` - the dominant minimal-API form,
+    ///     and the only one for .NET 11's union-typed JSON bodies). Minimal-API binding pulls
+    ///     route/query/header/body values, so every handler parameter (except infrastructure types)
+    ///     is attacker-influenced, exactly like a controller action. Lambda parameters are seeded
+    ///     from syntax and anchored to their own line, because the Map* overloads are usually
+    ///     unresolved and leave the lambda's converted symbol error-typed.
     /// </summary>
     private static void SeedHandlerParameters(FrameworkContext ctx, FrameworkResults results, InvocationExpressionSyntax invocation, string endpointPath)
     {
@@ -203,6 +207,38 @@ public sealed class MinimalApiProvider : IFrameworkProvider
             if (argument.NameColon is not null)
             {
                 continue;
+            }
+
+            IEnumerable<ParameterSyntax>? lambdaParameters = argument.Expression switch
+            {
+                SimpleLambdaExpressionSyntax simple => [simple.Parameter],
+                ParenthesizedLambdaExpressionSyntax parenthesized => parenthesized.ParameterList.Parameters,
+                _ => null
+            };
+            if (lambdaParameters is not null)
+            {
+                foreach (var parameter in lambdaParameters)
+                {
+                    if (IsInfrastructureParameterSyntax(parameter))
+                    {
+                        continue;
+                    }
+
+                    results.TaintSeeds.Add(new FrameworkTaintSeed
+                    {
+                        MethodName = FrameworkTaintSeedIndex.LambdaHandlerMethodName,
+                        ParameterName = parameter.Identifier.Text,
+                        FileName = Path.GetFileName(invocation.SyntaxTree.FilePath),
+                        LineNumber = parameter.GetLocation().GetLineSpan().StartLinePosition.Line + 1,
+                        BindingSource = "http-body",
+                        TaintKind = "http",
+                        FrameworkId = "minimal-api",
+                        EndpointPath = endpointPath,
+                        Confidence = ConfidenceTiers.Syntactic
+                    });
+                }
+
+                break;
             }
 
             var handlerName = argument.Expression switch
@@ -253,6 +289,46 @@ public sealed class MinimalApiProvider : IFrameworkProvider
 
             break;
         }
+    }
+
+    /// <summary>
+    ///     Syntax twin of <see cref="IsInfrastructureParameter" /> for inline lambda handlers,
+    ///     whose parameter types often fail to resolve. Applies the same exclusions by type-name
+    ///     text and written attributes, so a `CancellationToken ct`, an injected `ILogger<T>` or
+    ///     `ICatalogService`, and a `[FromServices]`-annotated parameter never become untrusted
+    ///     sources.
+    /// </summary>
+    private static bool IsInfrastructureParameterSyntax(ParameterSyntax parameter)
+    {
+        var typeName = parameter.Type?.ToString() ?? string.Empty;
+        var typeNameLastSegment = typeName.Split('.').LastOrDefault() ?? string.Empty;
+        if (typeNameLastSegment.Contains("CancellationToken", StringComparison.Ordinal) ||
+            typeNameLastSegment.Contains("HttpContext", StringComparison.Ordinal) ||
+            typeNameLastSegment.Contains("ClaimsPrincipal", StringComparison.Ordinal) ||
+            typeNameLastSegment.Contains("IServiceProvider", StringComparison.Ordinal) ||
+            typeNameLastSegment.StartsWith("ILogger", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        if (parameter.AttributeLists.SelectMany(list => list.Attributes).Any(attribute => attribute.Name.ToString() is "FromServices" or "FromServicesAttribute" or "FromKeyedServices" or "FromKeyedServicesAttribute"))
+        {
+            return true;
+        }
+
+        // I + Upper-second-letter is the conventional interface spelling; classes like "Item"
+        // fail the second-letter check. Mirrors the semantic-path heuristic.
+        if (typeNameLastSegment.Length > 2 && typeNameLastSegment[0] == 'I' && char.IsUpper(typeNameLastSegment[1]))
+        {
+            return true;
+        }
+
+        if (parameter.Identifier.Text is "ct" or "cancellationToken" or "cancellationTokenSource")
+        {
+            return true;
+        }
+
+        return false;
     }
 
     /// <summary>

@@ -20,6 +20,9 @@ public static partial class LanguageFrontendAnalyzer
     [GeneratedRegex(@"^\s*(#r|#load)\s+""([^""]+)""", RegexOptions.Compiled)]
     private static partial Regex FSharpDirective();
 
+    [GeneratedRegex(@"^#\s*(if|elif|else|endif)\b(.*)$", RegexOptions.Compiled)]
+    private static partial Regex FSharpConditionalDirective();
+
     [GeneratedRegex(@"^\s*type\s+(\w+)", RegexOptions.Compiled)]
     private static partial Regex FSharpType();
 
@@ -86,6 +89,7 @@ public static partial class LanguageFrontendAnalyzer
         var currentDeclarationIndent = int.MaxValue;
         int? typeDeclarationIndent = null;
         var lexerState = new FSharpLexerState();
+        var preprocessor = new FSharpPreprocessor();
         for (var i = 0; i < lines.Length; i++)
         {
             var line = lines[i];
@@ -94,6 +98,38 @@ public static partial class LanguageFrontendAnalyzer
             {
                 continue;
             }
+            var trimmedCode = code.TrimStart();
+            if (trimmedCode.StartsWith('#'))
+            {
+                // File-based app directives (`#:property`, `#:package`, ...) are ignored by the
+                // F# 11 compiler wherever they appear (FS-1337); they are never code or references.
+                if (trimmedCode.StartsWith("#:", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                // Conditional directives update the active region even when the line itself sits
+                // in an inactive one (an `#endif` there still closes its region); other compiler
+                // and script directives (`#light`, `#nowarn`, `#time`, ...) are line-scoped and
+                // only skipped. `#r`/`#load` fall through so reference extraction keeps working.
+                if (FSharpConditionalDirective().Match(trimmedCode) is { Success: true } conditional)
+                {
+                    preprocessor.Apply(conditional.Groups[1].Value, conditional.Groups[2].Value.Trim());
+                    continue;
+                }
+
+                if (!preprocessor.IsActive || FSharpDirective().Match(code) is not { Success: true })
+                {
+                    continue;
+                }
+            }
+            else if (!preprocessor.IsActive)
+            {
+                // Inactive conditional text contributes no declarations, calls, or dependencies -
+                // the branches the analysis define set (modern .NET, Release-shaped) leaves out.
+                continue;
+            }
+
             var indent = code.Length - code.TrimStart().Length;
             var module = FSharpNamespaceOrModule().Match(code);
             if (module.Success)
@@ -311,6 +347,125 @@ public static partial class LanguageFrontendAnalyzer
     {
         public int BlockCommentDepth;
         public FSharpStringKind String;
+    }
+
+    /// <summary>
+    ///     Tracks F# conditional-compilation regions (`#if`/`#elif`/`#else`/`#endif`, with `#elif`
+    ///     itself new in F# 11) across the lines of one file. Dosai compiles nothing, so the
+    ///     define set is the analysis one: <see cref="FrameworkPreprocessorDefines.ModernNet" />
+    ///     (`NET`, `NET11_0`, and the `NETx_0_OR_GREATER` chain) is defined, matching what a
+    ///     build against the latest .NET target defines, while `DEBUG`/`TRACE` stay undefined -
+    ///     a Release-shaped build. Multi-target guards (`#if NET8_0_OR_GREATER`) are
+    ///     near-universal in real F# libraries; treating them as undefined turned their bodies
+    ///     into dropped text, and for a security scanner a missed sink in a guarded branch is
+    ///     worse than a declaration the analyzed project's own target would not compile. This
+    ///     matches the C# pipeline, whose parse options define the same set.
+    /// </summary>
+    private sealed class FSharpPreprocessor
+    {
+        // One entry per open region: whether the enclosing regions are all active, whether any
+        // branch of this region has been taken, and whether the current branch is active.
+        private readonly Stack<(bool ParentActive, bool AnyBranchTaken, bool Active)> _regions = new();
+
+        public bool IsActive => _regions.Count == 0 || _regions.Peek().Active;
+
+        public void Apply(string directive, string condition)
+        {
+            switch (directive)
+            {
+                case "if":
+                    var parentActive = IsActive;
+                    var active = parentActive && EvaluateCondition(condition);
+                    _regions.Push((parentActive, active, active));
+                    break;
+                case "elif":
+                    if (_regions.Count == 0) break;
+                    var region = _regions.Pop();
+                    if (region.Active)
+                    {
+                        // A previous branch already ran; every later branch is inactive.
+                        _regions.Push((region.ParentActive, true, false));
+                    }
+                    else
+                    {
+                        var takesBranch = !region.AnyBranchTaken && region.ParentActive && EvaluateCondition(condition);
+                        _regions.Push((region.ParentActive, region.AnyBranchTaken || takesBranch, takesBranch));
+                    }
+                    break;
+                case "else":
+                    if (_regions.Count == 0) break;
+                    var current = _regions.Pop();
+                    _regions.Push((current.ParentActive, true, current.ParentActive && !current.AnyBranchTaken));
+                    break;
+                case "endif":
+                    if (_regions.Count > 0) _regions.Pop();
+                    break;
+            }
+        }
+
+        /// <summary>
+        ///     Evaluates an `#if`/`#elif` condition against the analysis define set: the modern-net
+        ///     symbols are defined, everything else (including `DEBUG`, `TRACE`, and custom
+        ///     symbols) is not. Only `!`, `&amp;&amp;`, `||`, parentheses, and identifiers have an
+        ///     effect.
+        /// </summary>
+        private static bool EvaluateCondition(string condition)
+        {
+            var tokens = Regex.Matches(condition ?? string.Empty, @"&&|\|\||!|\(|\)|[A-Za-z_][\w\.]*|\d+")
+                .Select(match => match.Value)
+                .ToList();
+            var position = 0;
+            var result = ParseOr();
+            return result;
+
+            bool ParseOr()
+            {
+                var value = ParseAnd();
+                while (position < tokens.Count && tokens[position] == "||")
+                {
+                    position++;
+                    var right = ParseAnd();
+                    value = value || right;
+                }
+                return value;
+            }
+
+            bool ParseAnd()
+            {
+                var value = ParseUnary();
+                while (position < tokens.Count && tokens[position] == "&&")
+                {
+                    position++;
+                    var right = ParseUnary();
+                    value = value && right;
+                }
+                return value;
+            }
+
+            bool ParseUnary()
+            {
+                if (position < tokens.Count && tokens[position] == "!")
+                {
+                    position++;
+                    return !ParseUnary();
+                }
+                if (position < tokens.Count && tokens[position] == "(")
+                {
+                    position++;
+                    var value = ParseOr();
+                    if (position < tokens.Count && tokens[position] == ")") position++;
+                    return value;
+                }
+                if (position < tokens.Count)
+                {
+                    var defined = FrameworkPreprocessorDefines.ModernNet.Contains(tokens[position]);
+                    position++;
+                    return defined;
+                }
+
+                return false;
+            }
+        }
     }
 
     private static void AnalyzeR(string basePath, string file, List<Method> methods, List<Dependency> dependencies, List<MethodCalls> calls)

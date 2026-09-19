@@ -4,6 +4,7 @@ using System.Reflection;
 using System.Reflection.Metadata;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Runtime.Versioning;
 using System.Xml.Linq;
 using Xunit;
 
@@ -1007,19 +1008,7 @@ class FlowSample
     public void GetDataFlows_AssemblyOnlyCliSourceToProcessStart_ReturnsIlSliceWithValidEdges()
     {
         using var tempDirectory = new TemporaryDirectory();
-        var projectDirectory = Path.Combine(tempDirectory.Path, "src");
-        var outputDirectory = Path.Combine(tempDirectory.Path, "bin");
-        Directory.CreateDirectory(projectDirectory);
-        Directory.CreateDirectory(outputDirectory);
-        File.WriteAllText(Path.Combine(projectDirectory, "AssemblyOnlyFlow.csproj"), """
-<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
-    <OutputType>Exe</OutputType>
-  </PropertyGroup>
-</Project>
-""");
-        File.WriteAllText(Path.Combine(projectDirectory, "Program.cs"), """
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "AssemblyOnlyFlow", """
 using System.Diagnostics;
 
 public static class Program
@@ -1031,23 +1020,6 @@ public static class Program
     }
 }
 """);
-
-        var build = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-        {
-            FileName = "dotnet",
-            Arguments = $"build \"{Path.Combine(projectDirectory, "AssemblyOnlyFlow.csproj")}\" -o \"{outputDirectory}\" -v:quiet",
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false
-        });
-        Assert.NotNull(build);
-        // Drain both pipes before waiting: a build that fills either buffer would otherwise
-        // block until the test times out.
-        var buildStdout = build.StandardOutput.ReadToEndAsync();
-        var buildStderr = build.StandardError.ReadToEndAsync();
-        build.WaitForExit();
-        var buildOutput = buildStdout.GetAwaiter().GetResult() + buildStderr.GetAwaiter().GetResult();
-        Assert.True(build.ExitCode == 0, buildOutput);
 
         var resultJson = DataFlowAnalyzer.GetDataFlows(Path.Combine(outputDirectory, "AssemblyOnlyFlow.dll"));
         var dataFlowResult = JsonSerializer.Deserialize<DataFlowResult>(resultJson, new JsonSerializerOptions
@@ -1347,6 +1319,7 @@ public static class Program
         Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "CSharp15Features", Name: "LabeledJumps" });
         Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "CSharp15Features", Name: "PointerRelaxations" });
         Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "CSharp15Features", Name: "ReadBootCommand" });
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "CSharp15Features", Name: "SafeKeywordMembers" });
         Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "SequenceExtensions", Name: "CountAtLeast" });
         Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Pet", Name: "Name" });
     }
@@ -1364,6 +1337,217 @@ public static class Program
         Assert.Contains(result.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" } && slice.SinkArgument == "names[0]");
         // Labeled break/continue does not break slice construction.
         Assert.Contains(result.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" } && slice.SinkArgument == "found");
+        // The `safe` keyword is placement-only: taint still reaches the sink from the method.
+        Assert.Contains(result.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" } && slice.SinkArgument == "command");
+    }
+
+    // File-based apps (`dotnet run app.cs`) carry their project model in `#:` directives and
+    // their entry point in top-level statements. The directives must parse as trivia (they are
+    // only accepted under the FileBasedProgram parser feature) instead of failing the file, and
+    // the synthesized `<Main>$` plus the trailing declarations must all reach the inventory.
+    [Fact]
+    public void GetMethods_FileBasedAppSource_InventoriesEntryPointWithoutDirectiveNoise()
+    {
+        var methodsSlice = ReadMethods(GetFilePath(FileBasedAppSource));
+
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Program", Name: "<Main>$" });
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Helpers", Name: "Report" });
+        // The `#:` directive lines are trivia: no phantom members or calls named after them.
+        Assert.DoesNotContain(methodsSlice.Methods!, method => method.Name is "property" or "package" or "sdk" or "include");
+        Assert.DoesNotContain(methodsSlice.MethodCalls ?? [], call => call.CalledMethod is "property" or "package" or "sdk");
+        // Local functions in the entry file still contribute calls to the graph.
+        Assert.Contains(methodsSlice.MethodCalls ?? [], call => call.CalledMethod?.Contains("Process.RunAndCaptureText", StringComparison.Ordinal) == true);
+        Assert.Contains(methodsSlice.MethodCalls ?? [], call => call.CalledMethod?.Contains("Process.StartAndForget", StringComparison.Ordinal) == true);
+        // The `#:package` directive is the file-based app's NuGet reference: it surfaces as a
+        // dependency the way `#r "nuget: ..."` does for F# scripts.
+        Assert.Contains(methodsSlice.Dependencies ?? [], dependency => dependency is { Name: "Microsoft.Extensions.Logging", Namespace: "nuget", Module: "FileBasedApp" });
+    }
+
+    [Fact]
+    public void GetDataFlows_FileBasedAppSource_CarriesTaintToNet11ProcessSinks()
+    {
+        var result = ReadDataFlows(GetFilePath(FileBasedAppSource));
+
+        Assert.Contains(result.Slices, slice => slice is { SinkCategory: "command" });
+        Assert.Contains(result.Nodes, node => node.IsSink && node.Symbol?.Contains("Process.RunAndCaptureText", StringComparison.Ordinal) == true);
+        Assert.Contains(result.Nodes, node => node.IsSink && node.Symbol?.Contains("Process.StartAndForget", StringComparison.Ordinal) == true);
+    }
+
+    // The .NET 11 run-and-capture process helpers are command-execution sinks in both analysis
+    // modes; a tainted argument must not slip past them just because the API is new.
+    [Fact]
+    public void GetDataFlows_Net11ProcessApiSinks_AllMatchAsCommandSinks()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Net11ProcessSinks.cs"), """
+using System.Diagnostics;
+using Microsoft.Win32.SafeHandles;
+
+class Net11ProcessSinks
+{
+    static void Run(string command)
+    {
+        Process.StartAndForget(command);
+        _ = Process.Run(command);
+        _ = Process.RunAsync(command);
+        _ = Process.RunAndCaptureText(command);
+        _ = Process.RunAndCaptureTextAsync(command);
+        SafeProcessHandle.Start(new ProcessStartInfo(command));
+    }
+}
+""");
+
+        var result = ReadDataFlows(tempDirectory.Path);
+
+        foreach (var sink in new[] { "StartAndForget", "Run(", "RunAsync", "RunAndCaptureText", "RunAndCaptureTextAsync", "SafeProcessHandle.Start" })
+        {
+            Assert.Contains(result.Nodes, node => node.IsSink && node.Category == "command" && node.Symbol?.Contains(sink.Replace("(", string.Empty), StringComparison.Ordinal) == true);
+        }
+
+        Assert.Contains(result.Slices, slice => slice is { SourceCategory: "message", SinkCategory: "command" });
+    }
+
+    // The same sink set compiled: the IL interpreter must recognize the .NET 11 process helpers
+    // from their metadata tokens like it does Process.Start.
+    [SkippableFact]
+    public void GetDataFlows_Net11ProcessApiSinks_AssemblyKeepsTaint()
+    {
+        Skip.IfNot(HasNet11Sdk(), "Compiling .NET 11 process APIs at test time needs a .NET 11 SDK.");
+        using var tempDirectory = new TemporaryDirectory();
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "Net11ProcessSinksAssembly", """
+using System.Diagnostics;
+
+public static class Program
+{
+    public static void Main(string[] args)
+    {
+        var command = args[0];
+        Process.StartAndForget(command);
+        _ = Process.Run(command);
+        _ = Process.RunAndCaptureText(command);
+    }
+}
+""", targetFramework: "net11.0");
+
+        var result = ReadDataFlows(Path.Combine(outputDirectory, "Net11ProcessSinksAssembly.dll"));
+
+        Assert.Contains(result.Nodes, node => node.IsSink && node.Symbol?.Contains("StartAndForget", StringComparison.Ordinal) == true);
+        Assert.Contains(result.Nodes, node => node.IsSink && node.Symbol?.Contains("RunAndCaptureText", StringComparison.Ordinal) == true);
+        Assert.Contains(result.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" });
+    }
+
+    // Conditional compilation in C#: the parse options define the modern-net symbol family
+    // (`NET`, `NET11_0`, `NETx_0_OR_GREATER`), so multi-target guards analyze as visible code
+    // instead of becoming disabled text that no inventory or slice ever sees. DEBUG/TRACE and
+    // the legacy families stay undefined - a Release-shaped, modern-target build.
+    [Fact]
+    public void GetMethods_CSharpModernNetGuard_StaysVisibleAndLegacyGuardsStayHidden()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "ModernNetGuard.cs"), """
+using System.Diagnostics;
+
+class ModernNetGuard
+{
+#if NET8_0_OR_GREATER
+    public static void Modern(string command) => Process.Start(command);
+#endif
+#if DEBUG
+    public static void DebugOnly(string command) => Process.Start(command);
+#endif
+#if NETFRAMEWORK
+    public static void LegacyOnly(string command) => Process.Start(command);
+#endif
+}
+""");
+
+        var methodsSlice = ReadMethods(tempDirectory.Path);
+
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "ModernNetGuard", Name: "Modern" });
+        Assert.DoesNotContain(methodsSlice.Methods!, method => method is { Name: "DebugOnly" or "LegacyOnly" });
+    }
+
+    [Fact]
+    public void GetDataFlows_CSharpModernNetGuard_TaintFromGuardedBranchReachesSink()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "ModernNetGuard.cs"), """
+using System.Diagnostics;
+
+class ModernNetGuard
+{
+#if NET8_0_OR_GREATER
+    public static void Modern(string command) => Process.Start(command);
+#endif
+}
+""");
+
+        var result = ReadDataFlows(tempDirectory.Path);
+
+        Assert.Contains(result.Nodes, node => node is { IsSource: true, Name: "command", MethodName: "Modern" });
+        Assert.Contains(result.Nodes, node => node is { IsSink: true, Category: "command" });
+        Assert.Contains(result.Slices, slice => slice is { SourceCategory: "message", SinkCategory: "command" });
+    }
+
+    // ASP.NET Core 11: `[ShortCircuit]` (on a minimal-API lambda) must not hide the endpoint,
+    // and a union-typed JSON body parameter must be seeded as an HTTP source so taint from the
+    // deserialized union reaches sinks.
+    [Fact]
+    public void GetMethods_AspNetCore11Endpoints_ExtractShortCircuitAndUnionRoutes()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "AspNet11.cs"), """
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+
+var builder = WebApplication.CreateBuilder(args);
+var app = builder.Build();
+app.MapGet("/health", [ShortCircuit] () => "ok");
+app.MapPost("/pets", (PetUnion pet, CancellationToken ct) => Results.Ok(pet));
+app.Run();
+
+public sealed record Cat(string Name);
+public sealed record Dog(string Name);
+public union PetUnion(Cat, Dog);
+""");
+
+        var methodsSlice = ReadMethods(tempDirectory.Path);
+
+        Assert.Contains(methodsSlice.ApiEndpoints ?? [], endpoint => endpoint is { HttpMethod: "GET", Path: "/health", EndpointKind: "MinimalApi" });
+        Assert.Contains(methodsSlice.ApiEndpoints ?? [], endpoint => endpoint is { HttpMethod: "POST", Path: "/pets", EndpointKind: "MinimalApi" });
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Program", Name: "<Main>$" });
+    }
+
+    [Fact]
+    public void GetDataFlows_AspNetCore11UnionBodyLambda_SeedsHandlerParameter()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "AspNet11Union.cs"), """
+using System.Diagnostics;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+
+var builder = WebApplication.CreateBuilder(args);
+var app = builder.Build();
+app.MapPost("/pets", (PetUnion pet, CancellationToken ct) =>
+{
+    var name = pet switch { Cat c => c.Name, Dog d => d.Name };
+    Process.Start(name);
+    return Results.Ok(name);
+});
+app.Run();
+
+public sealed record Cat(string Name);
+public sealed record Dog(string Name);
+public union PetUnion(Cat, Dog);
+""");
+
+        var result = ReadDataFlows(tempDirectory.Path);
+
+        // The union body parameter is bound from the request; the cancellation token is not.
+        Assert.Contains(result.Nodes, node => node.IsSource && node.Category == "http" && node.Name == "pet" && node.Type?.Contains("PetUnion", StringComparison.Ordinal) == true);
+        Assert.DoesNotContain(result.Nodes, node => node.IsSource && node.Name is "ct" or "cancellationToken");
+        Assert.Contains(result.Slices, slice => slice is { SourceCategory: "http", SinkCategory: "command" });
     }
 
     // Extension-member declarations live in a compiler-synthesized nested type whose metadata
@@ -1597,6 +1781,8 @@ public static class Program
     // Analyzing one file must survive a hostile sibling tree: the best-effort discovery skips
     // the unreadable subtree, keeps enumerating its siblings, and warns instead of letting an
     // inaccessible (or over-long) directory crash the whole scan.
+    [SupportedOSPlatform("Linux")]
+    [SupportedOSPlatform("macOS")]
     [SkippableFact]
     public void GetDataFlows_SingleFileWithUnreadableSiblingDirectory_RemainsBestEffort()
     {
@@ -1692,6 +1878,8 @@ public static class Linked
 
     // Discovery warnings must not reach stdout: the MCP server writes line-delimited JSON-RPC
     // there, and a warning line in that stream is a protocol error for strict clients.
+    [SupportedOSPlatform("Linux")]
+    [SupportedOSPlatform("macOS")]
     [SkippableFact]
     public void EnumerateAllFilesSafe_UnreadableDirectory_WarnsOnStandardErrorOnly()
     {
@@ -2315,6 +2503,52 @@ class Net11TlsSessionSample
         Assert.Contains(result.Operations, operation => operation is { Algorithm: "AES Key Wrap", OperationType: "key-wrap/unwrap" });
         Assert.Contains(result.Assets, asset => asset is { Name: "TLS", Family: "protocol" });
         Assert.Contains(result.Findings, finding => finding is { RuleId: "DOSAI-CRYPTO-EXPERIMENTAL-TLS-API", Severity: "Low" });
+    }
+
+    // .NET 11's X25519 Diffie-Hellman (RFC 7748) and the padded AES Key Wrap variant (RFC 5649)
+    // extend the managed crypto surface: both are strong primitives that belong in the CBOM, and
+    // the padded names must not fall through to the generic Aes classification.
+    [Fact]
+    public void CryptoAnalysis_DetectsX25519AndPaddedKeyWrap()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Net11X25519Sample.cs"), """
+using System.Security.Cryptography;
+
+class Net11X25519Sample
+{
+    static byte[] Agree()
+    {
+        using X25519DiffieHellman alice = X25519DiffieHellman.GenerateKey();
+        using X25519DiffieHellman bob = X25519DiffieHellman.GenerateKey();
+        return alice.DeriveRawSecretAgreement(bob);
+    }
+}
+""");
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Net11KeyWrapPaddedSample.cs"), """
+using System.Security.Cryptography;
+
+class Net11KeyWrapPaddedSample
+{
+    static byte[] Wrap(byte[] key)
+    {
+        using var aes = Aes.Create();
+        return aes.EncryptKeyWrapPadded(key);
+    }
+
+    static byte[] Unwrap(byte[] wrapped)
+    {
+        using var aes = Aes.Create();
+        return aes.DecryptKeyWrapPadded(wrapped);
+    }
+}
+""");
+
+        var result = CryptoAnalyzer.Analyze(tempDirectory.Path);
+
+        Assert.Contains(result.Assets, asset => asset is { Name: "X25519", Family: "key-agreement", Strength: "strong", Standard: "RFC 7748" });
+        Assert.Contains(result.Operations, operation => operation is { Algorithm: "X25519", OperationType: "key-agreement" });
+        Assert.Contains(result.Assets, asset => asset is { Name: "AES Key Wrap", Strength: "strong", Standard: "RFC 5649" });
     }
 
     // .NET's post-quantum algorithms (FIPS 203/204/205) are part of the modern .NET baseline;
@@ -3503,6 +3737,52 @@ class SqlFlow
         Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "FSharp11More", Name: "summarize" });
     }
 
+    // F# 11 conditional compilation: `#elif` is new, and the analysis define set (modern .NET
+    // family defined, DEBUG/TRACE/NETFRAMEWORK undefined) picks the `#else` arm, the
+    // `#if !DEBUG` region, and the `NET8_0_OR_GREATER` guard. Multi-target guards are
+    // near-universal in real F# libraries; their declarations and sinks must stay visible.
+    [Fact]
+    public void GetMethods_FSharp11Language_ConditionalDirectivesSelectCompilerBranches()
+    {
+        var methodsSlice = ReadMethods(GetFilePath(FSharp11LanguageSource));
+
+        // `configure` is declared in all three branches but only the `#else` branch is live.
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "FSharp11Language", Name: "configure" });
+        // `#if !DEBUG` is satisfied with DEBUG undefined.
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "FSharp11Language", Name: "releaseNotes" });
+        // The multi-targeting guard: its declaration (and with it its Process.Start sink line)
+        // stays visible - this is the near-universal real-library shape.
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "FSharp11Language", Name: "modernPath" });
+        // The legacy framework family stays undefined.
+        Assert.DoesNotContain(methodsSlice.Methods!, method => method is { Name: "legacyPath" });
+
+        var calls = methodsSlice.MethodCalls ?? [];
+        Assert.Contains(calls, call => call is { CalledMethod: "ignore" } && call.SourceId?.Contains("configure", StringComparison.Ordinal) == true);
+        // The inactive DEBUG/TRACE branches' logger calls must not leak in.
+        Assert.DoesNotContain(calls, call => call.CalledMethod is "WriteLine" or "Debug" or "Trace");
+        // The legacy branch must not leak in either.
+        Assert.DoesNotContain(calls, call => call.SourceId?.Contains("legacyPath", StringComparison.Ordinal) == true);
+        // `#:`-directive lines are ignored by the F# 11 compiler wherever they appear.
+        Assert.DoesNotContain(calls, call => call.CalledMethod is "package" or "property");
+        Assert.DoesNotContain(methodsSlice.Dependencies ?? [], dependency => dependency.Name is "package" or "AsyncSeq");
+    }
+
+    // Type-level record spreads, anonymous record spreads, and nested dotted updates are all
+    // F# 11 shapes the line scanner must not trip on: every function survives as a module member
+    // and the spread ellipses produce no phantom calls.
+    [Fact]
+    public void GetMethods_FSharp11Language_RecordSpreadFormsDeclareFunctions()
+    {
+        var methodsSlice = ReadMethods(GetFilePath(FSharp11LanguageSource));
+
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "FSharp11Language", Name: "annotate" });
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "FSharp11Language", Name: "label" });
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "FSharp11Language", Name: "relocate" });
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "FSharp11Language", Name: "build" });
+
+        Assert.DoesNotContain(methodsSlice.MethodCalls ?? [], call => call.CalledMethod is "..." or "Config" or "Opts");
+    }
+
     // Comment prose shaped like `word (F# 11)` or declaration keywords (`inherit`, `override`,
     // `abstract`) must not surface as method calls.
     [Fact]
@@ -3585,6 +3865,21 @@ class SqlFlow
         Assert.Contains(calls, call => call is { CalledMethod: "system" } && call.SourceId?.Contains("render", StringComparison.Ordinal) == true);
         // Comment prose shapes (`word (R 4.1+)`) must not become calls.
         Assert.DoesNotContain(calls, call => call.CalledMethod is "syntax" or "_" or "placeholder" or "shorthand");
+    }
+
+    // R 4.4+ added `%||%` and `declare()`, R 4.6 added `%notin%`: the infix operators are not
+    // calls and must not mint phantom function names, while the ordinary call keeps flowing
+    // through the guard to the `system` sink attribution.
+    [SkippableFact]
+    public void GetMethods_ModernRSource_InfixOperatorsAreNotCalls()
+    {
+        SkipIfRNativeParserIsInstalled();
+        var methodsSlice = ReadMethods(GetFilePath(ModernRFeatureSource));
+
+        var calls = methodsSlice.MethodCalls ?? [];
+        Assert.Contains(calls, call => call is { CalledMethod: "declare" } && call.SourceId?.Contains("render", StringComparison.Ordinal) == true);
+        Assert.Contains(calls, call => call is { CalledMethod: "message" } && call.SourceId?.Contains("render", StringComparison.Ordinal) == true);
+        Assert.DoesNotContain(calls, call => call.CalledMethod is "%notin%" or "%||%" or "notin");
     }
 
     // A backslash inside a string literal (`pattern <- "\\d+"`) is not the lambda introducer;
@@ -4490,7 +4785,9 @@ class SqlFlow
     private const string HelloWorldFSharpSource = "HelloWorld.fs";
     private const string FSharp11FeaturesSource = "FSharp11Features.fs";
     private const string FSharp11MoreFeaturesSource = "FSharp11MoreFeatures.fs";
+    private const string FSharp11LanguageSource = "FSharp11Language.fs";
     private const string CSharp15FeatureSource = "CSharp15Features.cs";
+    private const string FileBasedAppSource = "FileBasedApp.cs";
     private const string ExtensionMemberSource = "ExtensionMembers.cs";
     private const string ModernRFeatureSource = "ModernRFeatures.R";
     private const string NotebookSource = "Notebook.Rmd";
