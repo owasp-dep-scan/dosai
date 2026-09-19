@@ -784,6 +784,16 @@ public static class Dosai
     ///     references, ordered so the running runtime's own version is tried first and the
     ///     remaining installed versions newest-first.
     /// </summary>
+    private static List<string> GetSharedFrameworkProbingPaths()
+        => GetSharedFrameworkProbingPaths(
+            System.Runtime.InteropServices.RuntimeEnvironment.GetRuntimeDirectory(),
+            GetDotnetSharedRuntimePaths());
+
+    /// <summary>
+    ///     Testable core of <see cref="GetSharedFrameworkProbingPaths" />: the runtime
+    ///     directory and the shared roots reported by <c>dotnet --list-runtimes</c> are
+    ///     supplied by the caller.
+    /// </summary>
     /// <remarks>
     ///     Order is correctness, not a preference. These directories all contain a
     ///     `System.Runtime.dll`, one per installed framework version, and probing stops at the
@@ -795,9 +805,8 @@ public static class Dosai
     ///     Newest-first resolves references from a superset framework instead, and the running
     ///     runtime leads because it is the one version guaranteed to be loadable in-process.
     /// </remarks>
-    private static List<string> GetSharedFrameworkProbingPaths()
+    internal static List<string> GetSharedFrameworkProbingPaths(string runtimeDir, IEnumerable<string> dotnetSharedRuntimePaths)
     {
-        var runtimeDir = System.Runtime.InteropServices.RuntimeEnvironment.GetRuntimeDirectory();
         var sharedRoots = new HashSet<string>(StringComparer.Ordinal);
         var runningSharedRoot = Path.GetFullPath(Path.Combine(runtimeDir, "..", ".."));
         if (Directory.Exists(runningSharedRoot))
@@ -805,7 +814,7 @@ public static class Dosai
             sharedRoots.Add(runningSharedRoot);
         }
 
-        foreach (var sharedRoot in GetDotnetSharedRuntimePaths().Where(Directory.Exists))
+        foreach (var sharedRoot in dotnetSharedRuntimePaths.Where(Directory.Exists))
         {
             sharedRoots.Add(sharedRoot);
         }
@@ -821,10 +830,33 @@ public static class Dosai
             }
         }
 
+        // A self-contained deployment has no shared/<framework>/<version> layout: the runtime
+        // sits directly in the application directory, and the `dotnet` resolved from PATH may
+        // belong to an older machine install whose System.Runtime would then shadow the
+        // bundled one (a self-contained .NET 11 dosai on a .NET 10-only machine loses every
+        // C# 15 union type this way). When the runtime directory is itself a framework
+        // directory, probe it too; for a framework-dependent install this is the running
+        // version directory, which the ordering below already ranks first, so the duplicate
+        // is harmless.
+        if (File.Exists(Path.Combine(runtimeDir, "System.Runtime.dll")))
+        {
+            versionDirectories.Add(runtimeDir);
+        }
+
         var runningVersionDirectory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(runtimeDir));
+        var runningVersion = Environment.Version;
         return versionDirectories
             .Select(directory => Path.TrimEndingDirectorySeparator(Path.GetFullPath(directory)))
             .Distinct(StringComparer.Ordinal)
+            // A shared framework older than the running runtime is never a useful probe: its
+            // System.Runtime shadows the one hosting this process and drops types the running
+            // runtime understands. A single-file self-contained build keeps the bundled runtime
+            // inside the executable (no loose System.Runtime.dll anywhere), and skipping the
+            // older installs lets probing miss so the loader falls back to the Default context's
+            // already-loaded bundled assemblies instead. The running directory itself is exempt:
+            // a self-contained app directory is not named after a framework version.
+            .Where(directory => string.Equals(directory, runningVersionDirectory, StringComparison.Ordinal)
+                                || ParseFrameworkVersion(Path.GetFileName(directory)).Version >= runningVersion)
             .OrderByDescending(directory => string.Equals(directory, runningVersionDirectory, StringComparison.Ordinal))
             .ThenByDescending(directory => ParseFrameworkVersion(Path.GetFileName(directory)))
             .ToList();
@@ -1408,16 +1440,31 @@ public static class Dosai
         var constructors = new List<ConstructorInfo>();
         var sourceAssemblyMappings = new List<SourceAssemblyMapping>();
         var dispatchIndexes = new Dictionary<Compilation, DispatchResolver.SourceIndex>();
+        var metadataReferences = new Dictionary<string, PortableExecutableReference>(StringComparer.OrdinalIgnoreCase);
 #pragma warning disable IL3000
-        var mscorlib = MetadataReference.CreateFromFile(Path.Combine(AppContext.BaseDirectory, typeof(object).Assembly.Location));
-#pragma warning restore IL3000
-        var metadataReferences = new Dictionary<string, PortableExecutableReference>(StringComparer.OrdinalIgnoreCase)
+        // Single-file bundles give the core assembly no file location and set no
+        // TRUSTED_PLATFORM_ASSEMBLIES entries; combining the app directory with an empty
+        // location used to make CreateFromFile open the directory itself and crash.
+        if (Path.IsPathRooted(typeof(object).Assembly.Location))
         {
-            [mscorlib.FilePath ?? "System.Private.CoreLib"] = mscorlib
-        };
+            var mscorlib = MetadataReference.CreateFromFile(typeof(object).Assembly.Location);
+            metadataReferences[mscorlib.FilePath ?? "System.Private.CoreLib"] = mscorlib;
+        }
+#pragma warning restore IL3000
         if (AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES") is string trustedPlatformAssemblies)
         {
             foreach (var referencePath in trustedPlatformAssemblies.Split(Path.PathSeparator).Where(File.Exists))
+            {
+                metadataReferences.TryAdd(referencePath, MetadataReference.CreateFromFile(referencePath));
+            }
+        }
+        // Single-file fallback: with no core location and no trusted-platform entries, seed
+        // framework references from the newest probeable shared framework so source analysis
+        // keeps a usable semantic model. Only one framework directory is used - mixing
+        // versions would give Roslyn duplicate assembly identities.
+        if (metadataReferences.Count == 0 && GetSharedFrameworkProbingPaths().FirstOrDefault(Directory.Exists) is { } frameworkDirectory)
+        {
+            foreach (var referencePath in SafeFileRead.EnumerateAllFilesSafe(frameworkDirectory, "*.dll"))
             {
                 metadataReferences.TryAdd(referencePath, MetadataReference.CreateFromFile(referencePath));
             }

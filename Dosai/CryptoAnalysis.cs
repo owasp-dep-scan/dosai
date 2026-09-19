@@ -1442,22 +1442,58 @@ public static class CryptoBomExporter
         Converters = { new JsonStringEnumConverter() }
     };
 
+    /// <summary>
+    ///     Component shape for the CycloneDX export. Hyphenated schema keys such as
+    ///     <c>bom-ref</c> cannot be anonymous-type members, so the component (and the
+    ///     vulnerability below) are records carrying <see cref="JsonPropertyNameAttribute" />.
+    /// </summary>
+    private sealed record CycloneDxComponent(
+        [property: JsonPropertyName("type")] string Type,
+        [property: JsonPropertyName("name")] string Name,
+        [property: JsonPropertyName("version")] string? Version,
+        [property: JsonPropertyName("bom-ref")] string? BomRef,
+        [property: JsonPropertyName("cryptoProperties")] object? CryptoProperties,
+        [property: JsonPropertyName("properties")] object? Properties);
+
+    private sealed record CycloneDxVulnerability(
+        [property: JsonPropertyName("id")] string Id,
+        [property: JsonPropertyName("bom-ref")] string? BomRef,
+        [property: JsonPropertyName("source")] object Source,
+        [property: JsonPropertyName("ratings")] IReadOnlyList<object> Ratings,
+        [property: JsonPropertyName("cwes")] int[] Cwes,
+        [property: JsonPropertyName("description")] string? Description,
+        [property: JsonPropertyName("recommendation")] string? Recommendation,
+        [property: JsonPropertyName("affects")] object Affects,
+        [property: JsonPropertyName("properties")] object? Properties);
+
     public static string Export(CryptoAnalysisResult result, CryptoOutputFormat format) => format switch
     {
         CryptoOutputFormat.CycloneDx => ExportCycloneDx(result),
         _ => JsonSerializer.Serialize(result, JsonOptions)
     };
 
+    /// <summary>
+    ///     Emits a CycloneDX 1.6 CBOM. Every emitted key must exist in the 1.6 JSON schema:
+    ///     component and vulnerability references are <c>bom-ref</c> (not <c>bomRef</c>), and a
+    ///     <c>cryptographic-asset</c> component carries <c>cryptoProperties.assetType</c>. The
+    ///     document also declares <c>$schema</c> so strict validators can locate the spec.
+    /// </summary>
     private static string ExportCycloneDx(CryptoAnalysisResult result)
     {
         var components = new List<object>();
-        components.AddRange(result.Assets.Select(asset => new
-        {
-            type = "cryptographic-asset",
-            name = asset.Name,
-            version = asset.Standard,
-            bomRef = $"dosai:crypto:{asset.Id}",
-            properties = ToProperties(new Dictionary<string, string?>
+        components.AddRange(result.Assets.Select(asset => new CycloneDxComponent(
+            Type: "cryptographic-asset",
+            Name: asset.Name,
+            Version: asset.Standard,
+            BomRef: $"dosai:crypto:{asset.Id}",
+            CryptoProperties: new
+            {
+                assetType = ToCycloneDxAssetType(asset.AssetType),
+                algorithmProperties = ToCycloneDxPrimitive(asset.Family) is { } primitive
+                    ? new { primitive }
+                    : null
+            },
+            Properties: ToProperties(new Dictionary<string, string?>
             {
                 ["dosai:crypto:evidenceType"] = "asset",
                 ["dosai:crypto:assetType"] = asset.AssetType,
@@ -1467,14 +1503,14 @@ public static class CryptoBomExporter
                 ["dosai:crypto:reachableFromEntryPoint"] = asset.ReachableFromEntryPoint.ToString().ToLowerInvariant(),
                 ["dosai:crypto:entryPointIds"] = string.Join(",", asset.EntryPointIds),
                 ["dosai:location"] = FormatLocation(asset.Location)
-            })
-        }));
-        components.AddRange(result.Operations.Select(operation => new
-        {
-            type = "data",
-            name = operation.Algorithm,
-            bomRef = $"dosai:crypto:operation:{operation.Id}",
-            properties = ToProperties(new Dictionary<string, string?>
+            }))));
+        components.AddRange(result.Operations.Select(operation => new CycloneDxComponent(
+            Type: "data",
+            Name: operation.Algorithm,
+            Version: null,
+            BomRef: $"dosai:crypto:operation:{operation.Id}",
+            CryptoProperties: null,
+            Properties: ToProperties(new Dictionary<string, string?>
             {
                 ["dosai:crypto:evidenceType"] = "operation",
                 ["dosai:crypto:operationType"] = operation.OperationType,
@@ -1488,14 +1524,14 @@ public static class CryptoBomExporter
                 ["dosai:crypto:entryPointIds"] = string.Join(",", operation.EntryPointIds),
                 ["dosai:crypto:dataFlowSliceIds"] = string.Join(",", operation.DataFlowSliceIds),
                 ["dosai:location"] = FormatLocation(operation.Location)
-            })
-        }));
-        components.AddRange(result.Materials.Select(material => new
-        {
-            type = "data",
-            name = material.MaterialType,
-            bomRef = $"dosai:crypto:material:{material.Id}",
-            properties = ToProperties(new Dictionary<string, string?>
+            }))));
+        components.AddRange(result.Materials.Select(material => new CycloneDxComponent(
+            Type: "data",
+            Name: material.MaterialType,
+            Version: null,
+            BomRef: $"dosai:crypto:material:{material.Id}",
+            CryptoProperties: null,
+            Properties: ToProperties(new Dictionary<string, string?>
             {
                 ["dosai:crypto:evidenceType"] = "material",
                 ["dosai:crypto:materialName"] = material.Name,
@@ -1510,15 +1546,22 @@ public static class CryptoBomExporter
                 ["dosai:crypto:entryPointIds"] = string.Join(",", material.EntryPointIds),
                 ["dosai:crypto:dataFlowSliceIds"] = string.Join(",", material.DataFlowSliceIds),
                 ["dosai:location"] = FormatLocation(material.Location)
-            })
-        }));
-        components.AddRange(result.Protocols.Select(protocol => new
-        {
-            type = "cryptographic-asset",
-            name = protocol.Name,
-            version = protocol.Version,
-            bomRef = $"dosai:crypto:protocol:{protocol.Id}",
-            properties = ToProperties(new Dictionary<string, string?>
+            }))));
+        components.AddRange(result.Protocols.Select(protocol => new CycloneDxComponent(
+            Type: "cryptographic-asset",
+            Name: protocol.Name,
+            Version: protocol.Version,
+            BomRef: $"dosai:crypto:protocol:{protocol.Id}",
+            CryptoProperties: new
+            {
+                assetType = "protocol",
+                protocolProperties = new
+                {
+                    type = ToCycloneDxProtocolType(protocol.Name),
+                    version = protocol.Version
+                }
+            },
+            Properties: ToProperties(new Dictionary<string, string?>
             {
                 ["dosai:crypto:evidenceType"] = "protocol",
                 ["dosai:crypto:protocol"] = protocol.Name,
@@ -1529,20 +1572,18 @@ public static class CryptoBomExporter
                 ["dosai:crypto:reachableFromEntryPoint"] = protocol.ReachableFromEntryPoint.ToString().ToLowerInvariant(),
                 ["dosai:crypto:entryPointIds"] = string.Join(",", protocol.EntryPointIds),
                 ["dosai:location"] = FormatLocation(protocol.Location)
-            })
-        }));
+            }))));
 
-        var vulnerabilities = result.Findings.Select(finding => new
-        {
-            id = finding.RuleId,
-            bomRef = $"dosai:crypto:finding:{finding.Id}",
-            source = new { name = "Dosai" },
-            ratings = new[] { new { severity = finding.Severity.ToLowerInvariant(), method = "other", vector = finding.Confidence } },
-            cwes = string.IsNullOrWhiteSpace(finding.Cwe) ? Array.Empty<int>() : ParseCwe(finding.Cwe),
-            description = finding.Summary,
-            recommendation = finding.Recommendation,
-            affects = finding.AssetIds.Select(id => new { @ref = $"dosai:crypto:{id}" }).ToList(),
-            properties = ToProperties(new Dictionary<string, string?>
+        var vulnerabilities = result.Findings.Select(finding => new CycloneDxVulnerability(
+            Id: finding.RuleId,
+            BomRef: $"dosai:crypto:finding:{finding.Id}",
+            Source: new { name = "Dosai" },
+            Ratings: [new { severity = finding.Severity.ToLowerInvariant(), method = "other", vector = finding.Confidence }],
+            Cwes: string.IsNullOrWhiteSpace(finding.Cwe) ? [] : ParseCwe(finding.Cwe),
+            Description: finding.Summary,
+            Recommendation: finding.Recommendation,
+            Affects: finding.AssetIds.Select(id => new { @ref = $"dosai:crypto:{id}" }).ToList(),
+            Properties: ToProperties(new Dictionary<string, string?>
             {
                 ["dosai:crypto:reachableFromEntryPoint"] = finding.ReachableFromEntryPoint.ToString().ToLowerInvariant(),
                 ["dosai:crypto:entryPointIds"] = string.Join(",", finding.EntryPointIds),
@@ -1554,18 +1595,20 @@ public static class CryptoBomExporter
                 ["dosai:crypto:sinkOperationIds"] = string.Join(",", finding.SinkOperationIds),
                 ["dosai:method:id"] = finding.MethodId,
                 ["dosai:location"] = FormatLocation(finding.Location)
-            })
-        }).ToList();
+            }))).ToList();
 
         var dependencies = BuildDependencies(result).ToList();
 
-        var bom = new
+        // `$schema` is not a legal C# identifier, so the root is a dictionary while the
+        // nested sections stay anonymous objects.
+        var bom = new Dictionary<string, object?>
         {
-            bomFormat = "CycloneDX",
-            specVersion = "1.6",
-            serialNumber = $"urn:uuid:{Guid.NewGuid()}",
-            version = 1,
-            metadata = new
+            ["$schema"] = "http://cyclonedx.org/schema/bom-1.6.schema.json",
+            ["bomFormat"] = "CycloneDX",
+            ["specVersion"] = "1.6",
+            ["serialNumber"] = $"urn:uuid:{Guid.NewGuid()}",
+            ["version"] = 1,
+            ["metadata"] = new
             {
                 timestamp = result.Metadata.GeneratedAt,
                 tools = new[] { new { vendor = "OWASP", name = "Dosai", version = result.Metadata.AnalyzerVersion } },
@@ -1580,12 +1623,62 @@ public static class CryptoBomExporter
                     ["dosai:crypto:dataFlowSliceCount"] = result.Statistics.CryptoDataFlowSliceCount.ToString()
                 })
             },
-            components,
-            dependencies,
-            vulnerabilities
+            ["components"] = components,
+            ["dependencies"] = dependencies,
+            ["vulnerabilities"] = vulnerabilities
         };
         return JsonSerializer.Serialize(bom, JsonOptions);
     }
+
+    /// <summary>
+    ///     Maps a dosai asset type onto the CycloneDX <c>cryptoProperties.assetType</c> enum.
+    ///     The hyphenated <c>related-crypto-material</c> spelling accepts both dosai forms.
+    /// </summary>
+    private static string ToCycloneDxAssetType(string? assetType) => (assetType ?? string.Empty).Trim().ToLowerInvariant() switch
+    {
+        "certificate" => "certificate",
+        "protocol" => "protocol",
+        "relatedcryptomaterial" or "related-crypto-material" => "related-crypto-material",
+        _ => "algorithm"
+    };
+
+    /// <summary>
+    ///     Maps a dosai crypto family onto the CycloneDX <c>algorithmProperties.primitive</c>
+    ///     enum when the concepts coincide; returns null otherwise so the property is omitted
+    ///     rather than guessed (the family always survives as a dosai:crypto:family property).
+    /// </summary>
+    private static string? ToCycloneDxPrimitive(string? family) => (family ?? string.Empty).Trim().ToLowerInvariant() switch
+    {
+        "hash" => "hash",
+        "mac" => "mac",
+        "signature" => "signature",
+        "kdf" => "kdf",
+        "key-agreement" => "key-agree",
+        "kem" => "kem",
+        "block-cipher" => "block-cipher",
+        "stream-cipher" => "stream-cipher",
+        "pke" => "pke",
+        "drbg" => "drbg",
+        "xof" => "xof",
+        "ae" => "ae",
+        "combiner" => "combiner",
+        _ => null
+    };
+
+    /// <summary>
+    ///     Maps a dosai protocol name onto the CycloneDX <c>protocolProperties.type</c> enum;
+    ///     an unrecognized protocol is reported as <c>other</c>, the schema's catch-all.
+    /// </summary>
+    private static string ToCycloneDxProtocolType(string? name) => (name ?? string.Empty).Trim().ToLowerInvariant() switch
+    {
+        "tls" => "tls",
+        "ssh" => "ssh",
+        "ipsec" => "ipsec",
+        "ike" => "ike",
+        "sstp" => "sstp",
+        "wpa" => "wpa",
+        _ => "other"
+    };
 
     private static IEnumerable<object> BuildDependencies(CryptoAnalysisResult result)
     {
