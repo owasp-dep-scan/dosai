@@ -3959,7 +3959,7 @@ public sealed class FrameworkTaintSeedIndex
     /// </summary>
     public Frameworks.FrameworkTaintSeed? FindAtLine(string? fileName, string parameterName, int lineNumber) =>
         fileName is null ? null : _lineAnchored.FirstOrDefault(seed =>
-            seed.FileName.Equals(fileName, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(seed.FileName, fileName, StringComparison.OrdinalIgnoreCase) &&
             seed.ParameterName.Equals(parameterName, StringComparison.Ordinal) &&
             seed.LineNumber == lineNumber);
 

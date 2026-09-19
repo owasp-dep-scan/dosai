@@ -72,6 +72,16 @@ The rest of the C# 15 feature set parses and analyzes like ordinary code:
   `extern` member (`safe static extern int Read();`) and on fields of an explicit-layout struct
   parses too, and the members are inventoried like ordinary fields and methods.
 
+### Conditional compilation (`#if`) resolves against a modern .NET target
+
+Both the C# parse options and the F# line frontend define the modern-net symbol family - `NET`,
+`NET11_0`, and the `NETx_0_OR_GREATER` chain down to .NET 5 - while `DEBUG`/`TRACE` and the
+legacy `NETFRAMEWORK`/`NETSTANDARD` families stay undefined: a Release-shaped build against the
+latest .NET target. `#if NET8_0_OR_GREATER` guards are near-universal in real libraries, and
+parsing with an empty define set turned their bodies into disabled text invisible to
+`Methods[]`, `MethodCalls[]`, and the data-flow walker. A missed sink in a guarded branch is
+worse for a scanner than a declaration the analyzed project's own target would not compile.
+
 ### File-based apps (`dotnet run app.cs`)
 
 - The `#:` directives (`#:property`, `#:package`, `#:include`, `#:sdk`, `#:project`) parse as
@@ -138,9 +148,10 @@ The F# line frontend additionally follows the F# 11 compiler's preprocessor sema
 
 - `#elif` (new in F# 11) is recognized, and conditional regions (`#if`/`#elif`/`#else`/
   `#endif`, with `!`, `&&`, `||`, and parentheses in conditions) contribute declarations and
-  calls only from the branch the compiler would build with an empty define set — the same
-  branch selection the C# pipeline's Roslyn compilation applies. Inactive text previously
-  leaked phantom functions and calls into `Methods[]` and `MethodCalls[]`.
+  calls only from the branches the analysis define set selects - the same modern-net,
+  Release-shaped set the C# parse options define (see the conditional-compilation section
+  above). Inactive text previously leaked phantom functions and calls into `Methods[]` and
+  `MethodCalls[]`.
 - `#:`-prefixed file-based app directive lines are ignored wherever they appear (FS-1337);
   before, `#:property ...` lines minted phantom `property` calls.
 - Type-level record spreads (`type Labeled = { ...Config; Label: string }`), anonymous record

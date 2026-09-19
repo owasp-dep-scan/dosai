@@ -126,7 +126,7 @@ public static partial class LanguageFrontendAnalyzer
             else if (!preprocessor.IsActive)
             {
                 // Inactive conditional text contributes no declarations, calls, or dependencies -
-                // the same branch the compiler would build with an empty define set.
+                // the branches the analysis define set (modern .NET, Release-shaped) leaves out.
                 continue;
             }
 
@@ -351,11 +351,15 @@ public static partial class LanguageFrontendAnalyzer
 
     /// <summary>
     ///     Tracks F# conditional-compilation regions (`#if`/`#elif`/`#else`/`#endif`, with `#elif`
-    ///     itself new in F# 11) across the lines of one file. Dosai compiles nothing, so no
-    ///     compilation symbols are defined - the taken branch is the one the F# compiler would
-    ///     build with an empty define set, matching how the C# pipeline's Roslyn compilation
-    ///     keeps only the active branch. Conditions still honor `!`, `&&`, `||`, and parentheses,
-    ///     so `#if !DEBUG` selects its branch the way the compiler would.
+    ///     itself new in F# 11) across the lines of one file. Dosai compiles nothing, so the
+    ///     define set is the analysis one: <see cref="FrameworkPreprocessorDefines.ModernNet" />
+    ///     (`NET`, `NET11_0`, and the `NETx_0_OR_GREATER` chain) is defined, matching what a
+    ///     build against the latest .NET target defines, while `DEBUG`/`TRACE` stay undefined -
+    ///     a Release-shaped build. Multi-target guards (`#if NET8_0_OR_GREATER`) are
+    ///     near-universal in real F# libraries; treating them as undefined turned their bodies
+    ///     into dropped text, and for a security scanner a missed sink in a guarded branch is
+    ///     worse than a declaration the analyzed project's own target would not compile. This
+    ///     matches the C# pipeline, whose parse options define the same set.
     /// </summary>
     private sealed class FSharpPreprocessor
     {
@@ -399,7 +403,12 @@ public static partial class LanguageFrontendAnalyzer
             }
         }
 
-        /// <summary>Evaluates an `#if`/`#elif` condition with an empty define set: only `!`, `&amp;&amp;`, `||`, parentheses, and literals have an effect.</summary>
+        /// <summary>
+        ///     Evaluates an `#if`/`#elif` condition against the analysis define set: the modern-net
+        ///     symbols are defined, everything else (including `DEBUG`, `TRACE`, and custom
+        ///     symbols) is not. Only `!`, `&amp;&amp;`, `||`, parentheses, and identifiers have an
+        ///     effect.
+        /// </summary>
         private static bool EvaluateCondition(string condition)
         {
             var tokens = Regex.Matches(condition ?? string.Empty, @"&&|\|\||!|\(|\)|[A-Za-z_][\w\.]*|\d+")
@@ -447,8 +456,13 @@ public static partial class LanguageFrontendAnalyzer
                     if (position < tokens.Count && tokens[position] == ")") position++;
                     return value;
                 }
-                // No symbol is ever defined; bare identifiers and version literals are false.
-                if (position < tokens.Count) position++;
+                if (position < tokens.Count)
+                {
+                    var defined = FrameworkPreprocessorDefines.ModernNet.Contains(tokens[position]);
+                    position++;
+                    return defined;
+                }
+
                 return false;
             }
         }

@@ -7,9 +7,11 @@
 // expression spreads of FSharp11Features.fs, and nested dotted field updates
 // (`{ ...service; Config.Host = host }`) update one field of a nested record in place.
 //
-// With no compilation symbols defined - the same empty define set the F# compiler uses for a
-// Release build - only the `#else` branch of the first region and the `#if !DEBUG` branch of
-// the second contribute declarations and calls.
+// With the analysis define set - `NET`, `NET11_0`, and the `NETx_0_OR_GREATER` chain defined,
+// `DEBUG`/`TRACE` and the legacy `NETFRAMEWORK`/`NETSTANDARD` families undefined - the taken
+// branches are the `#else` arm of the first region, the `#if !DEBUG` region, and the
+// `#if NET8_0_OR_GREATER` region; the `#if NETFRAMEWORK` region stays out. Multi-target guards
+// are near-universal in real F# libraries, so their declarations and sinks must stay visible.
 //
 // Source-mode fixture only: it is deliberately not in Dosai.TestData.FSharp.fsproj's Compile
 // items, because compiling it would change that assembly's member set and with it the method
@@ -47,6 +49,18 @@ let configure mode = ignore mode
 
 #if !DEBUG
 let releaseNotes = "release"
+#endif
+
+// The near-universal multi-targeting guard: modern-API branches must stay visible, because a
+// missed sink in a guarded branch is worse for a scanner than a phantom declaration.
+#if NET8_0_OR_GREATER
+let modernPath (cmd: string) =
+    System.Diagnostics.Process.Start(cmd) |> ignore
+#endif
+
+#if NETFRAMEWORK
+let legacyPath (cmd: string) =
+    System.Diagnostics.Process.Start(cmd) |> ignore
 #endif
 
 let annotate (config: Config) =

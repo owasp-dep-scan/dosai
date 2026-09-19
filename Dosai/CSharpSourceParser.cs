@@ -4,6 +4,36 @@ using Microsoft.CodeAnalysis.CSharp;
 namespace Depscan;
 
 /// <summary>
+///     Preprocessor symbols the analysis treats as defined when interpreting conditional
+///     compilation, in C# (parse options) and F# (the line frontend's region tracking) alike:
+///     `NET`, the current `NET{n}_0`, and the `NET{x}_0_OR_GREATER` chain down to .NET 5 -
+///     exactly what a build against the latest .NET target defines. Multi-target guards
+///     (`#if NET8_0_OR_GREATER`) are near-universal in real libraries; parsing with an empty
+///     define set turns their bodies into disabled text, and for a security scanner a missed
+///     sink in a guarded branch is worse than a declaration the analyzed project's own target
+///     would not compile. `DEBUG`/`TRACE` (a Release-shaped build) and the legacy families
+///     (`NETFRAMEWORK`, `NETSTANDARD`) stay undefined, matching a modern net target. Bump the
+///     ceiling together with <c>TargetFramework</c>.
+/// </summary>
+internal static class FrameworkPreprocessorDefines
+{
+    private const int LatestModernNetMajor = 11;
+
+    public static IReadOnlySet<string> ModernNet { get; } = BuildModernNet();
+
+    private static IReadOnlySet<string> BuildModernNet()
+    {
+        var symbols = new HashSet<string>(StringComparer.Ordinal) { "NET", $"NET{LatestModernNetMajor}_0" };
+        for (var major = 5; major <= LatestModernNetMajor; major++)
+        {
+            symbols.Add($"NET{major}_0_OR_GREATER");
+        }
+
+        return symbols;
+    }
+}
+
+/// <summary>
 ///     Central place for building C# syntax trees for analysis. Every analyzer parses through
 ///     this helper so the accepted language version is decided in one spot.
 /// </summary>
@@ -25,10 +55,16 @@ namespace Depscan;
 ///     parsing a project-based file is unaffected - the feature only stops the compiler from
 ///     rejecting lines that a file-based app owns.
 /// </remarks>
+/// <remarks>
+///     The parse options also define <see cref="FrameworkPreprocessorDefines.ModernNet" />, so
+///     `#if NET8_0_OR_GREATER`-style guards analyze as visible code instead of becoming disabled
+///     text that no inventory, call graph, or data-flow result ever sees.
+/// </remarks>
 public static class CSharpSourceParser
 {
     private static readonly CSharpParseOptions ParseOptions = new CSharpParseOptions(languageVersion: LanguageVersion.Preview)
-        .WithFeatures([new KeyValuePair<string, string>("FileBasedProgram", "true")]);
+        .WithFeatures([new KeyValuePair<string, string>("FileBasedProgram", "true")])
+        .WithPreprocessorSymbols(FrameworkPreprocessorDefines.ModernNet);
 
     public static CSharpSyntaxTree Parse(string content, string path) =>
         (CSharpSyntaxTree)CSharpSyntaxTree.ParseText(content, ParseOptions, path);

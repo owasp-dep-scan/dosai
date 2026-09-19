@@ -4,6 +4,7 @@ using System.Reflection;
 using System.Reflection.Metadata;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Runtime.Versioning;
 using System.Xml.Linq;
 using Xunit;
 
@@ -1007,19 +1008,7 @@ class FlowSample
     public void GetDataFlows_AssemblyOnlyCliSourceToProcessStart_ReturnsIlSliceWithValidEdges()
     {
         using var tempDirectory = new TemporaryDirectory();
-        var projectDirectory = Path.Combine(tempDirectory.Path, "src");
-        var outputDirectory = Path.Combine(tempDirectory.Path, "bin");
-        Directory.CreateDirectory(projectDirectory);
-        Directory.CreateDirectory(outputDirectory);
-        File.WriteAllText(Path.Combine(projectDirectory, "AssemblyOnlyFlow.csproj"), """
-<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
-    <OutputType>Exe</OutputType>
-  </PropertyGroup>
-</Project>
-""");
-        File.WriteAllText(Path.Combine(projectDirectory, "Program.cs"), """
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "AssemblyOnlyFlow", """
 using System.Diagnostics;
 
 public static class Program
@@ -1031,23 +1020,6 @@ public static class Program
     }
 }
 """);
-
-        var build = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-        {
-            FileName = "dotnet",
-            Arguments = $"build \"{Path.Combine(projectDirectory, "AssemblyOnlyFlow.csproj")}\" -o \"{outputDirectory}\" -v:quiet",
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false
-        });
-        Assert.NotNull(build);
-        // Drain both pipes before waiting: a build that fills either buffer would otherwise
-        // block until the test times out.
-        var buildStdout = build.StandardOutput.ReadToEndAsync();
-        var buildStderr = build.StandardError.ReadToEndAsync();
-        build.WaitForExit();
-        var buildOutput = buildStdout.GetAwaiter().GetResult() + buildStderr.GetAwaiter().GetResult();
-        Assert.True(build.ExitCode == 0, buildOutput);
 
         var resultJson = DataFlowAnalyzer.GetDataFlows(Path.Combine(outputDirectory, "AssemblyOnlyFlow.dll"));
         var dataFlowResult = JsonSerializer.Deserialize<DataFlowResult>(resultJson, new JsonSerializerOptions
@@ -1464,6 +1436,59 @@ public static class Program
         Assert.Contains(result.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" });
     }
 
+    // Conditional compilation in C#: the parse options define the modern-net symbol family
+    // (`NET`, `NET11_0`, `NETx_0_OR_GREATER`), so multi-target guards analyze as visible code
+    // instead of becoming disabled text that no inventory or slice ever sees. DEBUG/TRACE and
+    // the legacy families stay undefined - a Release-shaped, modern-target build.
+    [Fact]
+    public void GetMethods_CSharpModernNetGuard_StaysVisibleAndLegacyGuardsStayHidden()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "ModernNetGuard.cs"), """
+using System.Diagnostics;
+
+class ModernNetGuard
+{
+#if NET8_0_OR_GREATER
+    public static void Modern(string command) => Process.Start(command);
+#endif
+#if DEBUG
+    public static void DebugOnly(string command) => Process.Start(command);
+#endif
+#if NETFRAMEWORK
+    public static void LegacyOnly(string command) => Process.Start(command);
+#endif
+}
+""");
+
+        var methodsSlice = ReadMethods(tempDirectory.Path);
+
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "ModernNetGuard", Name: "Modern" });
+        Assert.DoesNotContain(methodsSlice.Methods!, method => method is { Name: "DebugOnly" or "LegacyOnly" });
+    }
+
+    [Fact]
+    public void GetDataFlows_CSharpModernNetGuard_TaintFromGuardedBranchReachesSink()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "ModernNetGuard.cs"), """
+using System.Diagnostics;
+
+class ModernNetGuard
+{
+#if NET8_0_OR_GREATER
+    public static void Modern(string command) => Process.Start(command);
+#endif
+}
+""");
+
+        var result = ReadDataFlows(tempDirectory.Path);
+
+        Assert.Contains(result.Nodes, node => node is { IsSource: true, Name: "command", MethodName: "Modern" });
+        Assert.Contains(result.Nodes, node => node is { IsSink: true, Category: "command" });
+        Assert.Contains(result.Slices, slice => slice is { SourceCategory: "message", SinkCategory: "command" });
+    }
+
     // ASP.NET Core 11: `[ShortCircuit]` (on a minimal-API lambda) must not hide the endpoint,
     // and a union-typed JSON body parameter must be seeded as an HTTP source so taint from the
     // deserialized union reaches sinks.
@@ -1756,6 +1781,8 @@ public static class Program
     // Analyzing one file must survive a hostile sibling tree: the best-effort discovery skips
     // the unreadable subtree, keeps enumerating its siblings, and warns instead of letting an
     // inaccessible (or over-long) directory crash the whole scan.
+    [SupportedOSPlatform("Linux")]
+    [SupportedOSPlatform("macOS")]
     [SkippableFact]
     public void GetDataFlows_SingleFileWithUnreadableSiblingDirectory_RemainsBestEffort()
     {
@@ -1851,6 +1878,8 @@ public static class Linked
 
     // Discovery warnings must not reach stdout: the MCP server writes line-delimited JSON-RPC
     // there, and a warning line in that stream is a protocol error for strict clients.
+    [SupportedOSPlatform("Linux")]
+    [SupportedOSPlatform("macOS")]
     [SkippableFact]
     public void EnumerateAllFilesSafe_UnreadableDirectory_WarnsOnStandardErrorOnly()
     {
@@ -3708,11 +3737,10 @@ class SqlFlow
         Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "FSharp11More", Name: "summarize" });
     }
 
-    // F# 11 conditional compilation: `#elif` is new, and with no compilation symbols defined the
-    // taken branches are the `#else` arm and the `#if !DEBUG` region - exactly what the F#
-    // compiler would build for a Release configuration. Inactive branches contribute no
-    // declarations and no calls, and the ignored `#:` file-based app directives (FS-1337)
-    // produce neither phantom members nor phantom dependencies.
+    // F# 11 conditional compilation: `#elif` is new, and the analysis define set (modern .NET
+    // family defined, DEBUG/TRACE/NETFRAMEWORK undefined) picks the `#else` arm, the
+    // `#if !DEBUG` region, and the `NET8_0_OR_GREATER` guard. Multi-target guards are
+    // near-universal in real F# libraries; their declarations and sinks must stay visible.
     [Fact]
     public void GetMethods_FSharp11Language_ConditionalDirectivesSelectCompilerBranches()
     {
@@ -3720,13 +3748,20 @@ class SqlFlow
 
         // `configure` is declared in all three branches but only the `#else` branch is live.
         Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "FSharp11Language", Name: "configure" });
-        // `#if !DEBUG` is satisfied with an empty define set.
+        // `#if !DEBUG` is satisfied with DEBUG undefined.
         Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "FSharp11Language", Name: "releaseNotes" });
+        // The multi-targeting guard: its declaration (and with it its Process.Start sink line)
+        // stays visible - this is the near-universal real-library shape.
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "FSharp11Language", Name: "modernPath" });
+        // The legacy framework family stays undefined.
+        Assert.DoesNotContain(methodsSlice.Methods!, method => method is { Name: "legacyPath" });
 
         var calls = methodsSlice.MethodCalls ?? [];
         Assert.Contains(calls, call => call is { CalledMethod: "ignore" } && call.SourceId?.Contains("configure", StringComparison.Ordinal) == true);
         // The inactive DEBUG/TRACE branches' logger calls must not leak in.
         Assert.DoesNotContain(calls, call => call.CalledMethod is "WriteLine" or "Debug" or "Trace");
+        // The legacy branch must not leak in either.
+        Assert.DoesNotContain(calls, call => call.SourceId?.Contains("legacyPath", StringComparison.Ordinal) == true);
         // `#:`-directive lines are ignored by the F# 11 compiler wherever they appear.
         Assert.DoesNotContain(calls, call => call.CalledMethod is "package" or "property");
         Assert.DoesNotContain(methodsSlice.Dependencies ?? [], dependency => dependency.Name is "package" or "AsyncSeq");
