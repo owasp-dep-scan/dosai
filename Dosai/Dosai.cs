@@ -2259,6 +2259,48 @@ public static class Dosai
                 }
             }
 
+            // File-based app packages: `#:package Id@Version` (or `#:sdk`-scoped variants) are the
+            // only place a `dotnet run app.cs` app declares its NuGet references, so they surface
+            // as dependencies the way `#r "nuget: ..."` does for F# scripts. The directives parse
+            // as IgnoredDirectiveTrivia under the FileBasedProgram feature; the other `#:`
+            // kinds (property, sdk, include, project) carry no package identity.
+            if (csRoot is not null)
+            {
+                foreach (var directive in csRoot.DescendantTrivia(descendIntoTrivia: true))
+                {
+                    if (!directive.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.IgnoredDirectiveTrivia))
+                    {
+                        continue;
+                    }
+
+                    var directiveText = directive.ToString().Trim();
+                    if (!directiveText.StartsWith("#:", StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    var packageMatch = Regex.Match(directiveText, @"^#:\s*package\s+([A-Za-z0-9_.\-]+)");
+                    if (!packageMatch.Success)
+                    {
+                        continue;
+                    }
+
+                    var directiveSpan = directive.GetLocation().GetLineSpan().StartLinePosition;
+                    allUsingDirectives.Add(new Dependency
+                    {
+                        Path = Path.GetRelativePath(path, sourceFilePath),
+                        FileName = fileName,
+                        Assembly = string.Empty,
+                        Module = "FileBasedApp",
+                        Namespace = "nuget",
+                        Name = packageMatch.Groups[1].Value,
+                        LineNumber = directiveSpan.Line + 1,
+                        ColumnNumber = directiveSpan.Character + 1,
+                        NamespaceMembers = []
+                    });
+                }
+            }
+
             // import declarations
             if (vbImportsDirectives is not null)
             {

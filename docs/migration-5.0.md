@@ -68,7 +68,29 @@ The rest of the C# 15 feature set parses and analyzes like ordinary code:
   construction.
 - The memory-safety preview shapes — `unsafe(...)` expressions in field initializers, and the
   pointer relaxations (`&x`, `fixed`, `stackalloc`, `sizeof` outside an `unsafe` context) — parse
-  and inventory without requiring the updated safety rules.
+  and inventory without requiring the updated safety rules. The `safe` contextual keyword on an
+  `extern` member (`safe static extern int Read();`) and on fields of an explicit-layout struct
+  parses too, and the members are inventoried like ordinary fields and methods.
+
+### File-based apps (`dotnet run app.cs`)
+
+- The `#:` directives (`#:property`, `#:package`, `#:include`, `#:sdk`, `#:project`) parse as
+  trivia under the `FileBasedProgram` parser feature instead of reporting CS9298; without it the
+  whole file risked disappearing from every result. The top-level statements report the
+  compiler-synthesized `<Main>$`, and trailing type declarations (including unions) are
+  inventoried normally.
+- A `#:package Id@Version` directive surfaces in `Dependencies[]` with namespace `nuget` and
+  module `FileBasedApp`, because a file-based app declares its NuGet references nowhere else.
+
+### .NET 11 process-launch sinks
+
+The new `System.Diagnostics.Process` launch APIs are `command` sinks in both source and
+assembly mode, so a tainted argument cannot bypass analysis by switching API:
+
+- `Process.Run` (a `Contains` match that also covers `RunAsync`, `RunAndCaptureText`, and
+  `RunAndCaptureTextAsync`),
+- `Process.StartAndForget`, and
+- `SafeProcessHandle.Start`.
 
 Members declared in an `extension` block (C# 14 methods/properties, C# 15 indexers) are now
 attributed to the enclosing static class in `Methods[].ClassName`, in `MethodCalls[].ClassName` and
@@ -82,6 +104,13 @@ class name for them.
   `GetKeyWrapLength`) classify as an `AES Key Wrap` asset: family `key-wrap`, strength `strong`,
   operation `key-wrap/unwrap`, standard `RFC 3394`. It is matched ahead of the generic `AES`
   branch so the key-wrap purpose is preserved.
+- The padded key-wrap variants (`EncryptKeyWrapPadded`, `DecryptKeyWrapPadded`,
+  `TryDecryptKeyWrapPadded`, `GetKeyWrapPaddedLength`, RFC 5649) classify the same way with
+  standard `RFC 5649`; the word-boundary token match stopped at the unpadded prefix before, so
+  these calls fell through to the generic `AES` classification.
+- `X25519DiffieHellman` (.NET 11) classifies as an `X25519` asset: family `key-agreement`,
+  strength `strong`, operation `key-agreement`, standard `RFC 7748`, and joins the CBOM like
+  ECDH.
 - .NET's post-quantum algorithms classify as strong assets: `MLKem` → ML-KEM
   (family `key-agreement`, operation `key-agreement/encapsulate`, standard FIPS 203), `MLDsa` →
   ML-DSA (family `signature`, operation `sign`, standard FIPS 204), and `SlhDsa` → SLH-DSA
@@ -104,6 +133,36 @@ id. It is informational: the API works, its surface is not yet stable.
 spreads (`{ ...record; Field = v }`), record constructors (`Point(0, 0)` and
 `Point(Y = 20, X = 10)`), direct delegate construction (`Func<...>(Calculator.Add)`), and the
 efficient interpolated strings — parses instead of degrading to reduced coverage.
+
+The F# line frontend additionally follows the F# 11 compiler's preprocessor semantics:
+
+- `#elif` (new in F# 11) is recognized, and conditional regions (`#if`/`#elif`/`#else`/
+  `#endif`, with `!`, `&&`, `||`, and parentheses in conditions) contribute declarations and
+  calls only from the branch the compiler would build with an empty define set — the same
+  branch selection the C# pipeline's Roslyn compilation applies. Inactive text previously
+  leaked phantom functions and calls into `Methods[]` and `MethodCalls[]`.
+- `#:`-prefixed file-based app directive lines are ignored wherever they appear (FS-1337);
+  before, `#:property ...` lines minted phantom `property` calls.
+- Type-level record spreads (`type Labeled = { ...Config; Label: string }`), anonymous record
+  spreads (`{| ...config; Label = "x" |}`), and nested dotted updates
+  (`{ ...service; Opts.Host = host }`) extract their functions without phantom calls.
+
+### ASP.NET Core 11 endpoints and taint
+
+- `[ShortCircuit]` (on a minimal-API lambda handler or an MVC action) does not hide the
+  endpoint from `ApiEndpoints[]`.
+- Inline lambda handlers (`app.MapPost("/pets", (PetUnion pet) => ...)` — including .NET 11's
+  union-typed JSON bodies) now seed their bound parameters as HTTP taint sources, like method
+  groups always did. Infrastructure parameters (`CancellationToken`, `HttpContext`,
+  `ClaimsPrincipal`, `IServiceProvider`, `ILogger*`, `[FromServices]`, and `I`-prefixed
+  interfaces) stay excluded. Taint from a deserialized union payload reaching a sink is now a
+  slice where it was previously invisible.
+
+### R 4.4–4.6 syntax
+
+The R fallback parser handles the null-coalescing `%||%` operator (R 4.4+), `%notin%` (R 4.6+),
+and the `declare()` primitive (R 4.4+) without minting phantom function names from the infix
+operator tokens.
 
 ## Correctness fixes with output impact
 

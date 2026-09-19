@@ -4,13 +4,14 @@
     <TargetFramework>net11.0</TargetFramework>
   </PropertyGroup>
 
-  <!-- The C# 15 and extension-member fixtures stay source-mode only: compiling them here
-       would change this assembly's lowered member set and with it the method tables
+  <!-- The C# 15, extension-member, and file-based-app fixtures stay source-mode only: compiling
+       them here would change this assembly's lowered member set and with it the method tables
        the tests expect. -->
   <ItemGroup>
     <Compile Remove="UnionTypes.cs" />
     <Compile Remove="CSharp15Features.cs" />
     <Compile Remove="ExtensionMembers.cs" />
+    <Compile Remove="FileBasedApp.cs" />
   </ItemGroup>
 
 </Project>

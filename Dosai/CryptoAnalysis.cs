@@ -430,7 +430,7 @@ public static class CryptoAnalyzer
         }
         else
         {
-            names.AddRange(Regex.Matches(line, @"\b(AesGcm|AesCcm|Aes|DES|TripleDES|RC2|MD5|SHA1|SHA256|SHA384|SHA512|RSA|DSA|ECDsa|ECDiffieHellman|HMACSHA256|HMACSHA384|HMACSHA512|Rfc2898DeriveBytes|RandomNumberGenerator|RNGCryptoServiceProvider|X509Certificate2|SslStream|SslProtocols|EncryptKeyWrap|DecryptKeyWrap|TryDecryptKeyWrap|GetKeyWrapLength|TlsContext|TlsSession|TlsBufferSession|TlsSocketSession|TlsOperationStatus|MLDsa|MLKem|SlhDsa|System\.Random|Random|CipherMode\.ECB|SecurityAlgorithms\.None)\b").Select(match => match.Value));
+            names.AddRange(Regex.Matches(line, @"\b(AesGcm|AesCcm|Aes|DES|TripleDES|RC2|MD5|SHA1|SHA256|SHA384|SHA512|RSA|DSA|ECDsa|ECDiffieHellman|X25519DiffieHellman|X25519|HMACSHA256|HMACSHA384|HMACSHA512|Rfc2898DeriveBytes|RandomNumberGenerator|RNGCryptoServiceProvider|X509Certificate2|SslStream|SslProtocols|EncryptKeyWrap|EncryptKeyWrapPadded|DecryptKeyWrap|DecryptKeyWrapPadded|TryDecryptKeyWrap|TryDecryptKeyWrapPadded|GetKeyWrapLength|GetKeyWrapPaddedLength|TlsContext|TlsSession|TlsBufferSession|TlsSocketSession|TlsOperationStatus|MLDsa|MLKem|SlhDsa|System\.Random|Random|CipherMode\.ECB|SecurityAlgorithms\.None)\b").Select(match => match.Value));
         }
 
         return names.Where(name => !string.IsNullOrWhiteSpace(name)).Distinct(StringComparer.OrdinalIgnoreCase);
@@ -818,13 +818,19 @@ public static class CryptoAnalyzer
         if (HasCryptoToken(symbolText, "MLKem")) return Classify("ML-KEM", "key-agreement", "strong", "key-agreement/encapsulate", "FIPS 203");
         if (HasCryptoToken(symbolText, "MLDsa")) return Classify("ML-DSA", "signature", "strong", "sign", "FIPS 204");
         if (HasCryptoToken(symbolText, "SlhDsa")) return Classify("SLH-DSA", "signature", "strong", "sign", "FIPS 205");
-        // AES Key Wrap (RFC 3394), introduced by the Aes key-wrap methods in .NET 11; must be
-        // classified before the generic Aes branch so the key-wrap purpose is preserved.
+        // AES Key Wrap (RFC 3394) and its padded form (RFC 5649), introduced by the Aes key-wrap
+        // methods in .NET 11; must be classified before the generic Aes branch so the key-wrap
+        // purpose is preserved. The padded variants are matched first because the unpadded tokens
+        // are strict prefixes that the word-boundary token match would otherwise stop short of.
+        if (HasCryptoToken(symbolText, "EncryptKeyWrapPadded", "DecryptKeyWrapPadded", "TryDecryptKeyWrapPadded", "GetKeyWrapPaddedLength")) return Classify("AES Key Wrap", "key-wrap", "strong", "key-wrap/unwrap", "RFC 5649");
         if (HasCryptoToken(symbolText, "EncryptKeyWrap", "DecryptKeyWrap", "TryDecryptKeyWrap", "GetKeyWrapLength", "AES_wrap_key")) return Classify("AES Key Wrap", "key-wrap", "strong", "key-wrap/unwrap", "RFC 3394");
         if (HasCryptoToken(symbolText, "Aes", "AES_", "EVP_aes")) return Classify("AES", "symmetric", "acceptable", "encrypt/decrypt", "NIST");
         if (HasCryptoToken(symbolText, "RSA", "RSA_")) return Classify("RSA", "asymmetric", "acceptable", "sign/encrypt", "PKCS#1");
         if (HasCryptoToken(symbolText, "ECDsa", "ECDSA")) return Classify("ECDSA", "asymmetric", "strong", "sign", "FIPS 186");
         if (HasCryptoToken(symbolText, "ECDiffieHellman", "ECDH")) return Classify("ECDH", "key-agreement", "strong", "key-agreement");
+        // X25519 Diffie-Hellman (.NET 11): the TLS 1.3/SSH/Signal curve; strong and CBOM-worthy
+        // like ECDH, with RFC 7748 as its defining standard.
+        if (HasCryptoToken(symbolText, "X25519DiffieHellman", "X25519")) return Classify("X25519", "key-agreement", "strong", "key-agreement", "RFC 7748");
         if (HasCryptoToken(symbolText, "SHA256", "SHA384", "SHA512", "EVP_sha256", "EVP_sha512")) return Classify(symbol.Contains("512", StringComparison.Ordinal) ? "SHA-512" : "SHA-2", "hash", "strong");
         if (HasCryptoToken(symbolText, "HMACSHA256", "HMACSHA384", "HMACSHA512", "HMAC(")) return Classify("HMAC", "mac", "strong", "mac");
         if (HasCryptoToken(symbolText, "Rfc2898DeriveBytes", "PKCS5_PBKDF2_HMAC")) return Classify("PBKDF2", "kdf", "acceptable", "key-derivation", "PKCS#5");

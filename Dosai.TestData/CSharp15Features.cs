@@ -1,8 +1,9 @@
 // C# 15 source (ships with .NET 11) exercising the non-union feature set: the `closed`
 // modifier with exhaustive switch, extension indexers, collection expression arguments
 // (`[with(...), .. values]`), labeled `break`/`continue`, the `unsafe(...)` expression in a
-// field initializer, and the pointer relaxations (`&`, `fixed`, `stackalloc`, `sizeof` with no
-// `unsafe` context). Taint flows through every construct: each feature method reads its own
+// field initializer, the pointer relaxations (`&`, `fixed`, `stackalloc`, `sizeof` with no
+// `unsafe` context), and the `safe` contextual keyword on an extern member and on fields of an
+// explicit-layout struct. Taint flows through every construct: each feature method reads its own
 // Console.ReadLine source (only `Main` gets its `args` seeded) and must reach Process.Start.
 //
 // Source-mode fixture only: compiling it would change Dosai.TestData.CSharp's member set and
@@ -11,6 +12,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Runtime.InteropServices;
 
 public sealed record Cat(string Name);
 public union Pet(Cat)
@@ -43,6 +45,36 @@ public static class CSharp15Features
         int* pointer = &raw;
         int value = *pointer;
         return value.ToString();
+    }
+
+    // `safe` (part of the C# 15 memory-safety preview) marks an extern member and explicit-layout
+    // fields as requiring no unsafe context from their readers; the members themselves still
+    // parse as ordinary fields and methods for inventory and call-graph purposes.
+    [StructLayout(LayoutKind.Explicit)]
+    internal struct BootHeader
+    {
+        [FieldOffset(0)]
+        safe internal readonly int Signature;
+
+        [FieldOffset(4)]
+        internal readonly int Flags;
+    }
+
+    internal static class NativeInterop
+    {
+        [DllImport("dosai_fixture_native")]
+        safe internal static extern int ReadSignature();
+    }
+
+    public static int SafeKeywordMembers()
+    {
+        var command = Console.ReadLine() ?? string.Empty;
+        BootHeader header = default;
+        if (header.Signature == NativeInterop.ReadSignature())
+        {
+            Process.Start(command);
+        }
+        return header.Flags;
     }
 
     public static void ClosedSwitch()
