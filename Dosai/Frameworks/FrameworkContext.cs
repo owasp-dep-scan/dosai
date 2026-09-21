@@ -161,6 +161,10 @@ public sealed class FrameworkContext
             .Where(read => read.Text is not null)
             .Select(read => CSharpSourceParser.Parse(read.Text!, read.Path))
             .ToList();
+        if (CSharpSourceParser.TryCreateImplicitUsingsTree(basePath) is { } implicitUsingsTree)
+        {
+            csharpTrees.Insert(0, implicitUsingsTree);
+        }
         if (csharpTrees.Count > 0)
         {
             context.CSharp = CSharpCompilation.Create(
@@ -325,9 +329,20 @@ public sealed class FrameworkContext
             }
         }
 
-        foreach (var assemblyPath in EnumerateFilesSafe(basePath, Constants.AssemblyExtension))
+        var assemblyPaths = EnumerateFilesSafe(basePath, Constants.AssemblyExtension).ToList();
+        foreach (var assemblyPath in assemblyPaths)
         {
             references.Add(MetadataReference.CreateFromFile(assemblyPath));
+        }
+
+        // Restored-but-unbuilt trees: package DLLs from the NuGet cache, unpinned from bytes so
+        // the shared packages folder is never locked.
+        foreach (var cacheAssembly in NuGetRestoreCache.GetReferencePaths(basePath, assemblyPaths))
+        {
+            if (NuGetRestoreCache.TryCreateUnpinnedReference(cacheAssembly) is { } cacheReference)
+            {
+                references.Add(cacheReference);
+            }
         }
 
         return references;

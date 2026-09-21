@@ -516,6 +516,10 @@ public static class TransparencyBuilder
                 reachability.Confidence = "Low";
                 AddConfidenceReason(reachability, "Reachability is inferred from heuristic or unresolved evidence.");
             }
+            if (reachability.EvidenceKinds.Contains(AnalysisEvidenceKind.SourceUnresolved))
+            {
+                AddConfidenceReason(reachability, "Package assemblies were not available (or conflicted with other references) for semantic binding; reachability inferred from unresolved call sites. Restoring or building the tree raises this confidence.");
+            }
             reachability.EvidenceKinds = reachability.EvidenceKinds.Distinct().OrderBy(kind => kind.ToString(), StringComparer.Ordinal).ToList();
             reachability.ConfidenceReasons = reachability.ConfidenceReasons.Distinct(StringComparer.Ordinal).ToList();
             reachability.SourceLocations = reachability.SourceLocations
@@ -531,7 +535,7 @@ public static class TransparencyBuilder
     {
         AnalysisEvidenceKind.SourceRoslynDirect or AnalysisEvidenceKind.AssemblyIlDirect or AnalysisEvidenceKind.AssemblyIlGeneratedState or AnalysisEvidenceKind.AssemblyIlDelegateTarget or AnalysisEvidenceKind.SourceRoslynDelegateTarget => 3,
         AnalysisEvidenceKind.SourceRoslynSummary or AnalysisEvidenceKind.AssemblyIlSummary or AnalysisEvidenceKind.AssemblyReflection or AnalysisEvidenceKind.ExternalSummary or AnalysisEvidenceKind.FrameworkModel => 2,
-        AnalysisEvidenceKind.SourceRoslynVirtualCandidate or AnalysisEvidenceKind.AssemblyIlVirtualCandidate or AnalysisEvidenceKind.ReflectionHeuristic or AnalysisEvidenceKind.LanguageFrontend => 1,
+        AnalysisEvidenceKind.SourceRoslynVirtualCandidate or AnalysisEvidenceKind.AssemblyIlVirtualCandidate or AnalysisEvidenceKind.SourceUnresolved or AnalysisEvidenceKind.ReflectionHeuristic or AnalysisEvidenceKind.LanguageFrontend => 1,
         _ => 0
     };
 

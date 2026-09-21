@@ -152,6 +152,14 @@ public class CommandLine
             Description = "Optional file of policy-approved MCP stdio transport commands (one per line); commands listed here are not flagged by the MCP transport security assessment",
             Arity = ArgumentArity.ExactlyOne
         };
+        var restoreOption = new Option<bool>("--restore")
+        {
+            Description = "Run 'dotnet restore' on the discovered solution or projects before analysis so package assemblies can be resolved from the NuGet cache without build output (opt-in: restore evaluates MSBuild from the target repository)"
+        };
+        var buildOption = new Option<bool>("--build")
+        {
+            Description = "Run 'dotnet build' before analysis, implying restore (opt-in: building untrusted code executes MSBuild targets and source generators)"
+        };
 
         var methodsCommand = new Command("methods", "Retrieve details about the methods")
         {
@@ -163,7 +171,9 @@ public class CommandLine
             noClassifyDataOption,
             maxConventionalRoutesOption,
             includePromptTextOption,
-            mcpAllowlistOption
+            mcpAllowlistOption,
+            restoreOption,
+            buildOption
         };
 
         var dataFlowsCommand = new Command("dataflows", "Create data-flow slices from source patterns to sink patterns")
@@ -176,7 +186,9 @@ public class CommandLine
             dataFlowGraphOutputFileOption,
             printDataFlowsOption,
             printSourcesSinksOption,
-            suppressionsFileOption
+            suppressionsFileOption,
+            restoreOption,
+            buildOption
         };
 
         var cryptoCommand = new Command("crypto", "Detect cryptographic assets, operations, materials, misuse, and CBOM evidence")
@@ -185,7 +197,9 @@ public class CommandLine
             outputFileOption,
             cryptoFormatOption,
             cryptoGraphFormatOption,
-            cryptoGraphOutputFileOption
+            cryptoGraphOutputFileOption,
+            restoreOption,
+            buildOption
         };
 
         var agentContextCommand = new Command("agent-context", "Generate compact AI-agent context from data-flow analysis")
@@ -194,7 +208,9 @@ public class CommandLine
             outputFileOption,
             patternsFileOption,
             patternPacksOption,
-            suppressionsFileOption
+            suppressionsFileOption,
+            restoreOption,
+            buildOption
         };
 
         var reportCommand = new Command("report", "Generate a Markdown report from data-flow JSON")
@@ -248,6 +264,7 @@ public class CommandLine
                 var maxConventionalRoutes = parseResult.GetValue(maxConventionalRoutesOption);
                 var includePromptText = parseResult.GetValue(includePromptTextOption);
                 var mcpAllowlist = parseResult.GetValue(mcpAllowlistOption);
+                var buildPreparation = ParseBuildPreparation(parseResult.GetValue(restoreOption), parseResult.GetValue(buildOption));
 
                 // Stream the JSON straight to the output file and keep the built slice around so the call-graph
                 // exporter can reuse it. This avoids materialising the full JSON as a single string (which drove
@@ -260,7 +277,7 @@ public class CommandLine
                 }
                 else
                 {
-                    methodsSlice = Dosai.WriteMethods(path!, outputFile!, new Frameworks.FrameworkAnalysisOptions { ClassifyData = classifyData, MaxConventionalRoutes = maxConventionalRoutes, IncludePromptText = includePromptText, McpAllowlist = LoadMcpAllowlist(mcpAllowlist) });
+                    methodsSlice = Dosai.WriteMethods(path!, outputFile!, new Frameworks.FrameworkAnalysisOptions { ClassifyData = classifyData, MaxConventionalRoutes = maxConventionalRoutes, IncludePromptText = includePromptText, McpAllowlist = LoadMcpAllowlist(mcpAllowlist) }, buildPreparation);
                 }
 
                 if (!string.IsNullOrWhiteSpace(callGraphFormat))
@@ -297,11 +314,12 @@ public class CommandLine
             var printDataFlows = parseResult.GetValue(printDataFlowsOption);
             var printSourcesSinks = parseResult.GetValue(printSourcesSinksOption);
             var suppressionsFile = parseResult.GetValue(suppressionsFileOption);
+            var buildPreparation = ParseBuildPreparation(parseResult.GetValue(restoreOption), parseResult.GetValue(buildOption));
 
             // Stream the JSON straight to the output file and keep the result around for printing and graph
             // export. This avoids materialising the full JSON as a single string and the serialize-then-
             // deserialize round trip, both of which drive peak memory on large trees.
-            var dataFlowResult = DataFlowAnalyzer.WriteDataFlows(path!, outputFile!, patternsFile, patternPacks, suppressionsFile);
+            var dataFlowResult = DataFlowAnalyzer.WriteDataFlows(path!, outputFile!, patternsFile, patternPacks, suppressionsFile, buildPreparation);
 
             if (printDataFlows)
             {
@@ -335,9 +353,10 @@ public class CommandLine
             var format = parseResult.GetValue(cryptoFormatOption);
             var graphFormat = parseResult.GetValue(cryptoGraphFormatOption);
             var graphOutputFile = parseResult.GetValue(cryptoGraphOutputFileOption);
+            var buildPreparation = ParseBuildPreparation(parseResult.GetValue(restoreOption), parseResult.GetValue(buildOption));
             try
             {
-                var result = CryptoAnalyzer.Analyze(path);
+                var result = CryptoAnalyzer.Analyze(path, buildPreparation);
                 File.WriteAllText(outputFile, CryptoAnalyzer.Export(result, format));
                 if (!string.IsNullOrWhiteSpace(graphFormat))
                 {
@@ -360,7 +379,8 @@ public class CommandLine
             var patternsFile = parseResult.GetValue(patternsFileOption);
             var patternPacks = parseResult.GetValue(patternPacksOption);
             var suppressionsFile = parseResult.GetValue(suppressionsFileOption);
-            var result = DataFlowAnalyzer.Analyze(path, patternsFile, patternPacks, suppressionsFile);
+            var buildPreparation = ParseBuildPreparation(parseResult.GetValue(restoreOption), parseResult.GetValue(buildOption));
+            var result = DataFlowAnalyzer.Analyze(path, patternsFile, patternPacks, suppressionsFile, buildPreparation);
             // Converge crypto misuse findings into the weakness queue so agent-context carries
             // one CWE-stamped list; crypto analysis is best-effort and never blocks the context.
             try
@@ -437,6 +457,10 @@ public class CommandLine
         WriteIndented = true,
         Converters = { new JsonStringEnumConverter() }
     };
+
+    /// <summary>Build wins when both flags are given (build implies restore).</summary>
+    private static BuildPreparationMode ParseBuildPreparation(bool restore, bool build)
+        => build ? BuildPreparationMode.Build : restore ? BuildPreparationMode.Restore : BuildPreparationMode.None;
 
     /// <summary>Loads the --mcp-allowlist policy file (one command per line); missing file disables the allowlist.</summary>
     private static IReadOnlySet<string>? LoadMcpAllowlist(string? mcpAllowlistPath)

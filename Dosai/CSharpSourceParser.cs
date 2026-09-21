@@ -68,4 +68,112 @@ public static class CSharpSourceParser
 
     public static CSharpSyntaxTree Parse(string content, string path) =>
         (CSharpSyntaxTree)CSharpSyntaxTree.ParseText(content, ParseOptions, path);
+
+    /// <summary>
+    ///     The implicit global usings the .NET SDK adds to every compilation with
+    ///     <c>ImplicitUsings</c> enabled. Dosai compiles analyzed source without the project's
+    ///     MSBuild context, so without these trees the BCL names an implicit-usings project
+    ///     relies on (<c>Path</c>, <c>File</c>, <c>Console</c>, LINQ) fail to bind and every
+    ///     such call vanishes from the call graph.
+    /// </summary>
+    private const string ImplicitGlobalUsingsSource = """
+        global using System;
+        global using System.Collections.Generic;
+        global using System.IO;
+        global using System.Linq;
+        global using System.Net.Http;
+        global using System.Threading;
+        global using System.Threading.Tasks;
+        """;
+
+    /// <summary>
+    ///     A syntax tree carrying the SDK's implicit global usings, for projects under
+    ///     <paramref name="path" /> that enable <c>ImplicitUsings</c> (detected from csproj or
+    ///     Directory.Build.props). Null when no project enables it, so classic projects keep
+    ///     their explicit-usings semantics.
+    /// </summary>
+    public static CSharpSyntaxTree? TryCreateImplicitUsingsTree(string? path)
+    {
+        if (!ImplicitUsingsEnabled(path))
+        {
+            return null;
+        }
+        return Parse(ImplicitGlobalUsingsSource, "<implicit-usings>");
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex ImplicitUsingsRegex =
+        new(@"<ImplicitUsings\s*>enable</ImplicitUsings\s*>", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    private static readonly System.Threading.Lock DetectionLock = new();
+    private static readonly Dictionary<string, bool> EnabledByRoot = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    ///     True when any project file or Directory.Build.props under the path enables
+    ///     ImplicitUsings. Absent or disabled stays false: inventing the global usings for a
+    ///     classic project would bind calls its own compiler rejects.
+    /// </summary>
+    private static bool ImplicitUsingsEnabled(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return false;
+        }
+        string root;
+        try
+        {
+            root = System.IO.Path.GetFullPath(path);
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+        lock (DetectionLock)
+        {
+            if (EnabledByRoot.TryGetValue(root, out var cached))
+            {
+                return cached;
+            }
+            var enabled = DetectImplicitUsings(root);
+            EnabledByRoot[root] = enabled;
+            return enabled;
+        }
+    }
+
+    private static bool DetectImplicitUsings(string root)
+    {
+        try
+        {
+            foreach (var projectFile in SafeFileRead.EnumerateAllFilesSafe(root, "*.csproj"))
+            {
+                if (ProjectEnablesImplicitUsings(projectFile))
+                {
+                    return true;
+                }
+            }
+            foreach (var buildProps in SafeFileRead.EnumerateAllFilesSafe(root, "Directory.Build.props"))
+            {
+                if (ProjectEnablesImplicitUsings(buildProps))
+                {
+                    return true;
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            // Best-effort detection; analysis continues with explicit-usings semantics.
+        }
+        return false;
+    }
+
+    private static bool ProjectEnablesImplicitUsings(string projectFile)
+    {
+        try
+        {
+            return ImplicitUsingsRegex.IsMatch(File.ReadAllText(projectFile));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
 }

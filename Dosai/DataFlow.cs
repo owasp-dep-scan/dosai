@@ -248,21 +248,22 @@ public static partial class DataFlowAnalyzer
     /// through the serialized string. Streaming keeps the JSON out of a single contiguous string, which bounds
     /// peak memory and avoids overflowing the string allocator on large trees.
     /// </summary>
-    public static DataFlowResult WriteDataFlows(string path, string outputFile, string? patternsPath = null, string? patternPacks = null, string? suppressionsPath = null)
+    public static DataFlowResult WriteDataFlows(string path, string outputFile, string? patternsPath = null, string? patternPacks = null, string? suppressionsPath = null, BuildPreparationMode buildPreparation = BuildPreparationMode.None)
     {
-        var result = Analyze(path, patternsPath, patternPacks, suppressionsPath);
+        var result = Analyze(path, patternsPath, patternPacks, suppressionsPath, buildPreparation);
         using var stream = new FileStream(outputFile, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize: 65536);
         JsonSerializer.Serialize(stream, result, JsonOptions);
         return result;
     }
 
-    public static DataFlowResult Analyze(string path, string? patternsPath = null, string? patternPacks = null, string? suppressionsPath = null)
+    public static DataFlowResult Analyze(string path, string? patternsPath = null, string? patternPacks = null, string? suppressionsPath = null, BuildPreparationMode buildPreparation = BuildPreparationMode.None)
     {
         if (!File.Exists(path) && !Directory.Exists(path))
         {
             throw new FileNotFoundException($"Path does not exist: {path}", path);
         }
 
+        BuildPreparation.Prepare(path, buildPreparation);
         var patterns = LoadPatterns(patternsPath, patternPacks);
         var result = new DataFlowResult { Patterns = patterns, Metadata = TransparencyBuilder.CreateMetadata(path) };
         var purlResolver = PackageUrlResolver.Create(path);
@@ -283,6 +284,10 @@ public static partial class DataFlowAnalyzer
                 : null)
             .OfType<CSharpSyntaxTree>()
             .ToList();
+        if (CSharpSourceParser.TryCreateImplicitUsingsTree(path) is { } implicitUsingsTree)
+        {
+            csharpTrees.Insert(0, implicitUsingsTree);
+        }
         var vbTrees = sourcesToInspect
             .Where(source => Path.GetExtension(source).Equals(Constants.VBSourceExtension, StringComparison.OrdinalIgnoreCase))
             .Select(source => SafeFileRead.TryReadAllText(source, out var content)
@@ -1249,6 +1254,27 @@ public static partial class DataFlowAnalyzer
             foreach (var assemblyPath in SafeFileRead.EnumerateAllFilesSafe(rootDirectory, "*.dll", diagnostics.Add).Where(IsManagedAssembly))
             {
                 AddReference(assemblyPath);
+            }
+        }
+
+        // Restored-but-unbuilt trees: the NuGet cache carries the same assemblies the compiler
+        // would reference (project.assets.json packageFolders + compile entries), unpinned from
+        // bytes so the shared packages folder is never locked.
+        foreach (var cacheAssembly in NuGetRestoreCache.GetReferencePaths(path, references.Keys))
+        {
+            if (NuGetRestoreCache.TryCreateUnpinnedReference(cacheAssembly) is { } cacheReference)
+            {
+                if (!references.ContainsKey(cacheAssembly))
+                {
+                    references.Add(cacheAssembly, cacheReference);
+                }
+            }
+        }
+        foreach (var diagnostic in NuGetRestoreCache.GetDiagnostics(path))
+        {
+            if (!diagnostics.Contains(diagnostic, StringComparer.Ordinal))
+            {
+                diagnostics.Add(diagnostic);
             }
         }
 
