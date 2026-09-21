@@ -2445,12 +2445,7 @@ public static class Dosai
             // method calls / object creation / property access / event assignment
             if (model is not null)
             {
-                var namespaceCandidates = csUsingDirectives?
-                    .Select(usingDirective => usingDirective.Name?.ToString())
-                    .OfType<string>()
-                    .Where(name => !string.IsNullOrWhiteSpace(name))
-                    .ToList() ?? [];
-                var walker = new MethodCallOperationWalker(model, GetDispatchIndex(model.Compilation), allMethodCalls, path, sourceFilePath, fileName, namespaceCandidates);
+                var walker = new MethodCallOperationWalker(model, GetDispatchIndex(model.Compilation), allMethodCalls, path, sourceFilePath, fileName);
                 var operationNodes = csRoot is not null
                     ? csRoot.DescendantNodes().Where(node => node is Microsoft.CodeAnalysis.CSharp.Syntax.BlockSyntax or ArrowExpressionClauseSyntax or EqualsValueClauseSyntax or ConstructorInitializerSyntax or GlobalStatementSyntax)
                     : vbRoot?.DescendantNodes().Where(node => node is Microsoft.CodeAnalysis.VisualBasic.Syntax.StatementSyntax or Microsoft.CodeAnalysis.VisualBasic.Syntax.EqualsValueSyntax) ?? [];
@@ -2862,7 +2857,7 @@ public static class Dosai
         return string.Empty;
     }
 
-    private sealed class MethodCallOperationWalker(SemanticModel model, DispatchResolver.SourceIndex dispatchIndex, List<MethodCalls> methodCalls, string basePath, string sourceFilePath, string fileName, IReadOnlyList<string> namespaceCandidates) : DataFlowAnalyzer.DepthBoundedOperationWalker
+    private sealed class MethodCallOperationWalker(SemanticModel model, DispatchResolver.SourceIndex dispatchIndex, List<MethodCalls> methodCalls, string basePath, string sourceFilePath, string fileName) : DataFlowAnalyzer.DepthBoundedOperationWalker
     {
         // Bound for hostile trees: a generated file full of broken call sites must not turn
         // into an unbounded unresolved-edge list; real unbuilt projects stay far below this.
@@ -2933,6 +2928,12 @@ public static class Dosai
             // The type part of the name: everything for a constructor call, everything but
             // the method name for an invocation ("JsonConvert.SerializeObject" -> "JsonConvert").
             var typeSegments = isCreation ? segments : segments.Length > 1 ? segments[..^1] : segments;
+            // A namespace is recorded ONLY when the receiver's own qualification states it
+            // ("Newtonsoft.Json.JsonConvert.SerializeObject"). Guessing from the file's using
+            // directives fabricates reachability: an unresolvable type in a file that imports
+            // exactly one package would promote that innocent package from dependency-only to
+            // reachable, and ReachabilityKind is what downstream consumers trust. Unqualified
+            // receivers keep a null namespace, a null purl, and the dependency-only fallback.
             string? namespaceGuess = null;
             string? className = null;
             if (typeSegments.Length >= 2)
@@ -2943,17 +2944,6 @@ public static class Dosai
             else if (typeSegments.Length == 1)
             {
                 className = typeSegments[0];
-                // An unqualified receiver carries no namespace of its own; a file importing
-                // exactly one non-System namespace is the common single-package case.
-                var nonSystemCandidates = namespaceCandidates.Where(candidate => !candidate.StartsWith("System", StringComparison.Ordinal)).ToList();
-                if (nonSystemCandidates.Count == 1)
-                {
-                    namespaceGuess = nonSystemCandidates[0];
-                }
-                else if (namespaceCandidates.Count == 1)
-                {
-                    namespaceGuess = namespaceCandidates[0];
-                }
             }
 
             var argumentTexts = operation.Syntax switch

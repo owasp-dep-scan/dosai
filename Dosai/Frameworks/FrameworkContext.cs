@@ -312,32 +312,33 @@ public sealed class FrameworkContext
 
     private static List<MetadataReference> BuildMetadataReferences(string basePath)
     {
-        var references = new List<MetadataReference>();
+        var referencePaths = new List<string>();
 #pragma warning disable IL3000
         var coreLib = typeof(object).Assembly.Location;
 #pragma warning restore IL3000
         if (!string.IsNullOrWhiteSpace(coreLib))
         {
-            references.Add(MetadataReference.CreateFromFile(coreLib));
+            referencePaths.Add(coreLib);
         }
 
         if (AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES") is string trustedPlatformAssemblies)
         {
             foreach (var referencePath in trustedPlatformAssemblies.Split(Path.PathSeparator).Where(File.Exists))
             {
-                references.Add(MetadataReference.CreateFromFile(referencePath));
+                referencePaths.Add(referencePath);
             }
         }
 
-        var assemblyPaths = EnumerateFilesSafe(basePath, Constants.AssemblyExtension).ToList();
-        foreach (var assemblyPath in assemblyPaths)
-        {
-            references.Add(MetadataReference.CreateFromFile(assemblyPath));
-        }
+        referencePaths.AddRange(EnumerateFilesSafe(basePath, Constants.AssemblyExtension));
+        var references = referencePaths
+            .Select(path => (MetadataReference)MetadataReference.CreateFromFile(path))
+            .ToList();
 
         // Restored-but-unbuilt trees: package DLLs from the NuGet cache, unpinned from bytes so
-        // the shared packages folder is never locked.
-        foreach (var cacheAssembly in NuGetRestoreCache.GetReferencePaths(basePath, assemblyPaths))
+        // the shared packages folder is never locked. Deduped against the FULL reference set -
+        // runtime assemblies included - so cache copies of framework facades (System.Memory,
+        // netstandard shims) never land beside the runtime's at a different version.
+        foreach (var cacheAssembly in NuGetRestoreCache.GetReferencePaths(basePath, referencePaths))
         {
             if (NuGetRestoreCache.TryCreateUnpinnedReference(cacheAssembly) is { } cacheReference)
             {

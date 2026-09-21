@@ -187,21 +187,27 @@ that left a restored-but-unbuilt tree indistinguishable from a package that is o
   `ExternalCallGraphNode`/High.
 - **`SourceUnresolved` evidence.** When the target assembly still is not available, the call
   site — previously dropped entirely — is recorded from syntax with the new
-  `SourceUnresolved` evidence kind (score 1, below every direct kind), a
-  `Unresolved:<name>` target id, and the namespace recovered from a qualified receiver or the
-  file's `using` directives so the call can still map to a package purl. Affected packages gain
-  a `ConfidenceReasons` entry ("Package assemblies were not available…") and `Diagnostics[]`
-  counts the failed call sites and what the restore output resolved. Only sites whose
-  receiver or created type genuinely failed to resolve are recorded: a resolved receiver that
-  fails overload resolution (for example through a poisoned argument) keeps its candidates and
-  is a downstream symptom of a different missing reference.
+  `SourceUnresolved` evidence kind (score 1, below every direct kind) and a
+  `Unresolved:<name>` target id. A package purl is attributed only when the receiver's own
+  qualification states the namespace (`Newtonsoft.Json.JsonConvert.SerializeObject`); names
+  recovered from `using` directives are deliberately not guessed, because attributing an
+  unresolved call to whatever package the file imports would fabricate reachability for
+  innocent packages. Affected packages gain a `ConfidenceReasons` entry ("Package assemblies
+  were not available…") and `Diagnostics[]` counts the failed call sites and what the
+  restore output resolved. Only sites whose receiver or created type genuinely failed to
+  resolve are recorded: a resolved receiver that fails overload resolution (for example
+  through a poisoned argument) keeps its candidates and is a downstream symptom of a
+  different missing reference.
 - **Implicit global usings are honored.** Compiling analyzed source without the project's
   MSBuild context used to drop every BCL name an `ImplicitUsings` project relies on —
   `Path`, `File`, `Console`, LINQ — because the SDK-injected `global using`s were absent.
-  When any `csproj` or `Directory.Build.props` under the scanned path enables
-  `ImplicitUsings`, a synthetic global-usings tree joins the compilation (classic projects
-  keep explicit-usings semantics). On the Dosai self-scan this alone recovered thousands of
-  previously invisible call edges.
+  When any `csproj` or `Directory.Build.props`/`.targets` under the scanned path enables
+  `ImplicitUsings`, a synthetic global-usings tree joins the compilation. On the Dosai
+  self-scan this alone recovered thousands of previously invisible call edges. The decision
+  is per scan root (`global using`s are compilation-wide and one compilation covers every
+  scanned file): in a mixed monorepo, files from classic sibling projects also receive the
+  synthetic usings, so a BCL name their own compiler would reject can bind there — accepted
+  as the rarer failure mode versus silently dropping the enabling projects' calls.
 - **`--restore` / `--build`** CLI flags (methods, dataflows, crypto, agent-context) run the
   corresponding `dotnet` command before analysis. Opt-in, because executing MSBuild from the
   target repository is a trust decision; failures and timeouts leave analysis running as-is.

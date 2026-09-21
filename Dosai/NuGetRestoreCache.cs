@@ -165,7 +165,14 @@ public static class NuGetRestoreCache
                 return;
             }
 
-            foreach (var target in targets.EnumerateObject())
+            // Targets are visited highest-TFM-first so a multi-targeted project contributes the
+            // assemblies its primary (newest) TFM compiles against; with JSON order, a
+            // netstandard facade listed first could shadow the net8.0+ assembly for every
+            // shared package. Cross-file dedupe stays first-wins, per package.
+            var rankedTargets = targets.EnumerateObject()
+                .OrderByDescending(target => TargetFrameworkRank(target.Name))
+                .ThenBy(target => target.Name, StringComparer.Ordinal);
+            foreach (var target in rankedTargets)
             {
                 if (target.Value.ValueKind != JsonValueKind.Object)
                 {
@@ -209,6 +216,21 @@ public static class NuGetRestoreCache
             }
         }
     }
+
+    /// <summary>Rank a target framework name: net major version descending, netstandard lowest, unknown shapes neutral.</summary>
+    private static int TargetFrameworkRank(string targetFramework)
+    {
+        var name = targetFramework.Split('/')[0].Trim();
+        if (name.StartsWith("netstandard", StringComparison.OrdinalIgnoreCase))
+        {
+            return -1;
+        }
+        var match = TargetFrameworkRegex.Match(name);
+        return match.Success && int.TryParse(match.Groups[1].Value, out var major) ? major : 0;
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex TargetFrameworkRegex =
+        new(@"^net(\d+)\.", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 
     private static List<string> ReadPackageFolders(JsonElement root)
     {

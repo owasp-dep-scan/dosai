@@ -89,8 +89,15 @@ public static class CSharpSourceParser
     /// <summary>
     ///     A syntax tree carrying the SDK's implicit global usings, for projects under
     ///     <paramref name="path" /> that enable <c>ImplicitUsings</c> (detected from csproj or
-    ///     Directory.Build.props). Null when no project enables it, so classic projects keep
-    ///     their explicit-usings semantics.
+    ///     Directory.Build.props/targets). Null when no project enables it, so classic projects
+    ///     keep their explicit-usings semantics.
+    ///     Granularity limitation: <c>global using</c> directives are compilation-wide in
+    ///     Roslyn, and one compilation covers every scanned file, so the decision is per scan
+    ///     root — in a mixed monorepo where any project enables ImplicitUsings, files from
+    ///     classic sibling projects also receive the synthetic usings, and a BCL name their own
+    ///     compiler would reject can bind there. That rare false edge is accepted over the
+    ///     alternative (silently dropping every BCL call in the enabling projects, the common
+    ///     case); per-file semantics would need one compilation per project.
     /// </summary>
     public static CSharpSyntaxTree? TryCreateImplicitUsingsTree(string? path)
     {
@@ -101,14 +108,16 @@ public static class CSharpSourceParser
         return Parse(ImplicitGlobalUsingsSource, "<implicit-usings>");
     }
 
+    // Matches the element with optional attributes (Condition, msbuild metadata), any
+    // surrounding whitespace inside the text node, and any case of the value.
     private static readonly System.Text.RegularExpressions.Regex ImplicitUsingsRegex =
-        new(@"<ImplicitUsings\s*>enable</ImplicitUsings\s*>", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+        new(@"<ImplicitUsings(?:\s[^>]*)?>\s*enable\s*</ImplicitUsings\s*>", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 
     private static readonly System.Threading.Lock DetectionLock = new();
     private static readonly Dictionary<string, bool> EnabledByRoot = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
-    ///     True when any project file or Directory.Build.props under the path enables
+    ///     True when any project file or Directory.Build.props/targets under the path enables
     ///     ImplicitUsings. Absent or disabled stays false: inventing the global usings for a
     ///     classic project would bind calls its own compiler rejects.
     /// </summary>
@@ -150,7 +159,8 @@ public static class CSharpSourceParser
                     return true;
                 }
             }
-            foreach (var buildProps in SafeFileRead.EnumerateAllFilesSafe(root, "Directory.Build.props"))
+            foreach (var buildProps in SafeFileRead.EnumerateAllFilesSafe(root, "Directory.Build.props")
+                         .Concat(SafeFileRead.EnumerateAllFilesSafe(root, "Directory.Build.targets")))
             {
                 if (ProjectEnablesImplicitUsings(buildProps))
                 {

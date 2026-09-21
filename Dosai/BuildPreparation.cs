@@ -21,6 +21,10 @@ public static class BuildPreparation
 {
     private const int RestoreTimeoutMs = 300_000;
     private const int BuildTimeoutMs = 600_000;
+    // Aggregate budgets across every target in one scan: without them, a 50-project tree at
+    // the per-target cap means hours of dotnet before any analysis starts.
+    private const int RestoreBudgetMs = 600_000;
+    private const int BuildBudgetMs = 1_200_000;
     private const int MaxProjectFiles = 50;
 
     private static readonly HashSet<string> Prepared = new(StringComparer.OrdinalIgnoreCase);
@@ -54,9 +58,17 @@ public static class BuildPreparation
             }
         }
 
-        foreach (var target in FindTargets(root))
+        var budgetMs = mode == BuildPreparationMode.Build ? BuildBudgetMs : RestoreBudgetMs;
+        var budget = Stopwatch.StartNew();
+        var targets = FindTargets(root);
+        for (var index = 0; index < targets.Count; index++)
         {
-            RunDotNet(mode, root, target);
+            if (budget.ElapsedMilliseconds >= budgetMs)
+            {
+                Console.Error.WriteLine($"dosai: {(mode == BuildPreparationMode.Build ? "build" : "restore")} budget of {budgetMs / 1000}s exhausted; skipping {targets.Count - index} remaining target(s); analyzing the tree as-is.");
+                return;
+            }
+            RunDotNet(mode, root, targets[index]);
         }
     }
 

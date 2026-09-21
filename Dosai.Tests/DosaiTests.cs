@@ -4556,7 +4556,7 @@ internal static class Program
     }
 
     [Fact]
-    public void Methods_MissingPackageReferences_SurfaceUnresolvedCallsAndLowConfidenceReachability()
+    public void Methods_UnresolvedQualifiedCall_MapsNamespaceToPackageReachability()
     {
         using var tempDirectory = new TemporaryDirectory();
         var analyzedDirectory = Path.Combine(tempDirectory.Path, "src");
@@ -4565,13 +4565,11 @@ internal static class Program
         // resolution fails there too - it keeps its candidates and must NOT be blamed as an
         // unresolved target; only the genuinely missing JsonConvert call site is.
         File.WriteAllText(Path.Combine(analyzedDirectory, "Program.cs"), """
-using Newtonsoft.Json;
-
 internal static class Program
 {
     private static string Payload()
     {
-        var payload = JsonConvert.SerializeObject(new { name = "dosai" });
+        var payload = Newtonsoft.Json.JsonConvert.SerializeObject(new { name = "dosai" });
         System.Console.WriteLine(payload);
         return payload;
     }
@@ -4598,8 +4596,10 @@ internal static class Program
 
         var methodsSlice = Depscan.Dosai.GetMethodsSlice(analyzedDirectory);
 
+        // The receiver's own qualification ("Newtonsoft.Json.JsonConvert") grounds the
+        // namespace, so the unresolved call still maps to the package.
         var unresolvedCall = Assert.Single(methodsSlice.MethodCalls!, call => call.EvidenceKind == AnalysisEvidenceKind.SourceUnresolved);
-        Assert.Equal("Unresolved:JsonConvert.SerializeObject", unresolvedCall.TargetId);
+        Assert.Equal("Unresolved:Newtonsoft.Json.JsonConvert.SerializeObject", unresolvedCall.TargetId);
         Assert.Equal("Newtonsoft.Json", unresolvedCall.Namespace);
         Assert.Equal("pkg:nuget/Newtonsoft.Json@12.0.3", unresolvedCall.Purl);
         Assert.DoesNotContain(methodsSlice.MethodCalls!, call => call.EvidenceKind == AnalysisEvidenceKind.SourceUnresolved && call.TargetId!.StartsWith("Unresolved:System.Console", StringComparison.Ordinal));
@@ -4610,6 +4610,63 @@ internal static class Program
         Assert.Contains(reachability.ConfidenceReasons, reason => reason.Contains("Package assemblies were not available", StringComparison.Ordinal));
         Assert.Contains(methodsSlice.Diagnostics!, diagnostic => diagnostic.Contains("Semantic binding failed for 1 call sites", StringComparison.Ordinal));
         Assert.Contains(methodsSlice.Diagnostics!, diagnostic => diagnostic.Contains("Found project.assets.json but no package assemblies", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Methods_UnresolvedUnqualifiedCall_DoesNotFabricatePackageReachability()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var analyzedDirectory = Path.Combine(tempDirectory.Path, "src");
+        Directory.CreateDirectory(Path.Combine(analyzedDirectory, "obj"));
+        // Neither receiver states a namespace: an unqualified missing type, and a type that
+        // exists in no package at all. The file's single non-System using must NOT get the
+        // blame - attributing it would promote an innocent package from dependency-only to
+        // reachable, and ReachabilityKind is what downstream consumers trust.
+        File.WriteAllText(Path.Combine(analyzedDirectory, "Program.cs"), """
+using Newtonsoft.Json;
+
+internal static class Program
+{
+    private static string Payload()
+    {
+        var payload = JsonConvert.SerializeObject(new { name = "dosai" });
+        return TotallyMissingHelper.Decorate(payload);
+    }
+}
+""");
+        File.WriteAllText(Path.Combine(analyzedDirectory, "obj", "project.assets.json"), $$"""
+{
+  "version": 3,
+  "project": { "version": "1.0.0" },
+  "packageFolders": { "{{Path.Combine(tempDirectory.Path, "missing-packages").Replace('\\', '/')}}/": {} },
+  "libraries": {
+    "Newtonsoft.Json/12.0.3": { "type": "package", "path": "newtonsoft.json/12.0.3" }
+  },
+  "targets": {
+    "net8.0": {
+      "Newtonsoft.Json/12.0.3": {
+        "type": "package",
+        "compile": { "lib/netstandard2.0/Newtonsoft.Json.dll": {} }
+      }
+    }
+  }
+}
+""");
+
+        var methodsSlice = Depscan.Dosai.GetMethodsSlice(analyzedDirectory);
+
+        // The unresolved call sites are still recorded (not silently dropped)...
+        Assert.Contains(methodsSlice.MethodCalls!, call => call.EvidenceKind == AnalysisEvidenceKind.SourceUnresolved && call.TargetId == "Unresolved:JsonConvert.SerializeObject");
+        Assert.Contains(methodsSlice.MethodCalls!, call => call.EvidenceKind == AnalysisEvidenceKind.SourceUnresolved && call.TargetId == "Unresolved:TotallyMissingHelper.Decorate");
+        // ...but none of them claims a namespace or a package purl.
+        Assert.DoesNotContain(methodsSlice.MethodCalls!, call => call.EvidenceKind == AnalysisEvidenceKind.SourceUnresolved && (!string.IsNullOrWhiteSpace(call.Namespace) || !string.IsNullOrWhiteSpace(call.Purl)));
+        // The package stays at the dependency-only fallback with no unresolved evidence.
+        var reachability = Assert.Single(methodsSlice.PackageReachability!, package => package.Purl == "pkg:nuget/Newtonsoft.Json@12.0.3");
+        Assert.Equal("Dependency", reachability.ReachabilityKind);
+        Assert.DoesNotContain(AnalysisEvidenceKind.SourceUnresolved, reachability.EvidenceKinds);
+        Assert.DoesNotContain(reachability.ConfidenceReasons, reason => reason.Contains("Package assemblies were not available", StringComparison.Ordinal));
+        // The diagnostic still tells the operator why binding failed.
+        Assert.Contains(methodsSlice.Diagnostics!, diagnostic => diagnostic.Contains("Semantic binding failed for", StringComparison.Ordinal));
     }
 
     [Fact]
