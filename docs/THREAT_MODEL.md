@@ -94,7 +94,9 @@ Mitigations when the flags are used:
 
 - One invocation per solution or project, capped at 50 project files, with per-target timeouts
   (5 min restore, 10 min build) and an aggregate budget per scan (10 min restore, 20 min
-  build); leftover targets are skipped with a stderr note and analysis proceeds as-is.
+  build); the remaining budget also caps each target's own timeout, so the budget is a hard
+  wall-clock ceiling. Leftover targets are skipped with a stderr note and analysis proceeds
+  as-is.
 - A timeout kills the whole process tree (`Kill(entireProcessTree)`).
 - Failures, missing `dotnet`, and unreadable projects degrade to analyzing the tree as-is;
   they never fail the scan and never retry.

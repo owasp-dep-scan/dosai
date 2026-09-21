@@ -2935,15 +2935,10 @@ public static class Dosai
             // reachable, and ReachabilityKind is what downstream consumers trust. Unqualified
             // receivers keep a null namespace, a null purl, and the dependency-only fallback.
             string? namespaceGuess = null;
-            string? className = null;
-            if (typeSegments.Length >= 2)
+            var className = typeSegments.Length > 0 ? typeSegments[^1] : null;
+            if (typeSegments.Length >= 2 && IsNamespaceQualification(operation.Syntax, typeSegments[..^1]))
             {
                 namespaceGuess = string.Join(".", typeSegments[..^1]);
-                className = typeSegments[^1];
-            }
-            else if (typeSegments.Length == 1)
-            {
-                className = typeSegments[0];
             }
 
             var argumentTexts = operation.Syntax switch
@@ -2997,6 +2992,48 @@ public static class Dosai
             }
             return cleaned;
         }
+
+        /// <summary>
+        ///     True when the leading segments of an unresolved receiver really are a namespace
+        ///     qualification (<c>Newtonsoft.Json</c> in <c>Newtonsoft.Json.JsonConvert.Serialize</c>)
+        ///     rather than a value chain (<c>client</c> in <c>client.Inner.Send</c>). Recording
+        ///     the head of a value chain as a namespace puts noise in the Namespace field of
+        ///     every unresolved edge, so the head has to look like, and resolve like, a
+        ///     namespace: a symbol that resolves to a local, parameter, field or property is
+        ///     decisive, and for the common case where nothing resolves at all the .NET naming
+        ///     convention (namespace segments are capitalised) is the tiebreak.
+        /// </summary>
+        private bool IsNamespaceQualification(Microsoft.CodeAnalysis.SyntaxNode syntax, string[] namespaceSegments)
+        {
+            foreach (var segment in namespaceSegments)
+            {
+                if (segment.Length == 0 || !(char.IsUpper(segment[0]) || segment[0] == '_'))
+                {
+                    return false;
+                }
+            }
+            var leftmost = syntax switch
+            {
+                InvocationExpressionSyntax invocation => LeftmostIdentifier(invocation.Expression),
+                ObjectCreationExpressionSyntax created => LeftmostIdentifier(created.Type),
+                _ => null
+            };
+            if (leftmost is null)
+            {
+                return true;
+            }
+            // A resolved value receiver is never a namespace, whatever it is named.
+            return model.GetSymbolInfo(leftmost).Symbol is not (ILocalSymbol or IParameterSymbol or IFieldSymbol or IPropertySymbol);
+        }
+
+        private static IdentifierNameSyntax? LeftmostIdentifier(Microsoft.CodeAnalysis.SyntaxNode? node) => node switch
+        {
+            IdentifierNameSyntax identifier => identifier,
+            MemberAccessExpressionSyntax memberAccess => LeftmostIdentifier(memberAccess.Expression),
+            Microsoft.CodeAnalysis.CSharp.Syntax.QualifiedNameSyntax qualified => LeftmostIdentifier(qualified.Left),
+            Microsoft.CodeAnalysis.CSharp.Syntax.AliasQualifiedNameSyntax aliased => LeftmostIdentifier(aliased.Name),
+            _ => null
+        };
 
         /// <summary>
         ///     True when the call's TARGET (the receiver it is made on, or the type being

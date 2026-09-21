@@ -4670,6 +4670,45 @@ internal static class Program
     }
 
     [Fact]
+    public void Methods_UnresolvedValueChainCall_DoesNotRecordReceiverAsNamespace()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var analyzedDirectory = Path.Combine(tempDirectory.Path, "src");
+        Directory.CreateDirectory(analyzedDirectory);
+        // The receivers are value chains, not namespace qualifications: a local, a field and a
+        // parameter, each of an unresolvable type. The head of a value chain is not a
+        // namespace, so recording it as one would put noise in every such edge's Namespace.
+        File.WriteAllText(Path.Combine(analyzedDirectory, "Program.cs"), """
+internal static class Program
+{
+    private static MissingClient shared = null!;
+
+    private static void Run(MissingClient injected)
+    {
+        var client = shared;
+        client.Inner.Send("a");
+        shared.Inner.Send("b");
+        injected.Inner.Send("c");
+    }
+}
+""");
+
+        var methodsSlice = Depscan.Dosai.GetMethodsSlice(analyzedDirectory);
+
+        var unresolvedCalls = methodsSlice.MethodCalls!
+            .Where(call => call.EvidenceKind == AnalysisEvidenceKind.SourceUnresolved)
+            .ToList();
+        Assert.NotEmpty(unresolvedCalls);
+        // Every edge is recorded, and none of them claims "client", "shared" or "injected" as
+        // a namespace (nor resolves a purl off one).
+        Assert.All(unresolvedCalls, call =>
+        {
+            Assert.True(string.IsNullOrWhiteSpace(call.Namespace), $"Unexpected namespace '{call.Namespace}' on {call.TargetId}");
+            Assert.True(string.IsNullOrWhiteSpace(call.Purl), $"Unexpected purl '{call.Purl}' on {call.TargetId}");
+        });
+    }
+
+    [Fact]
     public void BuildPreparation_Restore_MakesLocalPackageAvailableForBinding()
     {
         using var tempDirectory = new TemporaryDirectory();

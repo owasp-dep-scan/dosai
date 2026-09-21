@@ -63,12 +63,15 @@ public static class BuildPreparation
         var targets = FindTargets(root);
         for (var index = 0; index < targets.Count; index++)
         {
-            if (budget.ElapsedMilliseconds >= budgetMs)
+            var remainingMs = budgetMs - budget.ElapsedMilliseconds;
+            if (remainingMs <= 0)
             {
                 Console.Error.WriteLine($"dosai: {(mode == BuildPreparationMode.Build ? "build" : "restore")} budget of {budgetMs / 1000}s exhausted; skipping {targets.Count - index} remaining target(s); analyzing the tree as-is.");
                 return;
             }
-            RunDotNet(mode, root, targets[index]);
+            // The remaining budget caps this target's own timeout, so the aggregate budget is
+            // a real wall-clock ceiling rather than a ceiling plus one full per-target timeout.
+            RunDotNet(mode, root, targets[index], (int)Math.Min(mode == BuildPreparationMode.Build ? BuildTimeoutMs : RestoreTimeoutMs, remainingMs));
         }
     }
 
@@ -114,7 +117,7 @@ public static class BuildPreparation
         return false;
     }
 
-    private static void RunDotNet(BuildPreparationMode mode, string root, string target)
+    private static void RunDotNet(BuildPreparationMode mode, string root, string target, int timeoutMs)
     {
         var verb = mode == BuildPreparationMode.Build ? "build" : "restore";
         var arguments = $"{verb} \"{target}\" -v:quiet --nologo";
@@ -139,7 +142,6 @@ public static class BuildPreparation
             // would otherwise block until the timeout instead of finishing.
             var stdoutTask = process.StandardOutput.ReadToEndAsync();
             var stderrTask = process.StandardError.ReadToEndAsync();
-            var timeoutMs = mode == BuildPreparationMode.Build ? BuildTimeoutMs : RestoreTimeoutMs;
             if (!process.WaitForExit(timeoutMs))
             {
                 process.Kill(entireProcessTree: true);
