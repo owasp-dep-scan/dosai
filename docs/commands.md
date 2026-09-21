@@ -53,6 +53,15 @@ Framework-analysis options:
 | `--max-conventional-routes N` | Cap conventional routing expansion, default 500                                                                                       |
 | `--include-prompt-text`       | Emit full system prompt text in `AiComponents` (default: SHA-256 prefix + first 200 chars; secret-shaped prompts are always withheld) |
 
+Build-preparation options (also accepted by `dataflows`, `crypto`, and `agent-context`):
+
+| Flag       | Effect                                                                                                                                                             |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `--restore` | Run `dotnet restore` on the discovered solution or projects before analysis, so package assemblies resolve from the NuGet cache without build output                |
+| `--build`   | Run `dotnet build` before analysis (implies restore); produces `bin/` output the assembly pipeline can also use                                                      |
+
+Both flags are opt-in because they execute MSBuild from the target repository (props/targets imports, source generators); see `docs/THREAT_MODEL.md`. Analysis continues as-is when the invocation fails or times out. Trees that carry `obj/project.assets.json` but no build output do not need either flag: the analysis resolves package assemblies from the NuGet packages cache named by the assets file.
+
 ### Implementation flow
 
 ```text

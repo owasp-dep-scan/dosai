@@ -33,6 +33,12 @@ The first two are produced by restore/build and contain package libraries plus c
 
 When two sources disagree on the version of the same package, the resolver keeps the most-trusted answer and records the conflict as a diagnostic. `ResolutionFacts` exposes, per package, which source file produced the purl (name, version, purl, source, confidence), so downstream tools can weigh the evidence.
 
+### Restore output as a source of reference assemblies
+
+`project.assets.json` does double duty for unbuilt trees. Beyond purl facts, `packageFolders` plus each target's `compile` entries name the same package DLLs the compiler would reference, inside the NuGet packages cache. `NuGetRestoreCache` resolves those paths and every metadata-reference builder adds them, so a restored checkout without `bin/` output still gets full Roslyn binding: call edges keep `SourceRoslynDirect` evidence, and package reachability stays at `ExternalCallGraphNode`/High instead of collapsing to the dependency-only fallback. Cache assemblies load from bytes (`MetadataReference.CreateFromImage`), so nothing in the shared packages folder is locked for the process lifetime. Trees without restore output can opt into `--restore` (or `--build`), which runs the corresponding `dotnet` command before analysis; see `docs/commands.md`.
+
+When neither build output nor cache assemblies are available, call sites that fail to bind are recorded with `SourceUnresolved` evidence instead of silently disappearing. A package purl is attributed only when the receiver's own qualification states the namespace (`Newtonsoft.Json.JsonConvert.SerializeObject`); namespaces are never guessed from the file's `using` directives, because attributing an unresolved call to whatever package the file imports would fabricate reachability for innocent packages. Affected packages get a `ConfidenceReasons` entry explaining that semantic binding was unavailable, and `Diagnostics` names how many call sites failed to bind and what the restore output resolved.
+
 ```mermaid
 flowchart LR
     Assets[project.assets.json] --> Resolver[PackageUrlResolver]

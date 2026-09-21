@@ -175,6 +175,43 @@ The R fallback parser handles the null-coalescing `%||%` operator (R 4.4+), `%no
 and the `declare()` primitive (R 4.4+) without minting phantom function names from the infix
 operator tokens.
 
+### Unbuilt-tree reference resolution and honest degradation
+
+Unbuilt checkouts no longer silently lose package calls. Two additive mechanisms close the gap
+that left a restored-but-unbuilt tree indistinguishable from a package that is only imported:
+
+- **Restore output as reference assemblies.** `project.assets.json` `packageFolders` plus each
+  target's `compile` entries name the package DLLs in the NuGet packages cache; every
+  metadata-reference builder now adds them (unpinned, from bytes), so semantic binding does not
+  need `bin/` output. Call edges stay `SourceRoslynDirect` and package reachability stays
+  `ExternalCallGraphNode`/High.
+- **`SourceUnresolved` evidence.** When the target assembly still is not available, the call
+  site — previously dropped entirely — is recorded from syntax with the new
+  `SourceUnresolved` evidence kind (score 1, below every direct kind) and a
+  `Unresolved:<name>` target id. A package purl is attributed only when the receiver's own
+  qualification states the namespace (`Newtonsoft.Json.JsonConvert.SerializeObject`); names
+  recovered from `using` directives are deliberately not guessed, because attributing an
+  unresolved call to whatever package the file imports would fabricate reachability for
+  innocent packages. Affected packages gain a `ConfidenceReasons` entry ("Package assemblies
+  were not available…") and `Diagnostics[]` counts the failed call sites and what the
+  restore output resolved. Only sites whose receiver or created type genuinely failed to
+  resolve are recorded: a resolved receiver that fails overload resolution (for example
+  through a poisoned argument) keeps its candidates and is a downstream symptom of a
+  different missing reference.
+- **Implicit global usings are honored.** Compiling analyzed source without the project's
+  MSBuild context used to drop every BCL name an `ImplicitUsings` project relies on —
+  `Path`, `File`, `Console`, LINQ — because the SDK-injected `global using`s were absent.
+  When any `csproj` or `Directory.Build.props`/`.targets` under the scanned path enables
+  `ImplicitUsings`, a synthetic global-usings tree joins the compilation. On the Dosai
+  self-scan this alone recovered thousands of previously invisible call edges. The decision
+  is per scan root (`global using`s are compilation-wide and one compilation covers every
+  scanned file): in a mixed monorepo, files from classic sibling projects also receive the
+  synthetic usings, so a BCL name their own compiler would reject can bind there — accepted
+  as the rarer failure mode versus silently dropping the enabling projects' calls.
+- **`--restore` / `--build`** CLI flags (methods, dataflows, crypto, agent-context) run the
+  corresponding `dotnet` command before analysis. Opt-in, because executing MSBuild from the
+  target repository is a trust decision; failures and timeouts leave analysis running as-is.
+
 ## Correctness fixes with output impact
 
 The following bugs are fixed. All of them could **remove** or corrupt results in 4.1.0, so

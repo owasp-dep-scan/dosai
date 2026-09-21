@@ -15,8 +15,12 @@ using Microsoft.CodeAnalysis.VisualBasic.Syntax;
 using System.IO.Compression;
 using System.Runtime.Loader;
 using CompilationUnitSyntax = Microsoft.CodeAnalysis.CSharp.Syntax.CompilationUnitSyntax;
+using ExpressionSyntax = Microsoft.CodeAnalysis.CSharp.Syntax.ExpressionSyntax;
 using FieldDeclarationSyntax = Microsoft.CodeAnalysis.CSharp.Syntax.FieldDeclarationSyntax;
+using IdentifierNameSyntax = Microsoft.CodeAnalysis.CSharp.Syntax.IdentifierNameSyntax;
 using InvocationExpressionSyntax = Microsoft.CodeAnalysis.CSharp.Syntax.InvocationExpressionSyntax;
+using MemberAccessExpressionSyntax = Microsoft.CodeAnalysis.CSharp.Syntax.MemberAccessExpressionSyntax;
+using ObjectCreationExpressionSyntax = Microsoft.CodeAnalysis.CSharp.Syntax.ObjectCreationExpressionSyntax;
 
 namespace Depscan;
 
@@ -183,8 +187,9 @@ public static class Dosai
     /// single multi-hundred-MB string, which is what drove peak RSS into the multi-GB range and eventually
     /// overflowed the string allocator on large assembly trees.
     /// </summary>
-    public static MethodsSlice GetMethodsSlice(string path, Frameworks.FrameworkAnalysisOptions? frameworkOptions = null)
+    public static MethodsSlice GetMethodsSlice(string path, Frameworks.FrameworkAnalysisOptions? frameworkOptions = null, BuildPreparationMode buildPreparation = BuildPreparationMode.None)
     {
+        BuildPreparation.Prepare(path, buildPreparation);
         var purlResolver = PackageUrlResolver.Create(path);
         var methods = GetAssemblyMethods(path);
         var (sourceMethods, usings, methodCalls, properties, fields, events, constructors, callGraph, sourceAssemblyMapping, sourceMode, compilations) = GetSourceMethods(path, methods);
@@ -216,6 +221,17 @@ public static class Dosai
         var deadCode = ReachabilityAnalyzer.BuildDeadCode(callGraph, reachability, sourceMode, budgetExhausted, reachabilityDiagnostics);
         var securityFindings = Frameworks.SecurityAnalyzer.Run(frameworkContext, frameworkResult, apiEndpoints);
 
+        var sliceDiagnostics = frameworkResult.Diagnostics.Select(diagnostic => $"{diagnostic.FrameworkId}: {diagnostic.Message}").Concat(reachabilityDiagnostics).ToList();
+        // Restore-output and unresolved-call diagnostics explain why package reachability may
+        // sit at Low confidence: unbuilt trees degrade semantic binding, and that fact should
+        // reach consumers instead of hiding behind silently missing call edges.
+        sliceDiagnostics.AddRange(NuGetRestoreCache.GetDiagnostics(path));
+        var unresolvedCallCount = methodCalls.Count(call => call.EvidenceKind == AnalysisEvidenceKind.SourceUnresolved);
+        if (unresolvedCallCount > 0)
+        {
+            sliceDiagnostics.Add($"Semantic binding failed for {unresolvedCallCount} call sites: target assemblies were missing or conflicted with other references. Restore or build the tree (--restore/--build) to raise reachability confidence.");
+        }
+
         return new MethodsSlice
         {
             Metadata = TransparencyBuilder.CreateMetadata(path),
@@ -239,7 +255,7 @@ public static class Dosai
             Services = frameworkResult.Services,
             AiComponents = frameworkResult.AiComponents,
             Frameworks = frameworkResult.Frameworks,
-            Diagnostics = frameworkResult.Diagnostics.Select(diagnostic => $"{diagnostic.FrameworkId}: {diagnostic.Message}").Concat(reachabilityDiagnostics).ToList()
+            Diagnostics = sliceDiagnostics
         };
     }
 
@@ -287,8 +303,8 @@ public static class Dosai
     /// without round-tripping through the serialized string. Streaming keeps the JSON out of a single
     /// contiguous string, which bounds peak memory on large assembly trees.
     /// </summary>
-    public static MethodsSlice WriteMethods(string path, string outputFile, Frameworks.FrameworkAnalysisOptions? frameworkOptions = null)
-        => StreamSlice(GetMethodsSlice(path, frameworkOptions), outputFile);
+    public static MethodsSlice WriteMethods(string path, string outputFile, Frameworks.FrameworkAnalysisOptions? frameworkOptions = null, BuildPreparationMode buildPreparation = BuildPreparationMode.None)
+        => StreamSlice(GetMethodsSlice(path, frameworkOptions, buildPreparation), outputFile);
 
     private static MethodsSlice StreamSlice(MethodsSlice slice, string outputFile)
     {
@@ -404,6 +420,13 @@ public static class Dosai
         foreach (var call in methodCalls)
         {
             call.Purl = resolver.Resolve(call.Assembly, call.Module, call.TargetId ?? call.CalledMethod, call.Namespace, call.ClassName);
+            // Unresolved call sites carry no assembly identity, so the first Resolve pass sees
+            // only the bare call name. The namespace recovered from syntax (a using directive
+            // or a qualified receiver) is the one fact that still maps to a package.
+            if (call.Purl is null && call.EvidenceKind == AnalysisEvidenceKind.SourceUnresolved && !string.IsNullOrWhiteSpace(call.Namespace))
+            {
+                call.Purl = resolver.Resolve(namespaceName: call.Namespace);
+            }
         }
 
         foreach (var property in properties)
@@ -435,6 +458,12 @@ public static class Dosai
         foreach (var node in callGraph.Nodes)
         {
             node.Purl = resolver.Resolve(node.Assembly, node.Module, node.Id, node.Namespace, node.ClassName);
+            // Unresolved-target nodes carry no assembly identity; the namespace recovered from
+            // syntax is the one fact that still maps them to a package (same rule as calls).
+            if (node.Purl is null && node.Id.StartsWith("Unresolved:", StringComparison.Ordinal) && !string.IsNullOrWhiteSpace(node.Namespace))
+            {
+                node.Purl = resolver.Resolve(namespaceName: node.Namespace);
+            }
             nodePurls[node.Id] = node.Purl;
         }
 
@@ -516,12 +545,14 @@ public static class Dosai
         Source = evidenceKind switch
         {
             AnalysisEvidenceKind.SourceRoslynDirect => "roslyn-source",
+            AnalysisEvidenceKind.SourceUnresolved => "roslyn-source-unresolved",
             AnalysisEvidenceKind.LanguageFrontend => "language-frontend",
             _ => "unknown"
         },
         Description = evidenceKind switch
         {
             AnalysisEvidenceKind.SourceRoslynDirect => "Call edge discovered from source semantic operations.",
+            AnalysisEvidenceKind.SourceUnresolved => "Call site discovered from syntax; the target assembly was not available to the compilation.",
             AnalysisEvidenceKind.LanguageFrontend => "Call edge discovered from language frontend source scanning.",
             _ => "Call edge discovered without producer-specific evidence metadata."
         },
@@ -728,7 +759,11 @@ public static class Dosai
             existingEvidenceKinds.AddRange(node.Evidence.Select(evidence => evidence.Kind));
             if (!methodIdentityById.TryGetValue(node.Id, out var identity))
             {
-                var evidenceKind = node.IsExternal ? AnalysisEvidenceKind.ExternalSummary : AnalysisEvidenceKind.Unknown;
+                // Unresolved-target nodes keep the weakest evidence kind; summary evidence
+                // would claim binding that never happened and mask the degraded analysis.
+                var evidenceKind = node.IsExternal
+                    ? node.Id.StartsWith("Unresolved:", StringComparison.Ordinal) ? AnalysisEvidenceKind.SourceUnresolved : AnalysisEvidenceKind.ExternalSummary
+                    : AnalysisEvidenceKind.Unknown;
                 identity = MethodIdentityFactory.FromParts(node.Id, null, node.Id, node.Id, node.Assembly, node.Module, node.Namespace, node.ClassName, node.Name, 0, node.Purl, evidenceKind);
             }
             var mergedIdentity = CloneMethodIdentity(identity);
@@ -1473,6 +1508,17 @@ public static class Dosai
         {
             metadataReferences.TryAdd(externalAssembly, MetadataReference.CreateFromFile(externalAssembly));
         }
+        // Restored-but-unbuilt trees: packageFolders plus the per-target compile entries in
+        // project.assets.json name the package DLLs inside the NuGet cache, so semantic
+        // binding no longer depends on bin/ output. Cache references load from bytes so the
+        // shared packages folder is never locked for the process lifetime.
+        foreach (var cacheAssembly in NuGetRestoreCache.GetReferencePaths(path, metadataReferences.Keys))
+        {
+            if (NuGetRestoreCache.TryCreateUnpinnedReference(cacheAssembly) is { } cacheReference)
+            {
+                metadataReferences.TryAdd(cacheAssembly, cacheReference);
+            }
+        }
 
         var referenceList = metadataReferences.Values.ToList();
         var csharpTrees = sourcesToInspect
@@ -1482,6 +1528,12 @@ public static class Dosai
                 : null)
             .OfType<CSharpSyntaxTree>()
             .ToList();
+        // Implicit-usings projects rely on global usings their compiler injects; without the
+        // synthetic tree every BCL call in them fails to bind and vanishes from the graph.
+        if (CSharpSourceParser.TryCreateImplicitUsingsTree(path) is { } implicitUsingsTree)
+        {
+            csharpTrees.Insert(0, implicitUsingsTree);
+        }
         var csharpCompilation = CSharpCompilation.Create(
             "Dosai.SourceAnalysis.CSharp",
             syntaxTrees: csharpTrees,
@@ -2807,6 +2859,11 @@ public static class Dosai
 
     private sealed class MethodCallOperationWalker(SemanticModel model, DispatchResolver.SourceIndex dispatchIndex, List<MethodCalls> methodCalls, string basePath, string sourceFilePath, string fileName) : DataFlowAnalyzer.DepthBoundedOperationWalker
     {
+        // Bound for hostile trees: a generated file full of broken call sites must not turn
+        // into an unbounded unresolved-edge list; real unbuilt projects stay far below this.
+        private const int MaxUnresolvedCallsPerFile = 512;
+        private readonly HashSet<string> unresolvedCallKeys = new(StringComparer.Ordinal);
+
         public override void VisitInvocation(IInvocationOperation operation)
         {
             AddMethodCall(operation, operation.TargetMethod, CallType.MethodCall, operation.Arguments);
@@ -2814,6 +2871,209 @@ public static class Dosai
             AddFrameworkAndReflectionCandidates(operation);
             base.VisitInvocation(operation);
         }
+
+        public override void VisitInvalid(IInvalidOperation operation)
+        {
+            AddUnresolvedCall(operation);
+            base.VisitInvalid(operation);
+        }
+
+        /// <summary>
+        ///     A missing package assembly turns its call sites into <c>IInvalidOperation</c>, so
+        ///     <see cref="VisitInvocation" /> never fires and the call would silently vanish
+        ///     from the graph - the exact silent degradation that collapses package reachability
+        ///     to the dependency-only fallback on unbuilt trees. Record the site from syntax
+        ///     with the weakest evidence kind, so consumers can tell "called but unresolvable"
+        ///     from "not called at all". C# syntax only: the other frontends own their
+        ///     inventories, and <c>IInvalidOperation</c> also covers non-call syntax.
+        /// </summary>
+        private void AddUnresolvedCall(IInvalidOperation operation)
+        {
+            if (unresolvedCallKeys.Count >= MaxUnresolvedCallsPerFile)
+            {
+                return;
+            }
+            if (operation.Syntax is not (InvocationExpressionSyntax or ObjectCreationExpressionSyntax))
+            {
+                return;
+            }
+            if (model.GetEnclosingSymbol(operation.Syntax.SpanStart) is not IMethodSymbol callerSymbol)
+            {
+                return;
+            }
+            // Only sites whose target itself is missing: an invocation into an available method
+            // can still bind to IInvalidOperation when an argument carries a poisoned (error)
+            // type and overload resolution fails - GetSymbolInfo then returns real candidates,
+            // and emitting an unresolved edge for it would blame a reference that exists.
+            if (!IsMissingTarget(operation.Syntax))
+            {
+                return;
+            }
+            var cleanName = CleanUnresolvedName(operation.Syntax is InvocationExpressionSyntax invocation
+                ? SafeSyntaxText.Text(invocation.Expression)
+                : SafeSyntaxText.Text(((ObjectCreationExpressionSyntax)operation.Syntax).Type));
+            if (string.IsNullOrWhiteSpace(cleanName))
+            {
+                return;
+            }
+            var location = operation.Syntax.GetLocation().GetLineSpan().StartLinePosition;
+            var key = $"{location.Line}:{location.Character}:{cleanName}";
+            if (!unresolvedCallKeys.Add(key))
+            {
+                return;
+            }
+
+            var isCreation = operation.Syntax is ObjectCreationExpressionSyntax;
+            var segments = cleanName.Split('.', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            // The type part of the name: everything for a constructor call, everything but
+            // the method name for an invocation ("JsonConvert.SerializeObject" -> "JsonConvert").
+            var typeSegments = isCreation ? segments : segments.Length > 1 ? segments[..^1] : segments;
+            // A namespace is recorded ONLY when the receiver's own qualification states it
+            // ("Newtonsoft.Json.JsonConvert.SerializeObject"). Guessing from the file's using
+            // directives fabricates reachability: an unresolvable type in a file that imports
+            // exactly one package would promote that innocent package from dependency-only to
+            // reachable, and ReachabilityKind is what downstream consumers trust. Unqualified
+            // receivers keep a null namespace, a null purl, and the dependency-only fallback.
+            string? namespaceGuess = null;
+            var className = typeSegments.Length > 0 ? typeSegments[^1] : null;
+            if (typeSegments.Length >= 2 && IsNamespaceQualification(operation.Syntax, typeSegments[..^1]))
+            {
+                namespaceGuess = string.Join(".", typeSegments[..^1]);
+            }
+
+            var argumentTexts = operation.Syntax switch
+            {
+                InvocationExpressionSyntax invoked => invoked.ArgumentList.Arguments.Select(argument => SafeSyntaxText.Text(argument.Expression)).ToList(),
+                ObjectCreationExpressionSyntax created => created.ArgumentList?.Arguments.Select(argument => SafeSyntaxText.Text(argument.Expression)).ToList() ?? [],
+                _ => []
+            };
+            methodCalls.Add(new MethodCalls
+            {
+                Path = Path.GetRelativePath(basePath, sourceFilePath),
+                FileName = fileName,
+                Namespace = namespaceGuess,
+                ClassName = className,
+                CalledMethod = isCreation ? className ?? cleanName : segments[^1],
+                LineNumber = location.Line + 1,
+                ColumnNumber = location.Character + 1,
+                Arguments = argumentTexts,
+                ArgumentExpressions = argumentTexts,
+                CallType = isCreation ? CallType.ConstructorCall : CallType.MethodCall,
+                SourceId = GenerateMethodSignature(callerSymbol),
+                TargetId = $"Unresolved:{cleanName}",
+                CallerMethod = callerSymbol.Name,
+                CallerNamespace = callerSymbol.ContainingNamespace?.ToDisplayString() ?? string.Empty,
+                CallerClass = GetNamedContainingTypeName(callerSymbol),
+                IsInternal = false,
+                EvidenceKind = AnalysisEvidenceKind.SourceUnresolved,
+                Evidence =
+                [
+                    new AnalysisEvidence
+                    {
+                        Kind = AnalysisEvidenceKind.SourceUnresolved,
+                        Source = "roslyn-source-unresolved",
+                        Confidence = "Low",
+                        Description = "Call site did not bind; the target assembly was not available to the compilation.",
+                        FileName = fileName,
+                        LineNumber = location.Line + 1,
+                        ColumnNumber = location.Character + 1
+                    }
+                ]
+            });
+        }
+
+        private static string CleanUnresolvedName(string name)
+        {
+            var cleaned = name.Replace("global::", string.Empty, StringComparison.Ordinal).Trim();
+            var genericIndex = cleaned.IndexOf('<');
+            if (genericIndex >= 0)
+            {
+                cleaned = cleaned[..genericIndex].Trim();
+            }
+            return cleaned;
+        }
+
+        /// <summary>
+        ///     True when the leading segments of an unresolved receiver really are a namespace
+        ///     qualification (<c>Newtonsoft.Json</c> in <c>Newtonsoft.Json.JsonConvert.Serialize</c>)
+        ///     rather than a value chain (<c>client</c> in <c>client.Inner.Send</c>). Recording
+        ///     the head of a value chain as a namespace puts noise in the Namespace field of
+        ///     every unresolved edge, so the head has to look like, and resolve like, a
+        ///     namespace: a symbol that resolves to a local, parameter, field or property is
+        ///     decisive, and for the common case where nothing resolves at all the .NET naming
+        ///     convention (namespace segments are capitalised) is the tiebreak.
+        /// </summary>
+        private bool IsNamespaceQualification(Microsoft.CodeAnalysis.SyntaxNode syntax, string[] namespaceSegments)
+        {
+            foreach (var segment in namespaceSegments)
+            {
+                if (segment.Length == 0 || !(char.IsUpper(segment[0]) || segment[0] == '_'))
+                {
+                    return false;
+                }
+            }
+            var leftmost = syntax switch
+            {
+                InvocationExpressionSyntax invocation => LeftmostIdentifier(invocation.Expression),
+                ObjectCreationExpressionSyntax created => LeftmostIdentifier(created.Type),
+                _ => null
+            };
+            if (leftmost is null)
+            {
+                return true;
+            }
+            // A resolved value receiver is never a namespace, whatever it is named.
+            return model.GetSymbolInfo(leftmost).Symbol is not (ILocalSymbol or IParameterSymbol or IFieldSymbol or IPropertySymbol);
+        }
+
+        private static IdentifierNameSyntax? LeftmostIdentifier(Microsoft.CodeAnalysis.SyntaxNode? node) => node switch
+        {
+            IdentifierNameSyntax identifier => identifier,
+            MemberAccessExpressionSyntax memberAccess => LeftmostIdentifier(memberAccess.Expression),
+            Microsoft.CodeAnalysis.CSharp.Syntax.QualifiedNameSyntax qualified => LeftmostIdentifier(qualified.Left),
+            Microsoft.CodeAnalysis.CSharp.Syntax.AliasQualifiedNameSyntax aliased => LeftmostIdentifier(aliased.Name),
+            _ => null
+        };
+
+        /// <summary>
+        ///     True when the call's TARGET (the receiver it is made on, or the type being
+        ///     created) resolved to nothing. An <c>IInvalidOperation</c> at a call site has two
+        ///     very different causes: a missing reference makes the receiver/type an error
+        ///     symbol (worth reporting), while a resolved receiver reached with a poisoned
+        ///     argument or an inexpressible overload fails resolution downstream - a symptom of
+        ///     some OTHER missing reference, and blaming it here would flag APIs that exist.
+        ///     The receiver is therefore the decisive signal: a valid receiver type, or a
+        ///     namespace receiver that resolves (the <c>Path</c> in <c>Path.GetFileName</c>),
+        ///     means the call is not an unresolved-target site.
+        /// </summary>
+        private bool IsMissingTarget(Microsoft.CodeAnalysis.SyntaxNode syntax)
+        {
+            if (syntax is ObjectCreationExpressionSyntax created)
+            {
+                return IsErrorSymbol(model.GetSymbolInfo(created.Type).Symbol);
+            }
+            if (syntax is not InvocationExpressionSyntax invocation)
+            {
+                return false;
+            }
+            if (invocation.Expression is not MemberAccessExpressionSyntax memberAccess)
+            {
+                // A bare identifier is a method group with no receiver to vouch for it: with
+                // no symbol and no candidates, no method of that name was found anywhere.
+                var identifierInfo = model.GetSymbolInfo(invocation.Expression);
+                return identifierInfo.Symbol is null && identifierInfo.CandidateSymbols.Length == 0;
+            }
+            var receiver = memberAccess.Expression;
+            var receiverType = model.GetTypeInfo(receiver).Type;
+            if (receiverType is not null)
+            {
+                return receiverType.TypeKind == TypeKind.Error || receiverType.Kind == SymbolKind.ErrorType;
+            }
+            // Namespace receivers have no type; resolve the symbol instead (Path, System.Console).
+            return IsErrorSymbol(model.GetSymbolInfo(receiver).Symbol);
+        }
+
+        private static bool IsErrorSymbol(ISymbol? symbol) => symbol is null || symbol.Kind == SymbolKind.ErrorType;
 
         public override void VisitObjectCreation(IObjectCreationOperation operation)
         {

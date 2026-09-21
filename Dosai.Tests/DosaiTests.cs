@@ -4380,7 +4380,7 @@ class SqlFlow
         }
     }
 
-    private static string BuildTemporaryProject(string tempRoot, string projectName, string programSource, string targetFramework = "net10.0")
+    private static string BuildTemporaryProject(string tempRoot, string projectName, string programSource, string targetFramework = "net10.0", string outputType = "Exe")
     {
         var projectDirectory = Path.Combine(tempRoot, projectName, "src");
         var outputDirectory = Path.Combine(tempRoot, projectName, "bin");
@@ -4390,7 +4390,7 @@ class SqlFlow
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>{targetFramework}</TargetFramework>
-    <OutputType>Exe</OutputType>
+    <OutputType>{outputType}</OutputType>
     <DebugType>portable</DebugType>
   </PropertyGroup>
 </Project>
@@ -4483,6 +4483,332 @@ class SqlFlow
   }
 }
 """);
+    }
+
+    [Fact]
+    public void Methods_RestoreCacheOutput_BindsPackageCallsWithoutBuildOutput()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        // The package assembly must come from the NuGet cache alone: it is copied to a
+        // directory OUTSIDE the analyzed path, exactly like the real global packages folder,
+        // and the analyzed tree has no bin/ build output of its own.
+        var libraryOutput = BuildTemporaryProject(tempDirectory.Path, "RestoreSampleLib", """
+namespace RestoreSampleLib
+{
+    public static class Greeter
+    {
+        public static string Hello() => "hello";
+    }
+}
+""", outputType: "Library");
+        var packageCacheRoot = Path.Combine(tempDirectory.Path, "package-cache");
+        var packageLibDirectory = Path.Combine(packageCacheRoot, "restore-sample-lib", "1.0.0", "lib", "net10.0");
+        Directory.CreateDirectory(packageLibDirectory);
+        File.Copy(Path.Combine(libraryOutput, "RestoreSampleLib.dll"), Path.Combine(packageLibDirectory, "RestoreSampleLib.dll"));
+
+        var analyzedDirectory = Path.Combine(tempDirectory.Path, "app", "src");
+        Directory.CreateDirectory(Path.Combine(analyzedDirectory, "obj"));
+        File.WriteAllText(Path.Combine(analyzedDirectory, "Program.cs"), """
+using RestoreSampleLib;
+
+internal static class Program
+{
+    private static void Main()
+    {
+        _ = Greeter.Hello();
+    }
+}
+""");
+        // Forward slashes inside the JSON: Windows path separators would need escaping, and
+        // the resolver accepts either separator.
+        File.WriteAllText(Path.Combine(analyzedDirectory, "obj", "project.assets.json"), $$"""
+{
+  "version": 3,
+  "project": { "version": "1.0.0" },
+  "packageFolders": { "{{packageCacheRoot.Replace('\\', '/')}}/": {} },
+  "libraries": {
+    "RestoreSampleLib/1.0.0": { "type": "package", "path": "restore-sample-lib/1.0.0" }
+  },
+  "targets": {
+    "net10.0": {
+      "RestoreSampleLib/1.0.0": {
+        "type": "package",
+        "compile": { "lib/net10.0/RestoreSampleLib.dll": {} },
+        "runtime": { "lib/net10.0/RestoreSampleLib.dll": {} }
+      }
+    }
+  }
+}
+""");
+
+        var methodsSlice = Depscan.Dosai.GetMethodsSlice(analyzedDirectory);
+
+        var boundCall = Assert.Single(methodsSlice.MethodCalls!, call => call.EvidenceKind == AnalysisEvidenceKind.SourceRoslynDirect && call.TargetId!.Contains("Greeter.Hello", StringComparison.Ordinal));
+        Assert.Equal("pkg:nuget/RestoreSampleLib@1.0.0", boundCall.Purl);
+        var reachability = Assert.Single(methodsSlice.PackageReachability!, package => package.Purl == "pkg:nuget/RestoreSampleLib@1.0.0");
+        Assert.Equal("ExternalCallGraphNode", reachability.ReachabilityKind);
+        Assert.Equal("High", reachability.Confidence);
+        Assert.Contains(AnalysisEvidenceKind.SourceRoslynDirect, reachability.EvidenceKinds);
+        Assert.Contains(methodsSlice.Diagnostics!, diagnostic => diagnostic.Contains("Resolved 1 package assemblies from NuGet restore output", StringComparison.Ordinal));
+
+        var dataFlowResult = DataFlowAnalyzer.Analyze(analyzedDirectory);
+        Assert.Contains(dataFlowResult.Diagnostics, diagnostic => diagnostic.Contains("Resolved 1 package assemblies from NuGet restore output", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Methods_UnresolvedQualifiedCall_MapsNamespaceToPackageReachability()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var analyzedDirectory = Path.Combine(tempDirectory.Path, "src");
+        Directory.CreateDirectory(Path.Combine(analyzedDirectory, "obj"));
+        // Console.WriteLine receives the poisoned (error-typed) payload, so overload
+        // resolution fails there too - it keeps its candidates and must NOT be blamed as an
+        // unresolved target; only the genuinely missing JsonConvert call site is.
+        File.WriteAllText(Path.Combine(analyzedDirectory, "Program.cs"), """
+internal static class Program
+{
+    private static string Payload()
+    {
+        var payload = Newtonsoft.Json.JsonConvert.SerializeObject(new { name = "dosai" });
+        System.Console.WriteLine(payload);
+        return payload;
+    }
+}
+""");
+        File.WriteAllText(Path.Combine(analyzedDirectory, "obj", "project.assets.json"), $$"""
+{
+  "version": 3,
+  "project": { "version": "1.0.0" },
+  "packageFolders": { "{{Path.Combine(tempDirectory.Path, "missing-packages").Replace('\\', '/')}}/": {} },
+  "libraries": {
+    "Newtonsoft.Json/12.0.3": { "type": "package", "path": "newtonsoft.json/12.0.3" }
+  },
+  "targets": {
+    "net8.0": {
+      "Newtonsoft.Json/12.0.3": {
+        "type": "package",
+        "compile": { "lib/netstandard2.0/Newtonsoft.Json.dll": {} }
+      }
+    }
+  }
+}
+""");
+
+        var methodsSlice = Depscan.Dosai.GetMethodsSlice(analyzedDirectory);
+
+        // The receiver's own qualification ("Newtonsoft.Json.JsonConvert") grounds the
+        // namespace, so the unresolved call still maps to the package.
+        var unresolvedCall = Assert.Single(methodsSlice.MethodCalls!, call => call.EvidenceKind == AnalysisEvidenceKind.SourceUnresolved);
+        Assert.Equal("Unresolved:Newtonsoft.Json.JsonConvert.SerializeObject", unresolvedCall.TargetId);
+        Assert.Equal("Newtonsoft.Json", unresolvedCall.Namespace);
+        Assert.Equal("pkg:nuget/Newtonsoft.Json@12.0.3", unresolvedCall.Purl);
+        Assert.DoesNotContain(methodsSlice.MethodCalls!, call => call.EvidenceKind == AnalysisEvidenceKind.SourceUnresolved && call.TargetId!.StartsWith("Unresolved:System.Console", StringComparison.Ordinal));
+        var reachability = Assert.Single(methodsSlice.PackageReachability!, package => package.Purl == "pkg:nuget/Newtonsoft.Json@12.0.3");
+        Assert.Equal("ExternalCallGraphNode", reachability.ReachabilityKind);
+        Assert.Equal("Low", reachability.Confidence);
+        Assert.Contains(AnalysisEvidenceKind.SourceUnresolved, reachability.EvidenceKinds);
+        Assert.Contains(reachability.ConfidenceReasons, reason => reason.Contains("Package assemblies were not available", StringComparison.Ordinal));
+        Assert.Contains(methodsSlice.Diagnostics!, diagnostic => diagnostic.Contains("Semantic binding failed for 1 call sites", StringComparison.Ordinal));
+        Assert.Contains(methodsSlice.Diagnostics!, diagnostic => diagnostic.Contains("Found project.assets.json but no package assemblies", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Methods_UnresolvedUnqualifiedCall_DoesNotFabricatePackageReachability()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var analyzedDirectory = Path.Combine(tempDirectory.Path, "src");
+        Directory.CreateDirectory(Path.Combine(analyzedDirectory, "obj"));
+        // Neither receiver states a namespace: an unqualified missing type, and a type that
+        // exists in no package at all. The file's single non-System using must NOT get the
+        // blame - attributing it would promote an innocent package from dependency-only to
+        // reachable, and ReachabilityKind is what downstream consumers trust.
+        File.WriteAllText(Path.Combine(analyzedDirectory, "Program.cs"), """
+using Newtonsoft.Json;
+
+internal static class Program
+{
+    private static string Payload()
+    {
+        var payload = JsonConvert.SerializeObject(new { name = "dosai" });
+        return TotallyMissingHelper.Decorate(payload);
+    }
+}
+""");
+        File.WriteAllText(Path.Combine(analyzedDirectory, "obj", "project.assets.json"), $$"""
+{
+  "version": 3,
+  "project": { "version": "1.0.0" },
+  "packageFolders": { "{{Path.Combine(tempDirectory.Path, "missing-packages").Replace('\\', '/')}}/": {} },
+  "libraries": {
+    "Newtonsoft.Json/12.0.3": { "type": "package", "path": "newtonsoft.json/12.0.3" }
+  },
+  "targets": {
+    "net8.0": {
+      "Newtonsoft.Json/12.0.3": {
+        "type": "package",
+        "compile": { "lib/netstandard2.0/Newtonsoft.Json.dll": {} }
+      }
+    }
+  }
+}
+""");
+
+        var methodsSlice = Depscan.Dosai.GetMethodsSlice(analyzedDirectory);
+
+        // The unresolved call sites are still recorded (not silently dropped)...
+        Assert.Contains(methodsSlice.MethodCalls!, call => call.EvidenceKind == AnalysisEvidenceKind.SourceUnresolved && call.TargetId == "Unresolved:JsonConvert.SerializeObject");
+        Assert.Contains(methodsSlice.MethodCalls!, call => call.EvidenceKind == AnalysisEvidenceKind.SourceUnresolved && call.TargetId == "Unresolved:TotallyMissingHelper.Decorate");
+        // ...but none of them claims a namespace or a package purl.
+        Assert.DoesNotContain(methodsSlice.MethodCalls!, call => call.EvidenceKind == AnalysisEvidenceKind.SourceUnresolved && (!string.IsNullOrWhiteSpace(call.Namespace) || !string.IsNullOrWhiteSpace(call.Purl)));
+        // The package stays at the dependency-only fallback with no unresolved evidence.
+        var reachability = Assert.Single(methodsSlice.PackageReachability!, package => package.Purl == "pkg:nuget/Newtonsoft.Json@12.0.3");
+        Assert.Equal("Dependency", reachability.ReachabilityKind);
+        Assert.DoesNotContain(AnalysisEvidenceKind.SourceUnresolved, reachability.EvidenceKinds);
+        Assert.DoesNotContain(reachability.ConfidenceReasons, reason => reason.Contains("Package assemblies were not available", StringComparison.Ordinal));
+        // The diagnostic still tells the operator why binding failed.
+        Assert.Contains(methodsSlice.Diagnostics!, diagnostic => diagnostic.Contains("Semantic binding failed for", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Methods_UnresolvedValueChainCall_DoesNotRecordReceiverAsNamespace()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var analyzedDirectory = Path.Combine(tempDirectory.Path, "src");
+        Directory.CreateDirectory(analyzedDirectory);
+        // The receivers are value chains, not namespace qualifications: a local, a field and a
+        // parameter, each of an unresolvable type. The head of a value chain is not a
+        // namespace, so recording it as one would put noise in every such edge's Namespace.
+        File.WriteAllText(Path.Combine(analyzedDirectory, "Program.cs"), """
+internal static class Program
+{
+    private static MissingClient shared = null!;
+
+    private static void Run(MissingClient injected)
+    {
+        var client = shared;
+        client.Inner.Send("a");
+        shared.Inner.Send("b");
+        injected.Inner.Send("c");
+    }
+}
+""");
+
+        var methodsSlice = Depscan.Dosai.GetMethodsSlice(analyzedDirectory);
+
+        var unresolvedCalls = methodsSlice.MethodCalls!
+            .Where(call => call.EvidenceKind == AnalysisEvidenceKind.SourceUnresolved)
+            .ToList();
+        Assert.NotEmpty(unresolvedCalls);
+        // Every edge is recorded, and none of them claims "client", "shared" or "injected" as
+        // a namespace (nor resolves a purl off one).
+        Assert.All(unresolvedCalls, call =>
+        {
+            Assert.True(string.IsNullOrWhiteSpace(call.Namespace), $"Unexpected namespace '{call.Namespace}' on {call.TargetId}");
+            Assert.True(string.IsNullOrWhiteSpace(call.Purl), $"Unexpected purl '{call.Purl}' on {call.TargetId}");
+        });
+    }
+
+    [Fact]
+    public void BuildPreparation_Restore_MakesLocalPackageAvailableForBinding()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        // Pack a local library into a folder NuGet source so restore stays offline.
+        var libraryDirectory = Path.Combine(tempDirectory.Path, "LocalLib");
+        Directory.CreateDirectory(libraryDirectory);
+        File.WriteAllText(Path.Combine(libraryDirectory, "LocalLib.csproj"), """
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <PackageId>LocalLib</PackageId>
+    <Version>1.0.0</Version>
+  </PropertyGroup>
+</Project>
+""");
+        File.WriteAllText(Path.Combine(libraryDirectory, "Greeter.cs"), """
+namespace LocalLib
+{
+    public static class Greeter
+    {
+        public static string Hello() => "hello";
+    }
+}
+""");
+        var packagesDirectory = Path.Combine(tempDirectory.Path, "nupkg");
+        Directory.CreateDirectory(packagesDirectory);
+        RunDotNet($"pack \"{Path.Combine(libraryDirectory, "LocalLib.csproj")}\" -o \"{packagesDirectory}\" -v:quiet --nologo");
+
+        var appDirectory = Path.Combine(tempDirectory.Path, "App");
+        Directory.CreateDirectory(appDirectory);
+        File.WriteAllText(Path.Combine(appDirectory, "nuget.config"), $"""
+<configuration>
+  <packageSources>
+    <clear />
+    <add key="local" value="{packagesDirectory}" />
+  </packageSources>
+</configuration>
+""");
+        File.WriteAllText(Path.Combine(appDirectory, "App.csproj"), """
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="LocalLib" Version="1.0.0" />
+  </ItemGroup>
+</Project>
+""");
+        File.WriteAllText(Path.Combine(appDirectory, "Program.cs"), """
+using LocalLib;
+
+internal static class Program
+{
+    private static void Main()
+    {
+        _ = Greeter.Hello();
+    }
+}
+""");
+
+        BuildPreparation.Prepare(appDirectory, BuildPreparationMode.Restore);
+
+        Assert.True(File.Exists(Path.Combine(appDirectory, "obj", "project.assets.json")), "dotnet restore should create obj/project.assets.json");
+        var methodsSlice = Depscan.Dosai.GetMethodsSlice(appDirectory);
+        Assert.Contains(methodsSlice.MethodCalls!, call => call.EvidenceKind == AnalysisEvidenceKind.SourceRoslynDirect && call.TargetId!.Contains("Greeter.Hello", StringComparison.Ordinal));
+        Assert.Contains(methodsSlice.PackageReachability!, package => package.Purl == "pkg:nuget/LocalLib@1.0.0" && package.Confidence == "High");
+    }
+
+    [Fact]
+    public void BuildPreparation_WithoutProjectsOrInvalidPaths_IsSafeNoOp()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        // No solution or project files: restore finds nothing to run and must not throw.
+        BuildPreparation.Prepare(tempDirectory.Path, BuildPreparationMode.Restore);
+        BuildPreparation.Prepare(tempDirectory.Path, BuildPreparationMode.None);
+        var filePath = Path.Combine(tempDirectory.Path, "not-a-project.txt");
+        File.WriteAllText(filePath, "hello");
+        BuildPreparation.Prepare(filePath, BuildPreparationMode.Restore);
+        BuildPreparation.Prepare(Path.Combine(tempDirectory.Path, "missing"), BuildPreparationMode.Restore);
+    }
+
+    private static void RunDotNet(string arguments)
+    {
+        var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = "dotnet",
+            Arguments = arguments,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        });
+        Assert.NotNull(process);
+        // Drain both pipes before waiting: a verbose pack that fills either buffer would
+        // otherwise block until the test times out.
+        var stdout = process.StandardOutput.ReadToEndAsync();
+        var stderr = process.StandardError.ReadToEndAsync();
+        process.WaitForExit();
+        var output = stdout.GetAwaiter().GetResult() + stderr.GetAwaiter().GetResult();
+        Assert.True(process.ExitCode == 0, output);
     }
 
     // Expected namespaces in Dosai.TestData.CSharp.dll

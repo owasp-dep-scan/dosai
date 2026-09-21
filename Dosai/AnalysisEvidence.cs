@@ -7,6 +7,8 @@ public enum AnalysisEvidenceKind
     SourceRoslynSummary,
     SourceRoslynVirtualCandidate,
     SourceRoslynDelegateTarget,
+    /// <summary>Call site that failed to bind because the target assembly was not available to the compilation; name and namespace are recovered from syntax.</summary>
+    SourceUnresolved,
     AssemblyReflection,
     AssemblyIlDirect,
     AssemblyIlSummary,

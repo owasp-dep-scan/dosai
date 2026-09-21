@@ -80,6 +80,30 @@ Recommended analyst workflow:
 3. Review slice code and endpoint exposure.
 4. Verify exploitability manually.
 
+## Opt-in restore/build execution (--restore / --build)
+
+`--restore` and `--build` make Dosai invoke `dotnet` against the target repository before
+analysis, because restoring output and build output give semantic binding its full-fidelity
+reference set. Both are **off by default** and deliberately not exposed through the MCP
+server: restoring evaluates MSBuild props/targets (including `Directory.Build.*` imports and
+inline tasks from restored packages), and building additionally runs source generators and
+pre/post-build targets — that is executing code from the repository under inspection, a trust
+decision the operator must make consciously.
+
+Mitigations when the flags are used:
+
+- One invocation per solution or project, capped at 50 project files, with per-target timeouts
+  (5 min restore, 10 min build) and an aggregate budget per scan (10 min restore, 20 min
+  build); the remaining budget also caps each target's own timeout, so the budget is a hard
+  wall-clock ceiling. Leftover targets are skipped with a stderr note and analysis proceeds
+  as-is.
+- A timeout kills the whole process tree (`Kill(entireProcessTree)`).
+- Failures, missing `dotnet`, and unreadable projects degrade to analyzing the tree as-is;
+  they never fail the scan and never retry.
+- Reading `project.assets.json` (the default, no-flag path — `NuGetRestoreCache`) evaluates
+  no target code: it only locates already-restored assemblies in the NuGet packages cache and
+  opens them read-only, unpinned, with delete-sharing.
+
 ## Security objectives
 
 - Do not execute analyzed code.

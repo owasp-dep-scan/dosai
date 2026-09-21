@@ -207,20 +207,21 @@ public static class CryptoAnalyzer
         _ => "CWE-327"
     };
 
-    public static CryptoAnalysisResult Analyze(string path)
-        => Analyze(path, methodsSlice: null);
+    public static CryptoAnalysisResult Analyze(string path, BuildPreparationMode buildPreparation = BuildPreparationMode.None)
+        => Analyze(path, methodsSlice: null, buildPreparation);
 
     /// <summary>
     ///     Callers that already hold a <see cref="MethodsSlice"/> (or its reachability index)
     ///     pass it here instead of forcing a second full methods-pipeline run and a JSON round trip.
     /// </summary>
-    public static CryptoAnalysisResult Analyze(string path, MethodsSlice? methodsSlice)
+    public static CryptoAnalysisResult Analyze(string path, MethodsSlice? methodsSlice, BuildPreparationMode buildPreparation = BuildPreparationMode.None)
     {
         if (!File.Exists(path) && !Directory.Exists(path))
         {
             throw new FileNotFoundException($"Path does not exist: {path}", path);
         }
 
+        BuildPreparation.Prepare(path, buildPreparation);
         var files = GetSourceFiles(path);
         var result = new CryptoAnalysisResult { Metadata = TransparencyBuilder.CreateMetadata(path) };
         var reachability = methodsSlice is null
@@ -280,6 +281,10 @@ public static class CryptoAnalyzer
                 ? CSharpSourceParser.Parse(content, file)
                 : null)
             .OfType<CSharpSyntaxTree>().ToList();
+        if (CSharpSourceParser.TryCreateImplicitUsingsTree(basePath) is { } implicitUsingsTree)
+        {
+            csharpTrees.Insert(0, implicitUsingsTree);
+        }
         var vbTrees = files.Where(file => Path.GetExtension(file).Equals(Constants.VBSourceExtension, StringComparison.OrdinalIgnoreCase))
             .Select(file => SafeFileRead.TryReadAllText(file, out var content)
                 ? (VisualBasicSyntaxTree)VisualBasicSyntaxTree.ParseText(content, path: file)
@@ -986,6 +991,22 @@ public static class CryptoAnalyzer
         if (!string.IsNullOrWhiteSpace(root) && Directory.Exists(root))
         {
             foreach (var assembly in SafeFileRead.EnumerateAllFilesSafe(root, "*.dll")) AddReference(assembly);
+        }
+        // Restored-but-unbuilt trees: resolve the same package assemblies the compiler would
+        // reference from the NuGet cache, unpinned from bytes (shared folder, never locked).
+        foreach (var cacheAssembly in NuGetRestoreCache.GetReferencePaths(path, references.Keys))
+        {
+            if (NuGetRestoreCache.TryCreateUnpinnedReference(cacheAssembly) is { } cacheReference && !references.ContainsKey(cacheAssembly))
+            {
+                references.Add(cacheAssembly, cacheReference);
+            }
+        }
+        foreach (var diagnostic in NuGetRestoreCache.GetDiagnostics(path))
+        {
+            if (!diagnostics.Contains(diagnostic, StringComparer.Ordinal))
+            {
+                diagnostics.Add(diagnostic);
+            }
         }
         return references.Values.ToList();
     }
