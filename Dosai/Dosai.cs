@@ -366,9 +366,23 @@ public static class Dosai
             sliceDiagnostics.Add($"Semantic binding failed for {unresolvedCallCount} call sites: target assemblies were missing or conflicted with other references. Restore or build the tree (--restore/--build) to raise reachability confidence.");
         }
 
+        // Conditional-compilation guards were evaluated against the detected target frameworks;
+        // consumers should see what was assumed, and the fallback to the latest modern net must
+        // be visible rather than silent.
+        var metadata = TransparencyBuilder.CreateMetadata(path);
+        var detectedTargetFrameworks = TargetFrameworkDetection.Detect(path);
+        if (detectedTargetFrameworks.Count > 0)
+        {
+            metadata.TargetFrameworks = [.. detectedTargetFrameworks];
+        }
+        else
+        {
+            sliceDiagnostics.Add($"No TargetFramework detected in project files or runtimeconfig under '{path}'; conditional-compilation guards assume the latest modern .NET (net{FrameworkPreprocessorDefines.LatestModernNetMajor}_0).");
+        }
+
         return new MethodsSlice
         {
-            Metadata = TransparencyBuilder.CreateMetadata(path),
+            Metadata = metadata,
             Dependencies = usings,
             Methods = methods,
             MethodCalls = methodCalls,

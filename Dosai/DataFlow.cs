@@ -280,7 +280,7 @@ public static partial class DataFlowAnalyzer
         var csharpTrees = sourcesToInspect
             .Where(source => Path.GetExtension(source).Equals(Constants.CSharpSourceExtension, StringComparison.OrdinalIgnoreCase))
             .Select(source => SafeFileRead.TryReadAllText(source, out var content)
-                ? CSharpSourceParser.Parse(content, source)
+                ? CSharpSourceParser.Parse(content, source, path)
                 : null)
             .OfType<CSharpSyntaxTree>()
             .ToList();

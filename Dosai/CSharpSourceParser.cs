@@ -1,24 +1,40 @@
 using System.Collections.Generic;
+using System.Globalization;
 using Microsoft.CodeAnalysis.CSharp;
 
 namespace Depscan;
 
 /// <summary>
 ///     Preprocessor symbols the analysis treats as defined when interpreting conditional
-///     compilation, in C# (parse options) and F# (the line frontend's region tracking) alike:
-///     `NET`, the current `NET{n}_0`, and the `NET{x}_0_OR_GREATER` chain down to .NET 5 -
-///     exactly what a build against the latest .NET target defines. Multi-target guards
-///     (`#if NET8_0_OR_GREATER`) are near-universal in real libraries; parsing with an empty
-///     define set turns their bodies into disabled text, and for a security scanner a missed
-///     sink in a guarded branch is worse than a declaration the analyzed project's own target
-///     would not compile. `DEBUG`/`TRACE` (a Release-shaped build) and the legacy families
-///     (`NETFRAMEWORK`, `NETSTANDARD`) stay undefined, matching a modern net target. Bump the
-///     ceiling together with <c>TargetFramework</c>.
+///     compilation, in C# (parse options) and F# (the line frontend's region tracking) alike.
+///     The set is a function of the analyzed project's detected target framework - what the
+///     project's own build would define - rather than one hardcoded latest-net set, so a
+///     net8.0 project analyzes its `#if NET8_0` bodies and its `#else` arms instead of the
+///     net9+/never-compiled branches it used to pick up (issue #56 follow-up).
+///     <para>
+///     Multi-target projects get the <b>union</b> of every TFM's set. The union is deliberate
+///     and strictly a superset of any single target: it keeps the "see more rather than less"
+///     bias a security scanner needs, at the cost of making both arms of an `#if`/`#else`
+///     visible at once - code that no single build would compile together. For a scanner,
+///     reporting a guarded sink beats missing it.
+///     </para>
+///     <para>
+///     `DEBUG`/`TRACE` stay undefined - a Release-shaped build - in every family. The
+///     <see cref="ModernNet" /> set (the historical hardcoded one) remains as the fallback
+///     for scan roots with no detectable target framework, so bare-directory scans behave
+///     exactly as before. Bump the ceiling together with <c>TargetFramework</c>.
+///     </para>
 /// </summary>
 internal static class FrameworkPreprocessorDefines
 {
-    private const int LatestModernNetMajor = 11;
+    public const int LatestModernNetMajor = 11;
 
+    /// <summary>
+    ///     The fallback define set when no project file narrows the target: what a build
+    ///     against the latest modern .NET defines (`NET`, `NET{Latest}_0`, the
+    ///     `NET5_0_OR_GREATER` chain down to .NET 5). Unchanged from the historical hardcoded
+    ///     behavior so no-project-file scans do not regress.
+    /// </summary>
     public static IReadOnlySet<string> ModernNet { get; } = BuildModernNet();
 
     private static IReadOnlySet<string> BuildModernNet()
@@ -30,6 +46,260 @@ internal static class FrameworkPreprocessorDefines
         }
 
         return symbols;
+    }
+
+    /// <summary>
+    ///     Union of the define sets of every detected target framework. An unparseable or
+    ///     unrecognized TFM contributes nothing; if nothing contributes, fall back to
+    ///     <see cref="ModernNet" /> so the result is never emptier than before.
+    /// </summary>
+    public static IReadOnlySet<string> ForTargetFrameworks(IEnumerable<string> targetFrameworks)
+    {
+        var union = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var targetFramework in targetFrameworks)
+        {
+            union.UnionWith(ForTargetFramework(targetFramework));
+        }
+
+        return union.Count > 0 ? union : ModernNet;
+    }
+
+    /// <summary>
+    ///     The define set one target framework implies, mirroring what the .NET SDK defines:
+    ///     <c>net8.0</c> → `NET`, `NET8_0`, `NET5_0_OR_GREATER`..`NET8_0_OR_GREATER`,
+    ///     `NETCOREAPP` and its `NETCOREAPP*_OR_GREATER` chain; <c>netstandard2.0</c> →
+    ///     `NETSTANDARD`, `NETSTANDARD2_0` and the lower chain; <c>net472</c> →
+    ///     `NETFRAMEWORK`, `NET472` and the `NET4x_OR_GREATER` chain. An OS/platform suffix
+    ///     (`net8.0-windows`) is stripped for symbol purposes. Unrecognized families yield an
+    ///     empty set; the caller's union falls back to <see cref="ModernNet" />.
+    /// </summary>
+    public static IReadOnlySet<string> ForTargetFramework(string targetFramework)
+    {
+        var normalized = Normalize(targetFramework);
+        var symbols = new HashSet<string>(StringComparer.Ordinal);
+        if (normalized.StartsWith("netstandard", StringComparison.Ordinal))
+        {
+            AddNetStandardSymbols(symbols, normalized["netstandard".Length..]);
+        }
+        else if (normalized.StartsWith("netcoreapp", StringComparison.Ordinal))
+        {
+            AddNetCoreAppSymbols(symbols, normalized["netcoreapp".Length..]);
+        }
+        else if (normalized.StartsWith("net", StringComparison.Ordinal))
+        {
+            if (!TryParseVersion(normalized["net".Length..], out var version))
+            {
+                return symbols;
+            }
+
+            if (version.Major >= 5)
+            {
+                AddModernNetSymbols(symbols, version);
+            }
+            else
+            {
+                AddFrameworkSymbols(symbols, version);
+            }
+        }
+
+        return symbols;
+    }
+
+    /// <summary>Detects the target frameworks for a scan root and returns its define set, falling back to <see cref="ModernNet" />.</summary>
+    public static IReadOnlySet<string> ForRoot(string? rootPath)
+    {
+        var detected = TargetFrameworkDetection.Detect(rootPath);
+        return detected.Count > 0 ? ForTargetFrameworks(detected) : ModernNet;
+    }
+
+    /// <summary>Trims, lowercases, and strips the OS/platform suffix (`net8.0-windows` → `net8.0`).</summary>
+    private static string Normalize(string targetFramework)
+    {
+        var normalized = targetFramework.Trim().ToLowerInvariant();
+        var platformSuffix = normalized.IndexOf('-', StringComparison.Ordinal);
+        return platformSuffix >= 0 ? normalized[..platformSuffix] : normalized;
+    }
+
+    private static void AddModernNetSymbols(HashSet<string> symbols, FrameworkVersion version)
+    {
+        symbols.Add("NET");
+        symbols.Add(Symbol("NET", version));
+        foreach (var candidate in ModernNetVersions)
+        {
+            if (candidate.CompareTo(version) <= 0)
+            {
+                symbols.Add($"NET{candidate.Major}_{candidate.Minor}_OR_GREATER");
+            }
+        }
+
+        // A modern .NET build also defines the .NET Core compatibility symbols.
+        symbols.Add("NETCOREAPP");
+        foreach (var candidate in NetCoreAppVersions)
+        {
+            if (candidate.CompareTo(version) <= 0)
+            {
+                symbols.Add($"NETCOREAPP{candidate.Major}_{candidate.Minor}_OR_GREATER");
+            }
+        }
+    }
+
+    private static void AddNetCoreAppSymbols(HashSet<string> symbols, string versionText)
+    {
+        if (!TryParseVersion(versionText, out var version))
+        {
+            return;
+        }
+
+        symbols.Add("NETCOREAPP");
+        symbols.Add(Symbol("NETCOREAPP", version));
+        foreach (var candidate in NetCoreAppVersions)
+        {
+            if (candidate.CompareTo(version) <= 0)
+            {
+                symbols.Add($"NETCOREAPP{candidate.Major}_{candidate.Minor}_OR_GREATER");
+            }
+        }
+    }
+
+    private static void AddNetStandardSymbols(HashSet<string> symbols, string versionText)
+    {
+        if (!TryParseVersion(versionText, out var version))
+        {
+            return;
+        }
+
+        symbols.Add("NETSTANDARD");
+        symbols.Add(Symbol("NETSTANDARD", version));
+        foreach (var candidate in NetStandardVersions)
+        {
+            if (candidate.CompareTo(version) <= 0)
+            {
+                symbols.Add($"NETSTANDARD{candidate.Major}_{candidate.Minor}_OR_GREATER");
+            }
+        }
+    }
+
+    private static void AddFrameworkSymbols(HashSet<string> symbols, FrameworkVersion version)
+    {
+        symbols.Add("NETFRAMEWORK");
+        symbols.Add(NetFrameworkSymbol(version));
+        foreach (var candidate in NetFrameworkVersions)
+        {
+            if (candidate.CompareTo(version) <= 0)
+            {
+                symbols.Add($"{NetFrameworkSymbol(candidate)}_OR_GREATER");
+            }
+        }
+    }
+
+    // .NET Framework symbols carry no _0 minor separator (`NET472`, `NET48`), matching MSBuild.
+    private static string NetFrameworkSymbol(FrameworkVersion version)
+    {
+        var digits = version.Minor.ToString(CultureInfo.InvariantCulture);
+        if (version.Patch > 0)
+        {
+            digits += version.Patch.ToString(CultureInfo.InvariantCulture);
+        }
+
+        return $"NET{version.Major}{digits}";
+    }
+
+    private static string Symbol(string prefix, FrameworkVersion version) => $"{prefix}{version.Major}_{version.Minor}";
+
+    private static bool TryParseVersion(string text, out FrameworkVersion version)
+    {
+        var trimmed = text.Trim();
+        if (trimmed.Length == 0)
+        {
+            version = default;
+            return false;
+        }
+
+        // Dotted form (`8.0`, `2.0`, `4.7.2`).
+        if (trimmed.Contains('.', StringComparison.Ordinal))
+        {
+            return TryParseParts(trimmed.Split('.'), out version);
+        }
+
+        // SDK-style digit run. Modern targets are major-only (`net8`, `net11`); the framework,
+        // netstandard, and netcoreapp families pack minor (and patch) into the run
+        // (`net45` → 4.5, `net472` → 4.7.2, `netcoreapp31` → 3.1).
+        if (!trimmed.All(char.IsAsciiDigit))
+        {
+            version = default;
+            return false;
+        }
+
+        if (trimmed[0] >= '5')
+        {
+            if (!int.TryParse(trimmed, NumberStyles.Integer, CultureInfo.InvariantCulture, out var major))
+            {
+                version = default;
+                return false;
+            }
+
+            version = new FrameworkVersion(major, 0, 0);
+            return true;
+        }
+
+        var segments = trimmed.Select(digit => digit - '0').ToArray();
+        version = new FrameworkVersion(segments[0], segments.Length > 1 ? segments[1] : 0, segments.Length > 2 ? segments[2] : 0);
+        return segments.Length <= 3;
+    }
+
+    private static bool TryParseParts(string[] parts, out FrameworkVersion version)
+    {
+        version = default;
+        if (parts.Length is < 2 or > 3 || parts.Any(part => part.Length == 0))
+        {
+            return false;
+        }
+
+        if (!int.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out var major)
+            || !int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var minor))
+        {
+            return false;
+        }
+
+        var patch = 0;
+        if (parts.Length == 3 && !int.TryParse(parts[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out patch))
+        {
+            return false;
+        }
+
+        version = new FrameworkVersion(major, minor, patch);
+        return true;
+    }
+
+    private static readonly FrameworkVersion[] ModernNetVersions =
+    [
+        new(5, 0, 0), new(6, 0, 0), new(7, 0, 0), new(8, 0, 0), new(9, 0, 0), new(10, 0, 0), new(11, 0, 0)
+    ];
+    private static readonly FrameworkVersion[] NetCoreAppVersions =
+    [
+        new(1, 0, 0), new(1, 1, 0), new(2, 0, 0), new(2, 1, 0), new(2, 2, 0), new(3, 0, 0), new(3, 1, 0)
+    ];
+    private static readonly FrameworkVersion[] NetStandardVersions =
+    [
+        new(1, 0, 0), new(1, 1, 0), new(1, 2, 0), new(1, 3, 0), new(1, 4, 0), new(1, 5, 0), new(1, 6, 0),
+        new(2, 0, 0), new(2, 1, 0)
+    ];
+    private static readonly FrameworkVersion[] NetFrameworkVersions =
+    [
+        new(2, 0, 0), new(3, 0, 0), new(3, 5, 0), new(4, 0, 0), new(4, 5, 0), new(4, 5, 1), new(4, 5, 2),
+        new(4, 6, 0), new(4, 6, 1), new(4, 6, 2), new(4, 7, 0), new(4, 7, 1), new(4, 7, 2), new(4, 8, 0),
+        new(4, 8, 1)
+    ];
+
+    private readonly record struct FrameworkVersion(int Major, int Minor, int Patch) : IComparable<FrameworkVersion>
+    {
+        public int CompareTo(FrameworkVersion other)
+        {
+            var major = Major.CompareTo(other.Major);
+            if (major != 0) return major;
+            var minor = Minor.CompareTo(other.Minor);
+            return minor != 0 ? minor : Patch.CompareTo(other.Patch);
+        }
     }
 }
 
@@ -56,18 +326,79 @@ internal static class FrameworkPreprocessorDefines
 ///     rejecting lines that a file-based app owns.
 /// </remarks>
 /// <remarks>
-///     The parse options also define <see cref="FrameworkPreprocessorDefines.ModernNet" />, so
-///     `#if NET8_0_OR_GREATER`-style guards analyze as visible code instead of becoming disabled
-///     text that no inventory, call graph, or data-flow result ever sees.
+///     The parse options define the target-framework-aware preprocessor symbol set (see
+///     <see cref="FrameworkPreprocessorDefines" />), resolved per scan root, so `#if NET8_0`-style
+///     guards in a net8.0 project analyze as visible code instead of becoming disabled text that
+///     no inventory, call graph, or data-flow result ever sees.
 /// </remarks>
 public static class CSharpSourceParser
 {
-    private static readonly CSharpParseOptions ParseOptions = new CSharpParseOptions(languageVersion: LanguageVersion.Preview)
-        .WithFeatures([new KeyValuePair<string, string>("FileBasedProgram", "true")])
-        .WithPreprocessorSymbols(FrameworkPreprocessorDefines.ModernNet);
+    private static readonly CSharpParseOptions DefaultParseOptions = BuildParseOptions();
 
-    public static CSharpSyntaxTree Parse(string content, string path) =>
-        (CSharpSyntaxTree)CSharpSyntaxTree.ParseText(content, ParseOptions, path);
+    public static CSharpSyntaxTree Parse(string content, string path, string? rootPath = null) =>
+        (CSharpSyntaxTree)CSharpSyntaxTree.ParseText(content, GetParseOptions(rootPath ?? TryGetDirectory(path)), path);
+
+    /// <summary>
+    ///     Parse options for a scan root: the language-version and FileBasedProgram decisions
+    ///     shared with every root, plus preprocessor symbols from the root's detected target
+    ///     frameworks. Cached per root the same way the implicit-usings decision is, so callers
+    ///     need no new parameter beyond the root path they already have. Null or empty roots
+    ///     get the default (latest modern net) set.
+    /// </summary>
+    internal static CSharpParseOptions GetParseOptions(string? rootPath)
+    {
+        if (string.IsNullOrWhiteSpace(rootPath))
+        {
+            return DefaultParseOptions;
+        }
+
+        string root;
+        try
+        {
+            root = Path.GetFullPath(rootPath);
+        }
+        catch (ArgumentException)
+        {
+            return DefaultParseOptions;
+        }
+
+        lock (ParseOptionsLock)
+        {
+            if (ParseOptionsByRoot.TryGetValue(root, out var cached))
+            {
+                return cached;
+            }
+
+            var options = BuildParseOptions(TargetFrameworkDetection.Detect(root));
+            ParseOptionsByRoot[root] = options;
+            return options;
+        }
+    }
+
+    private static readonly Lock ParseOptionsLock = new();
+    private static readonly Dictionary<string, CSharpParseOptions> ParseOptionsByRoot = new(StringComparer.OrdinalIgnoreCase);
+
+    private static CSharpParseOptions BuildParseOptions(IReadOnlyList<string>? detectedTargetFrameworks = null)
+    {
+        var symbols = detectedTargetFrameworks is { Count: > 0 }
+            ? FrameworkPreprocessorDefines.ForTargetFrameworks(detectedTargetFrameworks)
+            : FrameworkPreprocessorDefines.ModernNet;
+        return new CSharpParseOptions(languageVersion: LanguageVersion.Preview)
+            .WithFeatures([new KeyValuePair<string, string>("FileBasedProgram", "true")])
+            .WithPreprocessorSymbols(symbols);
+    }
+
+    private static string? TryGetDirectory(string path)
+    {
+        try
+        {
+            return Path.GetDirectoryName(Path.GetFullPath(path));
+        }
+        catch (ArgumentException)
+        {
+            return null;
+        }
+    }
 
     /// <summary>
     ///     The implicit global usings the .NET SDK adds to every compilation with
@@ -105,7 +436,7 @@ public static class CSharpSourceParser
         {
             return null;
         }
-        return Parse(ImplicitGlobalUsingsSource, "<implicit-usings>");
+        return Parse(ImplicitGlobalUsingsSource, "<implicit-usings>", path);
     }
 
     // Matches the element with optional attributes (Condition, msbuild metadata), any

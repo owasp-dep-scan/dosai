@@ -89,7 +89,10 @@ public static partial class LanguageFrontendAnalyzer
         var currentDeclarationIndent = int.MaxValue;
         int? typeDeclarationIndent = null;
         var lexerState = new FSharpLexerState();
-        var preprocessor = new FSharpPreprocessor();
+        // The define set mirrors the C# pipeline: preprocessor symbols of the target framework
+        // detected for the scan root, falling back to the latest modern net when no project file
+        // narrows it.
+        var preprocessor = new FSharpPreprocessor(FrameworkPreprocessorDefines.ForRoot(basePath));
         for (var i = 0; i < lines.Length; i++)
         {
             var line = lines[i];
@@ -352,16 +355,16 @@ public static partial class LanguageFrontendAnalyzer
     /// <summary>
     ///     Tracks F# conditional-compilation regions (`#if`/`#elif`/`#else`/`#endif`, with `#elif`
     ///     itself new in F# 11) across the lines of one file. Dosai compiles nothing, so the
-    ///     define set is the analysis one: <see cref="FrameworkPreprocessorDefines.ModernNet" />
-    ///     (`NET`, `NET11_0`, and the `NETx_0_OR_GREATER` chain) is defined, matching what a
-    ///     build against the latest .NET target defines, while `DEBUG`/`TRACE` stay undefined -
-    ///     a Release-shaped build. Multi-target guards (`#if NET8_0_OR_GREATER`) are
+    ///     define set is the analysis one: the preprocessor symbols of the target framework
+    ///     detected for the scan root (<see cref="FrameworkPreprocessorDefines.ForRoot" />),
+    ///     matching what the analyzed project's own build defines, while `DEBUG`/`TRACE` stay
+    ///     undefined - a Release-shaped build. Multi-target guards (`#if NET8_0_OR_GREATER`) are
     ///     near-universal in real F# libraries; treating them as undefined turned their bodies
     ///     into dropped text, and for a security scanner a missed sink in a guarded branch is
     ///     worse than a declaration the analyzed project's own target would not compile. This
     ///     matches the C# pipeline, whose parse options define the same set.
     /// </summary>
-    private sealed class FSharpPreprocessor
+    private sealed class FSharpPreprocessor(IReadOnlySet<string> definedSymbols)
     {
         // One entry per open region: whether the enclosing regions are all active, whether any
         // branch of this region has been taken, and whether the current branch is active.
@@ -404,12 +407,12 @@ public static partial class LanguageFrontendAnalyzer
         }
 
         /// <summary>
-        ///     Evaluates an `#if`/`#elif` condition against the analysis define set: the modern-net
-        ///     symbols are defined, everything else (including `DEBUG`, `TRACE`, and custom
-        ///     symbols) is not. Only `!`, `&amp;&amp;`, `||`, parentheses, and identifiers have an
-        ///     effect.
+        ///     Evaluates an `#if`/`#elif` condition against the analysis define set: the
+        ///     detected target framework's symbols are defined, everything else (including
+        ///     `DEBUG`, `TRACE`, and custom symbols) is not. Only `!`, `&amp;&amp;`, `||`,
+        ///     parentheses, and identifiers have an effect.
         /// </summary>
-        private static bool EvaluateCondition(string condition)
+        private bool EvaluateCondition(string condition)
         {
             var tokens = Regex.Matches(condition ?? string.Empty, @"&&|\|\||!|\(|\)|[A-Za-z_][\w\.]*|\d+")
                 .Select(match => match.Value)
@@ -458,7 +461,7 @@ public static partial class LanguageFrontendAnalyzer
                 }
                 if (position < tokens.Count)
                 {
-                    var defined = FrameworkPreprocessorDefines.ModernNet.Contains(tokens[position]);
+                    var defined = definedSymbols.Contains(tokens[position]);
                     position++;
                     return defined;
                 }
