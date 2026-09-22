@@ -1255,6 +1255,83 @@ class IsPatternFlow
         Assert.Contains(result.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" } && slice.SinkArgument?.Contains("command", StringComparison.Ordinal) == true);
     }
 
+    // owasp-dep-scan/dosai#56 (comment 5778365812): a build-output library whose class hierarchy
+    // is rooted in an assembly that is not shipped next to it. The runtime type loader resolves
+    // base chains recursively and amplifies the stack cost per level when a base fails to load
+    // (dotnet/runtime#131679), so Assembly.GetTypes() overflowed the stack and killed the process.
+    // The scan runs on a 1 MB thread - the Windows main-thread default - so the check does not
+    // depend on the stack size of the machine running the tests. A regression is a stack overflow,
+    // which terminates the test host rather than failing this test alone.
+    [Fact]
+    public void GetMethods_DeepHierarchyWithMissingBaseAssembly_CompletesOnSmallCallerStack()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var scanRoot = Path.Combine(tempDirectory.Path, "repo");
+        var buildOutput = Path.Combine(scanRoot, "BuildOutput");
+        var withheld = Path.Combine(tempDirectory.Path, "withheld");
+        Directory.CreateDirectory(buildOutput);
+        Directory.CreateDirectory(withheld);
+        const TypeAttributes publicClass = TypeAttributes.Public | TypeAttributes.Class | TypeAttributes.BeforeFieldInit;
+
+        // Vendor.UI.Core.dll is written outside the scan root and outside every probed
+        // directory, so references to it cannot be resolved.
+        var coreBuilder = new System.Reflection.Emit.PersistedAssemblyBuilder(new AssemblyName("Vendor.UI.Core"), typeof(object).Assembly);
+        var control = coreBuilder.DefineDynamicModule("Vendor.UI.Core.dll").DefineType("Vendor.UI.Core.Control", publicClass);
+        control.DefineDefaultConstructor(MethodAttributes.Public);
+        control.CreateType();
+        var corePath = Path.Combine(withheld, "Vendor.UI.Core.dll");
+        using (var stream = File.Create(corePath))
+        {
+            coreBuilder.Save(stream);
+        }
+
+        // 1,000 levels is about twice what overflows a 1 MB stack on macOS; Windows overflows
+        // far sooner.
+        var controlsBuilder = new System.Reflection.Emit.PersistedAssemblyBuilder(new AssemblyName("Vendor.UI.Controls"), typeof(object).Assembly);
+        var controlsModule = controlsBuilder.DefineDynamicModule("Vendor.UI.Controls.dll");
+        var parent = Assembly.Load(File.ReadAllBytes(corePath)).GetType("Vendor.UI.Core.Control", throwOnError: true)!;
+        for (var level = 0; level < 1_000; level++)
+        {
+            var type = controlsModule.DefineType($"Vendor.UI.Controls.Level{level}", publicClass, parent);
+            type.DefineDefaultConstructor(MethodAttributes.Public);
+            parent = type.CreateType();
+        }
+
+        // A type that does not depend on the missing assembly must still be inventoried.
+        var theme = controlsModule.DefineType("Vendor.UI.Controls.Theme", publicClass);
+        var apply = theme.DefineMethod("Apply", MethodAttributes.Public, typeof(string), [typeof(string)]);
+        var il = apply.GetILGenerator();
+        il.Emit(System.Reflection.Emit.OpCodes.Ldarg_1);
+        il.Emit(System.Reflection.Emit.OpCodes.Ret);
+        theme.DefineDefaultConstructor(MethodAttributes.Public);
+        theme.CreateType();
+        using (var stream = File.Create(Path.Combine(buildOutput, "Vendor.UI.Controls.dll")))
+        {
+            controlsBuilder.Save(stream);
+        }
+
+        MethodsSlice? slice = null;
+        Exception? failure = null;
+        var caller = new Thread(() =>
+        {
+            try
+            {
+                slice = Depscan.Dosai.GetMethodsSlice(scanRoot);
+            }
+            catch (Exception e)
+            {
+                failure = e;
+            }
+        }, 1024 * 1024);
+        caller.Start();
+        caller.Join();
+
+        Assert.Null(failure);
+        var controls = slice!.Methods!.Where(method => method.FileName == "Vendor.UI.Controls.dll").ToList();
+        Assert.Contains(controls, method => method.ClassName == "Theme" && method.Name == "Apply");
+        Assert.DoesNotContain(controls, method => method.ClassName.StartsWith("Level", StringComparison.Ordinal));
+    }
+
     // Inspecting an assembly must not leave it locked. AssemblyLoadContext.LoadFromAssemblyPath
     // memory-maps the file and collectible contexts unload asynchronously, so on Windows the
     // analyzed build output stayed undeletable for the rest of the process; deleting the

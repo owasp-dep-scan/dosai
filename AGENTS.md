@@ -58,6 +58,10 @@ dotnet test ./Dosai.sln
   `FileShare.ReadWrite | FileShare.Delete`, and inspected assemblies are loaded by value
   (`InspectionAssemblyLoadContext`), because a mapped path stays locked on Windows for the
   process lifetime even after a collectible context is unloaded.
+- Keep runtime-loader work (`Assembly.GetTypes()` and member reflection over inspected
+  assemblies) inside `GetAssemblyMethods`, which runs it on a dedicated large-stack thread. The
+  runtime type loader recurses per hierarchy level and, when a base type is missing, can
+  overflow a default-sized stack (dotnet/runtime#131679) - an uncatchable process crash.
 - Keep edge endpoints valid: every graph edge must reference existing nodes.
 - Preserve JSON compatibility unless a task explicitly allows breaking changes.
 - PURL enrichment must be best-effort and must never fail analysis.
