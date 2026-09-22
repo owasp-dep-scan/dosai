@@ -5,11 +5,27 @@ namespace Depscan;
 
 public sealed class AnalysisMetadata
 {
-    public string SchemaVersion { get; set; } = "5.0.0";
+    public string SchemaVersion { get; set; } = "5.1.0";
     public string AnalyzerVersion { get; set; } = typeof(Dosai).Assembly.GetName().Version?.ToString() ?? "4.1.0";
     public DateTimeOffset GeneratedAt { get; set; } = DateTimeOffset.UtcNow;
     public string? InputPath { get; set; }
     public string Tool { get; set; } = "Dosai";
+
+    /// <summary>
+    ///     The target frameworks detected for the scan root (from csproj/fsproj/vbproj,
+    ///     Directory.Build.props/targets, or a runtimeconfig) that conditional-compilation
+    ///     guards were evaluated against; null when nothing was detected and the default
+    ///     latest-modern-net set was assumed (a Diagnostics note marks that case).
+    /// </summary>
+    public List<string>? TargetFrameworks { get; set; }
+
+    /// <summary>
+    ///     The one target framework out of <see cref="TargetFrameworks" /> whose preprocessor
+    ///     symbols conditional-compilation guards were actually evaluated against. On a
+    ///     multi-target tree this decides which `#if` arms appear in the results at all, and it
+    ///     is not derivable from the list; null when nothing was detected.
+    /// </summary>
+    public string? GuardTargetFramework { get; set; }
 }
 
 public sealed class EntryPoint

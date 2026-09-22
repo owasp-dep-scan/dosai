@@ -147,4 +147,59 @@ public class CorpusTests
         Assert.Equal(result.EntryPoints.Count, result.AttackSurface.Sum(group => group.EntryPointCount));
         Assert.Contains(result.AttackSurface, group => group.Exposure.EndsWith("-http", StringComparison.Ordinal));
     }
+
+    // Added with the target-framework-aware analysis (schema 5.1.0): the corpus previously
+    // exercised only net10/net11-era apps, which is how a net8-crashing defect shipped unseen.
+    // This is a real .NET 8 LTS app whose TFM comes from src/Directory.Build.props.
+    [SkippableFact]
+    public void Corpus_ModularMonolith_Net8App_TargetFrameworkDetectedAndSurfaceAnalyzed()
+    {
+        var path = CorpusPathOrSkip("modular-monolith-with-ddd/src");
+        var slice = JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(path), JsonOptions)!;
+
+        // The net8.0 target is detected from the tree and surfaced in metadata - not silently
+        // assumed - so the fallback diagnostic must stay silent here.
+        Assert.Equal(["net8.0"], slice.Metadata!.TargetFrameworks);
+        Assert.DoesNotContain(slice.Diagnostics ?? [], diagnostic => diagnostic.Contains("No TargetFramework detected", StringComparison.Ordinal));
+
+        // 111 entry points / 72,108 methods / 9,806 edges at the calibration run.
+        Assert.True(slice.EntryPoints!.Count >= 90, $"expected >= 90 entry points, got {slice.EntryPoints.Count}");
+        Assert.True(slice.Methods!.Count >= 60_000, $"expected >= 60k methods, got {slice.Methods.Count}");
+        Assert.True(slice.CallGraph!.Edges.Count >= 8_000, $"expected >= 8k call-graph edges, got {slice.CallGraph.Edges.Count}");
+
+        // The merged graph stays valid: every edge references an existing node.
+        var nodeIds = slice.CallGraph.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
+        Assert.All(slice.CallGraph.Edges, edge =>
+        {
+            Assert.Contains(edge.SourceId, nodeIds);
+            Assert.Contains(edge.TargetId, nodeIds);
+        });
+    }
+
+    // A real six-target multi-targeting library (net462;netstandard2.0;netstandard2.1;
+    // net8.0;net9.0;net10.0): the union of every target's preprocessor guards is analyzed and
+    // the full TFM set is surfaced.
+    [SkippableFact]
+    public void Corpus_GrpcNetClient_MultiTargetLibrary_RepresentativeTargetAnalyzed()
+    {
+        var path = CorpusPathOrSkip("grpc-dotnet/src/Grpc.Net.Client");
+        var slice = JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(path), JsonOptions)!;
+
+        var targetFrameworks = slice.Metadata!.TargetFrameworks ?? [];
+        foreach (var expected in new[] { "net462", "netstandard2.0", "netstandard2.1", "net8.0", "net9.0", "net10.0" })
+        {
+            Assert.Contains(expected, targetFrameworks);
+        }
+        Assert.DoesNotContain(slice.Diagnostics ?? [], diagnostic => diagnostic.Contains("No TargetFramework detected", StringComparison.Ordinal));
+
+        // All six targets are detected, but guards resolve against the most modern one, and the
+        // slice says so rather than leaving consumers to guess from a declaration-ordered list.
+        Assert.Equal("net10.0", slice.Metadata!.GuardTargetFramework);
+        Assert.Contains(slice.Diagnostics ?? [], diagnostic => diagnostic.Contains("evaluated against 'net10.0'", StringComparison.Ordinal));
+
+        // 659 methods / 3,469 call sites / 1,547 edges at the calibration run.
+        Assert.True(slice.Methods!.Count >= 500, $"expected >= 500 methods, got {slice.Methods.Count}");
+        Assert.True(slice.MethodCalls!.Count >= 3_000, $"expected >= 3k call sites, got {slice.MethodCalls.Count}");
+        Assert.True(slice.CallGraph!.Edges.Count >= 1_200, $"expected >= 1.2k call-graph edges, got {slice.CallGraph.Edges.Count}");
+    }
 }

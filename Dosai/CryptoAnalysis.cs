@@ -278,7 +278,7 @@ public static class CryptoAnalyzer
         var references = GetMetadataReferences(basePath, result.Diagnostics);
         var csharpTrees = files.Where(file => Path.GetExtension(file).Equals(Constants.CSharpSourceExtension, StringComparison.OrdinalIgnoreCase))
             .Select(file => SafeFileRead.TryReadAllText(file, out var content)
-                ? CSharpSourceParser.Parse(content, file)
+                ? CSharpSourceParser.Parse(content, file, basePath)
                 : null)
             .OfType<CSharpSyntaxTree>().ToList();
         if (CSharpSourceParser.TryCreateImplicitUsingsTree(basePath) is { } implicitUsingsTree)
