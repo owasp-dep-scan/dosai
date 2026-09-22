@@ -108,6 +108,40 @@ Dosai targets .NET 11 and analyzes C# 15 source, the default language version fo
 
 Building Dosai requires the .NET 11 SDK (11.0.x); a .NET 10 SDK cannot build the current target frameworks. While .NET 11 is prerelease, the `FSharp.Compiler.Service`, `FSharp.Core`, and `System.Reflection.MetadataLoadContext` references are RC builds and are pinned to the RC SDK's versions; they move to the stable releases when .NET 11 reaches GA. The published binaries are self-contained, so analyzing .NET 11 code does not require a .NET 11 runtime on the machine running Dosai.
 
+### .NET version support (target-framework aware analysis)
+
+Dosai does not assume the analyzed code targets the same .NET it was built with. It detects the
+analyzed project's target framework(s) — from `*.csproj`/`*.fsproj`/`*.vbproj`
+(`<TargetFramework>`/`<TargetFrameworks>`), `Directory.Build.props`/`Directory.Build.targets`,
+or, for built trees without a project file, `*.runtimeconfig.json` — and evaluates
+conditional-compilation guards against what each detected target actually defines:
+
+| Detected target | Preprocessor guards analyzed |
+| --- | --- |
+| `net8.0` | `NET`, `NET8_0`, `NET5_0_OR_GREATER`..`NET8_0_OR_GREATER`, the `NETCOREAPP` family |
+| `netstandard2.0` | `NETSTANDARD`, `NETSTANDARD2_0` and the lower `NETSTANDARD*_OR_GREATER` chain |
+| `net472` | `NETFRAMEWORK`, `NET472` and the `NET4x_OR_GREATER` chain |
+| multi-target | the **union** of every target's set |
+| nothing detected | the historical fallback (`NET`, latest `NETn_0`, the modern chain), reported via a `Diagnostics` note |
+
+OS/platform-suffixed targets (`net8.0-windows`) contribute their base target's symbols, and the
+full target identifiers are surfaced as `Metadata.TargetFrameworks` so consumers can see what was
+assumed. Union semantics are deliberate: a multi-target project's guards are analyzed if any of
+its targets defines them — strictly more code than any single build compiles, never less than
+before. Two consequences worth knowing: both arms of an `#if`/`#else` can be visible at once
+(acceptable for a scanner — reporting a guarded sink beats missing it), and a body guarded by a
+negation (`#if !NETSTANDARD2_0`) is hidden when the negated target is part of the detected set,
+because at least one of the project's own targets does not compile it. For trees whose targets
+all predate .NET 5, modern-only branches (`#if NET5_0_OR_GREATER`) are no longer analyzed — they
+are phantom code for that target. The fallback for scan roots with no detectable target framework
+is unchanged from earlier releases.
+
+Building Dosai itself still requires the .NET 11 SDK (11.0.x); a .NET 10 SDK cannot build the
+current target frameworks. Analyzed source may target anything from `netstandard1.x` and
+`net4x` through `net11.0` — older targets are parsed and analyzed with the same fidelity; see
+[Migration to schema 5.1.0](./docs/migration-5.1.0.md) for the output changes that shipped with
+this behavior.
+
 ### Querying JSON
 
 ```bash

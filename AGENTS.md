@@ -41,12 +41,17 @@ dotnet test ./Dosai.sln
   every result, so the accepted language version stays a single decision. The parser also
   enables the `FileBasedProgram` feature so file-based app `#:` directives parse as trivia;
   `#:package` lines surface as dependencies in `GetSourceMethods`.
-- Conditional compilation resolves against `FrameworkPreprocessorDefines.ModernNet` in both
-  pipelines (`CSharpSourceParser` parse options; the F# line frontend's `#if`/`#elif` tracking):
-  `NET`, `NET11_0`, and the `NETx_0_OR_GREATER` chain are defined so multi-target guards stay
-  visible, while `DEBUG`/`TRACE` and the legacy `NETFRAMEWORK`/`NETSTANDARD` families are not -
-  a Release-shaped modern-target build. The F# frontend also ignores `#:`-prefixed lines
-  (FS-1337). Bump the ceiling with `TargetFramework`.
+- Conditional compilation resolves against preprocessor symbols derived from the analyzed
+  project's detected target framework (`TargetFrameworkDetection` feeding the per-root
+  `CSharpSourceParser` parse options and the F# line frontend's `#if`/`#elif` tracking): each
+  detected TFM contributes what its own build defines (`net8.0` -> `NET`, `NET8_0`, the
+  `NET5_0_OR_GREATER` chain, the `NETCOREAPP` family; `netstandard2.0` and `net472` -> their
+  families), multi-target projects get the union, and with no detectable TFM the fallback is the
+  historical `FrameworkPreprocessorDefines.ModernNet` set (`NET`, `NET11_0`, the modern chain) so
+  bare-directory scans behave as before. Detected TFMs surface in `Metadata.TargetFrameworks`,
+  and the fallback appends a `Diagnostics` note. `DEBUG`/`TRACE` stay undefined - a
+  Release-shaped build. The F# frontend also ignores `#:`-prefixed lines (FS-1337). Bump the
+  ceiling with `TargetFramework`.
 - Never leave an inspected file locked. Metadata readers open with
   `FileShare.ReadWrite | FileShare.Delete`, and inspected assemblies are loaded by value
   (`InspectionAssemblyLoadContext`), because a mapped path stays locked on Windows for the
@@ -120,6 +125,7 @@ The `docs` directory doubles as a Docsify site (see `docs/index.html`, `docs/_si
 - Migration to schema 4.0.0: `docs/migration-4.0.md`
 - Migration to schema 4.1.0 (additive; supersedes the unreleased 4.0.1): `docs/migration-4.1.0.md`
 - Migration to schema 5.0.0 (.NET 11 / C# 15; additive output changes): `docs/migration-5.0.md`
+- Migration to schema 5.1.0 (structured attribute arguments, TFM-aware analysis): `docs/migration-5.1.0.md`
 - Data-flow custom patterns: `docs/dataflow-patterns.md`
 - Built-in data-flow pattern packs: `docs/pattern-packs.md`
 - PURL/supply-chain details: `docs/supply-chain-purl.md`
