@@ -283,7 +283,7 @@ public static class Dosai
     ///     instead of vanishing. The catch is scoped to exactly this block; a bug anywhere else
     ///     in the pipeline still surfaces.
     /// </summary>
-    private static List<CustomAttributeInfo> ExtractCustomAttributes(ISymbol symbol, ICollection<string> diagnostics)
+    internal static List<CustomAttributeInfo> ExtractCustomAttributes(ISymbol symbol, ICollection<string> diagnostics)
     {
         try
         {

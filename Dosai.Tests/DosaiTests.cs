@@ -1,5 +1,8 @@
 using Depscan;
 using System.Collections;
+using System.Collections.Immutable;
+using System.Globalization;
+using Microsoft.CodeAnalysis;
 using System.Reflection;
 using System.Reflection.Metadata;
 using System.Text.Json;
@@ -1558,6 +1561,530 @@ class ModernNetGuard
         Assert.Contains(result.Nodes, node => node is { IsSink: true, Category: "command" });
         Assert.Contains(result.Slices, slice => slice is { SourceCategory: "message", SinkCategory: "command" });
     }
+
+    #region Issue 56 - attribute constructor arguments and target-framework awareness
+
+    /// <summary>Writes a minimal SDK-style project file so TFM detection classifies the scan root.</summary>
+    private static void WriteScanProjectFile(string directory, string frameworkProperty)
+    {
+        File.WriteAllText(Path.Combine(directory, "Scan.csproj"), $"""
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    {frameworkProperty}
+  </PropertyGroup>
+</Project>
+""");
+    }
+
+    // Shared shape: one params attribute applied with every constructor-argument form the
+    // issue-#56 family collapsed or crashed on.
+    private const string AttributeArgumentFixture = """
+using System;
+
+public static class Rows
+{
+    [Data(null)]
+    public static void NullData() { }
+
+    [Data(new object[0])]
+    public static void EmptyData() { }
+
+    [Data(new object?[] { null, 1, "" })]
+    public static void MixedData() { }
+
+    [Data(new object[] { new object[] { 1 } })]
+    public static void JaggedData() { }
+
+    [Data(new object?[] { "x" }, Note = null)]
+    public static void NullNamed() { }
+}
+
+[AttributeUsage(AttributeTargets.Method, AllowMultiple = true)]
+public sealed class DataAttribute(params object?[] values) : Attribute
+{
+    public string? Note { get; set; }
+}
+""";
+
+    /// <summary>The ConstructorArguments element of the Data attribute on one method of the raw methods JSON.</summary>
+    private static JsonElement DataAttributeArgument(JsonDocument document, string methodName)
+    {
+        foreach (var method in document.RootElement.GetProperty("Methods").EnumerateArray())
+        {
+            if (method.GetProperty("Name").GetString() != methodName)
+            {
+                continue;
+            }
+            foreach (var attribute in method.GetProperty("CustomAttributes").EnumerateArray())
+            {
+                if (attribute.GetProperty("Name").GetString() == "DataAttribute")
+                {
+                    return attribute.GetProperty("ConstructorArguments").EnumerateArray().First();
+                }
+            }
+        }
+
+        throw new Xunit.Sdk.XunitException($"No DataAttribute found on method {methodName}.");
+    }
+
+    // These tests assert on the raw emitted JSON (not a deserialize round trip) so the
+    // serializer policy itself is under test: a null stays null inside ConstructorArguments
+    // elements and NamedArguments[].Value = null is not silently dropped by WhenWritingNull.
+
+    // The reported crash: [Data(null)] on a params object?[] leaves Roslyn's TypedConstant.Values
+    // at its default and the old FormatTypedConstant .Select threw NullReferenceException - one
+    // attribute aborted the whole scan and no output was written at all.
+    [Fact]
+    public void GetMethods_NullArrayConstructorArgument_NoThrowAndSerializedAsNull()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Rows.cs"), AttributeArgumentFixture);
+
+        var methodsSlice = ReadMethods(tempDirectory.Path);
+        Assert.NotEmpty(methodsSlice.Methods!);
+
+        using var document = JsonDocument.Parse(Depscan.Dosai.GetMethods(tempDirectory.Path));
+        var argument = DataAttributeArgument(document, "NullData");
+        Assert.True(argument.GetProperty("IsNull").GetBoolean());
+        Assert.True(argument.GetProperty("IsArray").GetBoolean());
+        Assert.False(argument.TryGetProperty("Elements", out _));
+    }
+
+    // An empty array and a null array reference must stay distinguishable.
+    [Fact]
+    public void GetMethods_EmptyArrayConstructorArgument_DistinctFromNull()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Rows.cs"), AttributeArgumentFixture);
+
+        using var document = JsonDocument.Parse(Depscan.Dosai.GetMethods(tempDirectory.Path));
+        var argument = DataAttributeArgument(document, "EmptyData");
+        Assert.True(argument.GetProperty("IsArray").GetBoolean());
+        Assert.False(argument.TryGetProperty("IsNull", out _));
+        Assert.Equal(0, argument.GetProperty("Elements").GetArrayLength());
+    }
+
+    // A null element inside an array stays null next to scalar elements; jagged arrays recurse.
+    [Fact]
+    public void GetMethods_NullElementAndJaggedArrays_RecurseLosslessly()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Rows.cs"), AttributeArgumentFixture);
+
+        using var document = JsonDocument.Parse(Depscan.Dosai.GetMethods(tempDirectory.Path));
+
+        var mixed = DataAttributeArgument(document, "MixedData");
+        Assert.Equal(3, mixed.GetProperty("Elements").GetArrayLength());
+        Assert.True(mixed.GetProperty("Elements")[0].GetProperty("IsNull").GetBoolean());
+        Assert.Equal("1", mixed.GetProperty("Elements")[1].GetProperty("Value").GetString());
+        Assert.Equal(string.Empty, mixed.GetProperty("Elements")[2].GetProperty("Value").GetString());
+
+        var jagged = DataAttributeArgument(document, "JaggedData");
+        Assert.True(jagged.GetProperty("Elements")[0].GetProperty("IsArray").GetBoolean());
+        Assert.Equal("1", jagged.GetProperty("Elements")[0].GetProperty("Elements")[0].GetProperty("Value").GetString());
+    }
+
+    // NamedArguments[].Value = null must survive serialization: under WhenWritingNull the
+    // property would silently disappear, so NamedArgumentInfo.Value opts into Never.
+    [Fact]
+    public void GetMethods_NullNamedArgument_KeepsValuePropertyInJson()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Rows.cs"), AttributeArgumentFixture);
+
+        ReadMethods(tempDirectory.Path);
+
+        using var document = JsonDocument.Parse(Depscan.Dosai.GetMethods(tempDirectory.Path));
+        foreach (var method in document.RootElement.GetProperty("Methods").EnumerateArray())
+        {
+            if (method.GetProperty("Name").GetString() != "NullNamed")
+            {
+                continue;
+            }
+            foreach (var attribute in method.GetProperty("CustomAttributes").EnumerateArray())
+            {
+                if (attribute.GetProperty("Name").GetString() != "DataAttribute")
+                {
+                    continue;
+                }
+                var named = attribute.GetProperty("NamedArguments").EnumerateArray().Single();
+                Assert.Equal("Note", named.GetProperty("Name").GetString());
+                Assert.True(named.TryGetProperty("Value", out var value));
+                Assert.Equal(JsonValueKind.Null, value.ValueKind);
+                return;
+            }
+        }
+
+        throw new Xunit.Sdk.XunitException("No DataAttribute with named arguments found on NullNamed.");
+    }
+
+    // The assembly (MetadataLoadContext) path must produce the same encoding as the Roslyn
+    // path for the same attribute: it used to stringify arrays as ReadOnlyCollection type names.
+    [Fact]
+    public void GetMethods_Net8Assembly_AttributeArgumentsAgreeWithSourceScan()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var outputDirectory = BuildTemporaryProject(tempDirectory.Path, "Net8AttributeArgs", """
+using System;
+
+public static class Rows
+{
+    [Data(null)]
+    public static void NullData() { }
+
+    [Data(new object[0])]
+    public static void EmptyData() { }
+
+    [Data(new object?[] { null, 1, "" })]
+    public static void MixedData() { }
+
+    [Data(new object[] { new object[] { 1 } })]
+    public static void JaggedData() { }
+}
+
+[AttributeUsage(AttributeTargets.Method, AllowMultiple = true)]
+public sealed class DataAttribute(params object?[] values) : Attribute;
+""", targetFramework: "net8.0", outputType: "Library");
+
+        var sourceJson = Depscan.Dosai.GetMethods(Path.Combine(tempDirectory.Path, "Net8AttributeArgs", "src"));
+        var assemblyJson = Depscan.Dosai.GetMethods(outputDirectory);
+        Assert.Equal(AttributeArgumentShapes(sourceJson), AttributeArgumentShapes(assemblyJson));
+    }
+
+    /// <summary>Per-method shape of the Data attribute argument, ignoring Type display strings (Roslyn display text vs reflection names differ by design).</summary>
+    private static SortedList<string, string> AttributeArgumentShapes(string methodsJson)
+    {
+        using var document = JsonDocument.Parse(methodsJson);
+        var shapes = new SortedList<string, string>();
+        foreach (var method in document.RootElement.GetProperty("Methods").EnumerateArray())
+        {
+            var methodName = method.GetProperty("Name").GetString();
+            foreach (var attribute in method.GetProperty("CustomAttributes").EnumerateArray())
+            {
+                if (attribute.GetProperty("Name").GetString() == "DataAttribute" && !shapes.ContainsKey(methodName!))
+                {
+                    shapes.Add(methodName!, Shape(attribute.GetProperty("ConstructorArguments").EnumerateArray().First()));
+                }
+            }
+        }
+
+        return shapes;
+
+        static string Shape(JsonElement argument)
+        {
+            if (argument.TryGetProperty("Elements", out var elements))
+            {
+                return "[" + string.Join(",", elements.EnumerateArray().Select(Shape)) + "]";
+            }
+            if (argument.TryGetProperty("IsNull", out var isNull) && isNull.GetBoolean())
+            {
+                return "null";
+            }
+            return argument.TryGetProperty("Value", out var value) ? value.GetString() ?? "null" : "?";
+        }
+    }
+
+    // A symbol whose attribute extraction throws must cost only its own attribute list: the
+    // helper degrades to empty and reports into Diagnostics instead of aborting the scan.
+    [Fact]
+    public void ExtractCustomAttributes_HostileSymbol_DegradesToEmptyWithDiagnostic()
+    {
+        var diagnostics = new List<string>();
+        var attributes = Depscan.Dosai.ExtractCustomAttributes(new ThrowingSymbol(), diagnostics);
+
+        Assert.Empty(attributes);
+        Assert.Single(diagnostics);
+        Assert.Contains("HostileSymbol", diagnostics[0], StringComparison.Ordinal);
+        Assert.Contains("Attribute extraction failed", diagnostics[0], StringComparison.Ordinal);
+    }
+
+    // Roslyn's PublicAPI analyzer forbids external ISymbol implementations (RS1009); this
+    // test double is exactly the sanctioned use case for it.
+#pragma warning disable RS1009
+    private sealed class ThrowingSymbol : ISymbol
+    {
+        public string Name => "HostileSymbol";
+        public ImmutableArray<AttributeData> GetAttributes() => throw new NullReferenceException("simulated malformed attribute data");
+        public SymbolKind Kind => SymbolKind.Method;
+        public string Language => "C#";
+        public string MetadataName => Name;
+        public ISymbol? ContainingSymbol => null;
+        public IAssemblySymbol? ContainingAssembly => null;
+        public IModuleSymbol? ContainingModule => null;
+        public INamedTypeSymbol? ContainingType => null;
+        public INamespaceSymbol? ContainingNamespace => null;
+        public bool IsDefinition => false;
+        public bool IsStatic => false;
+        public bool IsVirtual => false;
+        public bool IsOverride => false;
+        public bool IsAbstract => false;
+        public bool IsSealed => false;
+        public bool IsExtern => false;
+        public bool IsImplicitlyDeclared => false;
+        public bool CanBeReferencedByName => false;
+        public bool HasUnsupportedMetadata => false;
+        public ImmutableArray<Location> Locations => [];
+        public ImmutableArray<SyntaxReference> DeclaringSyntaxReferences => [];
+        public Accessibility DeclaredAccessibility => Accessibility.NotApplicable;
+        public ISymbol OriginalDefinition => this;
+        public int MetadataToken => 0;
+        public bool Equals(ISymbol? other) => ReferenceEquals(this, other);
+        public bool Equals(ISymbol? other, SymbolEqualityComparer comparer) => ReferenceEquals(this, other);
+        public void Accept(SymbolVisitor visitor) => visitor.Visit(this);
+        public TResult? Accept<TResult>(SymbolVisitor<TResult> visitor) => visitor.Visit(this);
+        public TResult Accept<TArgument, TResult>(SymbolVisitor<TArgument, TResult> visitor, TArgument argument) => visitor.Visit(this, argument)!;
+        public string ToDisplayString(SymbolDisplayFormat? format = null) => Name;
+        public ImmutableArray<SymbolDisplayPart> ToDisplayParts(SymbolDisplayFormat? format = null) => [];
+        public string ToMinimalDisplayString(SemanticModel semanticModel, int position, SymbolDisplayFormat? format = null) => Name;
+        public ImmutableArray<SymbolDisplayPart> ToMinimalDisplayParts(SemanticModel semanticModel, int position, SymbolDisplayFormat? format = null) => [];
+        public string? GetDocumentationCommentId() => null;
+        public string GetDocumentationCommentXml(CultureInfo? preferredCulture = null, bool expand = false, CancellationToken cancellationToken = default) => string.Empty;
+    }
+#pragma warning restore RS1009
+
+    [Fact]
+    public void GetMethods_Net8Project_AnalyzesNet8GuardBodiesAndElseArm()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        WriteScanProjectFile(tempDirectory.Path, "<TargetFramework>net8.0</TargetFramework>");
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Program.cs"), """
+TfmGuards.Run();
+
+public static class TfmGuards
+{
+#if NET8_0
+    public static void Net8Only() { }
+#endif
+#if NET9_0_OR_GREATER
+    public static void Net9Plus() { }
+#else
+    public static void Net8Fallback() { }
+#endif
+    public static void Run()
+    {
+        Net8Only();
+        Net8Fallback();
+    }
+}
+""");
+
+        var methodsSlice = ReadMethods(tempDirectory.Path);
+
+        // Both net8 code paths are analyzed: the exact-TFM guard body and the #else arm of a
+        // guard the project would never compile. On the old hardcoded latest-net symbols the
+        // two net8 bodies were disabled text and only Net9Plus existed.
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "TfmGuards", Name: "Net8Only" });
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "TfmGuards", Name: "Net8Fallback" });
+        Assert.DoesNotContain(methodsSlice.Methods!, method => method is { ClassName: "TfmGuards", Name: "Net9Plus" });
+
+        // They are call-graph edges from the entry chain, not dead code.
+        Assert.Contains(methodsSlice.CallGraph!.Edges, edge => edge.SourceId.Contains("TfmGuards.Run()", StringComparison.Ordinal) && edge.TargetId.Contains("Net8Only()", StringComparison.Ordinal));
+        Assert.Contains(methodsSlice.CallGraph!.Edges, edge => edge.SourceId.Contains("TfmGuards.Run()", StringComparison.Ordinal) && edge.TargetId.Contains("Net8Fallback()", StringComparison.Ordinal));
+        Assert.DoesNotContain(methodsSlice.DeadCode ?? [], entry => entry.Name is "Net8Only" or "Net8Fallback");
+
+        // What was assumed is visible to consumers.
+        Assert.Equal("net8.0", Assert.Single(methodsSlice.Metadata!.TargetFrameworks!));
+    }
+
+    [Fact]
+    public void GetMethods_NetStandard20Project_AnalyzesNetStandardGuardBody()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        WriteScanProjectFile(tempDirectory.Path, "<TargetFramework>netstandard2.0</TargetFramework>");
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Guards.cs"), """
+public static class Guards
+{
+#if NETSTANDARD2_0
+    public static void StandardOnly() { }
+#endif
+#if NETFRAMEWORK
+    public static void FrameworkOnly() { }
+#endif
+}
+""");
+
+        var methodsSlice = ReadMethods(tempDirectory.Path);
+
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Guards", Name: "StandardOnly" });
+        Assert.DoesNotContain(methodsSlice.Methods!, method => method is { ClassName: "Guards", Name: "FrameworkOnly" });
+        Assert.Equal("netstandard2.0", Assert.Single(methodsSlice.Metadata!.TargetFrameworks!));
+    }
+
+    [Fact]
+    public void GetMethods_Net472Project_AnalyzesFrameworkGuardBody()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        WriteScanProjectFile(tempDirectory.Path, "<TargetFramework>net472</TargetFramework>");
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Guards.cs"), """
+public static class Guards
+{
+#if NETFRAMEWORK
+    public static void FrameworkOnly() { }
+#endif
+#if NET
+    public static void ModernOnly() { }
+#endif
+}
+""");
+
+        var methodsSlice = ReadMethods(tempDirectory.Path);
+
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Guards", Name: "FrameworkOnly" });
+        Assert.DoesNotContain(methodsSlice.Methods!, method => method is { ClassName: "Guards", Name: "ModernOnly" });
+        Assert.Equal("net472", Assert.Single(methodsSlice.Metadata!.TargetFrameworks!));
+    }
+
+    // Multi-target projects analyze the union of every target's guards: strictly more code
+    // than any single build would compile, never less than before.
+    [Fact]
+    public void GetMethods_MultiTargetProject_AnalyzesUnionOfGuardBodies()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        WriteScanProjectFile(tempDirectory.Path, "<TargetFrameworks>net462;net8.0;net10.0</TargetFrameworks>");
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Guards.cs"), """
+public static class Guards
+{
+#if NET462
+    public static void Net462Only() { }
+#endif
+#if NET8_0
+    public static void Net8Only() { }
+#endif
+#if NET10_0_OR_GREATER
+    public static void Net10Plus() { }
+#endif
+#if NETSTANDARD2_0
+    public static void StandardOnly() { }
+#endif
+}
+""");
+
+        var methodsSlice = ReadMethods(tempDirectory.Path);
+
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Guards", Name: "Net462Only" });
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Guards", Name: "Net8Only" });
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Guards", Name: "Net10Plus" });
+        Assert.DoesNotContain(methodsSlice.Methods!, method => method is { ClassName: "Guards", Name: "StandardOnly" });
+        Assert.Equal(["net462", "net8.0", "net10.0"], methodsSlice.Metadata!.TargetFrameworks);
+    }
+
+    // The regression most likely to slip: with no project file anywhere under the root, the
+    // fallback stays exactly the old hardcoded latest-modern-net set (NET11_0 defined, NET8_0
+    // exact not, NETFRAMEWORK not), the metadata carries no TargetFrameworks, and a
+    // Diagnostics note says the default was assumed.
+    [Fact]
+    public void GetMethods_NoProjectFile_KeepsLatestModernNetFallbackBehavior()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Guards.cs"), """
+public static class Guards
+{
+#if NET11_0
+    public static void Net11Only() { }
+#endif
+#if NET8_0
+    public static void Net8ExactOnly() { }
+#endif
+#if NET8_0_OR_GREATER
+    public static void Net8Plus() { }
+#endif
+#if NETFRAMEWORK
+    public static void FrameworkOnly() { }
+#endif
+}
+""");
+
+        var methodsSlice = ReadMethods(tempDirectory.Path);
+
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Guards", Name: "Net11Only" });
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Guards", Name: "Net8Plus" });
+        Assert.DoesNotContain(methodsSlice.Methods!, method => method is { ClassName: "Guards", Name: "Net8ExactOnly" });
+        Assert.DoesNotContain(methodsSlice.Methods!, method => method is { ClassName: "Guards", Name: "FrameworkOnly" });
+        Assert.Null(methodsSlice.Metadata!.TargetFrameworks);
+        Assert.Contains(methodsSlice.Diagnostics ?? [], diagnostic => diagnostic.Contains("No TargetFramework detected", StringComparison.Ordinal));
+    }
+
+    // Assembly-only trees have no project file; the runtimeconfig names the framework.
+    [Fact]
+    public void GetMethods_RuntimeConfigOnlyDirectory_DetectsTargetFramework()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "App.runtimeconfig.json"), """
+{
+  "runtimeOptions": {
+    "tfm": "net8.0",
+    "framework": {
+      "name": "Microsoft.NETCore.App",
+      "version": "8.0.0"
+    }
+  }
+}
+""");
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Guards.cs"), """
+public static class Guards
+{
+#if NET8_0
+    public static void Net8Only() { }
+#endif
+}
+""");
+
+        var methodsSlice = ReadMethods(tempDirectory.Path);
+
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Guards", Name: "Net8Only" });
+        Assert.Equal("net8.0", Assert.Single(methodsSlice.Metadata!.TargetFrameworks!));
+    }
+
+    // The F# line frontend evaluates the same detected define set as the C# pipeline.
+    [Fact]
+    public void GetMethods_FSharpNet8Project_AnalyzesNet8GuardedBodies()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        WriteScanProjectFile(tempDirectory.Path, "<TargetFramework>net8.0</TargetFramework>");
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "App.fs"), """
+module Sample.App
+
+#if NET8_0
+let net8Only () = ()
+#endif
+#if NET9_0_OR_GREATER
+let net9Plus () = ()
+#else
+let net8Fallback () = ()
+#endif
+""");
+
+        var methodsSlice = ReadMethods(tempDirectory.Path);
+
+        Assert.Contains(methodsSlice.Methods!, method => method is { Module: "LanguageFrontend", Name: "net8Only" });
+        Assert.Contains(methodsSlice.Methods!, method => method is { Module: "LanguageFrontend", Name: "net8Fallback" });
+        Assert.DoesNotContain(methodsSlice.Methods!, method => method is { Module: "LanguageFrontend", Name: "net9Plus" });
+    }
+
+    [Fact]
+    public void GetDataFlows_Net8ProjectGuardedBranch_TaintReachesSink()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        WriteScanProjectFile(tempDirectory.Path, "<TargetFramework>net8.0</TargetFramework>");
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Program.cs"), """
+using System.Diagnostics;
+
+public static class Guarded
+{
+#if NET8_0
+    public static void Modern(string command) => Process.Start(command);
+#endif
+}
+""");
+
+        var result = ReadDataFlows(tempDirectory.Path);
+
+        Assert.Contains(result.Nodes, node => node is { IsSource: true, Name: "command", MethodName: "Modern" });
+        Assert.Contains(result.Nodes, node => node is { IsSink: true, Category: "command" });
+        Assert.Contains(result.Slices, slice => slice is { SourceCategory: "message", SinkCategory: "command" });
+    }
+
+    #endregion
 
     // ASP.NET Core 11: `[ShortCircuit]` (on a minimal-API lambda) must not hide the endpoint,
     // and a union-typed JSON body parameter must be seeded as an HTTP source so taint from the
@@ -3296,7 +3823,7 @@ class Program
         Assert.Contains(methodsSlice.ApiEndpoints ?? [], endpoint => endpoint is { HttpMethod: "GET", Route: "api/[controller]/{id}", Path: "/api/Orders/{id}", FilePath: "Endpoints.cs" } && endpoint.RawUrls.Contains("https://api.example.test/orders/"));
         Assert.Contains(methodsSlice.ApiEndpoints ?? [], endpoint => endpoint is { HttpMethod: "POST", Route: "/upload", Path: "/upload", EndpointKind: "MinimalApi" });
         Assert.NotNull(methodsSlice.Metadata);
-        Assert.Equal("5.0.0", methodsSlice.Metadata.SchemaVersion);
+        Assert.Equal("5.1.0", methodsSlice.Metadata.SchemaVersion);
         Assert.Contains(methodsSlice.EntryPoints ?? [], entryPoint => entryPoint is { Kind: "HttpController", Route: "/api/Orders/{id}" });
     }
 
