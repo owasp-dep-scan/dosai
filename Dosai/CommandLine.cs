@@ -26,6 +26,13 @@ public class CommandLine
             DefaultValueFactory = _ => DefaultOutputFile
         };
 
+        var excludeOption = new Option<string[]>("--exclude")
+        {
+            Description = "Glob of files or directories to skip, relative to --path (repeatable), e.g. 'BuildOutput/**', '**/*.Designer.cs', 'node_modules'",
+            Arity = ArgumentArity.OneOrMore,
+            AllowMultipleArgumentsPerToken = true
+        };
+
         var callGraphFormatOption = new Option<string?>("--callgraph-format")
         {
             Description = "Export call graph separately in one of: mermaid, graphml, gexf",
@@ -164,6 +171,7 @@ public class CommandLine
         var methodsCommand = new Command("methods", "Retrieve details about the methods")
         {
             pathOption,
+            excludeOption,
             outputFileOption,
             callGraphFormatOption,
             callGraphOutputFileOption,
@@ -179,6 +187,7 @@ public class CommandLine
         var dataFlowsCommand = new Command("dataflows", "Create data-flow slices from source patterns to sink patterns")
         {
             pathOption,
+            excludeOption,
             outputFileOption,
             patternsFileOption,
             patternPacksOption,
@@ -194,6 +203,7 @@ public class CommandLine
         var cryptoCommand = new Command("crypto", "Detect cryptographic assets, operations, materials, misuse, and CBOM evidence")
         {
             pathOption,
+            excludeOption,
             outputFileOption,
             cryptoFormatOption,
             cryptoGraphFormatOption,
@@ -205,6 +215,7 @@ public class CommandLine
         var agentContextCommand = new Command("agent-context", "Generate compact AI-agent context from data-flow analysis")
         {
             pathOption,
+            excludeOption,
             outputFileOption,
             patternsFileOption,
             patternPacksOption,
@@ -258,6 +269,7 @@ public class CommandLine
             Guard("methods", () => parseResult.GetValue(outputFileOption), () =>
             {
                 var path = parseResult.GetValue(pathOption);
+                using var exclusions = PathExclusions.Apply(path!, parseResult.GetValue(excludeOption));
                 var outputFile = parseResult.GetValue(outputFileOption);
                 var callGraphFormat = parseResult.GetValue(callGraphFormatOption);
                 var callGraphOutputFile = parseResult.GetValue(callGraphOutputFileOption);
@@ -308,6 +320,7 @@ public class CommandLine
         Guard("dataFlows", () => parseResult.GetValue(outputFileOption), () =>
         {
             var path = parseResult.GetValue(pathOption);
+            using var exclusions = PathExclusions.Apply(path!, parseResult.GetValue(excludeOption));
             var outputFile = parseResult.GetValue(outputFileOption);
             var patternsFile = parseResult.GetValue(patternsFileOption);
             var patternPacks = parseResult.GetValue(patternPacksOption);
@@ -352,6 +365,7 @@ public class CommandLine
         Guard("crypto", () => parseResult.GetValue(outputFileOption), () =>
         {
             var path = parseResult.GetValue(pathOption)!;
+            using var exclusions = PathExclusions.Apply(path, parseResult.GetValue(excludeOption));
             var outputFile = parseResult.GetValue(outputFileOption)!;
             var format = parseResult.GetValue(cryptoFormatOption);
             var graphFormat = parseResult.GetValue(cryptoGraphFormatOption);
@@ -379,6 +393,7 @@ public class CommandLine
         Guard("agentContext", () => parseResult.GetValue(outputFileOption), () =>
         {
             var path = parseResult.GetValue(pathOption)!;
+            using var exclusions = PathExclusions.Apply(path, parseResult.GetValue(excludeOption));
             var outputFile = parseResult.GetValue(outputFileOption)!;
             var patternsFile = parseResult.GetValue(patternsFileOption);
             var patternPacks = parseResult.GetValue(patternPacksOption);

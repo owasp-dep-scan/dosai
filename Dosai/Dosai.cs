@@ -13,6 +13,7 @@ using Microsoft.CodeAnalysis.Operations;
 using Microsoft.CodeAnalysis.VisualBasic;
 using Microsoft.CodeAnalysis.VisualBasic.Syntax;
 using System.IO.Compression;
+using System.Runtime.ExceptionServices;
 using System.Runtime.Loader;
 using CompilationUnitSyntax = Microsoft.CodeAnalysis.CSharp.Syntax.CompilationUnitSyntax;
 using ExpressionSyntax = Microsoft.CodeAnalysis.CSharp.Syntax.ExpressionSyntax;
@@ -1197,11 +1198,52 @@ public static class Dosai
     }
 
     /// <summary>
+    ///     Stack reserved for assembly inspection. Reserved address space is committed only as
+    ///     it is used, so a large reservation costs nothing on the common, shallow path.
+    /// </summary>
+    private static readonly int AssemblyInspectionStackSize = Environment.Is64BitProcess ? 256 * 1024 * 1024 : 64 * 1024 * 1024;
+
+    /// <summary>
     /// Get all assembly methods for the given path to assembly or directory of assemblies
     /// </summary>
     /// <param name="path">Filesystem path to assembly file or directory containing assembly files</param>
     /// <returns>List of assembly methods</returns>
+    /// <remarks>
+    ///     Runs on a dedicated thread with <see cref="AssemblyInspectionStackSize" /> of stack.
+    ///     The runtime type loader resolves a type's base chain recursively, and when a base
+    ///     type fails to load - a build-output assembly whose dependency is not shipped next to
+    ///     it - native exception handling amplifies the stack used per level
+    ///     (dotnet/runtime#131679). On the default main-thread stack (1 MB on Windows, 8 MB on
+    ///     Linux and macOS) a deep enough hierarchy overflows inside <c>Assembly.GetTypes()</c>,
+    ///     which terminates the process: a stack overflow cannot be caught. The larger stack
+    ///     leaves the loader and its output untouched and moves that limit far beyond the
+    ///     hierarchy depth of real libraries.
+    /// </remarks>
     private static List<Method> GetAssemblyMethods(string path, ICollection<string> diagnostics)
+    {
+        List<Method>? methods = null;
+        ExceptionDispatchInfo? failure = null;
+        var inspection = new Thread(() =>
+        {
+            try
+            {
+                methods = InspectAssemblyMethods(path, diagnostics);
+            }
+            catch (Exception e)
+            {
+                failure = ExceptionDispatchInfo.Capture(e);
+            }
+        }, AssemblyInspectionStackSize)
+        {
+            Name = "Dosai assembly inspection"
+        };
+        inspection.Start();
+        inspection.Join();
+        failure?.Throw();
+        return methods!;
+    }
+
+    private static List<Method> InspectAssemblyMethods(string path, ICollection<string> diagnostics)
     {
         var assembliesToInspect = AssemblyScope.ScopeApplicationAssemblies(path, GetFilesToInspect(path, Constants.AssemblyExtension, Constants.ExeExtension), message => Console.Error.WriteLine($"Warning: {message}"));
         var assemblyMethods = new List<Method>();
