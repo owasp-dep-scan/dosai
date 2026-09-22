@@ -255,6 +255,7 @@ public class CommandLine
         rootCommand.Subcommands.Add(mcpCommand);
 
         methodsCommand.SetAction(parseResult =>
+            Guard("methods", () => parseResult.GetValue(outputFileOption), () =>
             {
                 var path = parseResult.GetValue(pathOption);
                 var outputFile = parseResult.GetValue(outputFileOption);
@@ -301,9 +302,10 @@ public class CommandLine
                 }
 
                 return 0;
-            });
+            }));
 
         dataFlowsCommand.SetAction(parseResult =>
+        Guard("dataFlows", () => parseResult.GetValue(outputFileOption), () =>
         {
             var path = parseResult.GetValue(pathOption);
             var outputFile = parseResult.GetValue(outputFileOption);
@@ -344,9 +346,10 @@ public class CommandLine
             }
 
             return 0;
-        });
+        }));
 
         cryptoCommand.SetAction(parseResult =>
+        Guard("crypto", () => parseResult.GetValue(outputFileOption), () =>
         {
             var path = parseResult.GetValue(pathOption)!;
             var outputFile = parseResult.GetValue(outputFileOption)!;
@@ -370,9 +373,10 @@ public class CommandLine
                 Console.Error.WriteLine(ex.Message);
                 return 1;
             }
-        });
+        }));
 
         agentContextCommand.SetAction(parseResult =>
+        Guard("agentContext", () => parseResult.GetValue(outputFileOption), () =>
         {
             var path = parseResult.GetValue(pathOption)!;
             var outputFile = parseResult.GetValue(outputFileOption)!;
@@ -399,9 +403,10 @@ public class CommandLine
             var context = TransparencyBuilder.BuildAgentContext(result, path);
             File.WriteAllText(outputFile, JsonSerializer.Serialize(context, JsonOptions()));
             return 0;
-        });
+        }));
 
         reportCommand.SetAction(parseResult =>
+        Guard("report", () => parseResult.GetValue(outputFileOption), () =>
         {
             var input = parseResult.GetValue(inputFileOption)!;
             var outputFile = parseResult.GetValue(outputFileOption)!;
@@ -413,9 +418,10 @@ public class CommandLine
             }
             File.WriteAllText(outputFile, TransparencyBuilder.ToMarkdownReport(result));
             return 0;
-        });
+        }));
 
         diffCommand.SetAction(parseResult =>
+        Guard("diff", () => parseResult.GetValue(outputFileOption), () =>
         {
             var oldInput = parseResult.GetValue(oldInputFileOption)!;
             var newInput = parseResult.GetValue(newInputFileOption)!;
@@ -429,25 +435,27 @@ public class CommandLine
             }
             File.WriteAllText(outputFile, TransparencyBuilder.DiffJson(oldResult, newResult));
             return 0;
-        });
+        }));
 
         queryCommand.SetAction(parseResult =>
+        Guard("query", () => parseResult.GetValue(inputFileOption), () =>
         {
             var input = parseResult.GetValue(inputFileOption)!;
             var outputFile = parseResult.GetValue(outputFileOption)!;
             var query = parseResult.GetValue(queryOption)!;
             File.WriteAllText(outputFile, DosaiQueryEngine.QueryJson(File.ReadAllText(input), query));
             return 0;
-        });
+        }));
 
         mcpCommand.SetAction(parseResult =>
+        Guard("mcp", null, () =>
         {
             var path = parseResult.GetValue(pathOption);
             var patternsFile = parseResult.GetValue(patternsFileOption);
             var patternPacks = parseResult.GetValue(patternPacksOption);
             var mcpRoot = parseResult.GetValue(mcpRootOption);
             return McpServer.Run(path, patternsFile, patternPacks, mcpRoot);
-        });
+        }));
 
         return rootCommand.Parse(args).Invoke();
     }
@@ -461,6 +469,32 @@ public class CommandLine
     /// <summary>Build wins when both flags are given (build implies restore).</summary>
     private static BuildPreparationMode ParseBuildPreparation(bool restore, bool build)
         => build ? BuildPreparationMode.Build : restore ? BuildPreparationMode.Restore : BuildPreparationMode.None;
+
+    /// <summary>
+    ///     Top-level guard around one command action (issue-#56 containment): an unhandled
+    ///     exception is written to stderr with a non-zero exit code instead of aborting the
+    ///     process and leaving no output at all, and when the output file already holds a
+    ///     partial result (the methods and dataflows commands stream JSON while they analyze)
+    ///     the user is told where it is instead of being left with nothing.
+    /// </summary>
+    private static int Guard(string commandName, Func<string?>? outputFile, Func<int> action)
+    {
+        try
+        {
+            return action();
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"{commandName} failed: {ex.GetType().Name}: {ex.Message}");
+            Console.Error.WriteLine(ex.StackTrace ?? "<no stack trace available>");
+            var output = outputFile?.Invoke();
+            if (!string.IsNullOrWhiteSpace(output) && File.Exists(output))
+            {
+                Console.Error.WriteLine($"Note: '{output}' was created before the failure and may hold a partial result.");
+            }
+            return 1;
+        }
+    }
 
     /// <summary>Loads the --mcp-allowlist policy file (one command per line); missing file disables the allowlist.</summary>
     private static IReadOnlySet<string>? LoadMcpAllowlist(string? mcpAllowlistPath)

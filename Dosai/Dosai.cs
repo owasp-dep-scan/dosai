@@ -155,14 +155,116 @@ public static class Dosai
     }
 
     /// <summary>
-    ///     Formats a TypedConstant for JSON output. Array-typed constants (params string[]
-    ///     constructor arguments such as HttpTriggerAttribute's methods) must be flattened:
-    ///     reading Value on them throws.
+    ///     Formats one Roslyn attribute constructor argument into its structured output shape -
+    ///     see <see cref="CustomAttributeArgumentInfo" /> for the encoding. Array-typed constants
+    ///     (params string[] constructor arguments such as HttpTriggerAttribute's methods) carry
+    ///     their elements in <see cref="TypedConstant.Values" />; reading <see cref="TypedConstant.Value" />
+    ///     on them throws. A null-valued constant (<c>[Routes(null)]</c>, issue #56) leaves
+    ///     <see cref="TypedConstant.Values" /> at its default, so null is decided before Values
+    ///     is ever touched - touching the default array throws NullReferenceException.
     /// </summary>
-    private static string FormatTypedConstant(TypedConstant constant) =>
-        constant.Kind == TypedConstantKind.Array
-            ? string.Join(",", constant.Values.Select(value => value.Value?.ToString() ?? string.Empty))
-            : constant.Value?.ToString() ?? string.Empty;
+    private static CustomAttributeArgumentInfo ToAttributeArgumentInfo(TypedConstant constant)
+    {
+        var info = new CustomAttributeArgumentInfo { Type = constant.Type?.ToDisplayString() };
+        if (constant.IsNull)
+        {
+            info.IsNull = true;
+            info.IsArray = constant.Kind == TypedConstantKind.Array;
+            return info;
+        }
+
+        if (constant.Kind == TypedConstantKind.Array)
+        {
+            info.IsArray = true;
+            info.Elements = constant.Values.IsDefault
+                ? []
+                : constant.Values.Select(ToAttributeArgumentInfo).ToList();
+            return info;
+        }
+
+        info.Value = constant.Value switch
+        {
+            null => null,
+            string text => text,
+            IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture),
+            var other => other.ToString()
+        };
+        return info;
+    }
+
+    /// <summary>
+    ///     Named arguments keep their scalar string shape: a null named constant is null, and an
+    ///     array-valued named constant flattens comma-joined (a null element flattens to the
+    ///     empty string). Named array arguments are rare; constructor arguments, where the
+    ///     issue-#56 shapes live, use the lossless structured encoding instead.
+    /// </summary>
+    private static string? FormatNamedArgumentValue(TypedConstant constant)
+    {
+        if (constant.IsNull)
+        {
+            return null;
+        }
+
+        return constant.Kind == TypedConstantKind.Array
+            ? (constant.Values.IsDefault
+                ? string.Empty
+                : string.Join(",", constant.Values.Select(value => FormatNamedArgumentValue(value) ?? string.Empty)))
+            : constant.Value switch
+            {
+                null => null,
+                string text => text,
+                IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture),
+                var other => other.ToString()
+            };
+    }
+
+    /// <summary>
+    ///     Reflection-side counterpart of <see cref="ToAttributeArgumentInfo(Microsoft.CodeAnalysis.TypedConstant)" />:
+    ///     produces the same structured encoding for the same attribute so a source scan and an
+    ///     assembly scan of one code base agree. A <see cref="CustomAttributeTypedArgument" />
+    ///     wraps an array value as a read-only collection of nested arguments - the assembly
+    ///     path used to stringify that wrapper as a type name - and a null array arrives as a
+    ///     null <see cref="CustomAttributeTypedArgument.Value" /> over an array
+    ///     <see cref="CustomAttributeTypedArgument.ArgumentType" />, so null is decided before
+    ///     the collection is ever touched. Scalar text is formatted invariantly to match the
+    ///     Roslyn side on every machine.
+    /// </summary>
+    private static CustomAttributeArgumentInfo ToAttributeArgumentInfo(CustomAttributeTypedArgument argument)
+    {
+        var info = new CustomAttributeArgumentInfo { Type = argument.ArgumentType.ToString() };
+        if (argument.Value is null)
+        {
+            info.IsNull = true;
+            info.IsArray = argument.ArgumentType.IsArray;
+            return info;
+        }
+
+        if (argument.ArgumentType.IsArray && argument.Value is IReadOnlyCollection<CustomAttributeTypedArgument> elements)
+        {
+            info.IsArray = true;
+            info.Elements = elements.Select(ToAttributeArgumentInfo).ToList();
+            return info;
+        }
+
+        info.Value = Convert.ToString(argument.Value, CultureInfo.InvariantCulture);
+        return info;
+    }
+
+    /// <summary>Reflection-side counterpart of <see cref="FormatNamedArgumentValue(Microsoft.CodeAnalysis.TypedConstant)" />, same encoding.</summary>
+    private static string? FormatNamedArgumentValue(CustomAttributeTypedArgument argument)
+    {
+        if (argument.Value is null)
+        {
+            return null;
+        }
+
+        if (argument.ArgumentType.IsArray && argument.Value is IReadOnlyCollection<CustomAttributeTypedArgument> elements)
+        {
+            return string.Join(",", elements.Select(element => FormatNamedArgumentValue(element) ?? string.Empty));
+        }
+
+        return Convert.ToString(argument.Value, CultureInfo.InvariantCulture);
+    }
 
     #endregion
 
@@ -172,6 +274,37 @@ public static class Dosai
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
         Converters = { new JsonStringEnumConverter() }
     };
+
+    /// <summary>
+    ///     Extracts the custom attribute list of one symbol, degrading to an empty list when a
+    ///     malformed attribute throws (the issue-#56 containment). One bad attribute costs this
+    ///     one symbol's attribute inventory - never the scan - and the failure is appended to
+    ///     <paramref name="diagnostics" /> (which reaches <see cref="MethodsSlice.Diagnostics" />)
+    ///     instead of vanishing. The catch is scoped to exactly this block; a bug anywhere else
+    ///     in the pipeline still surfaces.
+    /// </summary>
+    private static List<CustomAttributeInfo> ExtractCustomAttributes(ISymbol symbol, ICollection<string> diagnostics)
+    {
+        try
+        {
+            return symbol.GetAttributes().Select(attr => new CustomAttributeInfo
+            {
+                Name = attr.AttributeClass?.Name,
+                FullName = attr.AttributeClass?.ToDisplayString(),
+                ConstructorArguments = attr.ConstructorArguments.Select(ToAttributeArgumentInfo).ToList(),
+                NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo
+                {
+                    Name = na.Key,
+                    Value = FormatNamedArgumentValue(na.Value)
+                }).ToList()
+            }).ToList();
+        }
+        catch (Exception ex)
+        {
+            diagnostics.Add($"Attribute extraction failed for '{symbol.ToDisplayString()}': {ex.GetType().Name}: {ex.Message}. This symbol's attributes are omitted; the rest of the analysis is unaffected.");
+            return [];
+        }
+    }
 
     /// <summary>
     /// Get all assembly/source methods for the given path to assembly/source or directory of assemblies/source
@@ -192,7 +325,7 @@ public static class Dosai
         BuildPreparation.Prepare(path, buildPreparation);
         var purlResolver = PackageUrlResolver.Create(path);
         var methods = GetAssemblyMethods(path);
-        var (sourceMethods, usings, methodCalls, properties, fields, events, constructors, callGraph, sourceAssemblyMapping, sourceMode, compilations) = GetSourceMethods(path, methods);
+        var (sourceMethods, usings, methodCalls, properties, fields, events, constructors, callGraph, sourceAssemblyMapping, sourceMode, compilations, sourceDiagnostics) = GetSourceMethods(path, methods);
         var (assemblyMethodCalls, assemblyCallGraph) = AssemblyCallGraphAnalyzer.Analyze(path, methods);
         NormalizeAssemblyGraphToSourceIds(assemblyMethodCalls, assemblyCallGraph, sourceAssemblyMapping);
         methodCalls.AddRange(assemblyMethodCalls);
@@ -226,6 +359,7 @@ public static class Dosai
         // sit at Low confidence: unbuilt trees degrade semantic binding, and that fact should
         // reach consumers instead of hiding behind silently missing call edges.
         sliceDiagnostics.AddRange(NuGetRestoreCache.GetDiagnostics(path));
+        sliceDiagnostics.AddRange(sourceDiagnostics);
         var unresolvedCallCount = methodCalls.Count(call => call.EvidenceKind == AnalysisEvidenceKind.SourceUnresolved);
         if (unresolvedCallCount > 0)
         {
@@ -1144,11 +1278,11 @@ public static class Dosai
                     {
                         Name = attr.AttributeType.Name,
                         FullName = attr.AttributeType.FullName,
-                        ConstructorArguments = attr.ConstructorArguments.Select(arg => arg.Value?.ToString() ?? string.Empty).ToList(),
+                        ConstructorArguments = attr.ConstructorArguments.Select(ToAttributeArgumentInfo).ToList(),
                         NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo
                         {
                             Name = na.MemberName,
-                            Value = na.TypedValue.Value?.ToString() ?? string.Empty
+                            Value = FormatNamedArgumentValue(na.TypedValue)
                         }).ToList()
                     }).ToList(),
                 BaseType = baseType,
@@ -1371,8 +1505,9 @@ public static class Dosai
         string sourceFilePath,
         string fileName,
         string basePath,
-        int lineNumber = 0,
-        int columnNumber = 0)
+        int lineNumber,
+        int columnNumber,
+        List<string> diagnostics)
     {
         if (lineNumber == 0 || columnNumber == 0)
         {
@@ -1431,18 +1566,7 @@ public static class Dosai
                 TypeFullName = p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
                 IsGenericParameter = p.Type is ITypeParameterSymbol
             }).ToList(),
-            CustomAttributes = methodSymbol.GetAttributes().Select(attr =>
-                new CustomAttributeInfo
-                {
-                    Name = attr.AttributeClass?.Name,
-                    FullName = attr.AttributeClass?.ToDisplayString(),
-                    ConstructorArguments = attr.ConstructorArguments.Select(arg => FormatTypedConstant(arg)).ToList(),
-                    NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo
-                    {
-                        Name = na.Key,
-                        Value = FormatTypedConstant(na.Value)
-                    }).ToList()
-                }).ToList(),
+            CustomAttributes = ExtractCustomAttributes(methodSymbol, diagnostics),
             BaseType = baseType,
             ImplementedInterfaces = implementedInterfaces,
             MetadataToken = metadataToken,
@@ -1459,7 +1583,7 @@ public static class Dosai
     /// <param name="path">Filesystem path to C# source file or directory containing C# source files</param>
     /// <param name="assemblyMethods">List of assembly methods</param>
     /// <returns>Tuple with List of source methods and using directives</returns>
-    private static (List<Method> SourceMethods, List<Dependency> UsingDirectives, List<MethodCalls> MethodCalls, List<PropertyInfo> Properties, List<FieldInfo> Fields, List<EventInfo> Events, List<ConstructorInfo> Constructors, CallGraph CallGraph, List<SourceAssemblyMapping> SourceAssemblyMappings, bool SourceMode, Frameworks.SourceCompilations Compilations) GetSourceMethods(string path, List<Method> assemblyMethods)
+    private static (List<Method> SourceMethods, List<Dependency> UsingDirectives, List<MethodCalls> MethodCalls, List<PropertyInfo> Properties, List<FieldInfo> Fields, List<EventInfo> Events, List<ConstructorInfo> Constructors, CallGraph CallGraph, List<SourceAssemblyMapping> SourceAssemblyMappings, bool SourceMode, Frameworks.SourceCompilations Compilations, List<string> Diagnostics) GetSourceMethods(string path, List<Method> assemblyMethods)
     {
         var assembliesToInspect = GetFilesToInspect(path, Constants.AssemblyExtension, Constants.ExeExtension);
         var sourcesToInspect = GetFilesToInspect(path, Constants.CSharpSourceExtension);
@@ -1474,6 +1598,9 @@ public static class Dosai
         var events = new List<EventInfo>();
         var constructors = new List<ConstructorInfo>();
         var sourceAssemblyMappings = new List<SourceAssemblyMapping>();
+        // Per-symbol attribute-extraction failures (issue #56 containment) collect here and
+        // surface in MethodsSlice.Diagnostics instead of aborting the scan.
+        var sourceDiagnostics = new List<string>();
         var dispatchIndexes = new Dictionary<Compilation, DispatchResolver.SourceIndex>();
         var metadataReferences = new Dictionary<string, PortableExecutableReference>(StringComparer.OrdinalIgnoreCase);
 #pragma warning disable IL3000
@@ -1648,16 +1775,7 @@ public static class Dosai
                                 TypeFullName = p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
                                 IsGenericParameter = p.Type is ITypeParameterSymbol
                             }).ToList(),
-                            CustomAttributes = methodSymbol.GetAttributes().Select(attr => 
-                                new CustomAttributeInfo {
-                                    Name = attr.AttributeClass?.Name,
-                                    FullName = attr.AttributeClass?.ToDisplayString(),
-                                    ConstructorArguments = attr.ConstructorArguments.Select(arg => FormatTypedConstant(arg)).ToList(),
-                                    NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo {
-                                        Name = na.Key,
-                                        Value = FormatTypedConstant(na.Value)
-                                    }).ToList()
-                                }).ToList(),
+                            CustomAttributes = ExtractCustomAttributes(methodSymbol, sourceDiagnostics),
                             BaseType = baseType,
                             ImplementedInterfaces = implementedInterfaces,
                             MetadataToken = metadataToken,
@@ -1746,16 +1864,7 @@ public static class Dosai
                                 Type = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(p.Type.ToString()!),
                                 TypeFullName = p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
                             }).ToList(),
-                            CustomAttributes = method.GetAttributes().Select(attr => 
-                                new CustomAttributeInfo {
-                                    Name = attr.AttributeClass?.Name,
-                                    FullName = attr.AttributeClass?.ToDisplayString(),
-                                    ConstructorArguments = attr.ConstructorArguments.Select(arg => FormatTypedConstant(arg)).ToList(),
-                                    NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo {
-                                        Name = na.Key,
-                                        Value = FormatTypedConstant(na.Value)
-                                    }).ToList()
-                                }).ToList(),
+                            CustomAttributes = ExtractCustomAttributes(method, sourceDiagnostics),
                             BaseType = baseType,
                             ImplementedInterfaces = implementedInterfaces,
                             MetadataToken = metadataToken,
@@ -1801,16 +1910,7 @@ public static class Dosai
                             TypeFullName = propertySymbol.Type.ToDisplayString(),
                             LineNumber = lineNumber,
                             ColumnNumber = columnNumber,
-                            CustomAttributes = propertySymbol.GetAttributes().Select(attr => 
-                                new CustomAttributeInfo {
-                                    Name = attr.AttributeClass?.Name,
-                                    FullName = attr.AttributeClass?.ToDisplayString(),
-                                    ConstructorArguments = attr.ConstructorArguments.Select(arg => FormatTypedConstant(arg)).ToList(),
-                                    NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo {
-                                        Name = na.Key,
-                                        Value = FormatTypedConstant(na.Value)
-                                    }).ToList()
-                                }).ToList(),
+                            CustomAttributes = ExtractCustomAttributes(propertySymbol, sourceDiagnostics),
                             HasGetter = propertySymbol.GetMethod is not null,
                             HasSetter = propertySymbol.SetMethod is not null,
                             Implements = propertySymbol.ExplicitInterfaceImplementations.Select(i => i.ToDisplayString()).ToList(),
@@ -1820,12 +1920,12 @@ public static class Dosai
                         });
                         if (propertySymbol.GetMethod is not null)
                         {
-                            var getterMethod = CreateMethodFromSymbol(propertySymbol.GetMethod, model, sourceFilePath, fileName, path, lineNumber, columnNumber);
+                            var getterMethod = CreateMethodFromSymbol(propertySymbol.GetMethod, model, sourceFilePath, fileName, path, lineNumber, columnNumber, sourceDiagnostics);
                             sourceMethods.Add(getterMethod);    
                         }
                         if (propertySymbol.SetMethod is not null)
                         {
-                            var setterMethod = CreateMethodFromSymbol(propertySymbol.SetMethod, model, sourceFilePath, fileName, path, lineNumber, columnNumber);
+                            var setterMethod = CreateMethodFromSymbol(propertySymbol.SetMethod, model, sourceFilePath, fileName, path, lineNumber, columnNumber, sourceDiagnostics);
                             sourceMethods.Add(setterMethod);
                         }
                     }
@@ -1868,16 +1968,7 @@ public static class Dosai
                             TypeFullName = propertySymbol.Type.ToDisplayString(),
                             LineNumber = lineNumber,
                             ColumnNumber = columnNumber,
-                            CustomAttributes = propertySymbol.GetAttributes().Select(attr => 
-                                new CustomAttributeInfo {
-                                    Name = attr.AttributeClass?.Name,
-                                    FullName = attr.AttributeClass?.ToDisplayString(),
-                                    ConstructorArguments = attr.ConstructorArguments.Select(arg => FormatTypedConstant(arg)).ToList(),
-                                    NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo {
-                                        Name = na.Key,
-                                        Value = FormatTypedConstant(na.Value)
-                                    }).ToList()
-                                }).ToList(),
+                            CustomAttributes = ExtractCustomAttributes(propertySymbol, sourceDiagnostics),
                             HasGetter = propertySymbol.GetMethod is not null,
                             HasSetter = propertySymbol.SetMethod is not null,
                             Implements = propertySymbol.ExplicitInterfaceImplementations.Select(i => i.ToDisplayString()).ToList(),
@@ -1887,13 +1978,13 @@ public static class Dosai
                         });
                         if (propertySymbol.GetMethod is not null)
                         {
-                            var getterMethod = CreateMethodFromSymbol(propertySymbol.GetMethod, model, sourceFilePath, fileName, path, lineNumber, columnNumber);
+                            var getterMethod = CreateMethodFromSymbol(propertySymbol.GetMethod, model, sourceFilePath, fileName, path, lineNumber, columnNumber, sourceDiagnostics);
                             sourceMethods.Add(getterMethod);
                         }
 
                         if (propertySymbol.SetMethod is not null)
                         {
-                            var setterMethod = CreateMethodFromSymbol(propertySymbol.SetMethod, model, sourceFilePath, fileName, path, lineNumber, columnNumber);
+                            var setterMethod = CreateMethodFromSymbol(propertySymbol.SetMethod, model, sourceFilePath, fileName, path, lineNumber, columnNumber, sourceDiagnostics);
                             sourceMethods.Add(setterMethod);
                         }
                     }
@@ -1944,7 +2035,7 @@ public static class Dosai
                                     return new CustomAttributeInfo {
                                         Name = attrSymbol?.ContainingType.Name,
                                         FullName = attrSymbol?.ContainingType.ToDisplayString(),
-                                        ConstructorArguments = attr.ArgumentList?.Arguments.Select(arg => arg.Expression.ToString()).ToList() ??
+                                        ConstructorArguments = attr.ArgumentList?.Arguments.Select(arg => new CustomAttributeArgumentInfo { Value = arg.Expression.ToString() }).ToList() ??
                                                                [],
                                         NamedArguments = []
                                     };
@@ -2005,7 +2096,7 @@ public static class Dosai
                                         return new CustomAttributeInfo {
                                             Name = attrSymbol?.ContainingType.Name,
                                             FullName = attrSymbol?.ContainingType.ToDisplayString(),
-                                            ConstructorArguments = attr.ArgumentList?.Arguments.Select(arg => arg.GetExpression().ToString()).ToList() ??
+                                            ConstructorArguments = attr.ArgumentList?.Arguments.Select(arg => new CustomAttributeArgumentInfo { Value = arg.GetExpression().ToString() }).ToList() ??
                                                                    [],
                                             NamedArguments = []
                                         };
@@ -2055,16 +2146,7 @@ public static class Dosai
                             TypeFullName = eventSymbol.Type.ToDisplayString(),
                             LineNumber = lineNumber,
                             ColumnNumber = columnNumber,
-                            CustomAttributes = eventSymbol.GetAttributes().Select(attr => 
-                                new CustomAttributeInfo {
-                                    Name = attr.AttributeClass?.Name,
-                                    FullName = attr.AttributeClass?.ToDisplayString(),
-                                    ConstructorArguments = attr.ConstructorArguments.Select(arg => FormatTypedConstant(arg)).ToList(),
-                                    NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo {
-                                        Name = na.Key,
-                                        Value = na.Value.Value?.ToString()
-                                    }).ToList()
-                                }).ToList(),
+                            CustomAttributes = ExtractCustomAttributes(eventSymbol, sourceDiagnostics),
                             BaseType = baseType,
                             ImplementedInterfaces = implementedInterfaces,
                             MetadataToken = metadataToken
@@ -2118,7 +2200,7 @@ public static class Dosai
                                     return new CustomAttributeInfo {
                                         Name = attrSymbol?.ContainingType.Name,
                                         FullName = attrSymbol?.ContainingType.ToDisplayString(),
-                                        ConstructorArguments = attr.ArgumentList?.Arguments.Select(arg => arg.Expression.ToString()).ToList() ??
+                                        ConstructorArguments = attr.ArgumentList?.Arguments.Select(arg => new CustomAttributeArgumentInfo { Value = arg.Expression.ToString() }).ToList() ??
                                                                [],
                                         NamedArguments = []
                                     };
@@ -2167,16 +2249,7 @@ public static class Dosai
                             TypeFullName = eventSymbol.Type.ToDisplayString(),
                             LineNumber = lineNumber,
                             ColumnNumber = columnNumber,
-                            CustomAttributes = eventSymbol.GetAttributes().Select(attr => 
-                                new CustomAttributeInfo {
-                                    Name = attr.AttributeClass?.Name,
-                                    FullName = attr.AttributeClass?.ToDisplayString(),
-                                    ConstructorArguments = attr.ConstructorArguments.Select(arg => FormatTypedConstant(arg)).ToList(),
-                                    NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo {
-                                        Name = na.Key,
-                                        Value = FormatTypedConstant(na.Value)
-                                    }).ToList()
-                                }).ToList(),
+                            CustomAttributes = ExtractCustomAttributes(eventSymbol, sourceDiagnostics),
                             BaseType = baseType,
                             ImplementedInterfaces = implementedInterfaces,
                             MetadataToken = metadataToken
@@ -2234,16 +2307,7 @@ public static class Dosai
                                 TypeFullName = p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
                                 IsGenericParameter = p.Type is ITypeParameterSymbol
                             }).ToList(),
-                            CustomAttributes = constructorSymbol.GetAttributes().Select(attr => 
-                                new CustomAttributeInfo {
-                                    Name = attr.AttributeClass?.Name,
-                                    FullName = attr.AttributeClass?.ToDisplayString(),
-                                    ConstructorArguments = attr.ConstructorArguments.Select(arg => FormatTypedConstant(arg)).ToList(),
-                                    NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo {
-                                        Name = na.Key,
-                                        Value = FormatTypedConstant(na.Value)
-                                    }).ToList()
-                                }).ToList(),
+                            CustomAttributes = ExtractCustomAttributes(constructorSymbol, sourceDiagnostics),
                             IsStatic = constructorSymbol.IsStatic,
                             BaseType = baseType,
                             ImplementedInterfaces = implementedInterfaces,
@@ -2295,16 +2359,7 @@ public static class Dosai
                                     Name = p.Name,
                                     Type = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(p.Type.ToString()!)
                                 }).ToList(),
-                                CustomAttributes = constructorSymbol.GetAttributes().Select(attr => 
-                                    new CustomAttributeInfo {
-                                        Name = attr.AttributeClass?.Name,
-                                        FullName = attr.AttributeClass?.ToDisplayString(),
-                                        ConstructorArguments = attr.ConstructorArguments.Select(arg => FormatTypedConstant(arg)).ToList(),
-                                        NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo {
-                                            Name = na.Key,
-                                            Value = FormatTypedConstant(na.Value)
-                                        }).ToList()
-                                    }).ToList(),
+                                CustomAttributes = ExtractCustomAttributes(constructorSymbol, sourceDiagnostics),
                                 IsStatic = constructorSymbol.IsStatic,
                                 BaseType = baseType,
                                 ImplementedInterfaces = implementedInterfaces,
@@ -2570,7 +2625,7 @@ public static class Dosai
         {
             AddMapping(method, "Method");
         }
-        return (sourceMethods, allUsingDirectives, allMethodCalls, properties, fields, events, constructors, callGraph, sourceAssemblyMappings, sourceMode, new Frameworks.SourceCompilations { CSharp = csharpCompilation, VisualBasic = vbCompilation });
+        return (sourceMethods, allUsingDirectives, allMethodCalls, properties, fields, events, constructors, callGraph, sourceAssemblyMappings, sourceMode, new Frameworks.SourceCompilations { CSharp = csharpCompilation, VisualBasic = vbCompilation }, sourceDiagnostics);
 
         void AddNode(string id, string name, string? className, string? namespaceName, string? file, string? assembly, string? module, string kind, int lineNumber, int columnNumber, bool isExternal)
         {
