@@ -62,6 +62,9 @@ dotnet test ./Dosai.sln
   assemblies) inside `GetAssemblyMethods`, which runs it on a dedicated large-stack thread. The
   runtime type loader recurses per hierarchy level and, when a base type is missing, can
   overflow a default-sized stack (dotnet/runtime#131679) - an uncatchable process crash.
+- Enumerate the scanned tree through `SafeFileRead.EnumerateAllFilesSafe` (or filter through
+  `PathExclusions.IsExcluded`), so `--exclude` globs (`PathExclusions`, an ambient scope the CLI
+  applies per command) hold for every analyzer.
 - Keep edge endpoints valid: every graph edge must reference existing nodes.
 - Preserve JSON compatibility unless a task explicitly allows breaking changes.
 - PURL enrichment must be best-effort and must never fail analysis.

@@ -116,7 +116,7 @@ public sealed partial class PackageUrlResolver
                 RecurseSubdirectories = true,
                 IgnoreInaccessible = true,
                 AttributesToSkip = FileAttributes.ReparsePoint
-            }).ToList();
+            }).Where(file => !PathExclusions.IsExcluded(file, isDirectory: false)).ToList();
         }
         catch (DirectoryNotFoundException)
         {

@@ -44,7 +44,8 @@ internal static class SafeFileRead
     ///     skipped instead, so cycles terminate. Enumeration is lazy per directory: callers
     ///     filter as they go and never hold a whole tree in memory. Callers with a diagnostics
     ///     channel pass <paramref name="reportDiagnostic" />; the default writes a console
-    ///     warning to stderr, keeping stdout free for the MCP server's JSON-RPC stream.
+    ///     warning to stderr, keeping stdout free for the MCP server's JSON-RPC stream. Files and
+    ///     directories excluded by the active <see cref="PathExclusions" /> scope are skipped.
     /// </summary>
     public static IEnumerable<string> EnumerateAllFilesSafe(string root, string searchPattern = "*.*", Action<string>? reportDiagnostic = null)
     {
@@ -116,10 +117,13 @@ internal static class SafeFileRead
 
         foreach (var file in fileEntries)
         {
+            if (PathExclusions.IsExcluded(file.FullName, isDirectory: false)) continue;
             yield return file.FullName;
         }
         foreach (var subdirectory in subdirectories)
         {
+            // An excluded directory is pruned, not filtered: nothing beneath it is read.
+            if (PathExclusions.IsExcluded(subdirectory.FullName, isDirectory: true)) continue;
             foreach (var file in EnumerateDirectory(subdirectory, searchPattern, report, visited, depth + 1))
             {
                 yield return file;
