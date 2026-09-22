@@ -46,10 +46,12 @@ dotnet test ./Dosai.sln
   `CSharpSourceParser` parse options and the F# line frontend's `#if`/`#elif` tracking): each
   detected TFM contributes what its own build defines (`net8.0` -> `NET`, `NET8_0`, the
   `NET5_0_OR_GREATER` chain, the `NETCOREAPP` family; `netstandard2.0` and `net472` -> their
-  families), multi-target projects get the union, and with no detectable TFM the fallback is the
-  historical `FrameworkPreprocessorDefines.ModernNet` set (`NET`, `NET11_0`, the modern chain) so
-  bare-directory scans behave as before. Detected TFMs surface in `Metadata.TargetFrameworks`,
-  and the fallback appends a `Diagnostics` note. `DEBUG`/`TRACE` stay undefined - a
+  families), a multi-target project resolves to one representative target (the most modern it
+  declares - never the union of all of them, which would hide every `#if !SYMBOL` arm), and with
+  no detectable TFM the fallback is the historical `FrameworkPreprocessorDefines.ModernNet` set
+  (`NET`, `NET11_0`, the modern chain) so bare-directory scans behave as before. Detected TFMs
+  surface in `Metadata.TargetFrameworks`, the representative as
+  `Metadata.GuardTargetFramework`, and the fallback appends a `Diagnostics` note. `DEBUG`/`TRACE` stay undefined - a
   Release-shaped build. The F# frontend also ignores `#:`-prefixed lines (FS-1337). Bump the
   ceiling with `TargetFramework`.
 - Never leave an inspected file locked. Metadata readers open with

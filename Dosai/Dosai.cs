@@ -283,6 +283,36 @@ public static class Dosai
     ///     instead of vanishing. The catch is scoped to exactly this block; a bug anywhere else
     ///     in the pipeline still surfaces.
     /// </summary>
+    /// <summary>
+    ///     Reflection-side counterpart of the symbol overload, with the same containment: a
+    ///     member whose attribute blob is malformed - unresolvable attribute type, a custom
+    ///     attribute whose arguments cannot be decoded - costs that member's attribute inventory
+    ///     and a diagnostic, not the assembly. The enclosing per-assembly handler would otherwise
+    ///     drop every remaining type in the file.
+    /// </summary>
+    internal static List<CustomAttributeInfo> ExtractCustomAttributes(MemberInfo member, ICollection<string> diagnostics)
+    {
+        try
+        {
+            return member.GetCustomAttributesData().Select(attr => new CustomAttributeInfo
+            {
+                Name = attr.AttributeType.Name,
+                FullName = attr.AttributeType.FullName,
+                ConstructorArguments = attr.ConstructorArguments.Select(ToAttributeArgumentInfo).ToList(),
+                NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo
+                {
+                    Name = na.MemberName,
+                    Value = FormatNamedArgumentValue(na.TypedValue)
+                }).ToList()
+            }).ToList();
+        }
+        catch (Exception ex)
+        {
+            diagnostics.Add($"Attribute extraction failed for '{member.DeclaringType?.FullName}.{member.Name}': {ex.GetType().Name}: {ex.Message}. This member's attributes are omitted; the rest of the analysis is unaffected.");
+            return [];
+        }
+    }
+
     internal static List<CustomAttributeInfo> ExtractCustomAttributes(ISymbol symbol, ICollection<string> diagnostics)
     {
         try
@@ -324,7 +354,8 @@ public static class Dosai
     {
         BuildPreparation.Prepare(path, buildPreparation);
         var purlResolver = PackageUrlResolver.Create(path);
-        var methods = GetAssemblyMethods(path);
+        var assemblyDiagnostics = new List<string>();
+        var methods = GetAssemblyMethods(path, assemblyDiagnostics);
         var (sourceMethods, usings, methodCalls, properties, fields, events, constructors, callGraph, sourceAssemblyMapping, sourceMode, compilations, sourceDiagnostics) = GetSourceMethods(path, methods);
         var (assemblyMethodCalls, assemblyCallGraph) = AssemblyCallGraphAnalyzer.Analyze(path, methods);
         NormalizeAssemblyGraphToSourceIds(assemblyMethodCalls, assemblyCallGraph, sourceAssemblyMapping);
@@ -360,6 +391,7 @@ public static class Dosai
         // reach consumers instead of hiding behind silently missing call edges.
         sliceDiagnostics.AddRange(NuGetRestoreCache.GetDiagnostics(path));
         sliceDiagnostics.AddRange(sourceDiagnostics);
+        sliceDiagnostics.AddRange(assemblyDiagnostics);
         var unresolvedCallCount = methodCalls.Count(call => call.EvidenceKind == AnalysisEvidenceKind.SourceUnresolved);
         if (unresolvedCallCount > 0)
         {
@@ -374,6 +406,17 @@ public static class Dosai
         if (detectedTargetFrameworks.Count > 0)
         {
             metadata.TargetFrameworks = [.. detectedTargetFrameworks];
+            // Which one the guards resolved against is not derivable from the list, and on a
+            // multi-target tree it decides which `#if` arms are in the results at all.
+            if (detectedTargetFrameworks.Count > 1 && FrameworkPreprocessorDefines.TrySelectRepresentative(detectedTargetFrameworks, out var representative))
+            {
+                metadata.GuardTargetFramework = representative;
+                sliceDiagnostics.Add($"Multiple target frameworks detected ({string.Join(", ", detectedTargetFrameworks)}); conditional-compilation guards were evaluated against '{representative}'. Arms exclusive to the other targets are not analyzed.");
+            }
+            else if (detectedTargetFrameworks.Count == 1)
+            {
+                metadata.GuardTargetFramework = detectedTargetFrameworks[0];
+            }
         }
         else
         {
@@ -1158,7 +1201,7 @@ public static class Dosai
     /// </summary>
     /// <param name="path">Filesystem path to assembly file or directory containing assembly files</param>
     /// <returns>List of assembly methods</returns>
-    private static List<Method> GetAssemblyMethods(string path)
+    private static List<Method> GetAssemblyMethods(string path, ICollection<string> diagnostics)
     {
         var assembliesToInspect = AssemblyScope.ScopeApplicationAssemblies(path, GetFilesToInspect(path, Constants.AssemblyExtension, Constants.ExeExtension), message => Console.Error.WriteLine($"Warning: {message}"));
         var assemblyMethods = new List<Method>();
@@ -1287,18 +1330,7 @@ public static class Dosai
                 Name = name,
                 ReturnType = returnType,
                 Parameters = parameters,
-                CustomAttributes = member.GetCustomAttributesData().Select(attr =>
-                    new CustomAttributeInfo
-                    {
-                        Name = attr.AttributeType.Name,
-                        FullName = attr.AttributeType.FullName,
-                        ConstructorArguments = attr.ConstructorArguments.Select(ToAttributeArgumentInfo).ToList(),
-                        NamedArguments = attr.NamedArguments.Select(na => new NamedArgumentInfo
-                        {
-                            Name = na.MemberName,
-                            Value = FormatNamedArgumentValue(na.TypedValue)
-                        }).ToList()
-                    }).ToList(),
+                CustomAttributes = ExtractCustomAttributes(member, diagnostics),
                 BaseType = baseType,
                 ImplementedInterfaces = implementedInterfaces,
                 MetadataToken = metadataToken,

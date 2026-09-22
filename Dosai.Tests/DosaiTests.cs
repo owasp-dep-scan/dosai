@@ -1934,10 +1934,12 @@ public static class Guards
         Assert.Equal("net472", Assert.Single(methodsSlice.Metadata!.TargetFrameworks!));
     }
 
-    // Multi-target projects analyze the union of every target's guards: strictly more code
-    // than any single build would compile, never less than before.
+    // A multi-target project resolves to one representative target - the most modern it
+    // declares - so the analyzed arms are a real compilation rather than a mix no build
+    // produces. Every detected target still reaches the metadata, and the representative is
+    // named there and in a Diagnostics note because it decides what is in the results.
     [Fact]
-    public void GetMethods_MultiTargetProject_AnalyzesUnionOfGuardBodies()
+    public void GetMethods_MultiTargetProject_AnalyzesRepresentativeTargetGuards()
     {
         using var tempDirectory = new TemporaryDirectory();
         WriteScanProjectFile(tempDirectory.Path, "<TargetFrameworks>net462;net8.0;net10.0</TargetFrameworks>");
@@ -1961,11 +1963,87 @@ public static class Guards
 
         var methodsSlice = ReadMethods(tempDirectory.Path);
 
-        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Guards", Name: "Net462Only" });
-        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Guards", Name: "Net8Only" });
         Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Guards", Name: "Net10Plus" });
+        Assert.DoesNotContain(methodsSlice.Methods!, method => method is { ClassName: "Guards", Name: "Net462Only" });
+        Assert.DoesNotContain(methodsSlice.Methods!, method => method is { ClassName: "Guards", Name: "Net8Only" });
         Assert.DoesNotContain(methodsSlice.Methods!, method => method is { ClassName: "Guards", Name: "StandardOnly" });
         Assert.Equal(["net462", "net8.0", "net10.0"], methodsSlice.Metadata!.TargetFrameworks);
+        Assert.Equal("net10.0", methodsSlice.Metadata!.GuardTargetFramework);
+        Assert.Contains(methodsSlice.Diagnostics ?? [], diagnostic => diagnostic.Contains("evaluated against 'net10.0'", StringComparison.Ordinal));
+    }
+
+    // The defect a union of symbol sets produces, and the reason this resolves to one target
+    // instead: Hangfire.Core targets net451;net46;netstandard1.3;netstandard2.0, and its
+    // `#if !NETSTANDARD1_3` members ship in three of those four assemblies. Defining
+    // NETSTANDARD1_3 because one target defines it erased them from the inventory and the call
+    // graph - a public API present in the shipped binaries, invisible to analysis. Negated
+    // guards are the most common shape in real multi-target libraries, so this is the case that
+    // decides the semantics.
+    [Fact]
+    public void GetMethods_MultiTargetProjectWithNegatedGuard_KeepsMembersCompiledByMostTargets()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        WriteScanProjectFile(tempDirectory.Path, "<TargetFrameworks>net451;net46;netstandard1.3;netstandard2.0</TargetFrameworks>");
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Guards.cs"), """
+public static class Guards
+{
+#if !NETSTANDARD1_3
+    public static void UseElmahLogProvider() { }
+#endif
+#if NETSTANDARD1_3
+    public static void Standard13Only() { }
+#endif
+}
+""");
+
+        var methodsSlice = ReadMethods(tempDirectory.Path);
+
+        Assert.Equal("netstandard2.0", methodsSlice.Metadata!.GuardTargetFramework);
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Guards", Name: "UseElmahLogProvider" });
+        Assert.DoesNotContain(methodsSlice.Methods!, method => method is { ClassName: "Guards", Name: "Standard13Only" });
+    }
+
+    // A classic, non-SDK project declares its target as TargetFrameworkVersion rather than a
+    // TFM. Without that shape the project detects as nothing and silently inherits the
+    // modern-net fallback - the one case where the fallback is knowably wrong.
+    [Fact]
+    public void GetMethods_ClassicTargetFrameworkVersionProject_DetectsNetFramework()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        WriteScanProjectFile(tempDirectory.Path, "<TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion>");
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Guards.cs"), """
+public static class Guards
+{
+#if NETFRAMEWORK
+    public static void FrameworkOnly() { }
+#endif
+#if NET11_0
+    public static void ModernOnly() { }
+#endif
+}
+""");
+
+        var methodsSlice = ReadMethods(tempDirectory.Path);
+
+        Assert.Equal("net472", Assert.Single(methodsSlice.Metadata!.TargetFrameworks!));
+        Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Guards", Name: "FrameworkOnly" });
+        Assert.DoesNotContain(methodsSlice.Methods!, method => method is { ClassName: "Guards", Name: "ModernOnly" });
+    }
+
+    // A project file copied into build output must not widen detection: bin/obj are skipped
+    // for project files, the same way BuildPreparation skips them for restore targets.
+    [Fact]
+    public void GetMethods_ProjectFileUnderBuildDirectory_IsIgnoredByDetection()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        WriteScanProjectFile(tempDirectory.Path, "<TargetFramework>net8.0</TargetFramework>");
+        var staleOutput = Path.Combine(tempDirectory.Path, "bin", "Debug");
+        Directory.CreateDirectory(staleOutput);
+        File.WriteAllText(Path.Combine(staleOutput, "Stale.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net462</TargetFramework></PropertyGroup></Project>");
+
+        var methodsSlice = ReadMethods(tempDirectory.Path);
+
+        Assert.Equal("net8.0", Assert.Single(methodsSlice.Metadata!.TargetFrameworks!));
     }
 
     // The regression most likely to slip: with no project file anywhere under the root, the

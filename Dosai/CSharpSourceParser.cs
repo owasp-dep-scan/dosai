@@ -12,11 +12,23 @@ namespace Depscan;
 ///     net8.0 project analyzes its `#if NET8_0` bodies and its `#else` arms instead of the
 ///     net9+/never-compiled branches it used to pick up (issue #56 follow-up).
 ///     <para>
-///     Multi-target projects get the <b>union</b> of every TFM's set. The union is deliberate
-///     and strictly a superset of any single target: it keeps the "see more rather than less"
-///     bias a security scanner needs, at the cost of making both arms of an `#if`/`#else`
-///     visible at once - code that no single build would compile together. For a scanner,
-///     reporting a guarded sink beats missing it.
+///     A multi-target project resolves to the define set of one <b>representative</b> target -
+///     the most modern one it declares (see <see cref="TrySelectRepresentative" />) - not the
+///     union of all of them. A union looks like the "see more rather than less" choice and is
+///     the opposite: defining a symbol because <i>some</i> target defines it hides every
+///     `#if !SYMBOL` arm, and negated guards are the most common shape in real multi-target
+///     libraries. Hangfire.Core (`net451;net46;netstandard1.3;netstandard2.0`) is the worked
+///     example - its `#if !NETSTANDARD1_3` members ship in three of its four assemblies, and a
+///     union of the four symbol sets erased them from the inventory and the call graph
+///     entirely. One representative target keeps every arm that target compiles, which is a
+///     real, self-consistent compilation rather than a mix no build produces.
+///     </para>
+///     <para>
+///     The known limitation of a representative: arms exclusive to a <i>lower</i> target
+///     (`#if NETFRAMEWORK` in a `net462;net8.0` library) stay invisible, exactly as they were
+///     before target-framework detection existed. Seeing them too would mean analyzing each
+///     target's parse separately and unioning the resulting members - correct, and deliberately
+///     out of scope here.
 ///     </para>
 ///     <para>
 ///     `DEBUG`/`TRACE` stay undefined - a Release-shaped build - in every family. The
@@ -49,19 +61,75 @@ internal static class FrameworkPreprocessorDefines
     }
 
     /// <summary>
-    ///     Union of the define sets of every detected target framework. An unparseable or
-    ///     unrecognized TFM contributes nothing; if nothing contributes, fall back to
+    ///     The define set of the representative target framework among those detected - see the
+    ///     type remarks for why a representative rather than a union. An unparseable or
+    ///     unrecognized TFM is skipped; if none is recognized, falls back to
     ///     <see cref="ModernNet" /> so the result is never emptier than before.
     /// </summary>
     public static IReadOnlySet<string> ForTargetFrameworks(IEnumerable<string> targetFrameworks)
+        => TrySelectRepresentative(targetFrameworks, out var representative)
+            ? ForTargetFramework(representative)
+            : ModernNet;
+
+    /// <summary>
+    ///     Picks the target framework whose own build compiles the most of a multi-target
+    ///     project's modern surface: ordered by family first - modern .NET, then .NET Core,
+    ///     then .NET Standard, then .NET Framework - and by version within a family. For
+    ///     `net451;net46;netstandard1.3;netstandard2.0` that is `netstandard2.0`; for
+    ///     `net462;net8.0;net9.0;net10.0` it is `net10.0`. Ties keep the first declared.
+    ///     Returns false when nothing parses as a known family, leaving the caller on
+    ///     <see cref="ModernNet" />.
+    /// </summary>
+    public static bool TrySelectRepresentative(IEnumerable<string> targetFrameworks, out string representative)
     {
-        var union = new HashSet<string>(StringComparer.Ordinal);
+        representative = string.Empty;
+        var bestRank = (Family: -1, Version: default(FrameworkVersion));
         foreach (var targetFramework in targetFrameworks)
         {
-            union.UnionWith(ForTargetFramework(targetFramework));
+            if (!TryRank(targetFramework, out var rank))
+            {
+                continue;
+            }
+
+            if (rank.Family > bestRank.Family || (rank.Family == bestRank.Family && rank.Version.CompareTo(bestRank.Version) > 0))
+            {
+                bestRank = rank;
+                representative = targetFramework;
+            }
         }
 
-        return union.Count > 0 ? union : ModernNet;
+        return representative.Length > 0;
+    }
+
+    // Family ranks are ordered by how much modern surface a target compiles, not by release
+    // date: a netstandard2.0 arm of a legacy multi-target library carries the code its modern
+    // consumers actually bind against, while its net46 arm does not.
+    private static bool TryRank(string targetFramework, out (int Family, FrameworkVersion Version) rank)
+    {
+        var normalized = Normalize(targetFramework);
+        rank = default;
+        if (normalized.StartsWith("netstandard", StringComparison.Ordinal))
+        {
+            if (!TryParseVersion(normalized["netstandard".Length..], out var version)) return false;
+            rank = (2, version);
+            return true;
+        }
+
+        if (normalized.StartsWith("netcoreapp", StringComparison.Ordinal))
+        {
+            if (!TryParseVersion(normalized["netcoreapp".Length..], out var version)) return false;
+            rank = (3, version);
+            return true;
+        }
+
+        if (normalized.StartsWith("net", StringComparison.Ordinal))
+        {
+            if (!TryParseVersion(normalized["net".Length..], out var version)) return false;
+            rank = (version.Major >= 5 ? 4 : 1, version);
+            return true;
+        }
+
+        return false;
     }
 
     /// <summary>

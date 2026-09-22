@@ -121,20 +121,32 @@ conditional-compilation guards against what each detected target actually define
 | `net8.0` | `NET`, `NET8_0`, `NET5_0_OR_GREATER`..`NET8_0_OR_GREATER`, the `NETCOREAPP` family |
 | `netstandard2.0` | `NETSTANDARD`, `NETSTANDARD2_0` and the lower `NETSTANDARD*_OR_GREATER` chain |
 | `net472` | `NETFRAMEWORK`, `NET472` and the `NET4x_OR_GREATER` chain |
-| multi-target | the **union** of every target's set |
+| multi-target | the set of one **representative** target — the most modern one declared |
+| `<TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion>` (classic, non-SDK projects) | treated as `net472` |
 | nothing detected | the historical fallback (`NET`, latest `NETn_0`, the modern chain), reported via a `Diagnostics` note |
 
-OS/platform-suffixed targets (`net8.0-windows`) contribute their base target's symbols, and the
-full target identifiers are surfaced as `Metadata.TargetFrameworks` so consumers can see what was
-assumed. Union semantics are deliberate: a multi-target project's guards are analyzed if any of
-its targets defines them — strictly more code than any single build compiles, never less than
-before. Two consequences worth knowing: both arms of an `#if`/`#else` can be visible at once
-(acceptable for a scanner — reporting a guarded sink beats missing it), and a body guarded by a
-negation (`#if !NETSTANDARD2_0`) is hidden when the negated target is part of the detected set,
-because at least one of the project's own targets does not compile it. For trees whose targets
-all predate .NET 5, modern-only branches (`#if NET5_0_OR_GREATER`) are no longer analyzed — they
-are phantom code for that target. The fallback for scan roots with no detectable target framework
-is unchanged from earlier releases.
+OS/platform-suffixed targets (`net8.0-windows`) contribute their base target's symbols. Every
+detected target is surfaced as `Metadata.TargetFrameworks`, and the one that guards were actually
+evaluated against as `Metadata.GuardTargetFramework` — on a multi-target tree that choice decides
+which `#if` arms are in the results at all, so it is reported explicitly and, when the targets
+disagree, in a `Diagnostics` note too.
+
+A multi-target project resolves to a single representative target rather than the union of all of
+them, ranked by family (modern .NET, then .NET Core, then .NET Standard, then .NET Framework) and
+then by version. A union looks like the cautious choice and is the opposite: defining a symbol
+because *some* target defines it hides every `#if !SYMBOL` arm, and negated guards are the most
+common shape in real multi-targeting libraries. Hangfire.Core
+(`net451;net46;netstandard1.3;netstandard2.0`) is the worked example — its `#if !NETSTANDARD1_3`
+members ship in three of its four assemblies, and unioning the four symbol sets erased them from
+the inventory and the call graph entirely. One representative keeps every arm that target
+compiles, which is a real, self-consistent compilation rather than a mix no build produces.
+
+The known limitation is the mirror image: arms exclusive to a *lower* target (`#if NETFRAMEWORK`
+in a `net462;net8.0` library) stay invisible, exactly as they were before target-framework
+detection existed. Seeing those too would mean analyzing each target separately and merging the
+results. Likewise, for trees whose targets all predate .NET 5, modern-only branches
+(`#if NET5_0_OR_GREATER`) are no longer analyzed — they are phantom code for that target. The
+fallback for scan roots with no detectable target framework is unchanged from earlier releases.
 
 Building Dosai itself still requires the .NET 11 SDK (11.0.x); a .NET 10 SDK cannot build the
 current target frameworks. Analyzed source may target anything from `netstandard1.x` and

@@ -180,7 +180,7 @@ public class CorpusTests
     // net8.0;net9.0;net10.0): the union of every target's preprocessor guards is analyzed and
     // the full TFM set is surfaced.
     [SkippableFact]
-    public void Corpus_GrpcNetClient_MultiTargetLibrary_UnionOfTargetsAnalyzed()
+    public void Corpus_GrpcNetClient_MultiTargetLibrary_RepresentativeTargetAnalyzed()
     {
         var path = CorpusPathOrSkip("grpc-dotnet/src/Grpc.Net.Client");
         var slice = JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(path), JsonOptions)!;
@@ -191,6 +191,11 @@ public class CorpusTests
             Assert.Contains(expected, targetFrameworks);
         }
         Assert.DoesNotContain(slice.Diagnostics ?? [], diagnostic => diagnostic.Contains("No TargetFramework detected", StringComparison.Ordinal));
+
+        // All six targets are detected, but guards resolve against the most modern one, and the
+        // slice says so rather than leaving consumers to guess from a declaration-ordered list.
+        Assert.Equal("net10.0", slice.Metadata!.GuardTargetFramework);
+        Assert.Contains(slice.Diagnostics ?? [], diagnostic => diagnostic.Contains("evaluated against 'net10.0'", StringComparison.Ordinal));
 
         // 659 methods / 3,469 call sites / 1,547 edges at the calibration run.
         Assert.True(slice.Methods!.Count >= 500, $"expected >= 500 methods, got {slice.Methods.Count}");

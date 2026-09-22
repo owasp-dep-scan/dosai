@@ -18,6 +18,14 @@ public sealed class AnalysisMetadata
     ///     latest-modern-net set was assumed (a Diagnostics note marks that case).
     /// </summary>
     public List<string>? TargetFrameworks { get; set; }
+
+    /// <summary>
+    ///     The one target framework out of <see cref="TargetFrameworks" /> whose preprocessor
+    ///     symbols conditional-compilation guards were actually evaluated against. On a
+    ///     multi-target tree this decides which `#if` arms appear in the results at all, and it
+    ///     is not derivable from the list; null when nothing was detected.
+    /// </summary>
+    public string? GuardTargetFramework { get; set; }
 }
 
 public sealed class EntryPoint
