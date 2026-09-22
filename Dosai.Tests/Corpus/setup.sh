@@ -34,4 +34,18 @@ clone_at_commit \
     "${CORPUS_ROOT}/practical-aspnetcore"
 dotnet build "${CORPUS_ROOT}/practical-aspnetcore/projects/orleans/orleans-1" -v quiet
 
+echo "==> modular-monolith-with-ddd (net8.0 LTS app; TFM declared in src/Directory.Build.props)"
+clone_at_commit \
+    https://github.com/kgrzybek/modular-monolith-with-ddd \
+    91c8ef24b4cb6ef558c95d8267fa07d68c7059f8 \
+    "${CORPUS_ROOT}/modular-monolith-with-ddd"
+dotnet build "${CORPUS_ROOT}/modular-monolith-with-ddd/src/API/CompanyName.MyMeetings.API/CompanyName.MyMeetings.API.csproj" -v quiet
+
+echo "==> grpc-dotnet Grpc.Net.Client (multi-target library: net462;netstandard2.0;netstandard2.1;net8.0;net9.0;net10.0)"
+clone_at_commit \
+    https://github.com/grpc/grpc-dotnet \
+    74de8cad36e5d4a987b44f78eb4ef9f2d60592f1 \
+    "${CORPUS_ROOT}/grpc-dotnet"
+dotnet build "${CORPUS_ROOT}/grpc-dotnet/src/Grpc.Net.Client/Grpc.Net.Client.csproj" -v quiet
+
 echo "==> Corpus ready at ${CORPUS_ROOT}"
