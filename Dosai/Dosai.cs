@@ -13,7 +13,6 @@ using Microsoft.CodeAnalysis.Operations;
 using Microsoft.CodeAnalysis.VisualBasic;
 using Microsoft.CodeAnalysis.VisualBasic.Syntax;
 using System.IO.Compression;
-using System.Runtime.Loader;
 using CompilationUnitSyntax = Microsoft.CodeAnalysis.CSharp.Syntax.CompilationUnitSyntax;
 using ExpressionSyntax = Microsoft.CodeAnalysis.CSharp.Syntax.ExpressionSyntax;
 using FieldDeclarationSyntax = Microsoft.CodeAnalysis.CSharp.Syntax.FieldDeclarationSyntax;
@@ -49,48 +48,52 @@ internal static partial class FSharpRegex
 }
 
 /// <summary>
-///     An enhanced AssemblyLoadContext that resolves dependencies from a list of specified
-///     search paths. Inspected paths are searched before shared-framework paths, matching the
-///     probing order callers expect for an application's own dependencies.
+///     Resolves assembly references for <see cref="MetadataLoadContext" /> by probing the
+///     inspected paths first and shared-framework paths second, matching the probing order
+///     callers expect for an application's own dependencies.
 /// </summary>
 /// <remarks>
-///     Assemblies from the inspected paths are read into memory instead of being loaded from
-///     their file path. <see cref="AssemblyLoadContext.LoadFromAssemblyPath" /> memory-maps the
-///     file and keeps it open for the lifetime of the context, and unloading a collectible
-///     context is asynchronous, so an analyzed assembly stayed locked well after inspection
-///     finished. On Windows that made the analyzed build output undeletable for the rest of the
-///     process - a caller could not scan its own output directory and then clean or replace it.
-///     Shared-framework assemblies keep the mapped path: they are immutable, nobody deletes
-///     them, and copying them per inspected assembly would read tens of megabytes each time.
+///     Inspection runs over metadata only, never through the runtime type loader. The runtime
+///     loader recurses per hierarchy level in native code and keeps exception frames alive
+///     when a base type fails to resolve, so <c>Assembly.GetTypes()</c> on a build-output
+///     assembly with missing dependencies can stack-overflow the process - a failure no catch
+///     block can contain (dotnet/runtime#131679). <see cref="MetadataLoadContext" /> exposes
+///     the same reflection surface from raw metadata, resolves base types one level at a
+///     time, and surfaces missing dependencies as per-type errors that can be skipped.
+///     Assemblies are read by value (bytes copied from a delete-tolerant stream) so no
+///     inspected file stays locked after the read.
 /// </remarks>
-internal sealed class InspectionAssemblyLoadContext(IEnumerable<string> inspectedPaths, IEnumerable<string> sharedFrameworkPaths)
-    : AssemblyLoadContext(isCollectible: true)
+internal sealed class ProbingMetadataAssemblyResolver(IEnumerable<string> inspectedPaths, IEnumerable<string> sharedFrameworkPaths)
+    : MetadataAssemblyResolver
 {
     private readonly List<string> _inspectedDirectories = inspectedPaths.Distinct().ToList();
     private readonly List<string> _sharedFrameworkDirectories = sharedFrameworkPaths.Distinct().ToList();
 
-    protected override Assembly? Load(AssemblyName assemblyName)
+    public override Assembly? Resolve(MetadataLoadContext context, AssemblyName assemblyName)
     {
         var fileName = assemblyName.Name + Constants.AssemblyExtension;
-        return Probe(_inspectedDirectories, fileName, LoadWithoutLockingFile)
-               ?? Probe(_sharedFrameworkDirectories, fileName, LoadFromAssemblyPath);
+        var candidate = Probe(_inspectedDirectories, fileName) ?? Probe(_sharedFrameworkDirectories, fileName);
+        return candidate is null ? null : context.LoadFromStream(ReadAssemblyBytes(candidate));
     }
 
-    /// <summary>Loads an inspected assembly by value so no handle outlives the read.</summary>
-    internal Assembly LoadWithoutLockingFile(string assemblyPath)
+    /// <summary>Reads an assembly into memory so no handle outlives the read.</summary>
+    internal static MemoryStream ReadAssemblyBytes(string assemblyPath)
     {
         using var stream = new FileStream(assemblyPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-        return LoadFromStream(stream);
+        var image = new MemoryStream(capacity: (int)stream.Length);
+        stream.CopyTo(image);
+        image.Position = 0;
+        return image;
     }
 
-    private static Assembly? Probe(List<string> directories, string fileName, Func<string, Assembly> load)
+    private static string? Probe(List<string> directories, string fileName)
     {
         foreach (var directory in directories)
         {
             var candidate = Path.Combine(directory, fileName);
             if (File.Exists(candidate))
             {
-                return load(candidate);
+                return candidate;
             }
         }
 
@@ -1025,7 +1028,7 @@ public static class Dosai
                 continue;
             }
             var inspectedDirs = new List<string> { Path.GetDirectoryName(assemblyFilePath)!, Path.GetDirectoryName(path)! };
-            var loadContext = new InspectionAssemblyLoadContext(inspectedDirs, sharedFrameworkDirs);
+            using var loadContext = new MetadataLoadContext(new ProbingMetadataAssemblyResolver(inspectedDirs, sharedFrameworkDirs));
             try
             {
                 var assemblyName = AssemblyName.GetAssemblyName(assemblyFilePath);
@@ -1033,7 +1036,7 @@ public static class Dosai
                 {
                     continue;
                 }
-                var assembly = loadContext.LoadFromAssemblyName(assemblyName);
+                var assembly = loadContext.LoadFromStream(ProbingMetadataAssemblyResolver.ReadAssemblyBytes(assemblyFilePath));
                 Type[] types;
                 try
                 {
@@ -1060,49 +1063,65 @@ public static class Dosai
                     types = ex.Types.Where(t => t is not null).ToArray()!;
                 }
 
+                var skippedTypes = 0;
                 foreach (var type in types)
                 {
-                    foreach (var method in type.GetMethods())
+                    try
                     {
-                        if ($"{method.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" != fileName) continue;
-
-                        var parameters = method.GetParameters().Select(p => p.ParameterType.FullName ?? p.ParameterType.Name).ToList();
-                        var paramString = string.Join(",", parameters);
-                        var returnType = method.ReturnType.FullName ?? method.ReturnType.Name;
-                        var className = method.DeclaringType?.Name ?? "UnknownType";
-                        var ns = method.DeclaringType?.Namespace ?? "";
-                        var assemblySignature = $"{ns}.{className}.{method.Name}({paramString}):{returnType}";
-                        if (method.Name is ".ctor" or ".cctor")
+                        foreach (var method in type.GetMethods())
                         {
-                            assemblySignature = $"{ns}.{className}.{method.Name}({paramString})";
+                            if ($"{method.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" != fileName) continue;
+
+                            var parameters = method.GetParameters().Select(p => p.ParameterType.FullName ?? p.ParameterType.Name).ToList();
+                            var paramString = string.Join(",", parameters);
+                            var returnType = method.ReturnType.FullName ?? method.ReturnType.Name;
+                            var className = method.DeclaringType?.Name ?? "UnknownType";
+                            var ns = method.DeclaringType?.Namespace ?? "";
+                            var assemblySignature = $"{ns}.{className}.{method.Name}({paramString}):{returnType}";
+                            if (method.Name is ".ctor" or ".cctor")
+                            {
+                                assemblySignature = $"{ns}.{className}.{method.Name}({paramString})";
+                            }
+
+                            var methodParams = method.GetParameters().Select(p => new Parameter
+                            {
+                                Name = p.Name,
+                                Type = p.ParameterType.FullName ?? p.ParameterType.Name,
+                                TypeFullName = p.ParameterType.FullName ?? p.ParameterType.Name,
+                                IsGenericParameter = p.ParameterType.IsGenericParameter
+                            }).ToList();
+
+                            var genericParameters = method.IsGenericMethodDefinition
+                                ? method.GetGenericArguments().Select(t => t.Name).ToList()
+                                : [];
+
+                            assemblyMethods.Add(CreateMethodObjectFromMember(
+                                method, assemblyFilePath, fileName, method.Attributes.ToString(), method.Name, returnType,
+                                methodParams, method.MetadataToken, assemblySignature,
+                                method.IsGenericMethod, method.IsGenericMethodDefinition, genericParameters
+                            ));
                         }
-                        
-                        var methodParams = method.GetParameters().Select(p => new Parameter
-                        {
-                            Name = p.Name,
-                            Type = p.ParameterType.FullName ?? p.ParameterType.Name,
-                            TypeFullName = p.ParameterType.FullName ?? p.ParameterType.Name,
-                            IsGenericParameter = p.ParameterType.IsGenericParameter
-                        }).ToList();
-                        
-                        var genericParameters = method.IsGenericMethodDefinition
-                            ? method.GetGenericArguments().Select(t => t.Name).ToList()
-                            : [];
-
-                        assemblyMethods.Add(CreateMethodObjectFromMember(
-                            method, assemblyFilePath, fileName, method.Attributes.ToString(), method.Name, returnType,
-                            methodParams, method.MetadataToken, assemblySignature,
-                            method.IsGenericMethod, method.IsGenericMethodDefinition, genericParameters
-                        ));
+                        assemblyMethods.AddRange(from ctor in type.GetConstructors() where $"{ctor.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName let ctorParams = ctor.GetParameters().Select(p => new Parameter { Name = p.Name, Type = p.ParameterType.FullName }).ToList() let assemblySignature = $"{ctor.DeclaringType?.Name}" select CreateMethodObjectFromMember(ctor, assemblyFilePath, fileName, ctor.Attributes.ToString(), ".ctor", "Void", ctorParams, ctor.MetadataToken, assemblySignature));
+                        assemblyMethods.AddRange(from prop in type.GetProperties() where $"{prop.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName select CreateMethodObjectFromMember(prop, assemblyFilePath, fileName, "Property", prop.Name, prop.PropertyType.Name, []));
+                        assemblyMethods.AddRange(from field in type.GetFields() where $"{field.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName select CreateMethodObjectFromMember(field, assemblyFilePath, fileName, field.Attributes.ToString(), field.Name, field.FieldType.Name, []));
+                        assemblyMethods.AddRange(from evt in type.GetEvents() where $"{evt.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName select CreateMethodObjectFromMember(evt, assemblyFilePath, fileName, evt.Attributes.ToString(), evt.Name, evt.EventHandlerType?.Name ?? string.Empty, []));
                     }
-                    processedAssemblyIdentities.Add(assembly.FullName!);
-                    assemblyMethods.AddRange(from ctor in type.GetConstructors() where $"{ctor.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName let ctorParams = ctor.GetParameters().Select(p => new Parameter { Name = p.Name, Type = p.ParameterType.FullName }).ToList() let assemblySignature = $"{ctor.DeclaringType?.Name}" select CreateMethodObjectFromMember(ctor, assemblyFilePath, fileName, ctor.Attributes.ToString(), ".ctor", "Void", ctorParams, ctor.MetadataToken, assemblySignature));
-                    assemblyMethods.AddRange(from prop in type.GetProperties() where $"{prop.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName select CreateMethodObjectFromMember(prop, assemblyFilePath, fileName, "Property", prop.Name, prop.PropertyType.Name, []));
-                    assemblyMethods.AddRange(from field in type.GetFields() where $"{field.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName select CreateMethodObjectFromMember(field, assemblyFilePath, fileName, field.Attributes.ToString(), field.Name, field.FieldType.Name, []));
-                    assemblyMethods.AddRange(from evt in type.GetEvents() where $"{evt.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName select CreateMethodObjectFromMember(evt, assemblyFilePath, fileName, evt.Attributes.ToString(), evt.Name, evt.EventHandlerType?.Name ?? string.Empty, []));
+                    // A type whose base types, interfaces, or signature shapes live in a missing
+                    // assembly still materializes from metadata; touching those members throws.
+                    // Only the affected type is skipped so the rest of the assembly - and every
+                    // other assembly in the run - stays in the output.
+                    catch (Exception e) when (e is IOException or FileNotFoundException or FileLoadException or TypeLoadException or BadImageFormatException or NotSupportedException or InvalidOperationException)
+                    {
+                        skippedTypes++;
+                    }
                 }
+                if (skippedTypes > 0)
+                {
+                    Console.WriteLine($"Warning: Skipped {skippedTypes} type(s) from {fileName} whose members reference missing or unreadable assemblies.");
+                }
+                processedAssemblyIdentities.Add(assembly.FullName!);
             }
-            catch (Exception e) when (e is FileLoadException or FileNotFoundException or BadImageFormatException or TypeLoadException or NotSupportedException)
+            catch (Exception e) when (e is FileLoadException or FileNotFoundException or BadImageFormatException or TypeLoadException or NotSupportedException or IOException or InvalidOperationException)
             {
                 Console.WriteLine($"Warning: Skipping assembly {assemblyFilePath} as it could not be fully loaded for inspection.");
                 Console.WriteLine($"  - Reason: {e.GetType().Name}: {e.Message}");
@@ -1110,10 +1129,6 @@ public static class Dosai
             catch (Exception e)
             {
                 Console.WriteLine($"Error: An unexpected error occurred while processing {fileName}. Details: {e.Message}");
-            }
-            finally
-            {
-                loadContext.Unload();
             }
         }
 

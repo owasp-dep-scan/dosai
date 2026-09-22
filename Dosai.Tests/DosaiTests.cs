@@ -1,6 +1,7 @@
 using Depscan;
 using System.Collections;
 using System.Reflection;
+using System.Reflection.Emit;
 using System.Reflection.Metadata;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -112,6 +113,84 @@ namespace MultiThree
         {
             Assert.Equal(property.Value.GetRawText(), streamed.GetProperty(property.Name).GetRawText());
         }
+    }
+
+    // Regression guard for the uncatchable stack overflow reported against build-output scans
+    // (owasp-dep-scan/dosai#56 follow-up). Assembly enumeration used to run through the runtime
+    // type loader, which recurses per hierarchy level in native code and keeps exception frames
+    // alive when a base type fails to resolve, so an assembly with a deep hierarchy whose
+    // dependencies are missing killed the whole process inside Assembly.GetTypes() - a
+    // StackOverflowException no catch block can contain (dotnet/runtime#131679). Inspection now
+    // enumerates types through MetadataLoadContext, which resolves base types one metadata level
+    // at a time and turns the missing dependency into per-type skips. Against the old
+    // implementation this test does not fail - it terminates the test host with a stack overflow.
+    [Fact]
+    public void GetMethods_DeepHierarchyWithMissingBaseAssembly_DoesNotStackOverflow()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var scanDirectory = Path.Combine(tempDirectory.Path, "BuildOutput");
+        Directory.CreateDirectory(scanDirectory);
+
+        // BaseLib.dll is generated only to parent the chain; it is deliberately NOT copied
+        // into the scanned tree, so every Chain type has a base in a missing assembly. The
+        // chain is emitted with Reflection.Emit because compiling a 10,000-deep hierarchy
+        // would overflow the compiler's own base-type cycle analysis.
+        var baseLibBuilder = new PersistedAssemblyBuilder(new AssemblyName("BaseLib"), typeof(object).Assembly);
+        var baseLibModule = baseLibBuilder.DefineDynamicModule("BaseLib.dll");
+        var rootTypeBuilder = baseLibModule.DefineType("Root", TypeAttributes.Public | TypeAttributes.Class | TypeAttributes.BeforeFieldInit);
+        var rootMethod = rootTypeBuilder.DefineMethod("Setup", MethodAttributes.Public | MethodAttributes.Virtual);
+        rootMethod.SetReturnType(typeof(void));
+        rootTypeBuilder.DefineDefaultConstructor(MethodAttributes.Public);
+        var rootType = rootTypeBuilder.CreateType();
+        using (var baseLibFile = File.Create(Path.Combine(tempDirectory.Path, "BaseLib.dll")))
+        {
+            baseLibBuilder.Save(baseLibFile);
+        }
+        var baseLibAssembly = Assembly.Load(File.ReadAllBytes(Path.Combine(tempDirectory.Path, "BaseLib.dll")));
+        var rootLoadedType = baseLibAssembly.GetType("Root")!;
+
+        var chainBuilder = new PersistedAssemblyBuilder(new AssemblyName("Chain"), typeof(object).Assembly);
+        var chainModule = chainBuilder.DefineDynamicModule("Chain.dll");
+        TypeBuilder previous = chainModule.DefineType("C0", TypeAttributes.Public | TypeAttributes.Class | TypeAttributes.BeforeFieldInit, rootLoadedType);
+        for (var depth = 1; depth < 10_000; depth++)
+        {
+            previous.CreateType();
+            previous = chainModule.DefineType($"C{depth}", TypeAttributes.Public | TypeAttributes.Class | TypeAttributes.BeforeFieldInit, previous);
+        }
+        previous.CreateType();
+        using (var chainFile = File.Create(Path.Combine(scanDirectory, "Chain.dll")))
+        {
+            chainBuilder.Save(chainFile);
+        }
+
+        // A healthy sibling assembly proves the contained failure does not take down the rest
+        // of the scan.
+        var standaloneBuilder = new PersistedAssemblyBuilder(new AssemblyName("Standalone"), typeof(object).Assembly);
+        var standaloneModule = standaloneBuilder.DefineDynamicModule("Standalone.dll");
+        var widgetBuilder = standaloneModule.DefineType("Widget", TypeAttributes.Public | TypeAttributes.Class | TypeAttributes.BeforeFieldInit);
+        var serve = widgetBuilder.DefineMethod("Serve", MethodAttributes.Public);
+        serve.SetReturnType(typeof(string));
+        serve.SetParameters(typeof(int));
+        var serveBody = serve.GetILGenerator();
+        serveBody.Emit(System.Reflection.Emit.OpCodes.Ldarg_1);
+        serveBody.Emit(System.Reflection.Emit.OpCodes.Box, typeof(int));
+        serveBody.Emit(System.Reflection.Emit.OpCodes.Call, typeof(object).GetMethod("ToString")!);
+        serveBody.Emit(System.Reflection.Emit.OpCodes.Ret);
+        widgetBuilder.DefineDefaultConstructor(MethodAttributes.Public);
+        widgetBuilder.CreateType();
+        using (var standaloneFile = File.Create(Path.Combine(scanDirectory, "Standalone.dll")))
+        {
+            standaloneBuilder.Save(standaloneFile);
+        }
+
+        var slice = Depscan.Dosai.GetMethodsSlice(scanDirectory);
+
+        Assert.NotNull(slice.Methods);
+        Assert.Contains(slice.Methods!, method => method.FileName == "Standalone.dll" && method.ClassName == "Widget" && method.Name == "Serve");
+        // Metadata that is locally complete still surfaces even though the base assembly is
+        // gone: each chain type's constructor is reported with its unresolved base recorded.
+        Assert.Contains(slice.Methods!, method => method.FileName == "Chain.dll" && method.ClassName == "C0" && method.BaseType == "Root");
+        Assert.Contains(slice.Methods!, method => method.FileName == "Chain.dll" && method.ClassName == "C9999" && method.BaseType == "C9998");
     }
 
     [Fact]
