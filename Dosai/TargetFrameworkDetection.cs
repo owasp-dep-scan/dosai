@@ -60,7 +60,7 @@ internal static class TargetFrameworkDetection
                 .Concat(SafeFileRead.EnumerateAllFilesSafe(root, "*.vbproj"))
                 .Concat(SafeFileRead.EnumerateAllFilesSafe(root, "Directory.Build.props"))
                 .Concat(SafeFileRead.EnumerateAllFilesSafe(root, "Directory.Build.targets"));
-            foreach (var projectFile in projectFiles)
+            foreach (var projectFile in projectFiles.Where(file => !IsUnderBuildDirectory(root, file)))
             {
                 CollectTargetFrameworks(projectFile, detected);
             }
@@ -69,6 +69,8 @@ internal static class TargetFrameworkDetection
             // runtimeconfig names the framework the app runs on.
             if (detected.Count == 0)
             {
+                // A runtimeconfig only exists in build output, so unlike project files it is read
+                // from bin/obj rather than skipped there.
                 foreach (var runtimeConfig in SafeFileRead.EnumerateAllFilesSafe(root, "*.runtimeconfig.json"))
                 {
                     if (TryDetectFromRuntimeConfig(runtimeConfig, out var targetFramework))
@@ -92,6 +94,13 @@ internal static class TargetFrameworkDetection
         new(@"<TargetFrameworks?\s*>([^<]+)</TargetFrameworks?\s*>",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 
+    // Classic, non-SDK projects carry `<TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion>`
+    // instead of a TFM. Without this they detect as nothing and fall back to the modern-net
+    // defines, which is the one case where the fallback is knowably wrong.
+    private static readonly System.Text.RegularExpressions.Regex TargetFrameworkVersionRegex =
+        new(@"<TargetFrameworkVersion\s*>\s*v?([0-9]+(?:\.[0-9]+)*)\s*</TargetFrameworkVersion\s*>",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
     private static void CollectTargetFrameworks(string projectFile, List<string> detected)
     {
         if (!SafeFileRead.TryReadAllText(projectFile, out var content))
@@ -109,6 +118,29 @@ internal static class TargetFrameworkDetection
                 }
             }
         }
+
+        foreach (var match in TargetFrameworkVersionRegex.Matches(content).Cast<System.Text.RegularExpressions.Match>())
+        {
+            // `v4.7.2` is the `net472` moniker: digits joined, separators dropped.
+            var moniker = "net" + match.Groups[1].Value.Replace(".", string.Empty, StringComparison.Ordinal);
+            if (IsPlausibleTargetFramework(moniker))
+            {
+                detected.Add(moniker);
+            }
+        }
+    }
+
+    private static bool IsUnderBuildDirectory(string root, string filePath)
+    {
+        foreach (var segment in Path.GetRelativePath(root, filePath).Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
+        {
+            if (segment is "bin" or "obj" or "node_modules" or "artifacts" or "packages")
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     // Accepts `net8.0`, `net8.0-windows`, `net472`, `netstandard2.0`, `netcoreapp3.1`; rejects
