@@ -38,6 +38,34 @@ public static class DebugLog
 
     public static bool Enabled { get; private set; }
 
+    private static long excludedDirectories;
+    private static long excludedFiles;
+
+    /// <summary>
+    ///     Counts a directory pruned or a file skipped by the active <c>--exclude</c> scope. Called
+    ///     from the shared tree walk itself, so the totals describe what the analyzers skipped.
+    /// </summary>
+    internal static void NoteExcluded(bool isDirectory)
+    {
+        if (!Enabled)
+        {
+            return;
+        }
+
+        if (isDirectory)
+        {
+            Interlocked.Increment(ref excludedDirectories);
+        }
+        else
+        {
+            Interlocked.Increment(ref excludedFiles);
+        }
+    }
+
+    /// <summary>Running totals of <see cref="NoteExcluded" /> for the current process.</summary>
+    internal static (long Directories, long Files) ExcludedTotals
+        => (Interlocked.Read(ref excludedDirectories), Interlocked.Read(ref excludedFiles));
+
     /// <summary>Heartbeat cadence; injectable so tests do not wait 30 seconds.</summary>
     internal static TimeSpan HeartbeatInterval { get; set; } = TimeSpan.FromSeconds(30);
 
@@ -55,7 +83,12 @@ public static class DebugLog
     }
 
     /// <summary>Set once per CLI invocation (flag or environment); also how in-process tests disable a previously enabled log.</summary>
-    public static void Configure(bool enabled) => Enabled = enabled;
+    public static void Configure(bool enabled)
+    {
+        Enabled = enabled;
+        Interlocked.Exchange(ref excludedDirectories, 0);
+        Interlocked.Exchange(ref excludedFiles, 0);
+    }
 
     /// <summary>Writes <c>[dosai +12.345s] message</c> to stderr. No-op unless enabled.</summary>
     public static void Log(string message)
@@ -113,6 +146,20 @@ public static class DebugLog
         }
 
         return scope;
+    }
+
+    /// <summary>Runs <paramref name="work" /> inside <see cref="Phase" /> and returns its result.</summary>
+    public static T Measure<T>(string name, Func<T> work)
+    {
+        using var phase = Phase(name);
+        return work();
+    }
+
+    /// <summary>Runs <paramref name="work" /> inside <see cref="Phase" />.</summary>
+    public static void Measure(string name, Action work)
+    {
+        using var phase = Phase(name);
+        work();
     }
 
     private static void StartHeartbeatLocked()
@@ -193,74 +240,5 @@ public static class DebugLog
                 StopHeartbeatIfIdleLocked();
             }
         }
-    }
-}
-
-/// <summary>
-///     Debug-only discovery probe: counts the .NET-relevant file types under a scan root and how
-///     many files the active <see cref="PathExclusions" /> scope dropped. Walks the tree a second
-///     time with its own per-directory error handling, so it only runs when
-///     <see cref="DebugLog.Enabled" /> and never changes what the analyzers see.
-/// </summary>
-internal static class DebugDiscovery
-{
-    public static void LogFileCounts(string path)
-    {
-        if (!DebugLog.Enabled || !Directory.Exists(path))
-        {
-            return;
-        }
-
-        var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
-        {
-            [Constants.AssemblyExtension] = 0,
-            [Constants.ExeExtension] = 0,
-            [Constants.CSharpSourceExtension] = 0,
-            [Constants.VBSourceExtension] = 0,
-            [Constants.FSharpSourceExtension] = 0
-        };
-        var excluded = 0;
-        var total = 0;
-
-        var pending = new Stack<DirectoryInfo>();
-        pending.Push(new DirectoryInfo(path));
-        while (pending.Count > 0)
-        {
-            DirectoryInfo[] subdirectories;
-            FileInfo[] files;
-            try
-            {
-                var directory = pending.Pop();
-                subdirectories = directory.GetDirectories();
-                files = directory.GetFiles();
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
-            {
-                continue;
-            }
-
-            foreach (var subdirectory in subdirectories)
-            {
-                pending.Push(subdirectory);
-            }
-
-            foreach (var file in files)
-            {
-                total++;
-                if (PathExclusions.IsExcluded(file.FullName, isDirectory: false))
-                {
-                    excluded++;
-                    continue;
-                }
-
-                if (counts.TryGetValue(file.Extension, out _))
-                {
-                    counts[file.Extension]++;
-                }
-            }
-        }
-
-        var summary = string.Join(", ", counts.OrderBy(pair => pair.Key, StringComparer.Ordinal).Select(pair => $"{pair.Value} {pair.Key}"));
-        DebugLog.Log($"file discovery under '{path}': {summary}, {excluded} excluded by --exclude, {total} files total");
     }
 }

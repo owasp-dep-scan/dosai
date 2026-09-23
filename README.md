@@ -39,26 +39,26 @@ dotnet run --project ./Dosai/Dosai.csproj -- methods \
   --debug
 ```
 
-Example output (captured from `methods --path ./Dosai --debug`, with one heartbeat line from a longer `dataflows` run on the same tree):
+Example output, abridged from one real `methods --path ./Dosai --debug` run:
 
 ```
-[dosai +0.006s] dosai 5.0.0.0, .NET 11.0.0-rc.1.26425.128, macOS 26.6.2 Arm64, 14 processor(s)
-[dosai +0.009s] input path: /Users/you/dosai/Dosai
-[dosai +0.009s] --exclude: <none>
-[dosai +0.020s] file discovery under './Dosai': 90 .cs, 1420 .dll, 0 .exe, 0 .fs, 0 .vb, 0 excluded by --exclude, 1669 files total
-[dosai +0.020s] start methods
-[dosai +0.050s] start methods.assembly-inspection
-[dosai +0.072s] assembly scoping: kept 20, dropped 1385 of 1405 candidates (heuristic name filter (System./Microsoft./Newtonsoft./FSharp./Humanizer prefixes; no deps.json project libraries))
-[dosai +0.148s] end methods.assembly-inspection in 0.098s, managed heap 7 MB, working set 147 MB
-[dosai +0.610s] start methods.symbol-analysis
-[dosai +7.666s] end methods.symbol-analysis in 7.055s, managed heap 162 MB, working set 1.0 GB
-[dosai +8.924s] reachability bucketing path: condensed bitsets (6006 components x 6022 nodes, 4 MB of bitsets)
-[dosai +8.939s] reachability bucketing (condensed bitsets) completed in 0.015s
-[dosai +9.273s] end methods in 9.254s, managed heap 247 MB, working set 1.1 GB
-[dosai +30.023s] still in dataflows.graph-walk, managed heap 171 MB, working set 1.0 GB
+[dosai +0.002s] dosai 5.0.0.0, .NET 11.0.0-rc.1.26425.128, macOS 26.6.2 Arm64, 14 processor(s)
+[dosai +0.006s] input path: /Users/you/dosai/Dosai
+[dosai +0.006s] --exclude: <none>
+[dosai +0.006s] start methods
+[dosai +0.037s] start methods.assembly-inspection
+[dosai +0.057s] discovered under './Dosai': 1405 .dll, 0 .exe; 15 skipped in obj/bin or generated; --exclude pruned 0 director(ies) and skipped 0 file(s)
+[dosai +0.058s] assembly scoping: kept 20, dropped 1385 of 1405 candidates (heuristic name filter (System./Microsoft./Newtonsoft./FSharp./Humanizer prefixes; no deps.json project libraries))
+[dosai +0.129s] end methods.assembly-inspection in 0.091s, managed heap 7 MB, working set 147 MB
+[dosai +0.538s] start methods.symbol-analysis
+[dosai +7.016s] end methods.symbol-analysis in 6.478s, managed heap 162 MB, working set 1.0 GB
+[dosai +7.257s] call graph (merged) nodes: 6036
+[dosai +7.257s] call graph (merged) edges: 25997
 ```
 
-All debug output goes to stderr: JSON files and the `mcp` JSON-RPC stream on stdout are never touched, and a run's output is byte-identical with and without `--debug` (apart from the pre-existing `GeneratedAt` timestamp, which changes between any two runs). When the flag is off, debug logging costs nothing - no messages are built at all.
+Phases that run longer than 30 seconds also print a heartbeat every 30 seconds in the form `still in <phase>, managed heap <size>, working set <size>`.
+
+All debug output goes to stderr: JSON files and the `mcp` JSON-RPC stream on stdout are never touched, and a run's output is byte-identical with and without `--debug` (apart from the pre-existing `GeneratedAt` timestamp, which changes between any two runs). When the flag is off, each debug call is a single flag check and no messages are built.
 
 ### Data-flow analysis
 

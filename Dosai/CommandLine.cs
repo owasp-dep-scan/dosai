@@ -335,22 +335,22 @@ public class CommandLine
             }));
 
         dataFlowsCommand.SetAction(parseResult =>
-            Guard("dataFlows", () => parseResult.GetValue(outputFileOption), () =>
-            {
-                var path = parseResult.GetValue(pathOption);
-                var excludePatterns = parseResult.GetValue(excludeOption);
-                using var exclusions = PathExclusions.Apply(path!, excludePatterns);
-                var outputFile = parseResult.GetValue(outputFileOption);
-                var patternsFile = parseResult.GetValue(patternsFileOption);
-                var patternPacks = parseResult.GetValue(patternPacksOption);
-                var graphFormat = parseResult.GetValue(dataFlowFormatOption);
-                var graphOutputFile = parseResult.GetValue(dataFlowGraphOutputFileOption);
-                var printDataFlows = parseResult.GetValue(printDataFlowsOption);
-                var printSourcesSinks = parseResult.GetValue(printSourcesSinksOption);
-                var suppressionsFile = parseResult.GetValue(suppressionsFileOption);
-                var buildPreparation = ParseBuildPreparation(parseResult.GetValue(restoreOption), parseResult.GetValue(buildOption));
-                LogScanInput(path!, excludePatterns, outputFile!);
-                using var commandPhase = DebugLog.Phase("dataflows");
+        Guard("dataFlows", () => parseResult.GetValue(outputFileOption), () =>
+        {
+            var path = parseResult.GetValue(pathOption);
+            var excludePatterns = parseResult.GetValue(excludeOption);
+            using var exclusions = PathExclusions.Apply(path!, excludePatterns);
+            var outputFile = parseResult.GetValue(outputFileOption);
+            var patternsFile = parseResult.GetValue(patternsFileOption);
+            var patternPacks = parseResult.GetValue(patternPacksOption);
+            var graphFormat = parseResult.GetValue(dataFlowFormatOption);
+            var graphOutputFile = parseResult.GetValue(dataFlowGraphOutputFileOption);
+            var printDataFlows = parseResult.GetValue(printDataFlowsOption);
+            var printSourcesSinks = parseResult.GetValue(printSourcesSinksOption);
+            var suppressionsFile = parseResult.GetValue(suppressionsFileOption);
+            var buildPreparation = ParseBuildPreparation(parseResult.GetValue(restoreOption), parseResult.GetValue(buildOption));
+            LogScanInput(path!, excludePatterns, outputFile!);
+            using var commandPhase = DebugLog.Phase("dataflows");
 
             // Stream the JSON straight to the output file and keep the result around for printing and graph
             // export. This avoids materialising the full JSON as a single string and the serialize-then-
@@ -367,68 +367,68 @@ public class CommandLine
                 PrintSourcesAndSinks(dataFlowResult);
             }
 
-                if (!string.IsNullOrWhiteSpace(graphFormat))
-                {
-                    if (!DataFlowExporter.TryParseFormat(graphFormat, out var format))
-                    {
-                        Console.Error.WriteLine($"Unsupported data-flow graph format: {graphFormat}. Supported formats: mermaid, graphml, gexf.");
-                        return 1;
-                    }
-
-                    graphOutputFile ??= Path.ChangeExtension(outputFile!, DataFlowExporter.GetDefaultExtension(format));
-                    File.WriteAllText(graphOutputFile, DataFlowExporter.Export(dataFlowResult, format));
-                    LogWrittenBytes("data-flow graph export", graphOutputFile);
-                }
-
-                return 0;
-            }));
-
-        cryptoCommand.SetAction(parseResult =>
-            Guard("crypto", () => parseResult.GetValue(outputFileOption), () =>
+            if (!string.IsNullOrWhiteSpace(graphFormat))
             {
-                var path = parseResult.GetValue(pathOption)!;
-                var excludePatterns = parseResult.GetValue(excludeOption);
-                using var exclusions = PathExclusions.Apply(path, excludePatterns);
-                var outputFile = parseResult.GetValue(outputFileOption)!;
-                var format = parseResult.GetValue(cryptoFormatOption);
-                var graphFormat = parseResult.GetValue(cryptoGraphFormatOption);
-                var graphOutputFile = parseResult.GetValue(cryptoGraphOutputFileOption);
-                var buildPreparation = ParseBuildPreparation(parseResult.GetValue(restoreOption), parseResult.GetValue(buildOption));
-                LogScanInput(path, excludePatterns, outputFile);
-                using var commandPhase = DebugLog.Phase("crypto");
-                try
+                if (!DataFlowExporter.TryParseFormat(graphFormat, out var format))
                 {
-                    var result = CryptoAnalyzer.Analyze(path, buildPreparation);
-                    File.WriteAllText(outputFile, CryptoAnalyzer.Export(result, format));
-                    LogWrittenBytes("crypto export", outputFile);
-                    if (!string.IsNullOrWhiteSpace(graphFormat))
-                    {
-                        var graphExportResult = WriteCryptoDataFlowGraphSidecars(result, graphFormat, outputFile, graphOutputFile);
-                        if (graphExportResult != 0) return graphExportResult;
-                    }
-                    return 0;
-                }
-                catch (ArgumentException ex)
-                {
-                    Console.Error.WriteLine(ex.Message);
+                    Console.Error.WriteLine($"Unsupported data-flow graph format: {graphFormat}. Supported formats: mermaid, graphml, gexf.");
                     return 1;
                 }
-            }));
+
+                graphOutputFile ??= Path.ChangeExtension(outputFile!, DataFlowExporter.GetDefaultExtension(format));
+                File.WriteAllText(graphOutputFile, DataFlowExporter.Export(dataFlowResult, format));
+                LogWrittenBytes("data-flow graph export", graphOutputFile);
+            }
+
+            return 0;
+        }));
+
+        cryptoCommand.SetAction(parseResult =>
+        Guard("crypto", () => parseResult.GetValue(outputFileOption), () =>
+        {
+            var path = parseResult.GetValue(pathOption)!;
+            var excludePatterns = parseResult.GetValue(excludeOption);
+            using var exclusions = PathExclusions.Apply(path, excludePatterns);
+            var outputFile = parseResult.GetValue(outputFileOption)!;
+            var format = parseResult.GetValue(cryptoFormatOption);
+            var graphFormat = parseResult.GetValue(cryptoGraphFormatOption);
+            var graphOutputFile = parseResult.GetValue(cryptoGraphOutputFileOption);
+            var buildPreparation = ParseBuildPreparation(parseResult.GetValue(restoreOption), parseResult.GetValue(buildOption));
+            LogScanInput(path, excludePatterns, outputFile);
+            using var commandPhase = DebugLog.Phase("crypto");
+            try
+            {
+                var result = CryptoAnalyzer.Analyze(path, buildPreparation);
+                File.WriteAllText(outputFile, CryptoAnalyzer.Export(result, format));
+                LogWrittenBytes("crypto export", outputFile);
+                if (!string.IsNullOrWhiteSpace(graphFormat))
+                {
+                    var graphExportResult = WriteCryptoDataFlowGraphSidecars(result, graphFormat, outputFile, graphOutputFile);
+                    if (graphExportResult != 0) return graphExportResult;
+                }
+                return 0;
+            }
+            catch (ArgumentException ex)
+            {
+                Console.Error.WriteLine(ex.Message);
+                return 1;
+            }
+        }));
 
         agentContextCommand.SetAction(parseResult =>
-            Guard("agentContext", () => parseResult.GetValue(outputFileOption), () =>
-            {
-                var path = parseResult.GetValue(pathOption)!;
-                var excludePatterns = parseResult.GetValue(excludeOption);
-                using var exclusions = PathExclusions.Apply(path, excludePatterns);
-                var outputFile = parseResult.GetValue(outputFileOption)!;
-                var patternsFile = parseResult.GetValue(patternsFileOption);
-                var patternPacks = parseResult.GetValue(patternPacksOption);
-                var suppressionsFile = parseResult.GetValue(suppressionsFileOption);
-                var buildPreparation = ParseBuildPreparation(parseResult.GetValue(restoreOption), parseResult.GetValue(buildOption));
-                LogScanInput(path, excludePatterns, outputFile);
-                using var commandPhase = DebugLog.Phase("agent-context");
-                var result = DataFlowAnalyzer.Analyze(path, patternsFile, patternPacks, suppressionsFile, buildPreparation);
+        Guard("agentContext", () => parseResult.GetValue(outputFileOption), () =>
+        {
+            var path = parseResult.GetValue(pathOption)!;
+            var excludePatterns = parseResult.GetValue(excludeOption);
+            using var exclusions = PathExclusions.Apply(path, excludePatterns);
+            var outputFile = parseResult.GetValue(outputFileOption)!;
+            var patternsFile = parseResult.GetValue(patternsFileOption);
+            var patternPacks = parseResult.GetValue(patternPacksOption);
+            var suppressionsFile = parseResult.GetValue(suppressionsFileOption);
+            var buildPreparation = ParseBuildPreparation(parseResult.GetValue(restoreOption), parseResult.GetValue(buildOption));
+            LogScanInput(path, excludePatterns, outputFile);
+            using var commandPhase = DebugLog.Phase("agent-context");
+            var result = DataFlowAnalyzer.Analyze(path, patternsFile, patternPacks, suppressionsFile, buildPreparation);
             // Converge crypto misuse findings into the weakness queue so agent-context carries
             // one CWE-stamped list; crypto analysis is best-effort and never blocks the context.
             try
@@ -445,81 +445,75 @@ public class CommandLine
             }
 
             var context = TransparencyBuilder.BuildAgentContext(result, path);
-                File.WriteAllText(outputFile, JsonSerializer.Serialize(context, JsonOptions()));
-                LogWrittenBytes("agent-context export", outputFile);
-                return 0;
-            }));
+            File.WriteAllText(outputFile, JsonSerializer.Serialize(context, JsonOptions()));
+            LogWrittenBytes("agent-context export", outputFile);
+            return 0;
+        }));
 
         reportCommand.SetAction(parseResult =>
-            Guard("report", () => parseResult.GetValue(outputFileOption), () =>
+        Guard("report", () => parseResult.GetValue(outputFileOption), () =>
+        {
+            var input = parseResult.GetValue(inputFileOption)!;
+            var outputFile = parseResult.GetValue(outputFileOption)!;
+            LogFilePaths(("input file", input), ("output file", outputFile));
+            using var commandPhase = DebugLog.Phase("report");
+            var result = JsonSerializer.Deserialize<DataFlowResult>(File.ReadAllText(input), JsonOptions());
+            if (result is null)
             {
-                var input = parseResult.GetValue(inputFileOption)!;
-                var outputFile = parseResult.GetValue(outputFileOption)!;
-                DebugLog.Log($"input file: {Path.GetFullPath(input)}");
-                DebugLog.Log($"output file: {Path.GetFullPath(outputFile)}");
-                using var commandPhase = DebugLog.Phase("report");
-                var result = JsonSerializer.Deserialize<DataFlowResult>(File.ReadAllText(input), JsonOptions());
-                if (result is null)
-                {
-                    Console.Error.WriteLine("Could not read data-flow result.");
-                    return 1;
-                }
-                File.WriteAllText(outputFile, TransparencyBuilder.ToMarkdownReport(result));
-                LogWrittenBytes("report export", outputFile);
-                return 0;
-            }));
+                Console.Error.WriteLine("Could not read data-flow result.");
+                return 1;
+            }
+            File.WriteAllText(outputFile, TransparencyBuilder.ToMarkdownReport(result));
+            LogWrittenBytes("report export", outputFile);
+            return 0;
+        }));
 
         diffCommand.SetAction(parseResult =>
-            Guard("diff", () => parseResult.GetValue(outputFileOption), () =>
+        Guard("diff", () => parseResult.GetValue(outputFileOption), () =>
+        {
+            var oldInput = parseResult.GetValue(oldInputFileOption)!;
+            var newInput = parseResult.GetValue(newInputFileOption)!;
+            var outputFile = parseResult.GetValue(outputFileOption)!;
+            LogFilePaths(("--old", oldInput), ("--new", newInput), ("output file", outputFile));
+            using var commandPhase = DebugLog.Phase("diff");
+            var oldResult = JsonSerializer.Deserialize<DataFlowResult>(File.ReadAllText(oldInput), JsonOptions());
+            var newResult = JsonSerializer.Deserialize<DataFlowResult>(File.ReadAllText(newInput), JsonOptions());
+            if (oldResult is null || newResult is null)
             {
-                var oldInput = parseResult.GetValue(oldInputFileOption)!;
-                var newInput = parseResult.GetValue(newInputFileOption)!;
-                var outputFile = parseResult.GetValue(outputFileOption)!;
-                DebugLog.Log($"--old: {Path.GetFullPath(oldInput)}");
-                DebugLog.Log($"--new: {Path.GetFullPath(newInput)}");
-                DebugLog.Log($"output file: {Path.GetFullPath(outputFile)}");
-                using var commandPhase = DebugLog.Phase("diff");
-                var oldResult = JsonSerializer.Deserialize<DataFlowResult>(File.ReadAllText(oldInput), JsonOptions());
-                var newResult = JsonSerializer.Deserialize<DataFlowResult>(File.ReadAllText(newInput), JsonOptions());
-                if (oldResult is null || newResult is null)
-                {
-                    Console.Error.WriteLine("Could not read one or both data-flow results.");
-                    return 1;
-                }
-                File.WriteAllText(outputFile, TransparencyBuilder.DiffJson(oldResult, newResult));
-                LogWrittenBytes("diff export", outputFile);
-                return 0;
-            }));
+                Console.Error.WriteLine("Could not read one or both data-flow results.");
+                return 1;
+            }
+            File.WriteAllText(outputFile, TransparencyBuilder.DiffJson(oldResult, newResult));
+            LogWrittenBytes("diff export", outputFile);
+            return 0;
+        }));
 
         queryCommand.SetAction(parseResult =>
-            Guard("query", () => parseResult.GetValue(inputFileOption), () =>
-            {
-                var input = parseResult.GetValue(inputFileOption)!;
-                var outputFile = parseResult.GetValue(outputFileOption)!;
-                DebugLog.Log($"input file: {Path.GetFullPath(input)}");
-                DebugLog.Log($"output file: {Path.GetFullPath(outputFile)}");
-                using var commandPhase = DebugLog.Phase("query");
-                File.WriteAllText(outputFile, DosaiQueryEngine.QueryJson(File.ReadAllText(input), parseResult.GetValue(queryOption)!));
-                LogWrittenBytes("query export", outputFile);
-                return 0;
-            }));
+        Guard("query", () => parseResult.GetValue(inputFileOption), () =>
+        {
+            var input = parseResult.GetValue(inputFileOption)!;
+            var outputFile = parseResult.GetValue(outputFileOption)!;
+            var query = parseResult.GetValue(queryOption)!;
+            LogFilePaths(("input file", input), ("output file", outputFile));
+            using var commandPhase = DebugLog.Phase("query");
+            File.WriteAllText(outputFile, DosaiQueryEngine.QueryJson(File.ReadAllText(input), query));
+            LogWrittenBytes("query export", outputFile);
+            return 0;
+        }));
 
         mcpCommand.SetAction(parseResult =>
-            Guard("mcp", null, () =>
-            {
-                var path = parseResult.GetValue(pathOption);
-                var patternsFile = parseResult.GetValue(patternsFileOption);
-                var patternPacks = parseResult.GetValue(patternPacksOption);
-                var mcpRoot = parseResult.GetValue(mcpRootOption);
-                DebugLog.Log($"default path: {(path is null ? "<none>" : Path.GetFullPath(path))}");
-                if (mcpRoot is not null)
-                {
-                    DebugLog.Log($"mcp root: {Path.GetFullPath(mcpRoot)}");
-                }
-
-                using var commandPhase = DebugLog.Phase("mcp");
-                return McpServer.Run(path, patternsFile, patternPacks, mcpRoot);
-            }));
+        Guard("mcp", null, () =>
+        {
+            var path = parseResult.GetValue(pathOption);
+            var patternsFile = parseResult.GetValue(patternsFileOption);
+            var patternPacks = parseResult.GetValue(patternPacksOption);
+            var mcpRoot = parseResult.GetValue(mcpRootOption);
+            // No session-long phase: the server idles between requests, and a phase here would
+            // make the heartbeat report "still in mcp" every interval for as long as it runs.
+            // McpServer opens one phase per request instead.
+            LogFilePaths(("default path", path), ("mcp root", mcpRoot));
+            return McpServer.Run(path, patternsFile, patternPacks, mcpRoot);
+        }));
 
         // Debug logging is configured once, before any command action runs, so every analyzer
         // (and the dedicated assembly-inspection thread) can write through the static DebugLog
@@ -541,7 +535,7 @@ public class CommandLine
         Converters = { new JsonStringEnumConverter() }
     };
 
-    /// <summary>Debug-only preamble shared by the scan commands: resolved input path, active --exclude patterns, output file, and one file-discovery count pass.</summary>
+    /// <summary>Debug-only preamble shared by the scan commands: resolved input path, active --exclude patterns, and output file.</summary>
     private static void LogScanInput(string path, string[]? excludePatterns, string outputFile)
     {
         if (!DebugLog.Enabled)
@@ -552,7 +546,23 @@ public class CommandLine
         DebugLog.Log($"input path: {Path.GetFullPath(path)}");
         DebugLog.Log(excludePatterns is { Length: > 0 } ? $"--exclude: {string.Join(", ", excludePatterns)}" : "--exclude: <none>");
         DebugLog.Log($"output file: {Path.GetFullPath(outputFile)}");
-        DebugDiscovery.LogFileCounts(path);
+    }
+
+    /// <summary>Debug-only resolved paths for the commands that read and write files rather than scan a tree.</summary>
+    private static void LogFilePaths(params (string Label, string? Path)[] paths)
+    {
+        if (!DebugLog.Enabled)
+        {
+            return;
+        }
+
+        foreach (var (label, path) in paths)
+        {
+            if (path is not null)
+            {
+                DebugLog.Log($"{label}: {Path.GetFullPath(path)}");
+            }
+        }
     }
 
     /// <summary>Debug-only size report for a written output file.</summary>

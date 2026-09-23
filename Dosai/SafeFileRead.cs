@@ -117,13 +117,21 @@ internal static class SafeFileRead
 
         foreach (var file in fileEntries)
         {
-            if (PathExclusions.IsExcluded(file.FullName, isDirectory: false)) continue;
+            if (PathExclusions.IsExcluded(file.FullName, isDirectory: false))
+            {
+                DebugLog.NoteExcluded(isDirectory: false);
+                continue;
+            }
             yield return file.FullName;
         }
         foreach (var subdirectory in subdirectories)
         {
             // An excluded directory is pruned, not filtered: nothing beneath it is read.
-            if (PathExclusions.IsExcluded(subdirectory.FullName, isDirectory: true)) continue;
+            if (PathExclusions.IsExcluded(subdirectory.FullName, isDirectory: true))
+            {
+                DebugLog.NoteExcluded(isDirectory: true);
+                continue;
+            }
             foreach (var file in EnumerateDirectory(subdirectory, searchPattern, report, visited, depth + 1))
             {
                 yield return file;

@@ -124,7 +124,10 @@ public static class BuildPreparation
         Console.Error.WriteLine($"dosai: dotnet {verb} {Path.GetFileName(target)} (--{verb} requested)");
         // Debug logging reports the verb and exit code only - never the child command line.
         var watch = DebugLog.Enabled ? Stopwatch.StartNew() : null;
-        DebugLog.Log($"dotnet {verb} starting on '{Path.GetFileName(target)}'");
+        if (watch is not null)
+        {
+            DebugLog.Log($"dotnet {verb} starting on '{Path.GetFileName(target)}'");
+        }
         try
         {
             using var process = Process.Start(new ProcessStartInfo

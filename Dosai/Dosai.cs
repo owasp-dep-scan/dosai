@@ -353,8 +353,8 @@ public static class Dosai
     /// </summary>
     public static MethodsSlice GetMethodsSlice(string path, Frameworks.FrameworkAnalysisOptions? frameworkOptions = null, BuildPreparationMode buildPreparation = BuildPreparationMode.None)
     {
-        BuildPreparation.Prepare(path, buildPreparation);
-        var purlResolver = PackageUrlResolver.Create(path);
+        DebugLog.Measure("methods.build-preparation", () => BuildPreparation.Prepare(path, buildPreparation));
+        var purlResolver = DebugLog.Measure("methods.package-url-resolver", () => PackageUrlResolver.Create(path));
         var assemblyDiagnostics = new List<string>();
         List<Method> methods;
         using (DebugLog.Phase("methods.assembly-inspection"))
@@ -382,7 +382,7 @@ public static class Dosai
         MergeCallGraph(callGraph, assemblyCallGraph);
         DebugLog.Count("call graph (merged) nodes", callGraph.Nodes.Count);
         DebugLog.Count("call graph (merged) edges", callGraph.Edges.Count);
-        var assemblyInformation = GetAssemblyInformation(path);
+        var assemblyInformation = DebugLog.Measure("methods.assembly-information", () => GetAssemblyInformation(path));
         DebugLog.Count("assembly information entries", assemblyInformation.Count);
 
         Frameworks.FrameworkAnalysisResult frameworkResult;
@@ -400,7 +400,7 @@ public static class Dosai
         // ApiEndpointAnalyzer now only covers what no provider owns (VB.NET); the framework providers
         // own every C# endpoint. Entry points are therefore built from the analyzer's endpoints ALONE;
         // feeding it the combined list produced a second, MethodId-less copy of every provider endpoint.
-        var legacyEndpoints = ApiEndpointAnalyzer.GetApiEndpoints(path);
+        var legacyEndpoints = DebugLog.Measure("methods.legacy-api-endpoints", () => ApiEndpointAnalyzer.GetApiEndpoints(path));
         DebugLog.Count("legacy analyzer api endpoints (VB remainder)", legacyEndpoints.Count);
         var apiEndpoints = frameworkResult.ApiEndpoints.Concat(legacyEndpoints).ToList();
         methods.AddRange(sourceMethods);
@@ -408,13 +408,13 @@ public static class Dosai
         {
             EnrichPackageUrls(purlResolver, methods, usings, methodCalls, properties, fields, events, constructors, callGraph, assemblyInformation, sourceAssemblyMapping);
         }
-        var entryPoints = MergeEntryPoints(TransparencyBuilder.BuildEntryPoints(legacyEndpoints, methods), frameworkResult.EntryPoints);
+        var entryPoints = DebugLog.Measure("methods.entry-points", () => MergeEntryPoints(TransparencyBuilder.BuildEntryPoints(legacyEndpoints, methods), frameworkResult.EntryPoints));
         DebugLog.Count("entry points (merged)", entryPoints.Count);
-        using (DebugLog.Phase("methods.identity-and-package-reachability"))
+        using (DebugLog.Phase("methods.method-identities"))
         {
             EnrichMethodIdentities(methods, callGraph, sourceMode);
         }
-        var packageReachability = TransparencyBuilder.BuildPackageReachability(callGraph, dependencies: usings);
+        var packageReachability = DebugLog.Measure("methods.package-reachability", () => TransparencyBuilder.BuildPackageReachability(callGraph, dependencies: usings));
         DebugLog.Count("package reachability entries", packageReachability.Count);
 
         // Collapse repeated call sites of the same (source, target, call type, evidence) pair
@@ -436,7 +436,7 @@ public static class Dosai
         // next to the bucketing-path decision; only the derived reports are counted here.
         DebugLog.Count("recursion clusters", recursionClusters.Count);
         DebugLog.Count("dead code entries", deadCode.Count);
-        var securityFindings = Frameworks.SecurityAnalyzer.Run(frameworkContext, frameworkResult, apiEndpoints);
+        var securityFindings = DebugLog.Measure("methods.security-analysis", () => Frameworks.SecurityAnalyzer.Run(frameworkContext, frameworkResult, apiEndpoints));
 
         var sliceDiagnostics = frameworkResult.Diagnostics.Select(diagnostic => $"{diagnostic.FrameworkId}: {diagnostic.Message}").Concat(reachabilityDiagnostics).ToList();
         // Restore-output and unresolved-call diagnostics explain why package reachability may
@@ -3945,6 +3945,9 @@ public static class Dosai
             }
             // Best-effort discovery: unreadable or over-long subtrees are skipped with a
             // console warning; the inspection continues with the readable remainder.
+            using var discoveryPhase = DebugLog.Enabled ? DebugLog.Phase($"discovery {string.Join("/", fileExtensions)}") : null;
+            var skippedBuildOutput = 0;
+            var excludedBefore = DebugLog.ExcludedTotals;
             foreach (var inputFile in SafeFileRead.EnumerateAllFilesSafe(path))
             {
                 var extension = Path.GetExtension(inputFile);
@@ -3957,9 +3960,16 @@ public static class Dosai
                     (sourceExtensions.Contains(extension) && HasDirectorySegment(relativePath, "bin")) ||
                     inputFile.EndsWith($".g{extension}", StringComparison.OrdinalIgnoreCase))
                 {
+                    skippedBuildOutput++;
                     continue;
                 }
                 bucket.Add(inputFile);
+            }
+            if (DebugLog.Enabled)
+            {
+                var found = string.Join(", ", fileExtensions.Distinct(StringComparer.OrdinalIgnoreCase).Select(extension => $"{buckets[extension].Count} {extension}"));
+                var excludedAfter = DebugLog.ExcludedTotals;
+                DebugLog.Log($"discovered under '{path}': {found}; {skippedBuildOutput} skipped in obj/bin or generated; --exclude pruned {excludedAfter.Directories - excludedBefore.Directories} director(ies) and skipped {excludedAfter.Files - excludedBefore.Files} file(s)");
             }
             foreach (var extension in fileExtensions)
             {

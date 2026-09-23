@@ -268,7 +268,7 @@ public static partial class DataFlowAnalyzer
             throw new FileNotFoundException($"Path does not exist: {path}", path);
         }
 
-        BuildPreparation.Prepare(path, buildPreparation);
+        DebugLog.Measure("dataflows.build-preparation", () => BuildPreparation.Prepare(path, buildPreparation));
         DataFlowPatternSet patterns;
         using (DebugLog.Phase("dataflows.pattern-loading"))
         {
@@ -279,7 +279,7 @@ public static partial class DataFlowAnalyzer
         DebugLog.Count("data-flow passthrough patterns", patterns.Passthroughs.Count);
         DebugLog.Count("data-flow sanitizer patterns", patterns.Sanitizers.Count);
         var result = new DataFlowResult { Patterns = patterns, Metadata = TransparencyBuilder.CreateMetadata(path) };
-        var purlResolver = PackageUrlResolver.Create(path);
+        var purlResolver = DebugLog.Measure("dataflows.package-url-resolver", () => PackageUrlResolver.Create(path));
         // Purl-resolution evidence (which lock/config file produced each purl, version
         // conflicts across sources) rides along with the analysis diagnostics.
         foreach (var diagnostic in purlResolver.Diagnostics.Where(diagnostic => !result.Diagnostics.Contains(diagnostic, StringComparer.Ordinal)))
@@ -445,7 +445,7 @@ public static partial class DataFlowAnalyzer
         // sequential ids appended after them. The analyzer path is VB-only (providers own every
         // C# endpoint) and merges through the same dedup as methods mode, rebuilding entry
         // points from provider endpoints produced a second, MethodId-less copy of each.
-        var legacyEntryPoints = TransparencyBuilder.BuildEntryPoints(ApiEndpointAnalyzer.GetApiEndpoints(path));
+        var legacyEntryPoints = DebugLog.Measure("dataflows.legacy-entry-points", () => TransparencyBuilder.BuildEntryPoints(ApiEndpointAnalyzer.GetApiEndpoints(path)));
         var frameworkEntryPoints = Depscan.Dosai.MergeEntryPoints(legacyEntryPoints, frameworkResult.EntryPoints);
         AddDataFlowEntryPoints(result);
         var next = frameworkEntryPoints.Count;

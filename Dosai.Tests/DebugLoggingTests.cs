@@ -99,6 +99,9 @@ public partial class DosaiTests
         finally
         {
             Environment.SetEnvironmentVariable("DOSAI_DEBUG", previous);
+            // Main leaves the static flag as configured; reset it so parallel test classes do
+            // not inherit debug output.
+            DebugLog.Configure(false);
         }
     }
 
@@ -172,6 +175,7 @@ public partial class DosaiTests
         finally
         {
             Environment.SetEnvironmentVariable("DOSAI_DEBUG", previous);
+            DebugLog.Configure(false);
         }
 
         var lines = recorder.Snapshot();
@@ -220,8 +224,14 @@ public partial class DosaiTests
                 Console.SetOut(originalOut);
                 Console.SetIn(originalIn);
                 Console.SetError(originalError);
+                DebugLog.Configure(false);
             }
         }
+
+        // The server idles between requests, so only requests get a phase; a session-long
+        // phase would make the heartbeat report "still in mcp" for as long as it runs.
+        Assert.Contains(recorder.Snapshot(), line => line.EndsWith(" start mcp request initialize", StringComparison.Ordinal));
+        Assert.DoesNotContain(recorder.Snapshot(), line => line.EndsWith(" start mcp", StringComparison.Ordinal));
 
         // Debug lines went to stderr only; stdout carries exactly one parseable JSON-RPC response.
         var stdoutText = stdout.ToString();
@@ -396,5 +406,50 @@ public partial class DosaiTests
                 Console.SetError(originalError);
             }
         }
+    }
+
+    [Fact]
+    public void Methods_WithDebug_ReportsDiscoveryCountsFromTheRealWalk()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var root = tempDirectory.Path;
+        var source = Path.Combine(root, "src");
+        Directory.CreateDirectory(source);
+        File.WriteAllText(Path.Combine(source, "Keep.cs"), "namespace App; public class Keep { public void Run() { } }");
+        var buildOutput = Path.Combine(root, "BuildOutput", "Nested");
+        Directory.CreateDirectory(buildOutput);
+        File.WriteAllText(Path.Combine(buildOutput, "Drop.cs"), "namespace App; public class Drop { public void Gone() { } }");
+        try
+        {
+            // A link back to the root must not multiply the counts: the analyzers' walk skips it.
+            Directory.CreateSymbolicLink(Path.Combine(source, "loop"), root);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
+            // Creating links needs privileges on some Windows hosts; the count check still applies.
+        }
+
+        var recorder = new LineRecorder();
+        lock (ConsoleOutputLock)
+        {
+            var originalError = Console.Error;
+            var originalOut = Console.Out;
+            try
+            {
+                Console.SetError(recorder);
+                Console.SetOut(TextWriter.Null);
+                Assert.Equal(0, CommandLine.Main(["methods", "--path", root, "--o", Path.Combine(root, "out.json"), "--exclude", "BuildOutput/**", "--debug"]));
+            }
+            finally
+            {
+                Console.SetError(originalError);
+                Console.SetOut(originalOut);
+                DebugLog.Configure(false);
+            }
+        }
+
+        var sourceDiscovery = Assert.Single(recorder.Snapshot(), line => line.Contains("discovered under", StringComparison.Ordinal) && line.Contains(" .cs", StringComparison.Ordinal));
+        Assert.Contains(": 1 .cs;", sourceDiscovery, StringComparison.Ordinal);
+        Assert.Contains("pruned 1 director(ies)", sourceDiscovery, StringComparison.Ordinal);
     }
 }

@@ -221,7 +221,7 @@ public static class CryptoAnalyzer
             throw new FileNotFoundException($"Path does not exist: {path}", path);
         }
 
-        BuildPreparation.Prepare(path, buildPreparation);
+        DebugLog.Measure("crypto.build-preparation", () => BuildPreparation.Prepare(path, buildPreparation));
         var files = GetSourceFiles(path);
         var result = new CryptoAnalysisResult { Metadata = TransparencyBuilder.CreateMetadata(path) };
         DebugLog.Count("source files discovered", files.Count);
