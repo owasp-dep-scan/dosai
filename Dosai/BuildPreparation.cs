@@ -122,6 +122,12 @@ public static class BuildPreparation
         var verb = mode == BuildPreparationMode.Build ? "build" : "restore";
         var arguments = $"{verb} \"{target}\" -v:quiet --nologo";
         Console.Error.WriteLine($"dosai: dotnet {verb} {Path.GetFileName(target)} (--{verb} requested)");
+        // Debug logging reports the verb and exit code only - never the child command line.
+        var watch = DebugLog.Enabled ? Stopwatch.StartNew() : null;
+        if (watch is not null)
+        {
+            DebugLog.Log($"dotnet {verb} starting on '{Path.GetFileName(target)}'");
+        }
         try
         {
             using var process = Process.Start(new ProcessStartInfo
@@ -146,12 +152,20 @@ public static class BuildPreparation
             {
                 process.Kill(entireProcessTree: true);
                 process.WaitForExit();
+                if (watch is not null)
+                {
+                    DebugLog.Log($"dotnet {verb} timed out after {watch.Elapsed.TotalSeconds:F3}s (exit forced)");
+                }
                 Console.Error.WriteLine($"dosai: dotnet {verb} {Path.GetFileName(target)} timed out after {timeoutMs / 1000}s and was stopped; analyzing the tree as-is.");
                 return;
             }
             var exitCode = process.ExitCode;
             _ = stdoutTask.GetAwaiter().GetResult();
             _ = stderrTask.GetAwaiter().GetResult();
+            if (watch is not null)
+            {
+                DebugLog.Log($"dotnet {verb} exit code {exitCode} in {watch.Elapsed.TotalSeconds:F3}s");
+            }
             if (exitCode != 0)
             {
                 Console.Error.WriteLine($"dosai: dotnet {verb} {Path.GetFileName(target)} failed with exit code {exitCode}; analyzing the tree as-is.");
@@ -161,6 +175,10 @@ public static class BuildPreparation
         {
             // A missing dotnet on PATH surfaces as Win32Exception here; either way analysis
             // continues without restore output.
+            if (watch is not null)
+            {
+                DebugLog.Log($"dotnet {verb} could not run: {ex.GetType().Name}");
+            }
             Console.Error.WriteLine($"dosai: could not run dotnet {verb} on {Path.GetFileName(target)}: {ex.Message}");
         }
     }

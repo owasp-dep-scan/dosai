@@ -13,7 +13,10 @@ using Xunit;
 
 namespace Dosai.Tests;
 
-public class DosaiTests
+// Partial so the debug-logging tests (DebugLoggingTests.cs) live in the same xunit collection:
+// they and these tests redirect the process-wide Console and toggle the static DebugLog, which
+// is only safe when the two files never run in parallel.
+public partial class DosaiTests
 {
     private static readonly object ConsoleOutputLock = new();
 

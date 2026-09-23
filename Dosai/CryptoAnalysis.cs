@@ -221,17 +221,31 @@ public static class CryptoAnalyzer
             throw new FileNotFoundException($"Path does not exist: {path}", path);
         }
 
-        BuildPreparation.Prepare(path, buildPreparation);
+        DebugLog.Measure("crypto.build-preparation", () => BuildPreparation.Prepare(path, buildPreparation));
         var files = GetSourceFiles(path);
         var result = new CryptoAnalysisResult { Metadata = TransparencyBuilder.CreateMetadata(path) };
-        var reachability = methodsSlice is null
-            ? BuildReachability(path, result.Diagnostics)
-            : CryptoReachability.From(methodsSlice, result.Diagnostics);
+        DebugLog.Count("source files discovered", files.Count);
+        CryptoReachability reachability;
+        using (DebugLog.Phase("crypto.reachability"))
+        {
+            reachability = methodsSlice is null
+                ? BuildReachability(path, result.Diagnostics)
+                : CryptoReachability.From(methodsSlice, result.Diagnostics);
+        }
         result.Statistics.FilesAnalyzed = files.Count;
 
-        AnalyzeDotNetSources(path, files, reachability, result);
-        AnalyzeTextSources(path, files, reachability, result);
-        AttachCryptoDataFlows(path, result);
+        using (DebugLog.Phase("crypto.dotnet-sources"))
+        {
+            AnalyzeDotNetSources(path, files, reachability, result);
+        }
+        using (DebugLog.Phase("crypto.text-sources"))
+        {
+            AnalyzeTextSources(path, files, reachability, result);
+        }
+        using (DebugLog.Phase("crypto.dataflow-correlation"))
+        {
+            AttachCryptoDataFlows(path, result);
+        }
 
         result.Assets = result.Assets.OrderBy(a => a.Location.FileName, StringComparer.Ordinal).ThenBy(a => a.Location.LineNumber).ThenBy(a => a.Id, StringComparer.Ordinal).ToList();
         result.Operations = result.Operations.OrderBy(o => o.Location.FileName, StringComparer.Ordinal).ThenBy(o => o.Location.LineNumber).ThenBy(o => o.Id, StringComparer.Ordinal).ToList();
@@ -245,6 +259,16 @@ public static class CryptoAnalyzer
         result.Statistics.FindingCount = result.Findings.Count;
         result.Statistics.ReachableFindingCount = result.Findings.Count(f => f.ReachableFromEntryPoint);
         result.Statistics.CryptoDataFlowSliceCount = result.CryptoDataFlows?.Slices.Count ?? 0;
+        if (DebugLog.Enabled)
+        {
+            DebugLog.Count("crypto assets", result.Statistics.AssetCount);
+            DebugLog.Count("crypto operations", result.Statistics.OperationCount);
+            DebugLog.Count("crypto materials", result.Statistics.MaterialCount);
+            DebugLog.Count("crypto protocols", result.Statistics.ProtocolCount);
+            DebugLog.Count("crypto findings", result.Statistics.FindingCount);
+            DebugLog.Count("crypto findings reachable from an entry point", result.Statistics.ReachableFindingCount);
+            DebugLog.Count("crypto data-flow slices", result.Statistics.CryptoDataFlowSliceCount);
+        }
         return result;
     }
 

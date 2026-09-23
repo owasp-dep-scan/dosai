@@ -174,6 +174,7 @@ public static class ReachabilityAnalyzer
         // nothing here (they are still listed in EntryPoints). The budget diagnostic is emitted
         // once for the whole run, not once per entry point.
         var entryBudgetReported = false;
+        var walkedEntryPoints = 0;
         foreach (var entryPoint in entryPoints)
         {
             if (string.IsNullOrWhiteSpace(entryPoint.MethodId) || !facts.ContainsKey(entryPoint.MethodId))
@@ -181,6 +182,7 @@ public static class ReachabilityAnalyzer
                 continue;
             }
 
+            walkedEntryPoints++;
             var visited = new HashSet<string>(StringComparer.Ordinal);
             var queue = new Queue<(string NodeId, int Depth)>();
             queue.Enqueue((entryPoint.MethodId, 0));
@@ -224,6 +226,12 @@ public static class ReachabilityAnalyzer
         }
 
         var (components, componentOfNode, clusters) = ComputeComponents(callGraph, forward, facts);
+        if (DebugLog.Enabled)
+        {
+            DebugLog.Count("reachability nodes", facts.Count);
+            DebugLog.Count("reachability components", components.Count);
+            DebugLog.Count("entry points walked", walkedEntryPoints);
+        }
         ComputeReachableBuckets(facts, forward, components, componentOfNode, callGraph.Nodes, diagnostics);
         MarkKeepAlive(callGraph, facts);
         return (facts.Values.OrderBy(fact => fact.NodeId, StringComparer.Ordinal).ToList(), clusters, entryBudgetReported);
@@ -567,13 +575,27 @@ public static class ReachabilityAnalyzer
     /// </summary>
     private static void ComputeReachableBuckets(Dictionary<string, NodeReachability> facts, Dictionary<string, List<string>> forward, List<List<string>> components, Dictionary<string, int> componentOfNode, List<MethodNode> nodes, List<string> diagnostics)
     {
+        var bucketWatch = DebugLog.Enabled ? System.Diagnostics.Stopwatch.StartNew() : null;
         var nodeCount = nodes.Count;
         var bitsetBytes = (long)components.Count * ((nodeCount + 63) / 64 * 8);
         if (bitsetBytes > MaxBucketBitsetBytes)
         {
+            if (DebugLog.Enabled)
+            {
+                DebugLog.Log($"reachability bucketing path: budgeted walk ({components.Count} components x {nodeCount} nodes would need {DebugLog.FormatBytes(bitsetBytes)} of bitsets, above the {DebugLog.FormatBytes(MaxBucketBitsetBytes)} cap)");
+            }
             diagnostics.Add($"Reachable-node bucketing degraded to the budgeted walk ({components.Count} components × {nodeCount} nodes exceed the bitset cap).");
             ComputeReachableBucketsBudgeted(facts, forward, diagnostics);
+            if (bucketWatch is not null)
+            {
+                DebugLog.Log($"reachability bucketing (budgeted walk) completed in {bucketWatch.Elapsed.TotalSeconds:F3}s");
+            }
             return;
+        }
+
+        if (DebugLog.Enabled)
+        {
+            DebugLog.Log($"reachability bucketing path: condensed bitsets ({components.Count} components x {nodeCount} nodes, {DebugLog.FormatBytes(bitsetBytes)} of bitsets)");
         }
 
         var nodeIndexById = new Dictionary<string, int>(nodeCount, StringComparer.Ordinal);
@@ -641,6 +663,11 @@ public static class ReachabilityAnalyzer
             {
                 fact.ReachableNodeBucket = BucketFor(CountBits(set));
             }
+        }
+
+        if (bucketWatch is not null)
+        {
+            DebugLog.Log($"reachability bucketing (condensed bitsets) completed in {bucketWatch.Elapsed.TotalSeconds:F3}s");
         }
     }
 

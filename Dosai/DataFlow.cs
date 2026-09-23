@@ -251,8 +251,13 @@ public static partial class DataFlowAnalyzer
     public static DataFlowResult WriteDataFlows(string path, string outputFile, string? patternsPath = null, string? patternPacks = null, string? suppressionsPath = null, BuildPreparationMode buildPreparation = BuildPreparationMode.None)
     {
         var result = Analyze(path, patternsPath, patternPacks, suppressionsPath, buildPreparation);
+        using var serializationPhase = DebugLog.Phase("dataflows.serialization");
         using var stream = new FileStream(outputFile, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize: 65536);
         JsonSerializer.Serialize(stream, result, JsonOptions);
+        if (DebugLog.Enabled)
+        {
+            DebugLog.Log($"dataflows output: wrote {DebugLog.FormatBytes(stream.Length)} to '{outputFile}'");
+        }
         return result;
     }
 
@@ -263,10 +268,18 @@ public static partial class DataFlowAnalyzer
             throw new FileNotFoundException($"Path does not exist: {path}", path);
         }
 
-        BuildPreparation.Prepare(path, buildPreparation);
-        var patterns = LoadPatterns(patternsPath, patternPacks);
+        DebugLog.Measure("dataflows.build-preparation", () => BuildPreparation.Prepare(path, buildPreparation));
+        DataFlowPatternSet patterns;
+        using (DebugLog.Phase("dataflows.pattern-loading"))
+        {
+            patterns = LoadPatterns(patternsPath, patternPacks);
+        }
+        DebugLog.Count("data-flow source patterns", patterns.Sources.Count);
+        DebugLog.Count("data-flow sink patterns", patterns.Sinks.Count);
+        DebugLog.Count("data-flow passthrough patterns", patterns.Passthroughs.Count);
+        DebugLog.Count("data-flow sanitizer patterns", patterns.Sanitizers.Count);
         var result = new DataFlowResult { Patterns = patterns, Metadata = TransparencyBuilder.CreateMetadata(path) };
-        var purlResolver = PackageUrlResolver.Create(path);
+        var purlResolver = DebugLog.Measure("dataflows.package-url-resolver", () => PackageUrlResolver.Create(path));
         // Purl-resolution evidence (which lock/config file produced each purl, version
         // conflicts across sources) rides along with the analysis diagnostics.
         foreach (var diagnostic in purlResolver.Diagnostics.Where(diagnostic => !result.Diagnostics.Contains(diagnostic, StringComparer.Ordinal)))
@@ -275,26 +288,35 @@ public static partial class DataFlowAnalyzer
         }
         var sourcesToInspect = GetSourceFiles(path);
         result.Statistics.FilesAnalyzed = sourcesToInspect.Count;
+        DebugLog.Count("source files discovered", sourcesToInspect.Count);
 
         var references = GetMetadataReferences(path, result.Diagnostics);
-        var csharpTrees = sourcesToInspect
-            .Where(source => Path.GetExtension(source).Equals(Constants.CSharpSourceExtension, StringComparison.OrdinalIgnoreCase))
-            .Select(source => SafeFileRead.TryReadAllText(source, out var content)
-                ? CSharpSourceParser.Parse(content, source, path)
-                : null)
-            .OfType<CSharpSyntaxTree>()
-            .ToList();
-        if (CSharpSourceParser.TryCreateImplicitUsingsTree(path) is { } implicitUsingsTree)
+        DebugLog.Count("roslyn metadata references", references.Count);
+        List<CSharpSyntaxTree> csharpTrees;
+        List<VisualBasicSyntaxTree> vbTrees;
+        using (DebugLog.Phase("dataflows.parse"))
         {
-            csharpTrees.Insert(0, implicitUsingsTree);
+            csharpTrees = sourcesToInspect
+                .Where(source => Path.GetExtension(source).Equals(Constants.CSharpSourceExtension, StringComparison.OrdinalIgnoreCase))
+                .Select(source => SafeFileRead.TryReadAllText(source, out var content)
+                    ? CSharpSourceParser.Parse(content, source, path)
+                    : null)
+                .OfType<CSharpSyntaxTree>()
+                .ToList();
+            if (CSharpSourceParser.TryCreateImplicitUsingsTree(path) is { } implicitUsingsTree)
+            {
+                csharpTrees.Insert(0, implicitUsingsTree);
+            }
+            vbTrees = sourcesToInspect
+                .Where(source => Path.GetExtension(source).Equals(Constants.VBSourceExtension, StringComparison.OrdinalIgnoreCase))
+                .Select(source => SafeFileRead.TryReadAllText(source, out var content)
+                    ? (VisualBasicSyntaxTree)VisualBasicSyntaxTree.ParseText(content, path: source)
+                    : null)
+                .OfType<VisualBasicSyntaxTree>()
+                .ToList();
         }
-        var vbTrees = sourcesToInspect
-            .Where(source => Path.GetExtension(source).Equals(Constants.VBSourceExtension, StringComparison.OrdinalIgnoreCase))
-            .Select(source => SafeFileRead.TryReadAllText(source, out var content)
-                ? (VisualBasicSyntaxTree)VisualBasicSyntaxTree.ParseText(content, path: source)
-                : null)
-            .OfType<VisualBasicSyntaxTree>()
-            .ToList();
+        DebugLog.Count("csharp syntax trees", csharpTrees.Count);
+        DebugLog.Count("visualbasic syntax trees", vbTrees.Count);
 
         var csharpCompilation = CSharpCompilation.Create(
             "Dosai.DataFlow.CSharp",
@@ -308,8 +330,15 @@ public static partial class DataFlowAnalyzer
             options: new VisualBasicCompilationOptions(Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary));
 
         // Framework providers reuse these compilations; building them again would double the parse cost.
-        var frameworkContext = Frameworks.FrameworkContext.FromCompilations(path, csharpCompilation, vbCompilation, purlResolver);
-        var frameworkResult = Frameworks.FrameworkRegistry.Analyze(frameworkContext);
+        Frameworks.FrameworkAnalysisResult frameworkResult;
+        using (DebugLog.Phase("dataflows.framework-analysis"))
+        {
+            var frameworkContext = Frameworks.FrameworkContext.FromCompilations(path, csharpCompilation, vbCompilation, purlResolver);
+            frameworkResult = Frameworks.FrameworkRegistry.Analyze(frameworkContext);
+        }
+        DebugLog.Count("framework api endpoints", frameworkResult.ApiEndpoints.Count);
+        DebugLog.Count("framework services", frameworkResult.Services.Count);
+        DebugLog.Count("framework ai components", frameworkResult.AiComponents.Count);
 
         var summaries = new Dictionary<string, DataFlowMethodSummary>(StringComparer.Ordinal);
         var summaryCallerIndex = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
@@ -321,75 +350,82 @@ public static partial class DataFlowAnalyzer
         // rounds are a worklist over callers of summarized methods only, so a wrapper chain
         // converges without re-walking every tree (and without re-fetching semantic models).
         // Lists only ever grow, so recursion terminates via the cap.
-        foreach (var tree in csharpTrees)
+        using (DebugLog.Phase("dataflows.summary-fixpoint"))
         {
-            var model = csharpCompilation.GetSemanticModel(tree);
-            var root = tree.GetCompilationUnitRoot();
-            CollectCompilationUnitSummaries(model, root, summaries, patterns, summaryCallerIndex, summaryMethodRoots);
-        }
-
-        foreach (var tree in vbTrees)
-        {
-            var model = vbCompilation.GetSemanticModel(tree);
-            var root = tree.GetCompilationUnitRoot();
-            CollectCompilationUnitSummaries(model, root, summaries, patterns, summaryCallerIndex, summaryMethodRoots);
-        }
-
-        // The worklist is seeded with every key round one produced, then narrowed each round to the
-        // callers of the summaries that actually grew, so a converged wrapper chain is not
-        // re-walked just because some unrelated summary exists.
-        var changedSummaryKeys = new HashSet<string>(summaries.Keys, StringComparer.Ordinal);
-        var cellCountsByKey = SummaryCellCounts(summaries);
-        for (var round = 1; round < 3 && changedSummaryKeys.Count > 0; round++)
-        {
-            var callers = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var summaryKey in changedSummaryKeys)
+            foreach (var tree in csharpTrees)
             {
-                if (summaryCallerIndex.TryGetValue(summaryKey, out var indexedCallers))
+                var model = csharpCompilation.GetSemanticModel(tree);
+                var root = tree.GetCompilationUnitRoot();
+                CollectCompilationUnitSummaries(model, root, summaries, patterns, summaryCallerIndex, summaryMethodRoots);
+            }
+
+            foreach (var tree in vbTrees)
+            {
+                var model = vbCompilation.GetSemanticModel(tree);
+                var root = tree.GetCompilationUnitRoot();
+                CollectCompilationUnitSummaries(model, root, summaries, patterns, summaryCallerIndex, summaryMethodRoots);
+            }
+
+            // The worklist is seeded with every key round one produced, then narrowed each round to the
+            // callers of the summaries that actually grew, so a converged wrapper chain is not
+            // re-walked just because some unrelated summary exists.
+            var changedSummaryKeys = new HashSet<string>(summaries.Keys, StringComparer.Ordinal);
+            var cellCountsByKey = SummaryCellCounts(summaries);
+            for (var round = 1; round < 3 && changedSummaryKeys.Count > 0; round++)
+            {
+                var callers = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var summaryKey in changedSummaryKeys)
                 {
-                    callers.UnionWith(indexedCallers);
+                    if (summaryCallerIndex.TryGetValue(summaryKey, out var indexedCallers))
+                    {
+                        callers.UnionWith(indexedCallers);
+                    }
                 }
-            }
 
-            callers.RemoveWhere(callerKey => !summaryMethodRoots.ContainsKey(callerKey));
-            if (callers.Count == 0)
-            {
-                break;
-            }
+                callers.RemoveWhere(callerKey => !summaryMethodRoots.ContainsKey(callerKey));
+                if (callers.Count == 0)
+                {
+                    break;
+                }
 
-            foreach (var caller in callers)
-            {
-                var (root, model) = summaryMethodRoots[caller];
-                new DataFlowSummaryCollector(model, summaries, patterns, summaryCallerIndex, summaryMethodRoots).Visit(root);
-            }
+                foreach (var caller in callers)
+                {
+                    var (root, model) = summaryMethodRoots[caller];
+                    new DataFlowSummaryCollector(model, summaries, patterns, summaryCallerIndex, summaryMethodRoots).Visit(root);
+                }
 
-            var cellCountsAfter = SummaryCellCounts(summaries);
-            changedSummaryKeys = cellCountsAfter
-                .Where(entry => entry.Value != cellCountsByKey.GetValueOrDefault(entry.Key))
-                .Select(entry => entry.Key)
-                .ToHashSet(StringComparer.Ordinal);
-            cellCountsByKey = cellCountsAfter;
+                var cellCountsAfter = SummaryCellCounts(summaries);
+                changedSummaryKeys = cellCountsAfter
+                    .Where(entry => entry.Value != cellCountsByKey.GetValueOrDefault(entry.Key))
+                    .Select(entry => entry.Key)
+                    .ToHashSet(StringComparer.Ordinal);
+                cellCountsByKey = cellCountsAfter;
+            }
         }
+        DebugLog.Count("method summaries", summaries.Count);
 
         var graph = new DataFlowGraphBuilder(result, purlResolver, path);
 
         var frameworkSeeds = new FrameworkTaintSeedIndex(frameworkResult.TaintSeeds);
-        foreach (var tree in csharpTrees)
+        using (DebugLog.Phase("dataflows.graph-walk"))
         {
-            var model = csharpCompilation.GetSemanticModel(tree);
-            var root = tree.GetCompilationUnitRoot();
-            AnalyzeCompilationUnit(model, root, graph, patterns, summaries, path, tree.FilePath, frameworkSeeds);
-        }
+            foreach (var tree in csharpTrees)
+            {
+                var model = csharpCompilation.GetSemanticModel(tree);
+                var root = tree.GetCompilationUnitRoot();
+                AnalyzeCompilationUnit(model, root, graph, patterns, summaries, path, tree.FilePath, frameworkSeeds);
+            }
 
-        foreach (var tree in vbTrees)
-        {
-            var model = vbCompilation.GetSemanticModel(tree);
-            var root = tree.GetCompilationUnitRoot();
-            AnalyzeCompilationUnit(model, root, graph, patterns, summaries, path, tree.FilePath, frameworkSeeds);
-        }
+            foreach (var tree in vbTrees)
+            {
+                var model = vbCompilation.GetSemanticModel(tree);
+                var root = tree.GetCompilationUnitRoot();
+                AnalyzeCompilationUnit(model, root, graph, patterns, summaries, path, tree.FilePath, frameworkSeeds);
+            }
 
-        AnalyzeLanguageFrontendDataFlows(path, sourcesToInspect, patterns, result);
-        result.Statistics.FilesAnalyzed += AnalyzeAssemblyDataFlows(path, patterns, result, includeBuildArtifacts: sourcesToInspect.Count == 0);
+            AnalyzeLanguageFrontendDataFlows(path, sourcesToInspect, patterns, result);
+            result.Statistics.FilesAnalyzed += AnalyzeAssemblyDataFlows(path, patterns, result, includeBuildArtifacts: sourcesToInspect.Count == 0);
+        }
 
         result.Nodes = result.Nodes.OrderBy(n => n.FileName, StringComparer.Ordinal).ThenBy(n => n.LineNumber).ThenBy(n => n.ColumnNumber).ThenBy(n => n.Id, StringComparer.Ordinal).ToList();
         result.Edges = result.Edges.OrderBy(e => e.FileName, StringComparer.Ordinal).ThenBy(e => e.LineNumber).ThenBy(e => e.ColumnNumber).ThenBy(e => e.Id, StringComparer.Ordinal).ToList();
@@ -409,7 +445,7 @@ public static partial class DataFlowAnalyzer
         // sequential ids appended after them. The analyzer path is VB-only (providers own every
         // C# endpoint) and merges through the same dedup as methods mode, rebuilding entry
         // points from provider endpoints produced a second, MethodId-less copy of each.
-        var legacyEntryPoints = TransparencyBuilder.BuildEntryPoints(ApiEndpointAnalyzer.GetApiEndpoints(path));
+        var legacyEntryPoints = DebugLog.Measure("dataflows.legacy-entry-points", () => TransparencyBuilder.BuildEntryPoints(ApiEndpointAnalyzer.GetApiEndpoints(path)));
         var frameworkEntryPoints = Depscan.Dosai.MergeEntryPoints(legacyEntryPoints, frameworkResult.EntryPoints);
         AddDataFlowEntryPoints(result);
         var next = frameworkEntryPoints.Count;
@@ -430,6 +466,15 @@ public static partial class DataFlowAnalyzer
         TransparencyBuilder.ApplySuppressions(result, suppressionsPath);
         // After suppressions so the surface reflects the final, reportable findings.
         result.AttackSurface = TransparencyBuilder.BuildAttackSurface(result);
+        if (DebugLog.Enabled)
+        {
+            DebugLog.Count("data-flow nodes", result.Statistics.NodeCount);
+            DebugLog.Count("data-flow edges", result.Statistics.EdgeCount);
+            DebugLog.Count("data-flow sources", result.Statistics.SourceCount);
+            DebugLog.Count("data-flow sinks", result.Statistics.SinkCount);
+            DebugLog.Count("data-flow slices", result.Statistics.SliceCount);
+            DebugLog.Count("weakness candidates", result.WeaknessCandidates.Count);
+        }
         return result;
     }
 
