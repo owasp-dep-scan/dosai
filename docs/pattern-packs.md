@@ -53,27 +53,27 @@ These patterns are always loaded before optional packs.
 
 ### Always-on sinks
 
-| Kind     | Match      | Pattern                                                                                                    | Category          | Purpose                                |
-| -------- | ---------- | ---------------------------------------------------------------------------------------------------------- | ----------------- | -------------------------------------- |
-| `Method` | `Contains` | `System.Diagnostics.Process.Start`                                                                         | `command`         | Process execution.                     |
-| `Type`   | `Contains` | `System.Diagnostics.ProcessStartInfo`                                                                      | `command`         | Process execution configuration.       |
-| `Method` | `Contains` | `System.Diagnostics.Process.Run`                                                                            | `command`         | .NET 11 run-and-capture helpers (`Run`, `RunAsync`, `RunAndCaptureText`, `RunAndCaptureTextAsync`). |
-| `Method` | `Contains` | `System.Diagnostics.Process.StartAndForget`                                                                | `command`         | .NET 11 fire-and-forget process launch. |
-| `Method` | `Contains` | `Microsoft.Win32.SafeHandles.SafeProcessHandle.Start`                                                      | `command`         | .NET 11 process launch via safe handle. |
-| `Method` | `Contains` | `System.IO.File.`, `System.IO.Directory.`, `System.IO.FileStream`, `System.IO.Path.Combine`                | `file`            | File and path operations.              |
-| `Name`   | `Exact`    | `SaveAs`, `CopyTo`                                                                                         | `file`            | Upload/file copy helpers.              |
-| `Code`   | `Contains` | `SaveAs(`, `CopyTo(`, `Server.MapPath`                                                                     | `file`            | Legacy file operation fallback.        |
-| `Method` | `Contains` | `System.Net.Http.HttpClient.`                                                                              | `network`         | Outbound HTTP request.                 |
-| `Method` | `Contains` | `Response.Redirect`                                                                                        | `redirect`        | HTTP redirect.                         |
-| `Name`   | `Exact`    | `Redirect`                                                                                                 | `redirect`        | HTTP redirect helper.                  |
-| `Method` | `Contains` | `GetGrain`                                                                                                 | `rpc`             | Orleans grain dispatch.                |
-| `Name`   | `Exact`    | `GetGrain`                                                                                                 | `rpc`             | Orleans grain dispatch by simple name. |
-| `Method` | `Contains` | `System.Data.SqlClient.SqlCommand`, `Microsoft.Data.SqlClient.SqlCommand`, `MySqlCommand`, `SqliteCommand` | `sql`             | SQL command construction/execution.    |
-| `Name`   | `Exact`    | `ExecuteNonQuery`, `ExecuteReader`                                                                         | `sql`             | SQL command execution.                 |
-| `Method` | `Contains` | `ExecuteSqlRaw`, `FromSqlRaw`                                                                              | `sql`             | Entity Framework raw SQL.              |
-| `Method` | `Contains` | `System.Reflection.Assembly.Load`, `System.Type.GetType`                                                   | `reflection`      | Dynamic loading/type lookup.           |
-| `Method` | `Contains` | `BinaryFormatter.Deserialize`                                                                              | `deserialization` | BinaryFormatter deserialization.       |
-| `Name`   | `Exact`    | `Deserialize`                                                                                              | `deserialization` | Generic object deserialization.        |
+| Kind     | Match      | Pattern                                                                                                    | Category          | Purpose                                                                                             |
+| -------- | ---------- | ---------------------------------------------------------------------------------------------------------- | ----------------- | --------------------------------------------------------------------------------------------------- |
+| `Method` | `Contains` | `System.Diagnostics.Process.Start`                                                                         | `command`         | Process execution.                                                                                  |
+| `Type`   | `Contains` | `System.Diagnostics.ProcessStartInfo`                                                                      | `command`         | Process execution configuration.                                                                    |
+| `Method` | `Contains` | `System.Diagnostics.Process.Run`                                                                           | `command`         | .NET 11 run-and-capture helpers (`Run`, `RunAsync`, `RunAndCaptureText`, `RunAndCaptureTextAsync`). |
+| `Method` | `Contains` | `System.Diagnostics.Process.StartAndForget`                                                                | `command`         | .NET 11 fire-and-forget process launch.                                                             |
+| `Method` | `Contains` | `Microsoft.Win32.SafeHandles.SafeProcessHandle.Start`                                                      | `command`         | .NET 11 process launch via safe handle.                                                             |
+| `Method` | `Contains` | `System.IO.File.`, `System.IO.Directory.`, `System.IO.FileStream`, `System.IO.Path.Combine`                | `file`            | File and path operations.                                                                           |
+| `Name`   | `Exact`    | `SaveAs`, `CopyTo`                                                                                         | `file`            | Upload/file copy helpers.                                                                           |
+| `Code`   | `Contains` | `SaveAs(`, `CopyTo(`, `Server.MapPath`                                                                     | `file`            | Legacy file operation fallback.                                                                     |
+| `Method` | `Contains` | `System.Net.Http.HttpClient.`                                                                              | `network`         | Outbound HTTP request.                                                                              |
+| `Method` | `Contains` | `Response.Redirect`                                                                                        | `redirect`        | HTTP redirect.                                                                                      |
+| `Name`   | `Exact`    | `Redirect`                                                                                                 | `redirect`        | HTTP redirect helper.                                                                               |
+| `Method` | `Contains` | `GetGrain`                                                                                                 | `rpc`             | Orleans grain dispatch.                                                                             |
+| `Name`   | `Exact`    | `GetGrain`                                                                                                 | `rpc`             | Orleans grain dispatch by simple name.                                                              |
+| `Method` | `Contains` | `System.Data.SqlClient.SqlCommand`, `Microsoft.Data.SqlClient.SqlCommand`, `MySqlCommand`, `SqliteCommand` | `sql`             | SQL command construction/execution.                                                                 |
+| `Name`   | `Exact`    | `ExecuteNonQuery`, `ExecuteReader`                                                                         | `sql`             | SQL command execution.                                                                              |
+| `Method` | `Contains` | `ExecuteSqlRaw`, `FromSqlRaw`                                                                              | `sql`             | Entity Framework raw SQL.                                                                           |
+| `Method` | `Contains` | `System.Reflection.Assembly.Load`, `System.Type.GetType`                                                   | `reflection`      | Dynamic loading/type lookup.                                                                        |
+| `Method` | `Contains` | `BinaryFormatter.Deserialize`                                                                              | `deserialization` | BinaryFormatter deserialization.                                                                    |
+| `Name`   | `Exact`    | `Deserialize`                                                                                              | `deserialization` | Generic object deserialization.                                                                     |
 
 ### Always-on passthroughs
 

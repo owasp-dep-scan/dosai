@@ -61,18 +61,18 @@ Framework-analysis options:
 
 Build-preparation options (also accepted by `dataflows`, `crypto`, and `agent-context`):
 
-| Flag       | Effect                                                                                                                                                             |
-| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `--restore` | Run `dotnet restore` on the discovered solution or projects before analysis, so package assemblies resolve from the NuGet cache without build output                |
-| `--build`   | Run `dotnet build` before analysis (implies restore); produces `bin/` output the assembly pipeline can also use                                                      |
+| Flag        | Effect                                                                                                                                               |
+| ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--restore` | Run `dotnet restore` on the discovered solution or projects before analysis, so package assemblies resolve from the NuGet cache without build output |
+| `--build`   | Run `dotnet build` before analysis (implies restore); produces `bin/` output the assembly pipeline can also use                                      |
 
 Both flags are opt-in because they execute MSBuild from the target repository (props/targets imports, source generators); see `docs/THREAT_MODEL.md`. Analysis continues as-is when the invocation fails or times out. Trees that carry `obj/project.assets.json` but no build output do not need either flag: the analysis resolves package assemblies from the NuGet packages cache named by the assets file.
 
 Exclusion option (also accepted by `dataflows`, `crypto`, and `agent-context`):
 
-| Flag                | Effect                                                                                                   |
-| ------------------- | -------------------------------------------------------------------------------------------------------- |
-| `--exclude <glob>`  | Skip matching files and directories under `--path`; repeat the flag or pass several globs after it       |
+| Flag               | Effect                                                                                             |
+| ------------------ | -------------------------------------------------------------------------------------------------- |
+| `--exclude <glob>` | Skip matching files and directories under `--path`; repeat the flag or pass several globs after it |
 
 Globs are relative to `--path` and follow gitignore/fast-glob conventions: `*` and `?` stay within one path segment, `**` spans segments, a glob without a slash matches a name at any depth (`node_modules`, `*.Designer.cs`), a glob with a slash is anchored at the root (`BuildOutput/**`), and a trailing `/` matches directories only. An excluded directory is pruned, so nothing beneath it is read - useful for build-output trees with partial dependencies, or for forwarding a caller's own excludes (for example cdxgen's `--exclude`). Negated globs (`!pattern`) are rejected. Matching ignores case except on Linux.
 

@@ -248,7 +248,7 @@ The following bugs are fixed. All of them could **remove** or corrupt results in
   attributed to the previous function.
 - **R Markdown and Quarto documents were scanned as flat R.** Markdown prose (full of
   `word (paren)` shapes) and other engines' chunks (python, sql) produced phantom functions,
-  calls, and dependencies. Only `` ```{r} `` chunks are analyzed now.
+  calls, and dependencies. Only ` ```{r} ` chunks are analyzed now.
 - **F# and R comment prose produced phantom calls.** `// Record constructors (F# 11)` and
   `# Lambda syntax (R 4.1+)` matched the call regexes. Comments are stripped (quote-aware,
   nested `(* *)` for F#) before extraction. All three F# string forms are recognised - normal,

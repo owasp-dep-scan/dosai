@@ -148,14 +148,14 @@ analyzed project's target framework(s) — from `*.csproj`/`*.fsproj`/`*.vbproj`
 or, for built trees without a project file, `*.runtimeconfig.json` — and evaluates
 conditional-compilation guards against what each detected target actually defines:
 
-| Detected target | Preprocessor guards analyzed |
-| --- | --- |
-| `net8.0` | `NET`, `NET8_0`, `NET5_0_OR_GREATER`..`NET8_0_OR_GREATER`, the `NETCOREAPP` family |
-| `netstandard2.0` | `NETSTANDARD`, `NETSTANDARD2_0` and the lower `NETSTANDARD*_OR_GREATER` chain |
-| `net472` | `NETFRAMEWORK`, `NET472` and the `NET4x_OR_GREATER` chain |
-| multi-target | the set of one **representative** target — the most modern one declared |
-| `<TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion>` (classic, non-SDK projects) | treated as `net472` |
-| nothing detected | the historical fallback (`NET`, latest `NETn_0`, the modern chain), reported via a `Diagnostics` note |
+| Detected target                                                                       | Preprocessor guards analyzed                                                                          |
+| ------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `net8.0`                                                                              | `NET`, `NET8_0`, `NET5_0_OR_GREATER`..`NET8_0_OR_GREATER`, the `NETCOREAPP` family                    |
+| `netstandard2.0`                                                                      | `NETSTANDARD`, `NETSTANDARD2_0` and the lower `NETSTANDARD*_OR_GREATER` chain                         |
+| `net472`                                                                              | `NETFRAMEWORK`, `NET472` and the `NET4x_OR_GREATER` chain                                             |
+| multi-target                                                                          | the set of one **representative** target — the most modern one declared                               |
+| `<TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion>` (classic, non-SDK projects) | treated as `net472`                                                                                   |
+| nothing detected                                                                      | the historical fallback (`NET`, latest `NETn_0`, the modern chain), reported via a `Diagnostics` note |
 
 OS/platform-suffixed targets (`net8.0-windows`) contribute their base target's symbols. Every
 detected target is surfaced as `Metadata.TargetFrameworks`, and the one that guards were actually
@@ -166,14 +166,14 @@ disagree, in a `Diagnostics` note too.
 A multi-target project resolves to a single representative target rather than the union of all of
 them, ranked by family (modern .NET, then .NET Core, then .NET Standard, then .NET Framework) and
 then by version. A union looks like the cautious choice and is the opposite: defining a symbol
-because *some* target defines it hides every `#if !SYMBOL` arm, and negated guards are the most
+because _some_ target defines it hides every `#if !SYMBOL` arm, and negated guards are the most
 common shape in real multi-targeting libraries. Hangfire.Core
 (`net451;net46;netstandard1.3;netstandard2.0`) is the worked example — its `#if !NETSTANDARD1_3`
 members ship in three of its four assemblies, and unioning the four symbol sets erased them from
 the inventory and the call graph entirely. One representative keeps every arm that target
 compiles, which is a real, self-consistent compilation rather than a mix no build produces.
 
-The known limitation is the mirror image: arms exclusive to a *lower* target (`#if NETFRAMEWORK`
+The known limitation is the mirror image: arms exclusive to a _lower_ target (`#if NETFRAMEWORK`
 in a `net462;net8.0` library) stay invisible, exactly as they were before target-framework
 detection existed. Seeing those too would mean analyzing each target separately and merging the
 results. Likewise, for trees whose targets all predate .NET 5, modern-only branches
