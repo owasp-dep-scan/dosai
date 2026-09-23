@@ -356,34 +356,86 @@ public static class Dosai
         BuildPreparation.Prepare(path, buildPreparation);
         var purlResolver = PackageUrlResolver.Create(path);
         var assemblyDiagnostics = new List<string>();
-        var methods = GetAssemblyMethods(path, assemblyDiagnostics);
-        var (sourceMethods, usings, methodCalls, properties, fields, events, constructors, callGraph, sourceAssemblyMapping, sourceMode, compilations, sourceDiagnostics) = GetSourceMethods(path, methods);
-        var (assemblyMethodCalls, assemblyCallGraph) = AssemblyCallGraphAnalyzer.Analyze(path, methods);
+        List<Method> methods;
+        using (DebugLog.Phase("methods.assembly-inspection"))
+        {
+            methods = GetAssemblyMethods(path, assemblyDiagnostics);
+        }
+        DebugLog.Count("assembly methods", methods.Count);
+
+        var (sourceMethods, usings, methodCalls, properties, fields, events, constructors, callGraph, sourceAssemblyMapping, sourceMode, compilations, sourceDiagnostics) = AnalyzeSourcesWithDebugLogging(path, methods);
+        DebugLog.Count("source methods", sourceMethods.Count);
+        DebugLog.Count("call graph (source) nodes", callGraph.Nodes.Count);
+        DebugLog.Count("call graph (source) edges", callGraph.Edges.Count);
+
+        List<MethodCalls> assemblyMethodCalls;
+        CallGraph assemblyCallGraph;
+        using (DebugLog.Phase("methods.assembly-call-graph"))
+        {
+            (assemblyMethodCalls, assemblyCallGraph) = AssemblyCallGraphAnalyzer.Analyze(path, methods);
+        }
+        DebugLog.Count("call graph (assembly IL) nodes", assemblyCallGraph.Nodes.Count);
+        DebugLog.Count("call graph (assembly IL) edges", assemblyCallGraph.Edges.Count);
         NormalizeAssemblyGraphToSourceIds(assemblyMethodCalls, assemblyCallGraph, sourceAssemblyMapping);
+        DebugLog.Count("assembly IL call sites normalized to source ids", assemblyMethodCalls.Count);
         methodCalls.AddRange(assemblyMethodCalls);
         MergeCallGraph(callGraph, assemblyCallGraph);
+        DebugLog.Count("call graph (merged) nodes", callGraph.Nodes.Count);
+        DebugLog.Count("call graph (merged) edges", callGraph.Edges.Count);
         var assemblyInformation = GetAssemblyInformation(path);
-        var frameworkContext = Frameworks.FrameworkContext.FromCompilations(path, compilations.CSharp, compilations.VisualBasic, purlResolver);
-        var frameworkResult = Frameworks.FrameworkRegistry.Analyze(frameworkContext, frameworkOptions);
-        Frameworks.FrameworkRegistry.ApplyTrustBoundaries(frameworkResult, callGraph);
+        DebugLog.Count("assembly information entries", assemblyInformation.Count);
+
+        Frameworks.FrameworkAnalysisResult frameworkResult;
+        Frameworks.FrameworkContext frameworkContext;
+        using (DebugLog.Phase("methods.framework-analysis"))
+        {
+            frameworkContext = Frameworks.FrameworkContext.FromCompilations(path, compilations.CSharp, compilations.VisualBasic, purlResolver);
+            frameworkResult = Frameworks.FrameworkRegistry.Analyze(frameworkContext, frameworkOptions);
+            Frameworks.FrameworkRegistry.ApplyTrustBoundaries(frameworkResult, callGraph);
+        }
+        DebugLog.Count("framework api endpoints", frameworkResult.ApiEndpoints.Count);
+        DebugLog.Count("framework services", frameworkResult.Services.Count);
+        DebugLog.Count("framework ai components", frameworkResult.AiComponents.Count);
+        DebugLog.Count("framework entry points", frameworkResult.EntryPoints.Count);
         // ApiEndpointAnalyzer now only covers what no provider owns (VB.NET); the framework providers
         // own every C# endpoint. Entry points are therefore built from the analyzer's endpoints ALONE;
         // feeding it the combined list produced a second, MethodId-less copy of every provider endpoint.
         var legacyEndpoints = ApiEndpointAnalyzer.GetApiEndpoints(path);
+        DebugLog.Count("legacy analyzer api endpoints (VB remainder)", legacyEndpoints.Count);
         var apiEndpoints = frameworkResult.ApiEndpoints.Concat(legacyEndpoints).ToList();
         methods.AddRange(sourceMethods);
-        EnrichPackageUrls(purlResolver, methods, usings, methodCalls, properties, fields, events, constructors, callGraph, assemblyInformation, sourceAssemblyMapping);
+        using (DebugLog.Phase("methods.enrichment"))
+        {
+            EnrichPackageUrls(purlResolver, methods, usings, methodCalls, properties, fields, events, constructors, callGraph, assemblyInformation, sourceAssemblyMapping);
+        }
         var entryPoints = MergeEntryPoints(TransparencyBuilder.BuildEntryPoints(legacyEndpoints, methods), frameworkResult.EntryPoints);
-        EnrichMethodIdentities(methods, callGraph, sourceMode);
+        DebugLog.Count("entry points (merged)", entryPoints.Count);
+        using (DebugLog.Phase("methods.identity-and-package-reachability"))
+        {
+            EnrichMethodIdentities(methods, callGraph, sourceMode);
+        }
         var packageReachability = TransparencyBuilder.BuildPackageReachability(callGraph, dependencies: usings);
+        DebugLog.Count("package reachability entries", packageReachability.Count);
 
         // Collapse repeated call sites of the same (source, target, call type, evidence) pair
         // into one edge with a count, then compute the reachability section once over the
         // merged graph. Bounded walks; diagnostics land in the slice.
-        ReachabilityAnalyzer.CollapseDuplicateCallSites(callGraph);
+        List<NodeReachability> reachability;
+        List<RecursionCluster> recursionClusters;
+        bool budgetExhausted;
+        List<DeadCodeEntry> deadCode;
         var reachabilityDiagnostics = new List<string>();
-        var (reachability, recursionClusters, budgetExhausted) = ReachabilityAnalyzer.Compute(callGraph, entryPoints, reachabilityDiagnostics);
-        var deadCode = ReachabilityAnalyzer.BuildDeadCode(callGraph, reachability, sourceMode, budgetExhausted, reachabilityDiagnostics);
+        using (DebugLog.Phase("methods.reachability"))
+        {
+            ReachabilityAnalyzer.CollapseDuplicateCallSites(callGraph);
+            DebugLog.Count("call graph (collapsed) edges", callGraph.Edges.Count);
+            (reachability, recursionClusters, budgetExhausted) = ReachabilityAnalyzer.Compute(callGraph, entryPoints, reachabilityDiagnostics);
+            deadCode = ReachabilityAnalyzer.BuildDeadCode(callGraph, reachability, sourceMode, budgetExhausted, reachabilityDiagnostics);
+        }
+        // Reachability node/component counts come from ReachabilityAnalyzer.Compute itself,
+        // next to the bucketing-path decision; only the derived reports are counted here.
+        DebugLog.Count("recursion clusters", recursionClusters.Count);
+        DebugLog.Count("dead code entries", deadCode.Count);
         var securityFindings = Frameworks.SecurityAnalyzer.Run(frameworkContext, frameworkResult, apiEndpoints);
 
         var sliceDiagnostics = frameworkResult.Diagnostics.Select(diagnostic => $"{diagnostic.FrameworkId}: {diagnostic.Message}").Concat(reachabilityDiagnostics).ToList();
@@ -452,6 +504,17 @@ public static class Dosai
     }
 
     /// <summary>
+    ///     <see cref="GetSourceMethods" /> wrapped in its debug phase. The pipeline's twelve-part
+    ///     tuple stays inside this helper instead of forcing GetMethodsSlice to pre-declare every
+    ///     element just to scope a phase around the call.
+    /// </summary>
+    private static (List<Method> SourceMethods, List<Dependency> UsingDirectives, List<MethodCalls> MethodCalls, List<PropertyInfo> Properties, List<FieldInfo> Fields, List<EventInfo> Events, List<ConstructorInfo> Constructors, CallGraph CallGraph, List<SourceAssemblyMapping> SourceAssemblyMappings, bool SourceMode, Frameworks.SourceCompilations Compilations, List<string> Diagnostics) AnalyzeSourcesWithDebugLogging(string path, List<Method> assemblyMethods)
+    {
+        using var phase = DebugLog.Phase("methods.source-analysis");
+        return GetSourceMethods(path, assemblyMethods);
+    }
+
+    /// <summary>
     ///     Entry points contributed by framework providers keep their stable ids so services can
     ///     reference them. Analyzer-derived entry points are given content-derived ids rather than
     ///     positional <c>epN</c> ones, so that ids stay byte-identical across runs and across machines
@@ -500,8 +563,13 @@ public static class Dosai
 
     private static MethodsSlice StreamSlice(MethodsSlice slice, string outputFile)
     {
+        using var phase = DebugLog.Phase("methods.serialization");
         using var stream = new FileStream(outputFile, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize: 65536);
         JsonSerializer.Serialize(stream, slice, Options);
+        if (DebugLog.Enabled)
+        {
+            DebugLog.Log($"methods output: wrote {DebugLog.FormatBytes(stream.Length)} to '{outputFile}'");
+        }
         return slice;
     }
 
@@ -528,6 +596,7 @@ public static class Dosai
             tempExtractionDir = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
             Directory.CreateDirectory(tempExtractionDir);
             Console.WriteLine($"Extracting NuGet package: {nupkgPath} to {tempExtractionDir}");
+            using var extractionPhase = DebugLog.Phase("methods.nupkg-extraction");
             using var archive = ZipFile.OpenRead(nupkgPath);
             foreach (var entry in archive.Entries)
             {
@@ -1245,7 +1314,22 @@ public static class Dosai
 
     private static List<Method> InspectAssemblyMethods(string path, ICollection<string> diagnostics)
     {
-        var assembliesToInspect = AssemblyScope.ScopeApplicationAssemblies(path, GetFilesToInspect(path, Constants.AssemblyExtension, Constants.ExeExtension), message => Console.Error.WriteLine($"Warning: {message}"));
+        var candidateAssemblies = GetFilesToInspect(path, Constants.AssemblyExtension, Constants.ExeExtension);
+        var assembliesToInspect = AssemblyScope.ScopeApplicationAssemblies(path, candidateAssemblies, message => Console.Error.WriteLine($"Warning: {message}"));
+        if (DebugLog.Enabled)
+        {
+            // Re-derive the scoping basis (deps.json project libraries vs the name heuristic)
+            // purely for the debug line; the scoping decision itself was made above.
+            var applicationAssemblyNames = AssemblyScope.GetApplicationAssemblyNames(path);
+            var scopeReason = File.Exists(path)
+                ? "single-file input; no directory scoping"
+                : candidateAssemblies.Count == 0
+                    ? "no assembly candidates"
+                    : applicationAssemblyNames.Count > 0
+                        ? $"matched project libraries in deps.json ({applicationAssemblyNames.Count} project name(s))"
+                        : "heuristic name filter (System./Microsoft./Newtonsoft./FSharp./Humanizer prefixes; no deps.json project libraries)";
+            DebugLog.Log($"assembly scoping: kept {assembliesToInspect.Count}, dropped {candidateAssemblies.Count - assembliesToInspect.Count} of {candidateAssemblies.Count} candidates ({scopeReason})");
+        }
         var assemblyMethods = new List<Method>();
         var processedAssemblyIdentities = new HashSet<string>();
         var sharedFrameworkDirs = GetSharedFrameworkProbingPaths();
@@ -1259,6 +1343,10 @@ public static class Dosai
             }
             var inspectedDirs = new List<string> { Path.GetDirectoryName(assemblyFilePath)!, Path.GetDirectoryName(path)! };
             var loadContext = new InspectionAssemblyLoadContext(inspectedDirs, sharedFrameworkDirs);
+            // Per-assembly timing exists only for the debug log; the stopwatch is not created
+            // when debug is off, so the inspection loop pays nothing.
+            var assemblyWatch = DebugLog.Enabled ? Stopwatch.StartNew() : null;
+            var membersBefore = assemblyMethods.Count;
             try
             {
                 var assemblyName = AssemblyName.GetAssemblyName(assemblyFilePath);
@@ -1309,7 +1397,7 @@ public static class Dosai
                         {
                             assemblySignature = $"{ns}.{className}.{method.Name}({paramString})";
                         }
-                        
+
                         var methodParams = method.GetParameters().Select(p => new Parameter
                         {
                             Name = p.Name,
@@ -1317,7 +1405,7 @@ public static class Dosai
                             TypeFullName = p.ParameterType.FullName ?? p.ParameterType.Name,
                             IsGenericParameter = p.ParameterType.IsGenericParameter
                         }).ToList();
-                        
+
                         var genericParameters = method.IsGenericMethodDefinition
                             ? method.GetGenericArguments().Select(t => t.Name).ToList()
                             : [];
@@ -1337,16 +1425,34 @@ public static class Dosai
             }
             catch (Exception e) when (e is FileLoadException or FileNotFoundException or BadImageFormatException or TypeLoadException or NotSupportedException)
             {
+                if (DebugLog.Enabled)
+                {
+                    DebugLog.Log($"assembly '{fileName}' failed to load: {e.GetType().Name}: {e.Message}");
+                }
                 Console.WriteLine($"Warning: Skipping assembly {assemblyFilePath} as it could not be fully loaded for inspection.");
                 Console.WriteLine($"  - Reason: {e.GetType().Name}: {e.Message}");
             }
             catch (Exception e)
             {
+                if (DebugLog.Enabled)
+                {
+                    DebugLog.Log($"assembly '{fileName}' failed to load: {e.GetType().Name}: {e.Message}");
+                }
                 Console.WriteLine($"Error: An unexpected error occurred while processing {fileName}. Details: {e.Message}");
             }
             finally
             {
                 loadContext.Unload();
+                if (assemblyWatch is not null)
+                {
+                    assemblyWatch.Stop();
+                    // Only assemblies that took over a second get a line; per-assembly output is
+                    // otherwise noise on large trees.
+                    if (assemblyWatch.Elapsed.TotalSeconds >= 1)
+                    {
+                        DebugLog.Log($"assembly '{fileName}': {assemblyMethods.Count - membersBefore} members in {assemblyWatch.Elapsed.TotalSeconds:F3}s");
+                    }
+                }
             }
         }
 
@@ -1736,13 +1842,18 @@ public static class Dosai
         }
 
         var referenceList = metadataReferences.Values.ToList();
-        var csharpTrees = sourcesToInspect
-            .Where(source => Path.GetExtension(source).Equals(Constants.CSharpSourceExtension, StringComparison.OrdinalIgnoreCase))
-            .Select(source => SafeFileRead.TryReadAllText(source, out var content)
-                ? CSharpSourceParser.Parse(content, source)
-                : null)
-            .OfType<CSharpSyntaxTree>()
-            .ToList();
+        DebugLog.Count("roslyn metadata references", referenceList.Count);
+        List<CSharpSyntaxTree> csharpTrees;
+        using (DebugLog.Phase("methods.parse-csharp"))
+        {
+            csharpTrees = sourcesToInspect
+                .Where(source => Path.GetExtension(source).Equals(Constants.CSharpSourceExtension, StringComparison.OrdinalIgnoreCase))
+                .Select(source => SafeFileRead.TryReadAllText(source, out var content)
+                    ? CSharpSourceParser.Parse(content, source)
+                    : null)
+                .OfType<CSharpSyntaxTree>()
+                .ToList();
+        }
         // Implicit-usings projects rely on global usings their compiler injects; without the
         // synthetic tree every BCL call in them fails to bind and vanishes from the graph.
         if (CSharpSourceParser.TryCreateImplicitUsingsTree(path) is { } implicitUsingsTree)
@@ -1754,19 +1865,26 @@ public static class Dosai
             syntaxTrees: csharpTrees,
             references: referenceList,
             options: new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
-        var vbTrees = sourcesToInspect
-            .Where(source => Path.GetExtension(source).Equals(Constants.VBSourceExtension, StringComparison.OrdinalIgnoreCase))
-            .Select(source => SafeFileRead.TryReadAllText(source, out var content)
-                ? (VisualBasicSyntaxTree)VisualBasicSyntaxTree.ParseText(content, path: source)
-                : null)
-            .OfType<VisualBasicSyntaxTree>()
-            .ToList();
+        DebugLog.Count("csharp syntax trees", csharpTrees.Count);
+        List<VisualBasicSyntaxTree> vbTrees;
+        using (DebugLog.Phase("methods.parse-visualbasic"))
+        {
+            vbTrees = sourcesToInspect
+                .Where(source => Path.GetExtension(source).Equals(Constants.VBSourceExtension, StringComparison.OrdinalIgnoreCase))
+                .Select(source => SafeFileRead.TryReadAllText(source, out var content)
+                    ? (VisualBasicSyntaxTree)VisualBasicSyntaxTree.ParseText(content, path: source)
+                    : null)
+                .OfType<VisualBasicSyntaxTree>()
+                .ToList();
+        }
         var vbCompilation = VisualBasicCompilation.Create(
             "Dosai.SourceAnalysis.VisualBasic",
             syntaxTrees: vbTrees,
             references: referenceList,
             options: new VisualBasicCompilationOptions(Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary));
+        DebugLog.Count("visualbasic syntax trees", vbTrees.Count);
 
+        using var symbolAnalysisPhase = DebugLog.Phase("methods.symbol-analysis");
         foreach (var sourceFilePath in sourcesToInspect)
         {
             var fileName = Path.GetFileName(sourceFilePath);
@@ -2605,8 +2723,19 @@ public static class Dosai
             }
         }
 
+        // The per-file symbol-analysis phase ends with the loop; the frontends run on their own
+        // clock because they cover F#, R, and C/C++ files the Roslyn loop never visits.
+        symbolAnalysisPhase.Dispose();
+
         // Process non-Roslyn language frontends.
-        var (frontendMethods, frontendDependencies, frontendMethodCalls) = LanguageFrontendAnalyzer.GetMethods(path, includeFSharp: true);
+        List<Method> frontendMethods;
+        List<Dependency> frontendDependencies;
+        List<MethodCalls> frontendMethodCalls;
+        using (DebugLog.Phase("methods.language-frontends"))
+        {
+            (frontendMethods, frontendDependencies, frontendMethodCalls) = LanguageFrontendAnalyzer.GetMethods(path, includeFSharp: true);
+        }
+        DebugLog.Count("language-frontend methods (F#, R, C/C++)", frontendMethods.Count);
         sourceMethods.AddRange(frontendMethods);
         allUsingDirectives.AddRange(frontendDependencies);
         allMethodCalls.AddRange(frontendMethodCalls);

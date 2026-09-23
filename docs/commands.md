@@ -2,6 +2,12 @@
 
 This guide documents each Dosai command from an implementation and security analysis perspective. It explains the command purpose, inputs, output artifacts, core algorithm, strengths, and known limits.
 
+## `--debug` (all commands)
+
+`--debug` (or `DOSAI_DEBUG=1` / `DOSAI_DEBUG=true` in the environment, for callers such as cdxgen that cannot change arguments) turns on phase-granularity progress logging on stderr: resolved input path and runtime facts at startup, file-discovery counts per extension, assembly scoping (kept/dropped and why), slow (> 1 s) assembly loads and load failures with the reason, Roslyn tree and reference counts per language, call graph node/edge counts after each build stage, the reachability bucketing path taken (condensed bitsets vs the budgeted walk fallback) with elapsed time, framework analyzer result counts, and output bytes written. While any phase runs longer than 30 seconds, a heartbeat names the innermost running phase with heap and working-set size, so a long run says where it is instead of appearing hung.
+
+The log is designed to be pasted into an issue: it contains paths, counts, assembly and phase names, and timings only - never file contents, source text, string literals, secret or environment variable values, or child-process command lines (`--restore`/`--build` report the dotnet verb and exit code only). All output goes to stderr, so JSON artifacts and the `mcp` JSON-RPC stream on stdout are unaffected, and results are identical with and without the flag. When `--debug` is off (the default) no messages are constructed at all.
+
 ## Command map
 
 ```mermaid

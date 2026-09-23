@@ -28,6 +28,38 @@ For detailed command usage, implementation notes, algorithms, strengths, and lim
 
 `--path` is the file or directory to inspect. `--o` sets the output path and defaults to `dosai.json`. Use `--help` for command-specific options.
 
+### Debug progress logging
+
+Add `--debug` to any command (or set `DOSAI_DEBUG=1` / `DOSAI_DEBUG=true`) to report what dosai is doing on stderr: which phase is running, how long it took, and how large the intermediate data is. Long analyses log a heartbeat naming the current phase every 30 seconds, so a run that seems stuck tells you where it is. This is the log to paste into an issue when a scan is slow - it contains paths, counts, assembly and phase names, and timings only, never source text or other file contents.
+
+```bash
+dotnet run --project ./Dosai/Dosai.csproj -- methods \
+  --path ./YourRepo \
+  --o /tmp/dosai-methods.json \
+  --debug
+```
+
+Example output (captured from `methods --path ./Dosai --debug`, with one heartbeat line from a longer `dataflows` run on the same tree):
+
+```
+[dosai +0.006s] dosai 5.0.0.0, .NET 11.0.0-rc.1.26425.128, macOS 26.6.2 Arm64, 14 processor(s)
+[dosai +0.009s] input path: /Users/you/dosai/Dosai
+[dosai +0.009s] --exclude: <none>
+[dosai +0.020s] file discovery under './Dosai': 90 .cs, 1420 .dll, 0 .exe, 0 .fs, 0 .vb, 0 excluded by --exclude, 1669 files total
+[dosai +0.020s] start methods
+[dosai +0.050s] start methods.assembly-inspection
+[dosai +0.072s] assembly scoping: kept 20, dropped 1385 of 1405 candidates (heuristic name filter (System./Microsoft./Newtonsoft./FSharp./Humanizer prefixes; no deps.json project libraries))
+[dosai +0.148s] end methods.assembly-inspection in 0.098s, managed heap 7 MB, working set 147 MB
+[dosai +0.610s] start methods.symbol-analysis
+[dosai +7.666s] end methods.symbol-analysis in 7.055s, managed heap 162 MB, working set 1.0 GB
+[dosai +8.924s] reachability bucketing path: condensed bitsets (6006 components x 6022 nodes, 4 MB of bitsets)
+[dosai +8.939s] reachability bucketing (condensed bitsets) completed in 0.015s
+[dosai +9.273s] end methods in 9.254s, managed heap 247 MB, working set 1.1 GB
+[dosai +30.023s] still in dataflows.graph-walk, managed heap 171 MB, working set 1.0 GB
+```
+
+All debug output goes to stderr: JSON files and the `mcp` JSON-RPC stream on stdout are never touched, and a run's output is byte-identical with and without `--debug` (apart from the pre-existing `GeneratedAt` timestamp, which changes between any two runs). When the flag is off, debug logging costs nothing - no messages are built at all.
+
 ### Data-flow analysis
 
 `dataflows` includes built-in .NET source and sink packs for ASP.NET, data access, filesystem, serialization, cloud/serverless, RPC, auth-sensitive APIs, and crypto-sensitive APIs, plus weakness-class packs for XSS, XXE, LDAP/XPath/NoSQL injection, log and header injection, ReDoS, and template injection. Custom pattern JSON can add `sources`, `sinks`, `passthroughs`, and `sanitizers`, and a pattern can override the severity of the slices it produces. Sanitizer matches stop taint propagation, validators such as `Regex.IsMatch` suppress guarded true branches, and both record the suppressed flow in `SanitizedFlows` as negative evidence.

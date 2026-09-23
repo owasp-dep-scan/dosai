@@ -56,6 +56,9 @@ public static class McpServer
                     continue;
                 }
 
+                // Debug lines go to stderr through DebugLog; the JSON-RPC stream on the output
+                // writer is untouched, so --debug never corrupts the protocol.
+                using var requestPhase = DebugLog.Phase($"mcp request {request.Method}");
                 var result = Handle(request, defaultPath, patternsPath, patternPacks, confinedRoot);
                 WriteResult(output, request.Id, result);
             }
