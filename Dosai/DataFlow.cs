@@ -261,7 +261,18 @@ public static partial class DataFlowAnalyzer
         return result;
     }
 
+    /// <summary>
+    ///     Analyze <paramref name="path" /> and return the data-flow result. Runs on a dedicated
+    ///     thread with <see cref="DedicatedStack.AnalysisStackSize" /> of stack: the operation
+    ///     walker asks Roslyn for <c>IOperation</c> trees per statement, and the operation factory
+    ///     recurses roughly one frame set per call in a chain, so a long fluent chain overflows the
+    ///     default main-thread stack and terminates the process - an uncatchable failure that
+    ///     writes no output (owasp-dep-scan/dosai#60).
+    /// </summary>
     public static DataFlowResult Analyze(string path, string? patternsPath = null, string? patternPacks = null, string? suppressionsPath = null, BuildPreparationMode buildPreparation = BuildPreparationMode.None)
+        => DedicatedStack.Run("Dosai data-flow analysis", () => AnalyzeCore(path, patternsPath, patternPacks, suppressionsPath, buildPreparation));
+
+    private static DataFlowResult AnalyzeCore(string path, string? patternsPath, string? patternPacks, string? suppressionsPath, BuildPreparationMode buildPreparation)
     {
         if (!File.Exists(path) && !Directory.Exists(path))
         {

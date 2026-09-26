@@ -62,6 +62,11 @@ dotnet test ./Dosai.sln
   assemblies) inside `GetAssemblyMethods`, which runs it on a dedicated large-stack thread. The
   runtime type loader recurses per hierarchy level and, when a base type is missing, can
   overflow a default-sized stack (dotnet/runtime#131679) - an uncatchable process crash.
+- Keep Roslyn `IOperation` work behind the guarded analysis entry points (`Dosai.GetMethodsSlice`,
+  `DataFlowAnalyzer.Analyze`, `CryptoAnalyzer.Analyze`), which run on `DedicatedStack` threads.
+  The operation factory recurses roughly one frame set per call in a chain, so a deep fluent
+  chain overflows a default-sized stack inside `SemanticModel.GetOperation` - the same
+  uncatchable process crash, reached through source analysis.
 - Enumerate the scanned tree through `SafeFileRead.EnumerateAllFilesSafe` (or filter through
   `PathExclusions.IsExcluded`), so `--exclude` globs (`PathExclusions`, an ambient scope the CLI
   applies per command) hold for every analyzer.
@@ -77,6 +82,10 @@ dotnet test ./Dosai.sln
 - Preserve the current scaling optimizations in `Dosai/DataFlow.cs`: indexed pattern subsets (`DataFlowPatternIndex`), cached syntax text in the operation walker, edge de-duplication, and source-indexed outgoing edges for slice construction.
 - When adding new source/sink/passthrough/sanitizer matching, route repeated lookups through the pattern index and avoid calling `SyntaxNode.ToString()` unless the selected pattern kind needs code text.
 - When changing slice construction, keep it near-linear in trace size by using indexed edges; avoid scanning every graph edge for every slice.
+- Preserve the set-backed membership guards in `TransparencyBuilder.BuildPackageReachability`
+  (`PackageReachabilityAccumulator`): the `PackageReachability` lists keep insertion order for
+  byte-stable output while hash sets beside them answer membership, so a purl holding tens of
+  thousands of edge ids stays linear instead of quadratic.
 
 ## Validation checklist
 

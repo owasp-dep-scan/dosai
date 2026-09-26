@@ -13,7 +13,6 @@ using Microsoft.CodeAnalysis.Operations;
 using Microsoft.CodeAnalysis.VisualBasic;
 using Microsoft.CodeAnalysis.VisualBasic.Syntax;
 using System.IO.Compression;
-using System.Runtime.ExceptionServices;
 using System.Runtime.Loader;
 using CompilationUnitSyntax = Microsoft.CodeAnalysis.CSharp.Syntax.CompilationUnitSyntax;
 using ExpressionSyntax = Microsoft.CodeAnalysis.CSharp.Syntax.ExpressionSyntax;
@@ -351,7 +350,18 @@ public static class Dosai
     /// single multi-hundred-MB string, which is what drove peak RSS into the multi-GB range and eventually
     /// overflowed the string allocator on large assembly trees.
     /// </summary>
+    /// <remarks>
+    ///     Runs on a dedicated thread with <see cref="DedicatedStack.AnalysisStackSize" /> of stack. The
+    ///     source-analysis phases ask Roslyn for <c>IOperation</c> trees, and the operation factory recurses
+    ///     roughly one frame set per call in a chain, so one long fluent chain in ordinary C# overflows the
+    ///     default main-thread stack inside <c>SemanticModel.GetOperation</c> and terminates the process -
+    ///     an uncatchable failure that writes no output and names no file (issue #60). The larger stack
+    ///     moves that limit far beyond the chain depth of real code, for every caller of this entry point.
+    /// </remarks>
     public static MethodsSlice GetMethodsSlice(string path, Frameworks.FrameworkAnalysisOptions? frameworkOptions = null, BuildPreparationMode buildPreparation = BuildPreparationMode.None)
+        => DedicatedStack.Run("Dosai methods analysis", () => BuildMethodsSlice(path, frameworkOptions, buildPreparation));
+
+    private static MethodsSlice BuildMethodsSlice(string path, Frameworks.FrameworkAnalysisOptions? frameworkOptions, BuildPreparationMode buildPreparation)
     {
         DebugLog.Measure("methods.build-preparation", () => BuildPreparation.Prepare(path, buildPreparation));
         var purlResolver = DebugLog.Measure("methods.package-url-resolver", () => PackageUrlResolver.Create(path));
@@ -1267,18 +1277,12 @@ public static class Dosai
     }
 
     /// <summary>
-    ///     Stack reserved for assembly inspection. Reserved address space is committed only as
-    ///     it is used, so a large reservation costs nothing on the common, shallow path.
-    /// </summary>
-    private static readonly int AssemblyInspectionStackSize = Environment.Is64BitProcess ? 256 * 1024 * 1024 : 64 * 1024 * 1024;
-
-    /// <summary>
     /// Get all assembly methods for the given path to assembly or directory of assemblies
     /// </summary>
     /// <param name="path">Filesystem path to assembly file or directory containing assembly files</param>
     /// <returns>List of assembly methods</returns>
     /// <remarks>
-    ///     Runs on a dedicated thread with <see cref="AssemblyInspectionStackSize" /> of stack.
+    ///     Runs on a dedicated thread with <see cref="DedicatedStack.AnalysisStackSize" /> of stack.
     ///     The runtime type loader resolves a type's base chain recursively, and when a base
     ///     type fails to load - a build-output assembly whose dependency is not shipped next to
     ///     it - native exception handling amplifies the stack used per level
@@ -1289,28 +1293,7 @@ public static class Dosai
     ///     hierarchy depth of real libraries.
     /// </remarks>
     private static List<Method> GetAssemblyMethods(string path, ICollection<string> diagnostics)
-    {
-        List<Method>? methods = null;
-        ExceptionDispatchInfo? failure = null;
-        var inspection = new Thread(() =>
-        {
-            try
-            {
-                methods = InspectAssemblyMethods(path, diagnostics);
-            }
-            catch (Exception e)
-            {
-                failure = ExceptionDispatchInfo.Capture(e);
-            }
-        }, AssemblyInspectionStackSize)
-        {
-            Name = "Dosai assembly inspection"
-        };
-        inspection.Start();
-        inspection.Join();
-        failure?.Throw();
-        return methods!;
-    }
+        => DedicatedStack.Run("Dosai assembly inspection", () => InspectAssemblyMethods(path, diagnostics));
 
     private static List<Method> InspectAssemblyMethods(string path, ICollection<string> diagnostics)
     {

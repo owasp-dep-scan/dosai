@@ -1335,6 +1335,125 @@ class IsPatternFlow
         Assert.DoesNotContain(controls, method => method.ClassName.StartsWith("Level", StringComparison.Ordinal));
     }
 
+    // owasp-dep-scan/dosai#60: the Roslyn operation factory recurses roughly one frame set per
+    // call in a chain, so one long fluent chain in ordinary C# overflowed the calling thread's
+    // stack inside SemanticModel.GetOperation and killed the process with no output and no file
+    // name. The source-analysis phases now run on a dedicated large-stack thread (DedicatedStack),
+    // the same remedy #58 applied to assembly inspection. The scan is started from a 1 MB thread -
+    // the Windows main-thread default - so the check does not depend on the stack size of the
+    // machine running the tests. A regression is a stack overflow, which terminates the test host
+    // rather than failing this test alone.
+    [Fact]
+    public void GetMethods_DeepFluentChainInSource_CompletesOnSmallCallerStack()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        // 5,000 linked calls is several times what overflows a 1 MB stack on Windows and macOS;
+        // real-world trigger files (a metadata registration written as one fluent chain) sit in
+        // the low thousands.
+        const int chainDepth = 5_000;
+        var chain = "Fluent.Start()" + string.Concat(Enumerable.Repeat(".Next()", chainDepth));
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "DeepChain.cs"), $$"""
+public class Fluent
+{
+    public static Fluent Start() => new Fluent();
+    public Fluent Next() => this;
+}
+
+public class Chain
+{
+    public object Build()
+    {
+        return {{chain}};
+    }
+}
+""");
+
+        MethodsSlice? slice = null;
+        Exception? failure = null;
+        var caller = new Thread(() =>
+        {
+            try
+            {
+                slice = Depscan.Dosai.GetMethodsSlice(tempDirectory.Path);
+            }
+            catch (Exception e)
+            {
+                failure = e;
+            }
+        }, 1024 * 1024);
+        caller.Start();
+        caller.Join();
+
+        Assert.Null(failure);
+        Assert.Contains(slice!.Methods!, method => method.ClassName == "Chain" && method.Name == "Build");
+        var nodeIds = slice.CallGraph!.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
+        Assert.Contains(slice.CallGraph!.Edges, edge => nodeIds.Contains(edge.TargetId) && edge.TargetId.Contains("Fluent.Next", StringComparison.Ordinal));
+    }
+
+    // owasp-dep-scan/dosai#61: every insert into a PackageReachability was guarded by a linear
+    // List.Contains scan, and the guards ran once per call graph node and twice per edge, so a
+    // purl holding N ids cost O(N^2) and the methods.package-reachability phase stopped finishing
+    // on graphs whose calls concentrate on a few packages. Membership now sits in hash sets beside
+    // the lists, so the same concentrated graph must complete far inside this generous bound while
+    // still producing identical, de-duplicated, insertion-ordered output.
+    [Fact]
+    public void BuildPackageReachability_ManyEdgesSharingOnePurl_StaysLinearAndDeduplicates()
+    {
+        const int nodeCount = 50_000;
+        const string purl = "pkg:nuget/runtime.native.System@4.3.0";
+        var nodes = new List<MethodNode>();
+        for (var i = 0; i < nodeCount; i++)
+        {
+            nodes.Add(new MethodNode
+            {
+                Id = $"m:{i}",
+                Name = $"Call{i}",
+                ClassName = "Graph",
+                Namespace = "PurlConcentration",
+                FileName = "/repo/Graph.cs",
+                LineNumber = i + 1,
+                Purl = purl
+            });
+        }
+        // A repeated node id and a repeated edge must land in the lists exactly once.
+        nodes.Add(new MethodNode { Id = "m:0", Name = "Call0", ClassName = "Graph", Namespace = "PurlConcentration", FileName = "/repo/Graph.cs", LineNumber = 1, Purl = purl });
+        var edges = new List<MethodCallEdge>();
+        for (var i = 0; i < nodeCount; i++)
+        {
+            edges.Add(new MethodCallEdge
+            {
+                Id = $"e:{i}",
+                SourceId = $"m:{i}",
+                TargetId = $"m:{(i + 1) % nodeCount}",
+                SourcePurl = purl,
+                TargetPurl = purl,
+                CallLocation = new CallLocation { FileName = "/repo/Graph.cs", LineNumber = i + 1, ColumnNumber = 4 }
+            });
+        }
+        edges.Add(new MethodCallEdge { Id = "e:0", SourceId = "m:0", TargetId = "m:1", SourcePurl = purl, TargetPurl = purl, CallLocation = new CallLocation { FileName = "/repo/Graph.cs", LineNumber = 1, ColumnNumber = 4 } });
+        var callGraph = new CallGraph { Nodes = nodes, Edges = edges };
+
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        var reachability = TransparencyBuilder.BuildPackageReachability(callGraph);
+        stopwatch.Stop();
+
+        var facts = Assert.Single(reachability);
+        Assert.Equal(purl, facts.Purl);
+        // Insertion order is preserved (byte-stable serialized output) and duplicates collapse.
+        Assert.Equal("m:0", facts.NodeIds[0]);
+        Assert.Equal("InternalCallGraphNode", facts.ReachabilityKind);
+        Assert.Equal(nodeCount, facts.NodeIds.Count);
+        Assert.Equal(nodeCount, facts.EdgeIds.Count);
+        Assert.Equal(nodeCount, facts.NodeIds.Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(nodeCount, facts.EdgeIds.Distinct(StringComparer.Ordinal).Count());
+        // Only the edge target insert carries a category (the call type).
+        Assert.Equal(new[] { "Unknown" }, facts.Categories);
+        Assert.Equal(nodeCount * 2, facts.SourceLocations.Count);
+        // The linear path finishes in tens of milliseconds; the quadratic guard it replaced needed
+        // minutes at this size, so a generous ceiling still fails loudly on a regression.
+        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(30), $"BuildPackageReachability took {stopwatch.Elapsed.TotalSeconds:F1}s for {nodeCount} edges on one purl");
+    }
+
     // Inspecting an assembly must not leave it locked. AssemblyLoadContext.LoadFromAssemblyPath
     // memory-maps the file and collectible contexts unload asynchronously, so on Windows the
     // analyzed build output stayed undeletable for the rest of the process; deleting the

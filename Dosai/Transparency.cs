@@ -269,7 +269,7 @@ public static class TransparencyBuilder
 
     public static List<PackageReachability> BuildPackageReachability(CallGraph callGraph, IEnumerable<DataFlowSlice>? slices = null, IEnumerable<Dependency>? dependencies = null)
     {
-        var byPurl = new Dictionary<string, PackageReachability>(StringComparer.Ordinal);
+        var byPurl = new Dictionary<string, PackageReachabilityAccumulator>(StringComparer.Ordinal);
 
         foreach (var node in callGraph.Nodes)
         {
@@ -296,34 +296,27 @@ public static class TransparencyBuilder
         {
             Add(dependency.Purl, "Dependency", category: dependency.Name ?? dependency.Namespace, sourceLocation: SourceLocationFromDependency(dependency, "Dependency"));
         }
-        FinalizeConfidence(byPurl.Values);
-        return byPurl.Values.OrderBy(p => p.Purl, StringComparer.Ordinal).ToList();
+        FinalizeConfidence(Facts());
+        return Facts().OrderBy(p => p.Purl, StringComparer.Ordinal).ToList();
+
+        IEnumerable<PackageReachability> Facts() => byPurl.Values.Select(accumulator => accumulator.Facts);
 
         void Add(string? purl, string kind, string? nodeId = null, string? edgeId = null, string? sliceId = null, string? category = null, IEnumerable<AnalysisEvidenceKind>? evidenceKinds = null, string? confidence = null, ReachabilityLocation? sourceLocation = null)
         {
             if (string.IsNullOrWhiteSpace(purl)) return;
             if (!byPurl.TryGetValue(purl, out var reachability))
             {
-                reachability = new PackageReachability { Purl = purl, Reachable = true, ReachabilityKind = kind };
+                reachability = new PackageReachabilityAccumulator(purl, kind);
                 byPurl[purl] = reachability;
             }
-            if (nodeId is not null && !reachability.NodeIds.Contains(nodeId)) reachability.NodeIds.Add(nodeId);
-            if (edgeId is not null && !reachability.EdgeIds.Contains(edgeId)) reachability.EdgeIds.Add(edgeId);
-            if (sliceId is not null && !reachability.SliceIds.Contains(sliceId)) reachability.SliceIds.Add(sliceId);
-            if (category is not null && !reachability.Categories.Contains(category)) reachability.Categories.Add(category);
-            AddSourceLocation(reachability, sourceLocation);
-            foreach (var evidenceKind in evidenceKinds ?? [])
-            {
-                if (!reachability.EvidenceKinds.Contains(evidenceKind)) reachability.EvidenceKinds.Add(evidenceKind);
-            }
-            if (!string.IsNullOrWhiteSpace(confidence)) AddConfidenceReason(reachability, $"Data-flow slice confidence is {confidence}.");
-            if (kind == "Dependency") AddConfidenceReason(reachability, "Package URL is supported by dependency/import metadata.");
+            reachability.Remember(nodeId, edgeId, sliceId, category, evidenceKinds, confidence, sourceLocation);
+            if (kind == "Dependency") AddConfidenceReason(reachability.Facts, "Package URL is supported by dependency/import metadata.");
         }
     }
 
     public static List<PackageReachability> BuildPackageReachability(DataFlowResult result)
     {
-        var byPurl = new Dictionary<string, PackageReachability>(StringComparer.Ordinal);
+        var byPurl = new Dictionary<string, PackageReachabilityAccumulator>(StringComparer.Ordinal);
         var nodesById = result.Nodes
             .GroupBy(node => node.Id, StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
@@ -344,28 +337,18 @@ public static class TransparencyBuilder
                 Add(purl, "DataFlowSlice", sliceId: slice.Id, category: slice.SinkCategory, confidence: slice.Confidence, sourceLocations: SourceLocationsForSlice(slice, purl, nodesById, edgesById));
             }
         }
-        FinalizeConfidence(byPurl.Values);
-        return byPurl.Values.OrderBy(p => p.Purl, StringComparer.Ordinal).ToList();
+        FinalizeConfidence(byPurl.Values.Select(accumulator => accumulator.Facts));
+        return byPurl.Values.Select(accumulator => accumulator.Facts).OrderBy(p => p.Purl, StringComparer.Ordinal).ToList();
 
         void Add(string? purl, string kind, string? nodeId = null, string? edgeId = null, string? sliceId = null, string? category = null, IEnumerable<AnalysisEvidenceKind>? evidenceKinds = null, string? confidence = null, ReachabilityLocation? sourceLocation = null, IEnumerable<ReachabilityLocation>? sourceLocations = null)
         {
             if (string.IsNullOrWhiteSpace(purl)) return;
             if (!byPurl.TryGetValue(purl, out var reachability))
             {
-                reachability = new PackageReachability { Purl = purl, Reachable = true, ReachabilityKind = kind };
+                reachability = new PackageReachabilityAccumulator(purl, kind);
                 byPurl[purl] = reachability;
             }
-            if (nodeId is not null && !reachability.NodeIds.Contains(nodeId)) reachability.NodeIds.Add(nodeId);
-            if (edgeId is not null && !reachability.EdgeIds.Contains(edgeId)) reachability.EdgeIds.Add(edgeId);
-            if (sliceId is not null && !reachability.SliceIds.Contains(sliceId)) reachability.SliceIds.Add(sliceId);
-            if (category is not null && !reachability.Categories.Contains(category)) reachability.Categories.Add(category);
-            AddSourceLocation(reachability, sourceLocation);
-            foreach (var location in sourceLocations ?? []) AddSourceLocation(reachability, location);
-            foreach (var evidenceKind in evidenceKinds ?? [])
-            {
-                if (!reachability.EvidenceKinds.Contains(evidenceKind)) reachability.EvidenceKinds.Add(evidenceKind);
-            }
-            if (!string.IsNullOrWhiteSpace(confidence)) AddConfidenceReason(reachability, $"Data-flow slice confidence is {confidence}.");
+            reachability.Remember(nodeId, edgeId, sliceId, category, evidenceKinds, confidence, sourceLocation, sourceLocations);
         }
     }
 
@@ -490,15 +473,53 @@ public static class TransparencyBuilder
          fileName.EndsWith(".rmd", StringComparison.OrdinalIgnoreCase) ||
          fileName.EndsWith(".qmd", StringComparison.OrdinalIgnoreCase));
 
-    private static void AddSourceLocation(PackageReachability reachability, ReachabilityLocation? location)
+    /// <summary>
+    ///     Per-purl accumulator behind the <see cref="BuildPackageReachability(CallGraph, IEnumerable{DataFlowSlice}, IEnumerable{Dependency})" />
+    ///     and <see cref="BuildPackageReachability(DataFlowResult)" /> overloads. The
+    ///     <see cref="PackageReachability" /> lists keep insertion order so the serialized output is
+    ///     byte-stable, while the hash sets beside them answer membership in constant time. The
+    ///     list-scan guards this replaces ran once per node and twice per edge, which was quadratic
+    ///     in the ids sharing one purl and stalled the methods.package-reachability phase on graphs
+    ///     whose calls concentrate on a few packages (owasp-dep-scan/dosai#61).
+    /// </summary>
+    private sealed class PackageReachabilityAccumulator(string purl, string kind)
     {
-        if (location is null) return;
-        if (reachability.SourceLocations.Any(existing =>
-            string.Equals(existing.Path, location.Path, StringComparison.Ordinal) &&
-            existing.LineNumber == location.LineNumber &&
-            existing.ColumnNumber == location.ColumnNumber &&
-            string.Equals(existing.Kind, location.Kind, StringComparison.Ordinal))) return;
-        reachability.SourceLocations.Add(location);
+        private readonly HashSet<string> nodeIds = new(StringComparer.Ordinal);
+        private readonly HashSet<string> edgeIds = new(StringComparer.Ordinal);
+        private readonly HashSet<string> sliceIds = new(StringComparer.Ordinal);
+        private readonly HashSet<string> categories = new(StringComparer.Ordinal);
+        private readonly HashSet<AnalysisEvidenceKind> evidenceKinds = new();
+        private readonly HashSet<(string? Path, int LineNumber, int ColumnNumber, string Kind)> sourceLocationKeys = new();
+        private readonly HashSet<string> confidenceReasons = new(StringComparer.Ordinal);
+
+        public PackageReachability Facts { get; } = new() { Purl = purl, Reachable = true, ReachabilityKind = kind };
+
+        public void Remember(string? nodeId = null, string? edgeId = null, string? sliceId = null, string? category = null, IEnumerable<AnalysisEvidenceKind>? evidenceKinds = null, string? confidence = null, ReachabilityLocation? sourceLocation = null, IEnumerable<ReachabilityLocation>? sourceLocations = null)
+        {
+            if (nodeId is not null && nodeIds.Add(nodeId)) Facts.NodeIds.Add(nodeId);
+            if (edgeId is not null && edgeIds.Add(edgeId)) Facts.EdgeIds.Add(edgeId);
+            if (sliceId is not null && sliceIds.Add(sliceId)) Facts.SliceIds.Add(sliceId);
+            if (category is not null && categories.Add(category)) Facts.Categories.Add(category);
+            AddSourceLocation(sourceLocation);
+            foreach (var location in sourceLocations ?? []) AddSourceLocation(location);
+            foreach (var evidenceKind in evidenceKinds ?? [])
+            {
+                if (this.evidenceKinds.Add(evidenceKind)) Facts.EvidenceKinds.Add(evidenceKind);
+            }
+            if (!string.IsNullOrWhiteSpace(confidence)) AddConfidenceReason($"Data-flow slice confidence is {confidence}.");
+        }
+
+        private void AddSourceLocation(ReachabilityLocation? location)
+        {
+            if (location is null) return;
+            if (!sourceLocationKeys.Add((location.Path, location.LineNumber, location.ColumnNumber, location.Kind))) return;
+            Facts.SourceLocations.Add(location);
+        }
+
+        private void AddConfidenceReason(string reason)
+        {
+            if (confidenceReasons.Add(reason)) Facts.ConfidenceReasons.Add(reason);
+        }
     }
 
     private static IEnumerable<AnalysisEvidenceKind> NodeEvidenceKinds(MethodNode node)
