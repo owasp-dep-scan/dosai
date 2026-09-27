@@ -1,0 +1,66 @@
+Dosai/DedicatedStack.cs
+  s_f8df1d80261cf6::t_5c2c8d6403f1db 1,12-17,27-32,35-38,42-46,49-50,53-55,66-68,70-81
+Dosai/Dosai.cs
+  s_f8df1d80261cf6::t_612040f20c23f2 2721-2725
+  s_f8df1d80261cf6::t_c72e118bb8d838 1870-1881,1893,1902,1914-1916
+  s_f8df1d80261cf6::t_832a4de45e8f27 2714-2715
+  s_f8df1d80261cf6::t_300b4ce21c4650 1917,3142-3157,3159,3162,3168-3170,3175-3187
+  s_f8df1d80261cf6::t_362283ec2ed866 3158,3160-3161,3163-3167,3171-3174
+  s_f8df1d80261cf6::t_ca7a25b597ea7a 1918,3221,3434,3701
+Dosai/Transparency.cs
+  s_f8df1d80261cf6::t_02739b7039e220 780-782,794
+  s_f8df1d80261cf6::t_cb67a2bd06440b 519
+  s_f8df1d80261cf6::t_da8390d1476465 313
+Dosai/Frameworks/Providers/LlmSdkProvider.cs
+  s_f8df1d80261cf6::t_b7939da6499a8b 134-136
+docs/compiler-engineering.md
+  s_f8df1d80261cf6::t_8d8f3dfcbd0186 130-133
+Dosai.Tests/DosaiTests.cs
+  s_f8df1d80261cf6::t_8b1aca9a1af136 1345-1348,1354-1355
+  s_f8df1d80261cf6::t_8662c848e92eda 1375-1376,1383-1384,1398-1538,1542-1545,1547-1550,1552-1560
+  s_f8df1d80261cf6::t_fe3a4a914ccff2 1539-1541,1546,1551
+Dosai/DataFlow.cs
+  s_f8df1d80261cf6::t_c9f6d8f3c60b34 3878-3885
+  s_f8df1d80261cf6::t_f50e5470cfd5c0 1361-1366,1369-1374,1378-1383,1391-1395,1398,1407-1412
+  s_f8df1d80261cf6::t_832a4de45e8f27 531,548,562,582,1476,1975,3861,3886
+  s_f8df1d80261cf6::t_0fc11b5c981b6f 1787-1789
+  s_f8df1d80261cf6::t_d7a91026f62491 1800
+  s_f8df1d80261cf6::t_b44cb1a2f40340 3934-3942
+  s_f8df1d80261cf6::t_9bf6b2a693ec90 429,437
+  s_f8df1d80261cf6::t_2db34de3e1ea3e 2
+Dosai/DispatchResolver.cs
+  s_f8df1d80261cf6::t_832a4de45e8f27 35
+Dosai.Tests/CorpusTests.cs
+  s_f8df1d80261cf6::t_fb688734b7c389 200-201,203
+Dosai/Frameworks/SecurityAnalyzer.cs
+  s_f8df1d80261cf6::t_832a4de45e8f27 324
+Dosai/Frameworks/Providers/SignalRProvider.cs
+  s_f8df1d80261cf6::t_4b8c8909256993 322-326
+Dosai/CryptoAnalysis.cs
+  s_f8df1d80261cf6::t_832a4de45e8f27 333,347
+  s_f8df1d80261cf6::t_f7cb819eb5eae1 331
+  s_f8df1d80261cf6::t_33148fcb036f96 345
+Dosai/OperationDepthGuard.cs
+  s_f8df1d80261cf6::t_9b8cae6f58d3ab 1-159
+Dosai.Tests/Roadmap/Batch1Tests.cs
+  s_f8df1d80261cf6::t_4dee9e9a418757 44,46
+AGENTS.md
+  s_f8df1d80261cf6::t_9edb0cd0680023 66-75
+  s_f8df1d80261cf6::t_4cff02a84a830b 91-93
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "f4433151b4590cfa20c383350617f13ba9b629f0",
+  "prompts": {},
+  "sessions": {
+    "s_f8df1d80261cf6": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "44504e07-2849-410c-9825-5420e5b528a8",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
