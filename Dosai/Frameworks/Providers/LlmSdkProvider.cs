@@ -131,7 +131,9 @@ public sealed partial class LlmSdkProvider : IFrameworkProvider
             }
         }
 
-        if (ToolConstructionCalls.Any(call => invocation.ToString().Contains(call, StringComparison.Ordinal)))
+        // The file-text gate is exact (an invocation's text is a slice of it) and keeps a fluent
+        // chain from rendering the whole chain once per call.
+        if (ctx.TextContainsAny(tree, ToolConstructionCalls) && ToolConstructionCalls.Any(call => invocation.ToString().Contains(call, StringComparison.Ordinal)))
         {
             var enclosingType = invocation.Ancestors().OfType<TypeDeclarationSyntax>().FirstOrDefault()?.Identifier.Text ?? "tool";
             var line = invocation.GetLocation().GetLineSpan().StartLinePosition.Line + 1;

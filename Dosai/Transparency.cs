@@ -310,7 +310,7 @@ public static class TransparencyBuilder
                 byPurl[purl] = reachability;
             }
             reachability.Remember(nodeId, edgeId, sliceId, category, evidenceKinds, confidence, sourceLocation);
-            if (kind == "Dependency") AddConfidenceReason(reachability.Facts, "Package URL is supported by dependency/import metadata.");
+            if (kind == "Dependency") reachability.AddConfidenceReason("Package URL is supported by dependency/import metadata.");
         }
     }
 
@@ -516,7 +516,7 @@ public static class TransparencyBuilder
             Facts.SourceLocations.Add(location);
         }
 
-        private void AddConfidenceReason(string reason)
+        public void AddConfidenceReason(string reason)
         {
             if (confidenceReasons.Add(reason)) Facts.ConfidenceReasons.Add(reason);
         }
@@ -777,6 +777,9 @@ public static class TransparencyBuilder
             return;
         }
 
+        // Each (caller, callee) pair occurs once - callers are distinct keys and callees a set - so
+        // the lists need no membership guard; a linear Contains here was quadratic in the fan-in
+        // of a hot callee, the #61 shape again.
         var reverseEdges = new Dictionary<string, List<string>>(StringComparer.Ordinal);
         foreach (var (caller, callees) in methodEdges)
         {
@@ -788,10 +791,7 @@ public static class TransparencyBuilder
                     reverseEdges[callee] = callers;
                 }
 
-                if (!callers.Contains(caller))
-                {
-                    callers.Add(caller);
-                }
+                callers.Add(caller);
             }
         }
 

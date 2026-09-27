@@ -328,8 +328,9 @@ public static class CryptoAnalyzer
 
         foreach (var tree in csharpTrees)
         {
+            if (OperationDepthGuard.Describe(tree) is { } csharpDepthDiagnostic) result.Diagnostics.Add(csharpDepthDiagnostic);
             var model = csharpCompilation.GetSemanticModel(tree);
-            foreach (var operation in GetCSharpOperationRoots(tree.GetRoot()).Select(node => model.GetOperation(node)).Where(operation => operation is not null))
+            foreach (var operation in GetCSharpOperationRoots(tree.GetRoot()).Select(node => OperationDepthGuard.GetOperation(model, node)).Where(operation => operation is not null))
             {
                 new CryptoOperationWalker(model, basePath, tree.FilePath, reachability, result).Visit(operation);
             }
@@ -341,8 +342,9 @@ public static class CryptoAnalyzer
 
         foreach (var tree in vbTrees)
         {
+            if (OperationDepthGuard.Describe(tree) is { } vbDepthDiagnostic) result.Diagnostics.Add(vbDepthDiagnostic);
             var model = vbCompilation.GetSemanticModel(tree);
-            foreach (var operation in GetVisualBasicOperationRoots(tree.GetRoot()).Select(node => model.GetOperation(node)).Where(operation => operation is not null))
+            foreach (var operation in GetVisualBasicOperationRoots(tree.GetRoot()).Select(node => OperationDepthGuard.GetOperation(model, node)).Where(operation => operation is not null))
             {
                 new CryptoOperationWalker(model, basePath, tree.FilePath, reachability, result).Visit(operation);
             }

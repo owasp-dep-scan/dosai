@@ -321,7 +321,7 @@ public static class SecurityAnalyzer
                 }
 
                 // When the symbol resolves, confirm the semantic name agrees with the syntactic one.
-                if (model.GetOperation(invocation) is IInvocationOperation { TargetMethod: { } targetMethod } &&
+                if (OperationDepthGuard.GetOperation(model, invocation) is IInvocationOperation { TargetMethod: { } targetMethod } &&
                     !IsCorsRegistrationName(targetMethod.Name))
                 {
                     continue;

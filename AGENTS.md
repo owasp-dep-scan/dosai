@@ -63,10 +63,16 @@ dotnet test ./Dosai.sln
   runtime type loader recurses per hierarchy level and, when a base type is missing, can
   overflow a default-sized stack (dotnet/runtime#131679) - an uncatchable process crash.
 - Keep Roslyn `IOperation` work behind the guarded analysis entry points (`Dosai.GetMethodsSlice`,
-  `DataFlowAnalyzer.Analyze`, `CryptoAnalyzer.Analyze`), which run on `DedicatedStack` threads.
-  The operation factory recurses roughly one frame set per call in a chain, so a deep fluent
-  chain overflows a default-sized stack inside `SemanticModel.GetOperation` - the same
-  uncatchable process crash, reached through source analysis.
+  `DataFlowAnalyzer.Analyze`, `CryptoAnalyzer.Analyze`), which run on `DedicatedStack` threads
+  (a nested entry point runs inline on the thread it is already on). The operation factory
+  recurses roughly one frame set per call in a chain, so a deep fluent chain overflows a
+  default-sized stack inside `SemanticModel.GetOperation` - the same uncatchable process crash,
+  reached through source analysis. Request operations only through
+  `OperationDepthGuard.GetOperation`, which skips members too deep for even the dedicated stack
+  and reports them per file (`OperationDepthGuard.Describe`).
+- Operation walkers derive from `DepthBoundedOperationWalker`. Its budget bounds cost, not stack
+  (the stack is checked separately): walkers that render call text keep the 1,024-level default,
+  and the call-graph walker follows the stack so long chains keep their head call.
 - Enumerate the scanned tree through `SafeFileRead.EnumerateAllFilesSafe` (or filter through
   `PathExclusions.IsExcluded`), so `--exclude` globs (`PathExclusions`, an ambient scope the CLI
   applies per command) hold for every analyzer.
@@ -82,6 +88,9 @@ dotnet test ./Dosai.sln
 - Preserve the current scaling optimizations in `Dosai/DataFlow.cs`: indexed pattern subsets (`DataFlowPatternIndex`), cached syntax text in the operation walker, edge de-duplication, and source-indexed outgoing edges for slice construction.
 - When adding new source/sink/passthrough/sanitizer matching, route repeated lookups through the pattern index and avoid calling `SyntaxNode.ToString()` unless the selected pattern kind needs code text.
 - When changing slice construction, keep it near-linear in trace size by using indexed edges; avoid scanning every graph edge for every slice.
+- Do not render an invocation's or receiver's text for every call without a cheap gate first
+  (a file keyword check, the invoked name): the text of a call in a fluent chain spans the whole
+  chain before it, so per-call rendering is quadratic in chain length.
 - Preserve the set-backed membership guards in `TransparencyBuilder.BuildPackageReachability`
   (`PackageReachabilityAccumulator`): the `PackageReachability` lists keep insertion order for
   byte-stable output while hash sets beside them answer membership, so a purl holding tens of
