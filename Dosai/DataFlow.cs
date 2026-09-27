@@ -1,4 +1,5 @@
 using System.Reflection.PortableExecutable;
+using System.Runtime.CompilerServices;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -261,7 +262,18 @@ public static partial class DataFlowAnalyzer
         return result;
     }
 
+    /// <summary>
+    ///     Analyze <paramref name="path" /> and return the data-flow result. Runs on a dedicated
+    ///     thread with <see cref="DedicatedStack.AnalysisStackSize" /> of stack: the operation
+    ///     walker asks Roslyn for <c>IOperation</c> trees per statement, and the operation factory
+    ///     recurses roughly one frame set per call in a chain, so a long fluent chain overflows the
+    ///     default main-thread stack and terminates the process - an uncatchable failure that
+    ///     writes no output (owasp-dep-scan/dosai#60).
+    /// </summary>
     public static DataFlowResult Analyze(string path, string? patternsPath = null, string? patternPacks = null, string? suppressionsPath = null, BuildPreparationMode buildPreparation = BuildPreparationMode.None)
+        => DedicatedStack.Run("Dosai data-flow analysis", () => AnalyzeCore(path, patternsPath, patternPacks, suppressionsPath, buildPreparation));
+
+    private static DataFlowResult AnalyzeCore(string path, string? patternsPath, string? patternPacks, string? suppressionsPath, BuildPreparationMode buildPreparation)
     {
         if (!File.Exists(path) && !Directory.Exists(path))
         {
@@ -414,6 +426,7 @@ public static partial class DataFlowAnalyzer
                 var model = csharpCompilation.GetSemanticModel(tree);
                 var root = tree.GetCompilationUnitRoot();
                 AnalyzeCompilationUnit(model, root, graph, patterns, summaries, path, tree.FilePath, frameworkSeeds);
+                if (OperationDepthGuard.Describe(tree) is { } depthDiagnostic) graph.RecordDiagnostic(depthDiagnostic);
             }
 
             foreach (var tree in vbTrees)
@@ -421,6 +434,7 @@ public static partial class DataFlowAnalyzer
                 var model = vbCompilation.GetSemanticModel(tree);
                 var root = tree.GetCompilationUnitRoot();
                 AnalyzeCompilationUnit(model, root, graph, patterns, summaries, path, tree.FilePath, frameworkSeeds);
+                if (OperationDepthGuard.Describe(tree) is { } depthDiagnostic) graph.RecordDiagnostic(depthDiagnostic);
             }
 
             AnalyzeLanguageFrontendDataFlows(path, sourcesToInspect, patterns, result);
@@ -514,7 +528,7 @@ public static partial class DataFlowAnalyzer
         var collector = new DataFlowSummaryCollector(model, summaries, patterns, callerIndex, methodRoots);
         foreach (var node in operationNodes)
         {
-            var operation = model.GetOperation(node);
+            var operation = OperationDepthGuard.GetOperation(model, node);
             if (operation is not null)
             {
                 collector.Visit(operation);
@@ -531,7 +545,7 @@ public static partial class DataFlowAnalyzer
             .Where(node => node is Microsoft.CodeAnalysis.VisualBasic.Syntax.MethodBlockSyntax or Microsoft.CodeAnalysis.VisualBasic.Syntax.AccessorBlockSyntax);
         foreach (var node in operationNodes)
         {
-            var operation = model.GetOperation(node);
+            var operation = OperationDepthGuard.GetOperation(model, node);
             if (operation is not null)
             {
                 new DataFlowSummaryCollector(model, summaries, patterns, callerIndex, methodRoots).Visit(operation);
@@ -545,7 +559,7 @@ public static partial class DataFlowAnalyzer
             .Where(node => node is Microsoft.CodeAnalysis.CSharp.Syntax.BaseMethodDeclarationSyntax or Microsoft.CodeAnalysis.CSharp.Syntax.AccessorDeclarationSyntax or Microsoft.CodeAnalysis.CSharp.Syntax.LocalFunctionStatementSyntax);
         foreach (var node in operationNodes)
         {
-            var operation = model.GetOperation(node);
+            var operation = OperationDepthGuard.GetOperation(model, node);
             if (operation is not null)
             {
                 new DataFlowOperationWalker(model, graph, patterns, summaries, basePath, sourceFilePath, frameworkSeeds).Visit(operation);
@@ -565,7 +579,7 @@ public static partial class DataFlowAnalyzer
             .Where(node => node is Microsoft.CodeAnalysis.VisualBasic.Syntax.MethodBlockSyntax or Microsoft.CodeAnalysis.VisualBasic.Syntax.AccessorBlockSyntax);
         foreach (var node in operationNodes)
         {
-            var operation = model.GetOperation(node);
+            var operation = OperationDepthGuard.GetOperation(model, node);
             if (operation is not null)
             {
                 new DataFlowOperationWalker(model, graph, patterns, summaries, basePath, sourceFilePath, frameworkSeeds).Visit(operation);
@@ -1344,15 +1358,29 @@ public static partial class DataFlowAnalyzer
 
     // Machine-generated code can nest expressions thousands of levels deep; a recursive
     // Roslyn operation walk past that depth terminates the process with an unrecoverable
-    // stack overflow. Descendants stop descending past MaxAnalysisDepth so analysis of
-    // pathological members degrades gracefully instead of crashing the whole scan.
+    // stack overflow. Descendants stop descending past MaxAnalysisDepth, or earlier when the
+    // stack runs low, so analysis of pathological members degrades gracefully instead of
+    // crashing the whole scan. The walkers run on the DedicatedStack thread, so the budget is a
+    // cost bound rather than a stack bound: it has to cover real fluent chains (a registration
+    // chain of ~450 calls reported in owasp-dep-scan/dosai#60), whose head - the deepest
+    // operation - is usually the call that matters.
     internal abstract class DepthBoundedOperationWalker : OperationWalker
     {
-        protected const int MaxAnalysisDepth = 200;
+        /// <summary>
+        ///     Budget for the text-matching walkers (data flow, crypto), which render each visited
+        ///     call's source text: a chain call's text spans the chain before it, so their cost
+        ///     grows with depth times chain length.
+        /// </summary>
+        protected const int DefaultMaxAnalysisDepth = 1024;
 
         private int _depth;
 
-        protected bool MaxDepthReached => _depth >= MaxAnalysisDepth;
+        protected virtual int MaxAnalysisDepth => DefaultMaxAnalysisDepth;
+
+        protected bool MaxDepthReached => _depth >= MaxAnalysisDepth || !RuntimeHelpers.TryEnsureSufficientExecutionStack();
+
+        /// <summary>True once an operation was skipped for depth, so a caller can report the truncation.</summary>
+        internal bool DepthBudgetExceeded { get; private set; }
 
         protected void EnterDepth() => _depth++;
 
@@ -1360,8 +1388,14 @@ public static partial class DataFlowAnalyzer
 
         public override void Visit(IOperation? operation)
         {
+            if (operation is null)
+            {
+                return;
+            }
+
             if (MaxDepthReached)
             {
+                DepthBudgetExceeded = true;
                 return;
             }
 
@@ -1369,6 +1403,12 @@ public static partial class DataFlowAnalyzer
             try
             {
                 base.Visit(operation);
+            }
+            catch (InsufficientExecutionStackException)
+            {
+                // Roslyn's own walker guard fired a few frames below the check above; drop this
+                // subtree and keep walking its siblings.
+                DepthBudgetExceeded = true;
             }
             finally
             {
@@ -1433,7 +1473,7 @@ public static partial class DataFlowAnalyzer
             {
                 foreach (var statement in statementList)
                 {
-                    if (model.GetOperation(statement) is not { } operation)
+                    if (OperationDepthGuard.GetOperation(model, statement) is not { } operation)
                     {
                         continue;
                     }
@@ -1744,7 +1784,9 @@ public static partial class DataFlowAnalyzer
             var name = symbol.Name;
             var containingType = Normalize((symbol.ContainingType ?? symbol as INamedTypeSymbol)?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty);
             var namespaceName = symbol.ContainingNamespace?.ToDisplayString() ?? string.Empty;
-            var code = syntax.ToString();
+            // Rendered only for a Code pattern: the text of a call in a fluent chain spans the whole
+            // chain before it, so rendering it eagerly made every chain quadratic.
+            string? code = null;
 
             foreach (var pattern in candidatePatterns)
             {
@@ -1755,7 +1797,7 @@ public static partial class DataFlowAnalyzer
                     DataFlowPatternKind.Type => containingType,
                     DataFlowPatternKind.Namespace => namespaceName,
                     DataFlowPatternKind.Name => name,
-                    DataFlowPatternKind.Code => code,
+                    DataFlowPatternKind.Code => code ??= syntax.ToString(),
                     DataFlowPatternKind.Attribute => string.Join(' ', symbol.GetAttributes().Select(a => a.AttributeClass?.Name ?? string.Empty)),
                     _ => normalizedSymbol
                 };
@@ -1930,7 +1972,7 @@ public static partial class DataFlowAnalyzer
                 SeedMethodParameters(topLevelMain, statementList[0]);
                 foreach (var statement in statementList)
                 {
-                    if (model.GetOperation(statement) is { } operation)
+                    if (OperationDepthGuard.GetOperation(model, statement) is { } operation)
                     {
                         Visit(operation);
                     }
@@ -3816,7 +3858,7 @@ public static partial class DataFlowAnalyzer
 
                 foreach (var creation in root.DescendantNodes().OfType<Microsoft.CodeAnalysis.CSharp.Syntax.ObjectCreationExpressionSyntax>())
                 {
-                    if (model.GetOperation(creation) is not IObjectCreationOperation operation ||
+                    if (OperationDepthGuard.GetOperation(model, creation) is not IObjectCreationOperation operation ||
                         !IsRegexType(operation.Type))
                     {
                         continue;
@@ -3833,7 +3875,15 @@ public static partial class DataFlowAnalyzer
 
                 foreach (var invocation in root.DescendantNodes().OfType<Microsoft.CodeAnalysis.CSharp.Syntax.InvocationExpressionSyntax>())
                 {
-                    if (model.GetOperation(invocation) is not IInvocationOperation { TargetMethod: { } targetMethod } invocationOperation ||
+                    // The syntax names the invoked method, so a call that is not IsMatch/Match/Matches
+                    // cannot qualify; skipping it before GetOperation keeps a file without regex calls
+                    // from being bound a third time (deep fluent chains bind superlinearly).
+                    if (InvokedMemberName(invocation) is { } invokedName && invokedName is not ("IsMatch" or "Match" or "Matches"))
+                    {
+                        continue;
+                    }
+
+                    if (OperationDepthGuard.GetOperation(model, invocation) is not IInvocationOperation { TargetMethod: { } targetMethod } invocationOperation ||
                         targetMethod.Name is not ("IsMatch" or "Match" or "Matches") ||
                         !IsRegexType(targetMethod.ContainingType))
                     {
@@ -3880,6 +3930,15 @@ public static partial class DataFlowAnalyzer
 
             return candidates;
         }
+
+        /// <summary>Name the invocation syntax gives the invoked member, or null when it names none directly (a delegate expression, say).</summary>
+        private static string? InvokedMemberName(Microsoft.CodeAnalysis.CSharp.Syntax.InvocationExpressionSyntax invocation) => invocation.Expression switch
+        {
+            Microsoft.CodeAnalysis.CSharp.Syntax.MemberAccessExpressionSyntax member => member.Name.Identifier.ValueText,
+            Microsoft.CodeAnalysis.CSharp.Syntax.MemberBindingExpressionSyntax binding => binding.Name.Identifier.ValueText,
+            Microsoft.CodeAnalysis.CSharp.Syntax.SimpleNameSyntax name => name.Identifier.ValueText,
+            _ => null
+        };
 
         private static bool IsRegexType(ITypeSymbol? type) =>
             Normalize(type?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty) == "System.Text.RegularExpressions.Regex";

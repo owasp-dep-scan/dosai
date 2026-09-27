@@ -213,8 +213,16 @@ public static class CryptoAnalyzer
     /// <summary>
     ///     Callers that already hold a <see cref="MethodsSlice"/> (or its reachability index)
     ///     pass it here instead of forcing a second full methods-pipeline run and a JSON round trip.
+    ///     Runs on a dedicated thread with <see cref="DedicatedStack.AnalysisStackSize" /> of stack:
+    ///     the C#/VB operation walk asks Roslyn for <c>IOperation</c> trees, and the operation
+    ///     factory recurses roughly one frame set per call in a chain, so a long fluent chain
+    ///     overflows the default main-thread stack and terminates the process - an uncatchable
+    ///     failure that writes no output (owasp-dep-scan/dosai#60).
     /// </summary>
     public static CryptoAnalysisResult Analyze(string path, MethodsSlice? methodsSlice, BuildPreparationMode buildPreparation = BuildPreparationMode.None)
+        => DedicatedStack.Run("Dosai crypto analysis", () => AnalyzeCore(path, methodsSlice, buildPreparation));
+
+    private static CryptoAnalysisResult AnalyzeCore(string path, MethodsSlice? methodsSlice, BuildPreparationMode buildPreparation)
     {
         if (!File.Exists(path) && !Directory.Exists(path))
         {
@@ -320,8 +328,9 @@ public static class CryptoAnalyzer
 
         foreach (var tree in csharpTrees)
         {
+            if (OperationDepthGuard.Describe(tree) is { } csharpDepthDiagnostic) result.Diagnostics.Add(csharpDepthDiagnostic);
             var model = csharpCompilation.GetSemanticModel(tree);
-            foreach (var operation in GetCSharpOperationRoots(tree.GetRoot()).Select(node => model.GetOperation(node)).Where(operation => operation is not null))
+            foreach (var operation in GetCSharpOperationRoots(tree.GetRoot()).Select(node => OperationDepthGuard.GetOperation(model, node)).Where(operation => operation is not null))
             {
                 new CryptoOperationWalker(model, basePath, tree.FilePath, reachability, result).Visit(operation);
             }
@@ -333,8 +342,9 @@ public static class CryptoAnalyzer
 
         foreach (var tree in vbTrees)
         {
+            if (OperationDepthGuard.Describe(tree) is { } vbDepthDiagnostic) result.Diagnostics.Add(vbDepthDiagnostic);
             var model = vbCompilation.GetSemanticModel(tree);
-            foreach (var operation in GetVisualBasicOperationRoots(tree.GetRoot()).Select(node => model.GetOperation(node)).Where(operation => operation is not null))
+            foreach (var operation in GetVisualBasicOperationRoots(tree.GetRoot()).Select(node => OperationDepthGuard.GetOperation(model, node)).Where(operation => operation is not null))
             {
                 new CryptoOperationWalker(model, basePath, tree.FilePath, reachability, result).Visit(operation);
             }

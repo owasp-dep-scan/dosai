@@ -32,7 +32,7 @@ internal static class DispatchResolver
                 var root = syntaxTree.GetRoot();
                 foreach (var objectCreationNode in root.DescendantNodes().Where(IsObjectCreationSyntax))
                 {
-                    if (semanticModel.GetOperation(objectCreationNode) is not IObjectCreationOperation objectCreation)
+                    if (OperationDepthGuard.GetOperation(semanticModel, objectCreationNode) is not IObjectCreationOperation objectCreation)
                     {
                         continue;
                     }

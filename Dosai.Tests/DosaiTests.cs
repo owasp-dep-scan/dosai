@@ -1335,6 +1335,295 @@ class IsPatternFlow
         Assert.DoesNotContain(controls, method => method.ClassName.StartsWith("Level", StringComparison.Ordinal));
     }
 
+    // owasp-dep-scan/dosai#60: the Roslyn operation factory recurses roughly one frame set per
+    // call in a chain, so one long fluent chain in ordinary C# overflowed the calling thread's
+    // stack inside SemanticModel.GetOperation and killed the process with no output and no file
+    // name. The source-analysis phases now run on a dedicated large-stack thread (DedicatedStack),
+    // the same remedy #58 applied to assembly inspection. The scan is started from a 1 MB thread -
+    // the Windows main-thread default - so the check does not depend on the stack size of the
+    // machine running the tests. A regression is a stack overflow, which terminates the test host
+    // rather than failing this test alone. The data-flow and crypto entry points build the same
+    // operation trees and are covered from the same caller. Surviving is not enough: the
+    // call-graph walker once stopped 200 operations deep, so every call past that - including the
+    // chain head, the deepest operation - silently vanished from MethodCalls and the graph.
+    [Fact]
+    public void GetMethods_DeepFluentChainInSource_CompletesOnSmallCallerStack()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        // 5,000 linked calls is several times what overflows a 1 MB stack on Windows and macOS;
+        // the real-world trigger file (a metadata registration written as one fluent chain) held
+        // about 450.
+        const int chainDepth = 5_000;
+        var chain = "Fluent.Start()" + string.Concat(Enumerable.Repeat(".Next()", chainDepth));
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "DeepChain.cs"), $$"""
+public class Fluent
+{
+    public static Fluent Start() => new Fluent();
+    public Fluent Next() => this;
+}
+
+public class Chain
+{
+    public object Build()
+    {
+        return {{chain}};
+    }
+}
+""");
+
+        MethodsSlice? slice = null;
+        DataFlowResult? dataFlows = null;
+        CryptoAnalysisResult? crypto = null;
+        Exception? failure = null;
+        var caller = new Thread(() =>
+        {
+            try
+            {
+                slice = Depscan.Dosai.GetMethodsSlice(tempDirectory.Path);
+                dataFlows = DataFlowAnalyzer.Analyze(tempDirectory.Path);
+                crypto = CryptoAnalyzer.Analyze(tempDirectory.Path);
+            }
+            catch (Exception e)
+            {
+                failure = e;
+            }
+        }, 1024 * 1024);
+        caller.Start();
+        caller.Join();
+
+        Assert.Null(failure);
+        Assert.Contains(slice!.Methods!, method => method.ClassName == "Chain" && method.Name == "Build");
+        var nodeIds = slice.CallGraph!.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
+        Assert.Contains(slice.CallGraph!.Edges, edge => nodeIds.Contains(edge.TargetId) && edge.TargetId.Contains("Fluent.Next", StringComparison.Ordinal));
+        // Every call of the chain, head included, is recorded exactly once.
+        Assert.Equal(chainDepth, slice.MethodCalls!.Count(call => call.CallerMethod == "Build" && call.CalledMethod == "Fluent.Next()"));
+        Assert.Single(slice.MethodCalls!, call => call.CallerMethod == "Build" && call.CalledMethod == "Fluent.Start()");
+        Assert.Contains(slice.CallGraph!.Edges, edge => nodeIds.Contains(edge.TargetId) && edge.TargetId.Contains("Fluent.Start", StringComparison.Ordinal));
+        Assert.DoesNotContain(slice.Diagnostics ?? [], diagnostic => diagnostic.Contains("depth budget", StringComparison.Ordinal) || diagnostic.Contains("syntax levels", StringComparison.Ordinal));
+        Assert.Equal(1, dataFlows!.Statistics.FilesAnalyzed);
+        Assert.NotNull(crypto);
+    }
+
+    // A member nesting deeper than the stack can carry must not reach the Roslyn operation
+    // factory at all: past the limit the dedicated stack only moves the uncatchable overflow (a
+    // chain of about 180,000 calls still filled 256 MB). The guard skips that member with a
+    // diagnostic naming the file and keeps the rest of the file. The limit is lowered for this
+    // test so the fixture stays small; the production limit follows the analysis stack size.
+    [Fact]
+    public void Analysis_MemberNestedPastOperationDepthLimit_IsSkippedWithDiagnostic()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var chain = "Fluent.Start()" + string.Concat(Enumerable.Repeat(".Next()", 1_000));
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Mixed.cs"), $$"""
+public class Fluent
+{
+    public static Fluent Start() => new Fluent();
+    public Fluent Next() => this;
+}
+
+public class Mixed
+{
+    public object Deep()
+    {
+        return {{chain}};
+    }
+
+    public Fluent Shallow()
+    {
+        return Fluent.Start().Next();
+    }
+}
+""");
+
+        using (OperationDepthGuard.OverrideMaxSyntaxDepth(500))
+        {
+            var slice = Depscan.Dosai.GetMethodsSlice(tempDirectory.Path);
+            Assert.DoesNotContain(slice.MethodCalls!, call => call.CallerMethod == "Deep");
+            Assert.Contains(slice.MethodCalls!, call => call.CallerMethod == "Shallow" && call.CalledMethod == "Fluent.Next()");
+            Assert.Contains(slice.MethodCalls!, call => call.CallerMethod == "Shallow" && call.CalledMethod == "Fluent.Start()");
+            Assert.Contains(slice.Diagnostics!, diagnostic => diagnostic.Contains("Mixed.cs", StringComparison.Ordinal) && diagnostic.Contains("nest deeper than 500 syntax levels", StringComparison.Ordinal));
+
+            var dataFlows = DataFlowAnalyzer.Analyze(tempDirectory.Path);
+            Assert.Contains(dataFlows.Diagnostics, diagnostic => diagnostic.Contains("nest deeper than 500 syntax levels", StringComparison.Ordinal));
+            var crypto = CryptoAnalyzer.Analyze(tempDirectory.Path);
+            Assert.Contains(crypto.Diagnostics, diagnostic => diagnostic.Contains("nest deeper than 500 syntax levels", StringComparison.Ordinal));
+        }
+    }
+
+    // Top-level statements share one synthesized entry point, so a single deep statement puts all
+    // of them behind the guard; ordinary members beside a deep one stay analyzable, and a tree
+    // shorter than the limit is never walked.
+    [Fact]
+    public void OperationDepthGuard_FindDeepMembers_MarksDeepMemberOrAllTopLevelStatements()
+    {
+        var deepExpression = "x" + string.Concat(Enumerable.Repeat(".M()", 100));
+        var members = CSharpSourceParser.Parse($$"""
+public class C
+{
+    public object Deep(dynamic x) => {{deepExpression}};
+    public int Shallow() => 1;
+}
+""", "Members.cs");
+        var deepMember = Assert.Single(OperationDepthGuard.FindDeepMembers(members, 50));
+        Assert.Contains("Deep(", members.GetText().ToString(deepMember), StringComparison.Ordinal);
+        Assert.Empty(OperationDepthGuard.FindDeepMembers(members, members.Length + 100));
+
+        var topLevel = CSharpSourceParser.Parse($$"""
+System.Console.WriteLine(1);
+dynamic x = 1;
+var y = {{deepExpression}};
+System.Console.WriteLine(2);
+""", "Program.cs");
+        Assert.Equal(4, OperationDepthGuard.FindDeepMembers(topLevel, 50).Count);
+    }
+
+    // Every block, initializer and VB statement is handed to the call-graph walker as a root, and
+    // each nested one also sits inside its parent's operation tree, so a call used to be recorded
+    // once per enclosing block (VB: once per enclosing statement) and each member was walked once
+    // per nesting level.
+    [Fact]
+    public void GetMethods_CallsInNestedBlocks_AreRecordedOnce()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Nested.cs"), """
+public class Nested
+{
+    public void Run(bool flag)
+    {
+        if (flag)
+        {
+            Target();
+            if (!flag)
+            {
+                System.Action callback = () => { Target(); };
+                callback();
+            }
+        }
+    }
+
+    public void Target() { }
+}
+""");
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "NestedVb.vb"), """
+Public Class NestedVb
+    Public Sub Run(flag As Boolean)
+        If flag Then
+            Target()
+            If Not flag Then
+                Target()
+            End If
+        End If
+    End Sub
+
+    Public Sub Target()
+    End Sub
+End Class
+""");
+
+        var slice = ReadMethods(tempDirectory.Path);
+        var targetCalls = (slice.MethodCalls ?? []).Where(call => call.CalledMethod is "Nested.Target()" or "NestedVb.Target()").ToList();
+        Assert.Equal(4, targetCalls.Count);
+        Assert.Equal(4, targetCalls.Select(call => (call.FileName, call.LineNumber, call.ColumnNumber)).Distinct().Count());
+    }
+
+    // Guarded entry points nest (crypto analysis runs the methods and data-flow pipelines, methods
+    // analysis inspects assemblies): a nested call must run inline on the analysis thread rather
+    // than reserve another large stack, and the worker must keep the caller's culture, which
+    // title-cases member modifiers in the output.
+    [Fact]
+    public void DedicatedStack_NestedRunsInlineAndKeepsCallerCulture()
+    {
+        var previousCulture = CultureInfo.CurrentCulture;
+        try
+        {
+            // A clone rather than a named culture, so the test also holds in invariant-globalization mode.
+            var callerCulture = (CultureInfo)CultureInfo.InvariantCulture.Clone();
+            CultureInfo.CurrentCulture = callerCulture;
+            var (outerThread, innerThread, workerCulture, onAnalysisThread) = DedicatedStack.Run("outer", () =>
+            {
+                var outer = Environment.CurrentManagedThreadId;
+                var inner = DedicatedStack.Run("inner", () => Environment.CurrentManagedThreadId);
+                return (outer, inner, CultureInfo.CurrentCulture, DedicatedStack.IsOnAnalysisThread);
+            });
+
+            Assert.NotEqual(Environment.CurrentManagedThreadId, outerThread);
+            Assert.Equal(outerThread, innerThread);
+            Assert.Same(callerCulture, workerCulture);
+            Assert.True(onAnalysisThread);
+            Assert.False(DedicatedStack.IsOnAnalysisThread);
+            var failure = Assert.Throws<InvalidOperationException>(() => DedicatedStack.Run<int>("failing", () => throw new InvalidOperationException("from the worker")));
+            Assert.Equal("from the worker", failure.Message);
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = previousCulture;
+        }
+    }
+
+    // owasp-dep-scan/dosai#61: every insert into a PackageReachability was guarded by a linear
+    // List.Contains scan, and the guards ran once per call graph node and twice per edge, so a
+    // purl holding N ids cost O(N^2) and the methods.package-reachability phase stopped finishing
+    // on graphs whose calls concentrate on a few packages. Membership now sits in hash sets beside
+    // the lists, so the same concentrated graph must complete far inside this generous bound while
+    // still producing identical, de-duplicated, insertion-ordered output.
+    [Fact]
+    public void BuildPackageReachability_ManyEdgesSharingOnePurl_StaysLinearAndDeduplicates()
+    {
+        const int nodeCount = 50_000;
+        const string purl = "pkg:nuget/runtime.native.System@4.3.0";
+        var nodes = new List<MethodNode>();
+        for (var i = 0; i < nodeCount; i++)
+        {
+            nodes.Add(new MethodNode
+            {
+                Id = $"m:{i}",
+                Name = $"Call{i}",
+                ClassName = "Graph",
+                Namespace = "PurlConcentration",
+                FileName = "/repo/Graph.cs",
+                LineNumber = i + 1,
+                Purl = purl
+            });
+        }
+        // A repeated node id and a repeated edge must land in the lists exactly once.
+        nodes.Add(new MethodNode { Id = "m:0", Name = "Call0", ClassName = "Graph", Namespace = "PurlConcentration", FileName = "/repo/Graph.cs", LineNumber = 1, Purl = purl });
+        var edges = new List<MethodCallEdge>();
+        for (var i = 0; i < nodeCount; i++)
+        {
+            edges.Add(new MethodCallEdge
+            {
+                Id = $"e:{i}",
+                SourceId = $"m:{i}",
+                TargetId = $"m:{(i + 1) % nodeCount}",
+                SourcePurl = purl,
+                TargetPurl = purl,
+                CallLocation = new CallLocation { FileName = "/repo/Graph.cs", LineNumber = i + 1, ColumnNumber = 4 }
+            });
+        }
+        edges.Add(new MethodCallEdge { Id = "e:0", SourceId = "m:0", TargetId = "m:1", SourcePurl = purl, TargetPurl = purl, CallLocation = new CallLocation { FileName = "/repo/Graph.cs", LineNumber = 1, ColumnNumber = 4 } });
+        var callGraph = new CallGraph { Nodes = nodes, Edges = edges };
+
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        var reachability = TransparencyBuilder.BuildPackageReachability(callGraph);
+        stopwatch.Stop();
+
+        var facts = Assert.Single(reachability);
+        Assert.Equal(purl, facts.Purl);
+        // Insertion order is preserved (byte-stable serialized output) and duplicates collapse.
+        Assert.Equal("m:0", facts.NodeIds[0]);
+        Assert.Equal("InternalCallGraphNode", facts.ReachabilityKind);
+        Assert.Equal(nodeCount, facts.NodeIds.Count);
+        Assert.Equal(nodeCount, facts.EdgeIds.Count);
+        Assert.Equal(nodeCount, facts.NodeIds.Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(nodeCount, facts.EdgeIds.Distinct(StringComparer.Ordinal).Count());
+        // Only the edge target insert carries a category (the call type).
+        Assert.Equal(new[] { "Unknown" }, facts.Categories);
+        Assert.Equal(nodeCount * 2, facts.SourceLocations.Count);
+        // The linear path finishes in tens of milliseconds; the quadratic guard it replaced needed
+        // minutes at this size, so a generous ceiling still fails loudly on a regression.
+        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(30), $"BuildPackageReachability took {stopwatch.Elapsed.TotalSeconds:F1}s for {nodeCount} edges on one purl");
+    }
+
     // Inspecting an assembly must not leave it locked. AssemblyLoadContext.LoadFromAssemblyPath
     // memory-maps the file and collectible contexts unload asynchronously, so on Windows the
     // analyzed build output stayed undeletable for the rest of the process; deleting the

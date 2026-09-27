@@ -197,9 +197,10 @@ public class CorpusTests
         Assert.Equal("net10.0", slice.Metadata!.GuardTargetFramework);
         Assert.Contains(slice.Diagnostics ?? [], diagnostic => diagnostic.Contains("evaluated against 'net10.0'", StringComparison.Ordinal));
 
-        // 659 methods / 3,469 call sites / 1,547 edges at the calibration run.
+        // 659 methods / 1,929 call sites / 1,547 edges at the calibration run. (The earlier 3,469
+        // call sites counted each call once per enclosing block; the distinct sites are unchanged.)
         Assert.True(slice.Methods!.Count >= 500, $"expected >= 500 methods, got {slice.Methods.Count}");
-        Assert.True(slice.MethodCalls!.Count >= 3_000, $"expected >= 3k call sites, got {slice.MethodCalls.Count}");
+        Assert.True(slice.MethodCalls!.Count >= 1_650, $"expected >= 1.65k call sites, got {slice.MethodCalls.Count}");
         Assert.True(slice.CallGraph!.Edges.Count >= 1_200, $"expected >= 1.2k call-graph edges, got {slice.CallGraph.Edges.Count}");
     }
 }

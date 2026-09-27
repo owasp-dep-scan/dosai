@@ -13,7 +13,6 @@ using Microsoft.CodeAnalysis.Operations;
 using Microsoft.CodeAnalysis.VisualBasic;
 using Microsoft.CodeAnalysis.VisualBasic.Syntax;
 using System.IO.Compression;
-using System.Runtime.ExceptionServices;
 using System.Runtime.Loader;
 using CompilationUnitSyntax = Microsoft.CodeAnalysis.CSharp.Syntax.CompilationUnitSyntax;
 using ExpressionSyntax = Microsoft.CodeAnalysis.CSharp.Syntax.ExpressionSyntax;
@@ -351,7 +350,18 @@ public static class Dosai
     /// single multi-hundred-MB string, which is what drove peak RSS into the multi-GB range and eventually
     /// overflowed the string allocator on large assembly trees.
     /// </summary>
+    /// <remarks>
+    ///     Runs on a dedicated thread with <see cref="DedicatedStack.AnalysisStackSize" /> of stack. The
+    ///     source-analysis phases ask Roslyn for <c>IOperation</c> trees, and the operation factory recurses
+    ///     roughly one frame set per call in a chain, so one long fluent chain in ordinary C# overflows the
+    ///     default main-thread stack inside <c>SemanticModel.GetOperation</c> and terminates the process -
+    ///     an uncatchable failure that writes no output and names no file (issue #60). The larger stack
+    ///     moves that limit far beyond the chain depth of real code, for every caller of this entry point.
+    /// </remarks>
     public static MethodsSlice GetMethodsSlice(string path, Frameworks.FrameworkAnalysisOptions? frameworkOptions = null, BuildPreparationMode buildPreparation = BuildPreparationMode.None)
+        => DedicatedStack.Run("Dosai methods analysis", () => BuildMethodsSlice(path, frameworkOptions, buildPreparation));
+
+    private static MethodsSlice BuildMethodsSlice(string path, Frameworks.FrameworkAnalysisOptions? frameworkOptions, BuildPreparationMode buildPreparation)
     {
         DebugLog.Measure("methods.build-preparation", () => BuildPreparation.Prepare(path, buildPreparation));
         var purlResolver = DebugLog.Measure("methods.package-url-resolver", () => PackageUrlResolver.Create(path));
@@ -1267,18 +1277,12 @@ public static class Dosai
     }
 
     /// <summary>
-    ///     Stack reserved for assembly inspection. Reserved address space is committed only as
-    ///     it is used, so a large reservation costs nothing on the common, shallow path.
-    /// </summary>
-    private static readonly int AssemblyInspectionStackSize = Environment.Is64BitProcess ? 256 * 1024 * 1024 : 64 * 1024 * 1024;
-
-    /// <summary>
     /// Get all assembly methods for the given path to assembly or directory of assemblies
     /// </summary>
     /// <param name="path">Filesystem path to assembly file or directory containing assembly files</param>
     /// <returns>List of assembly methods</returns>
     /// <remarks>
-    ///     Runs on a dedicated thread with <see cref="AssemblyInspectionStackSize" /> of stack.
+    ///     Runs on a dedicated thread with <see cref="DedicatedStack.AnalysisStackSize" /> of stack.
     ///     The runtime type loader resolves a type's base chain recursively, and when a base
     ///     type fails to load - a build-output assembly whose dependency is not shipped next to
     ///     it - native exception handling amplifies the stack used per level
@@ -1289,28 +1293,7 @@ public static class Dosai
     ///     hierarchy depth of real libraries.
     /// </remarks>
     private static List<Method> GetAssemblyMethods(string path, ICollection<string> diagnostics)
-    {
-        List<Method>? methods = null;
-        ExceptionDispatchInfo? failure = null;
-        var inspection = new Thread(() =>
-        {
-            try
-            {
-                methods = InspectAssemblyMethods(path, diagnostics);
-            }
-            catch (Exception e)
-            {
-                failure = ExceptionDispatchInfo.Capture(e);
-            }
-        }, AssemblyInspectionStackSize)
-        {
-            Name = "Dosai assembly inspection"
-        };
-        inspection.Start();
-        inspection.Join();
-        failure?.Throw();
-        return methods!;
-    }
+        => DedicatedStack.Run("Dosai assembly inspection", () => InspectAssemblyMethods(path, diagnostics));
 
     private static List<Method> InspectAssemblyMethods(string path, ICollection<string> diagnostics)
     {
@@ -1884,6 +1867,18 @@ public static class Dosai
             options: new VisualBasicCompilationOptions(Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary));
         DebugLog.Count("visualbasic syntax trees", vbTrees.Count);
 
+        // Keyed lookups: a linear search per file was quadratic in the file count.
+        var csharpTreesByPath = new Dictionary<string, CSharpSyntaxTree>(StringComparer.Ordinal);
+        foreach (var tree in csharpTrees)
+        {
+            csharpTreesByPath.TryAdd(tree.FilePath, tree);
+        }
+        var vbTreesByPath = new Dictionary<string, VisualBasicSyntaxTree>(StringComparer.Ordinal);
+        foreach (var tree in vbTrees)
+        {
+            vbTreesByPath.TryAdd(tree.FilePath, tree);
+        }
+
         using var symbolAnalysisPhase = DebugLog.Phase("methods.symbol-analysis");
         foreach (var sourceFilePath in sourcesToInspect)
         {
@@ -1895,8 +1890,7 @@ public static class Dosai
 
             if (extn.Equals(Constants.CSharpSourceExtension))
             {
-                var tree = csharpTrees.FirstOrDefault(t => t.FilePath == sourceFilePath);
-                if (tree is null)
+                if (!csharpTreesByPath.TryGetValue(sourceFilePath, out var tree))
                 {
                     continue;
                 }
@@ -1905,8 +1899,7 @@ public static class Dosai
             }
             else if (extn.Equals(Constants.VBSourceExtension))
             {
-                var tree = vbTrees.FirstOrDefault(t => t.FilePath == sourceFilePath);
-                if (tree is null)
+                if (!vbTreesByPath.TryGetValue(sourceFilePath, out var tree))
                 {
                     continue;
                 }
@@ -1916,6 +1909,11 @@ public static class Dosai
             else
             {
                 continue;
+            }
+
+            if (OperationDepthGuard.Describe(model.SyntaxTree) is { } depthDiagnostic)
+            {
+                sourceDiagnostics.Add(depthDiagnostic);
             }
 
             var csMethodDeclarations = csRoot?.DescendantNodes().OfType<MethodDeclarationSyntax>();
@@ -2713,12 +2711,17 @@ public static class Dosai
                 foreach (var operationNode in operationNodes)
                 {
                     var operation = operationNode is GlobalStatementSyntax globalStatement
-                        ? model.GetOperation(globalStatement.Statement)
-                        : model.GetOperation(operationNode);
+                        ? OperationDepthGuard.GetOperation(model, globalStatement.Statement)
+                        : OperationDepthGuard.GetOperation(model, operationNode);
                     if (operation is not null)
                     {
                         walker.Visit(operation);
                     }
+                }
+
+                if (walker.DepthBudgetExceeded)
+                {
+                    sourceDiagnostics.Add($"{sourceFilePath}: operations nested past the call-graph walker's depth budget were skipped; calls inside them are missing from MethodCalls and the call graph.");
                 }
             }
         }
@@ -3136,6 +3139,52 @@ public static class Dosai
         private const int MaxUnresolvedCallsPerFile = 512;
         private readonly HashSet<string> unresolvedCallKeys = new(StringComparer.Ordinal);
 
+        // Roots overlap: every block, initializer and (VB) statement is handed to this walker,
+        // and each nested one is already inside its parent's operation tree, which recorded a
+        // call once per enclosing block and walked each member once per nesting level.
+        private readonly HashSet<IOperation> visitedOperations = new(ReferenceEqualityComparer.Instance);
+
+        // Every call of a fluent chain starts at the chain's first token, and resolving the
+        // enclosing symbol descends the tree to that position, so one lookup per call made a
+        // chain quadratic.
+        private readonly Dictionary<int, ISymbol?> enclosingSymbols = [];
+
+        // Calls carry no source text here, so the budget can follow the stack (and the
+        // OperationDepthGuard limit) and keep every call of a long chain in the graph.
+        protected override int MaxAnalysisDepth => 1 << 17;
+
+        public override void Visit(IOperation? operation)
+        {
+            if (operation is null)
+            {
+                return;
+            }
+
+            if (MaxDepthReached)
+            {
+                // Left unmarked so a nested root handed over later still covers it; the base
+                // records the truncation.
+                base.Visit(operation);
+                return;
+            }
+
+            if (visitedOperations.Add(operation))
+            {
+                base.Visit(operation);
+            }
+        }
+
+        private ISymbol? EnclosingSymbol(int position)
+        {
+            if (!enclosingSymbols.TryGetValue(position, out var symbol))
+            {
+                symbol = model.GetEnclosingSymbol(position);
+                enclosingSymbols[position] = symbol;
+            }
+
+            return symbol;
+        }
+
         public override void VisitInvocation(IInvocationOperation operation)
         {
             AddMethodCall(operation, operation.TargetMethod, CallType.MethodCall, operation.Arguments);
@@ -3169,7 +3218,7 @@ public static class Dosai
             {
                 return;
             }
-            if (model.GetEnclosingSymbol(operation.Syntax.SpanStart) is not IMethodSymbol callerSymbol)
+            if (EnclosingSymbol(operation.Syntax.SpanStart) is not IMethodSymbol callerSymbol)
             {
                 return;
             }
@@ -3382,7 +3431,7 @@ public static class Dosai
 
         private void AddMethodCall(IOperation operation, IMethodSymbol? targetMethod, CallType callType, IEnumerable<IArgumentOperation> arguments)
         {
-            if (targetMethod is null || model.GetEnclosingSymbol(operation.Syntax.SpanStart) is not IMethodSymbol callerSymbol)
+            if (targetMethod is null || EnclosingSymbol(operation.Syntax.SpanStart) is not IMethodSymbol callerSymbol)
             {
                 return;
             }
@@ -3649,7 +3698,7 @@ public static class Dosai
 
         private void AddInferredMethodCall(IOperation operation, IMethodSymbol targetMethod, CallType callType, IEnumerable<IArgumentOperation> arguments, List<string> argumentExpressions, AnalysisEvidenceKind evidenceKind, string description, string confidence, IMethodSymbol? callerOverride = null, string? dispatchConfidence = null)
         {
-            if ((callerOverride ?? model.GetEnclosingSymbol(operation.Syntax.SpanStart)) is not IMethodSymbol callerSymbol)
+            if ((callerOverride ?? EnclosingSymbol(operation.Syntax.SpanStart)) is not IMethodSymbol callerSymbol)
             {
                 return;
             }

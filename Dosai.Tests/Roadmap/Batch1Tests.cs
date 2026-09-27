@@ -41,9 +41,9 @@ public static class Dedup
     public void DataFlows_DeepNesting_EmitsWalkerBudgetDiagnostic()
     {
         using var directory = new RoadmapTemporaryDirectory();
-        // 260 nested binary operations: past the 200-level walker budget.
+        // 1,100 nested binary operations: past the 1,024-level data-flow walker budget.
         var expression = "input";
-        for (var depth = 0; depth < 260; depth++)
+        for (var depth = 0; depth < 1_100; depth++)
         {
             expression = $"({expression} + \"x\")";
         }

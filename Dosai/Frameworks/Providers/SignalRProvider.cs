@@ -319,7 +319,11 @@ public sealed class SignalRProvider : IFrameworkProvider
                 }
 
                 // ---- IHubContext<T> usage ----
-                foreach (var invocation in root.DescendantNodes().OfType<InvocationExpressionSyntax>())
+                // A receiver can only name IHubContext<T> when the file text does. Without this gate
+                // every invocation rendered its whole receiver, so one fluent chain of N calls cost
+                // O(N^2) text in a file that never mentions SignalR (owasp-dep-scan/dosai#60).
+                var mayUseHubContext = hubContextTypes.Count > 0 && fileText.Contains("IHubContext", StringComparison.Ordinal);
+                foreach (var invocation in mayUseHubContext ? root.DescendantNodes().OfType<InvocationExpressionSyntax>() : [])
                 {
                     var receiver = invocation.Expression as MemberAccessExpressionSyntax;
                     var receiverTypeName = receiver?.Expression.ToString();
