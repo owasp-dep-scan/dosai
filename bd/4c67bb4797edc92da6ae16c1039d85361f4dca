@@ -1,0 +1,29 @@
+docs/compiler-engineering.md
+  s_c49eb31e317cab::t_5746fa284ba43a 136
+AGENTS.md
+  s_c49eb31e317cab::t_5746fa284ba43a 73-99
+docs/migration-5.1.0.md
+  s_c49eb31e317cab::t_5746fa284ba43a 80-109
+docs/commands.md
+  s_c49eb31e317cab::t_5746fa284ba43a 125-127,145
+docs/ARCHITECTURE.md
+  s_c49eb31e317cab::t_5746fa284ba43a 241
+docs/migration-4.1.0.md
+  s_c49eb31e317cab::t_5746fa284ba43a 23
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "bd4c67bb4797edc92da6ae16c1039d85361f4dca",
+  "prompts": {},
+  "sessions": {
+    "s_c49eb31e317cab": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3f2c4695-4d8f-41c7-8a07-f27eb3294e64",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
