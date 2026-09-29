@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 
 namespace Depscan;
@@ -238,7 +239,10 @@ public static class DosaiQueryEngine
             _ => value.ToString()
         };
 
-        if (double.TryParse(actual, out var actualNumber) && double.TryParse(expected, out var expectedNumber))
+        // JSON numbers and query literals are invariant text: a current-culture parse read "7.5"
+        // as 75 under de-DE (issue #63) and failed under sv-SE, changing which elements matched.
+        if (double.TryParse(actual, NumberStyles.Float, CultureInfo.InvariantCulture, out var actualNumber) &&
+            double.TryParse(expected, NumberStyles.Float, CultureInfo.InvariantCulture, out var expectedNumber))
         {
             return op switch
             {

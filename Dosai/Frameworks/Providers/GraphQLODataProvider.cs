@@ -1,6 +1,7 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using System.Globalization;
 
 namespace Depscan.Frameworks.Providers;
 
@@ -75,11 +76,11 @@ foreach (var tree in ctx.CSharpTrees)
                     var depthArg = invocation.ArgumentList.Arguments.FirstOrDefault()?.Expression;
                     if (depthArg is LiteralExpressionSyntax literal && literal.Token.Value is int depth)
                     {
-                        maxExecutionDepth = depth.ToString();
+                        maxExecutionDepth = depth.ToString(CultureInfo.InvariantCulture);
                     }
-                    else if (depthArg is LiteralExpressionSyntax stringLiteral && int.TryParse(stringLiteral.Token.Text, out var parsedDepth))
+                    else if (depthArg is LiteralExpressionSyntax stringLiteral && int.TryParse(stringLiteral.Token.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedDepth))
                     {
-                        maxExecutionDepth = parsedDepth.ToString();
+                        maxExecutionDepth = parsedDepth.ToString(CultureInfo.InvariantCulture);
                     }
                 }
             }

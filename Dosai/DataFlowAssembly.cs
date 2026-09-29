@@ -1534,7 +1534,7 @@ public static partial class DataFlowAnalyzer
             }
 
             var separator = marker.IndexOf(':');
-            if (!int.TryParse(marker[(separator + 1)..], out var slotIndex))
+            if (!int.TryParse(marker[(separator + 1)..], NumberStyles.None, CultureInfo.InvariantCulture, out var slotIndex))
             {
                 continue;
             }

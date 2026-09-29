@@ -8,6 +8,7 @@ using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.Operations;
 using Microsoft.CodeAnalysis.VisualBasic;
 using CSharpSyntax = Microsoft.CodeAnalysis.CSharp.Syntax;
+using System.Globalization;
 using VisualBasicSyntax = Microsoft.CodeAnalysis.VisualBasic.Syntax;
 
 namespace Depscan;
@@ -570,7 +571,7 @@ public static class CryptoAnalyzer
         }
 
         var pbkdf2 = Regex.Match(line, @"Rfc2898DeriveBytes\s*\([^\n;]*(?<iterations>\b\d{1,6}\b)");
-        if (pbkdf2.Success && int.TryParse(pbkdf2.Groups["iterations"].Value, out var iterations) && iterations < 100_000)
+        if (pbkdf2.Success && int.TryParse(pbkdf2.Groups["iterations"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var iterations) && iterations < 100_000)
         {
             var location = CreateLocation(basePath, file, lineNumber, Math.Max(1, pbkdf2.Index + 1));
             var methodId = ResolveMethodId(reachability, file, namespaceName, className, methodName);
@@ -1670,12 +1671,12 @@ public static class CryptoBomExporter
                 properties = ToProperties(new Dictionary<string, string?>
                 {
                     ["dosai:inputPath"] = result.Metadata.InputPath,
-                    ["dosai:crypto:assetCount"] = result.Statistics.AssetCount.ToString(),
-                    ["dosai:crypto:operationCount"] = result.Statistics.OperationCount.ToString(),
-                    ["dosai:crypto:materialCount"] = result.Statistics.MaterialCount.ToString(),
-                    ["dosai:crypto:protocolCount"] = result.Statistics.ProtocolCount.ToString(),
-                    ["dosai:crypto:findingCount"] = result.Statistics.FindingCount.ToString(),
-                    ["dosai:crypto:dataFlowSliceCount"] = result.Statistics.CryptoDataFlowSliceCount.ToString()
+                    ["dosai:crypto:assetCount"] = result.Statistics.AssetCount.ToString(CultureInfo.InvariantCulture),
+                    ["dosai:crypto:operationCount"] = result.Statistics.OperationCount.ToString(CultureInfo.InvariantCulture),
+                    ["dosai:crypto:materialCount"] = result.Statistics.MaterialCount.ToString(CultureInfo.InvariantCulture),
+                    ["dosai:crypto:protocolCount"] = result.Statistics.ProtocolCount.ToString(CultureInfo.InvariantCulture),
+                    ["dosai:crypto:findingCount"] = result.Statistics.FindingCount.ToString(CultureInfo.InvariantCulture),
+                    ["dosai:crypto:dataFlowSliceCount"] = result.Statistics.CryptoDataFlowSliceCount.ToString(CultureInfo.InvariantCulture)
                 })
             },
             ["components"] = components,
@@ -1773,7 +1774,7 @@ public static class CryptoBomExporter
         .Select(kvp => new { name = kvp.Key, value = kvp.Value })
         .ToArray();
 
-    private static int[] ParseCwe(string cwe) => int.TryParse(cwe.Replace("CWE-", string.Empty, StringComparison.OrdinalIgnoreCase), out var number) ? [number] : [];
+    private static int[] ParseCwe(string cwe) => int.TryParse(cwe.Replace("CWE-", string.Empty, StringComparison.OrdinalIgnoreCase), NumberStyles.None, CultureInfo.InvariantCulture, out var number) ? [number] : [];
 
     private static string FormatLocation(CodeLocation location) => $"{location.Path ?? location.FileName}:{location.LineNumber}:{location.ColumnNumber}";
 }

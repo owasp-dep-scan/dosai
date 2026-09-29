@@ -32,4 +32,7 @@
   <ItemGroup>
     <InternalsVisibleTo Include="Dosai.Tests" />
   </ItemGroup>
+  <ItemGroup>
+    <GlobalAnalyzerConfigFiles Include="Globalization.globalconfig" />
+  </ItemGroup>
 </Project>

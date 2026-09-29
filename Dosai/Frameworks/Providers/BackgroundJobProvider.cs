@@ -340,12 +340,12 @@ foreach (var tree in ctx.CSharpTrees)
             return $"daily at {hour.PadLeft(2, '0')}:{minute.PadLeft(2, '0')}";
         }
 
-        if (minute.StartsWith("*/") && hour == "*")
+        if (minute.StartsWith("*/", StringComparison.Ordinal) && hour == "*")
         {
             return $"every {minute[2..]} minutes";
         }
 
-        if (hour.StartsWith("*/"))
+        if (hour.StartsWith("*/", StringComparison.Ordinal))
         {
             return $"every {hour[2..]} hours";
         }

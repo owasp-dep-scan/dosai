@@ -1,14 +1,12 @@
-using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using System.Text.RegularExpressions;
 using Depscan;
 using Xunit;
 
 namespace Dosai.Tests;
 
-// Regression tests for three filed issues, each written against the reported reproduction:
-// - #63 locale-dependent output (Turkish title-casing, Swedish minus sign and decimal comma)
+// Regression tests written against the reported reproductions (locale tests for #63 live in
+// LocaleInvarianceTests.cs):
 // - #64 the Roslyn InvalidOperationException on a generic method over a generic interface
 // - #65 symbol analysis on one core and super-linear in the file count (parallel workers,
 //   bucketed dispatch, memoized lookups, byte-identical output to the sequential path)
@@ -21,137 +19,6 @@ public partial class DosaiTests
     {
         Converters = { new JsonStringEnumConverter() }
     };
-
-    /// <summary>Runs the enclosed test code under a named culture, restoring both cultures after.</summary>
-    private sealed class CultureScope : IDisposable
-    {
-        private readonly CultureInfo _culture;
-        private readonly CultureInfo _uiCulture;
-
-        public CultureScope(string name)
-        {
-            _culture = CultureInfo.CurrentCulture;
-            _uiCulture = CultureInfo.CurrentUICulture;
-            var replacement = new CultureInfo(name);
-            CultureInfo.CurrentCulture = replacement;
-            CultureInfo.CurrentUICulture = replacement;
-        }
-
-        public void Dispose()
-        {
-            CultureInfo.CurrentCulture = _culture;
-            CultureInfo.CurrentUICulture = _uiCulture;
-        }
-    }
-
-    #region Issue #63 - locale-independent output
-
-    [Fact]
-    public void GetMethods_TurkishLocale_KeepsModifierAndParameterTypeCasingInvariant()
-    {
-        // The exact 21-line repro shape from the issue: under tr-TR, title-casing "internal"
-        // produced "İnternal" (U+0130) and "int" produced "İnt" in the JSON.
-        using var tempDirectory = new TemporaryDirectory();
-        File.WriteAllText(Path.Combine(tempDirectory.Path, "Sample.cs"), """
-internal class Sample
-{
-    internal int Count(int items, string name) => items;
-}
-""");
-
-        string json;
-        using (new CultureScope("tr-TR"))
-        {
-            json = Depscan.Dosai.GetMethods(tempDirectory.Path);
-        }
-
-        var slice = JsonSerializer.Deserialize<MethodsSlice>(json, JsonStringEnums);
-        var count = Assert.Single(slice!.Methods!, method => method.Name == "Count");
-        Assert.Equal("Internal", count.Attributes);
-        Assert.Equal("Int", Assert.Single(count.Parameters!, parameter => parameter.Name == "items").Type);
-        Assert.Equal("String", Assert.Single(count.Parameters!, parameter => parameter.Name == "name").Type);
-    }
-
-    [Fact]
-    public void GetDataFlows_SwedishLocale_FormatsNegativeSinkArgumentInvariantly()
-    {
-        // A sink invoked on a tainted receiver records SinkArgumentIndex -1; under sv-SE that
-        // interpolated as U+2212 MINUS SIGN in the slice summary. FakeCommand keeps the fixture
-        // self-contained: "ExecuteNonQuery" is an exact-name sink pattern, and a constructor
-        // argument's taint taints the created instance.
-        using var tempDirectory = new TemporaryDirectory();
-        File.WriteAllText(Path.Combine(tempDirectory.Path, "ReceiverSink.cs"), """
-class FakeCommand
-{
-    public FakeCommand(string sql)
-    {
-        Sql = sql;
-    }
-
-    public string Sql { get; }
-    public int ExecuteNonQuery() => 0;
-}
-
-class ReceiverSinkSample
-{
-    static void Main(string[] args)
-    {
-        var command = new FakeCommand(args[0]);
-        command.ExecuteNonQuery();
-    }
-}
-""");
-
-        string json;
-        using (new CultureScope("sv-SE"))
-        {
-            json = DataFlowAnalyzer.GetDataFlows(tempDirectory.Path);
-        }
-
-        var result = JsonSerializer.Deserialize<DataFlowResult>(json, JsonStringEnums);
-        Assert.NotNull(result);
-        var receiverSlice = Assert.Single(result.Slices!, slice => slice.SinkArgumentIndex == -1);
-        Assert.EndsWith("argument -1.", receiverSlice.Summary);
-        // No summary in the whole result may carry a locale minus sign or digit grouping.
-        Assert.DoesNotContain(result.Slices!, slice => slice.Summary.Contains('\u2212'));
-    }
-
-    [Fact]
-    public void DebugLog_SwedishLocale_UsesInvariantTimestampsAndByteFormats()
-    {
-        using var cultureScope = new CultureScope("sv-SE");
-
-        // Byte formatting rounds through the invariant culture: "1.3 GB", never "1,3 GB".
-        Assert.Equal("1.3 GB", DebugLog.FormatBytes(1395864371));
-        Assert.Equal("15 KB", DebugLog.FormatBytes(15 * 1024 + 300));
-
-        var recorder = new LineRecorder();
-        lock (ConsoleOutputLock)
-        {
-            var originalError = Console.Error;
-            Console.SetError(recorder);
-            try
-            {
-                DebugLog.Configure(true);
-                using (DebugLog.Phase("locale-invariance-test"))
-                {
-                }
-            }
-            finally
-            {
-                DebugLog.Configure(false);
-                Console.SetError(originalError);
-            }
-        }
-
-        var lines = recorder.Snapshot();
-        Assert.Contains(lines, line => Regex.IsMatch(line, @"^\[dosai \+\d+\.\d{3}s\] start locale-invariance-test$"));
-        Assert.Contains(lines, line => Regex.IsMatch(line, @"^\[dosai \+\d+\.\d{3}s\] end locale-invariance-test in \d+\.\d{3}s, managed heap \d+ [KMG]B, working set \d+(\.\d+)? [KMG]B$"));
-        // A decimal comma anywhere in a timestamp is the regression this test guards against.
-        Assert.DoesNotContain(lines, line => line.Contains(",]"));
-    }
-
-    #endregion
 
     #region Issue #64 - Roslyn failure on generic method over a generic interface
 

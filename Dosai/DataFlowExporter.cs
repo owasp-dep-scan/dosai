@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security;
 using System.Text;
 
@@ -105,7 +106,7 @@ public static class DataFlowExporter
             AppendGraphMlData(builder, "purl", node.Purl, 6);
             AppendGraphMlData(builder, "file", node.FileName, 6);
             AppendGraphMlData(builder, "method", node.MethodName, 6);
-            AppendGraphMlData(builder, "line", node.LineNumber.ToString(), 6);
+            AppendGraphMlData(builder, "line", node.LineNumber.ToString(CultureInfo.InvariantCulture), 6);
             AppendGraphMlData(builder, "category", node.Category, 6);
             AppendGraphMlData(builder, "source", node.IsSource.ToString().ToLowerInvariant(), 6);
             AppendGraphMlData(builder, "sink", node.IsSink.ToString().ToLowerInvariant(), 6);
@@ -121,7 +122,7 @@ public static class DataFlowExporter
             AppendGraphMlData(builder, "edge_sourcePurl", edge.SourcePurl, 6);
             AppendGraphMlData(builder, "edge_targetPurl", edge.TargetPurl, 6);
             AppendGraphMlData(builder, "edge_file", edge.FileName, 6);
-            AppendGraphMlData(builder, "edge_line", edge.LineNumber.ToString(), 6);
+            AppendGraphMlData(builder, "edge_line", edge.LineNumber.ToString(CultureInfo.InvariantCulture), 6);
             builder.AppendLine("    </edge>");
         }
 
@@ -159,7 +160,7 @@ public static class DataFlowExporter
             AppendGexfValue(builder, "purl", node.Purl, 10);
             AppendGexfValue(builder, "file", node.FileName, 10);
             AppendGexfValue(builder, "method", node.MethodName, 10);
-            AppendGexfValue(builder, "line", node.LineNumber.ToString(), 10);
+            AppendGexfValue(builder, "line", node.LineNumber.ToString(CultureInfo.InvariantCulture), 10);
             AppendGexfValue(builder, "category", node.Category, 10);
             AppendGexfValue(builder, "source", node.IsSource.ToString().ToLowerInvariant(), 10);
             AppendGexfValue(builder, "sink", node.IsSink.ToString().ToLowerInvariant(), 10);
