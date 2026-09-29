@@ -1433,7 +1433,7 @@ public static class Dosai
                     // otherwise noise on large trees.
                     if (assemblyWatch.Elapsed.TotalSeconds >= 1)
                     {
-                        DebugLog.Log($"assembly '{fileName}': {assemblyMethods.Count - membersBefore} members in {assemblyWatch.Elapsed.TotalSeconds:F3}s");
+                        DebugLog.Log(string.Create(CultureInfo.InvariantCulture, $"assembly '{fileName}': {assemblyMethods.Count - membersBefore} members in {assemblyWatch.Elapsed.TotalSeconds:F3}s"));
                     }
                 }
             }
@@ -1676,6 +1676,47 @@ public static class Dosai
         return keywords.Contains(word);
     }
 
+    /// <summary>
+    ///     Title-cases modifiers and parameter type names through the invariant culture so the
+    ///     JSON is identical on every machine: <c>CultureInfo.CurrentCulture.TextInfo</c> applies
+    ///     the running locale's casing rules, and a Turkish locale turned "internal" into
+    ///     "İnternal" and "int" into "İnt" (issue #63).
+    /// </summary>
+    private static string TitleCase(string value) => CultureInfo.InvariantCulture.TextInfo.ToTitleCase(value);
+
+    /// <summary>
+    ///     Upper bound on the parallel per-file symbol-analysis workers (issue #65). Defaults to
+    ///     one worker per processor; <c>DOSAI_SYMBOL_ANALYSIS_WORKERS</c> overrides it for
+    ///     memory-constrained hosts. Each worker reserves a large analysis stack, so the bound
+    ///     also bounds reserved address space. Internal and mutable so tests can pin the count
+    ///     and compare a parallel run against a sequential one.
+    /// </summary>
+    internal static int MaxSymbolAnalysisWorkers { get; set; } = ResolveDefaultSymbolAnalysisWorkers();
+
+    private static int ResolveDefaultSymbolAnalysisWorkers()
+    {
+        var raw = Environment.GetEnvironmentVariable("DOSAI_SYMBOL_ANALYSIS_WORKERS");
+        return int.TryParse(raw, out var parsed) && parsed > 0 ? parsed : Environment.ProcessorCount;
+    }
+
+    /// <summary>
+    ///     Per-file symbol-analysis output. The per-file body of
+    ///     <see cref="GetSourceMethods" /> fills one collector per file on whichever worker owns
+    ///     it, and the collectors merge in file order afterwards, keeping the aggregated output
+    ///     byte-identical to a sequential run (issue #65).
+    /// </summary>
+    private sealed class SourceFileSymbols
+    {
+        public List<Method> Methods { get; } = [];
+        public List<Dependency> UsingDirectives { get; } = [];
+        public List<MethodCalls> MethodCalls { get; } = [];
+        public List<PropertyInfo> Properties { get; } = [];
+        public List<FieldInfo> Fields { get; } = [];
+        public List<EventInfo> Events { get; } = [];
+        public List<ConstructorInfo> Constructors { get; } = [];
+        public List<string> Diagnostics { get; } = [];
+    }
+
     private static Method CreateMethodFromSymbol(
         IMethodSymbol methodSymbol,
         SemanticModel model,
@@ -1731,7 +1772,7 @@ public static class Dosai
             Module = module?.ToDisplayString() ?? "",
             Namespace = containingNamespace?.ToDisplayString() ?? "",
             ClassName = GetNamedContainingTypeName(methodSymbol),
-            Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
+            Attributes = TitleCase(string.Join(", ", modifiers)),
             Name = methodSymbol.Name,
             ReturnType = methodSymbol.ReturnType.ToDisplayString(),
             LineNumber = lineNumber,
@@ -1767,17 +1808,19 @@ public static class Dosai
         sourcesToInspect.AddRange(GetFilesToInspect(path, Constants.VBSourceExtension));
         sourcesToInspect.AddRange(GetFilesToInspect(path, Constants.FSharpSourceExtension));
         var sourceMode = sourcesToInspect.Count > 0;
-        var sourceMethods = new List<Method>();
-        var allUsingDirectives = new List<Dependency>();
-        var allMethodCalls = new List<MethodCalls>();
-        var properties = new List<PropertyInfo>();
-        var fields = new List<FieldInfo>();
-        var events = new List<EventInfo>();
-        var constructors = new List<ConstructorInfo>();
+        // Aggregated across all files (and all parallel workers) after the per-file loop; the
+        // per-file locals inside AnalyzeSourceFile keep their historical names.
+        var mergedMethods = new List<Method>();
+        var mergedUsings = new List<Dependency>();
+        var mergedMethodCalls = new List<MethodCalls>();
+        var mergedProperties = new List<PropertyInfo>();
+        var mergedFields = new List<FieldInfo>();
+        var mergedEvents = new List<EventInfo>();
+        var mergedConstructors = new List<ConstructorInfo>();
         var sourceAssemblyMappings = new List<SourceAssemblyMapping>();
         // Per-symbol attribute-extraction failures (issue #56 containment) collect here and
         // surface in MethodsSlice.Diagnostics instead of aborting the scan.
-        var sourceDiagnostics = new List<string>();
+        var mergedDiagnostics = new List<string>();
         var dispatchIndexes = new Dictionary<Compilation, DispatchResolver.SourceIndex>();
         var metadataReferences = new Dictionary<string, PortableExecutableReference>(StringComparer.OrdinalIgnoreCase);
 #pragma warning disable IL3000
@@ -1879,9 +1922,40 @@ public static class Dosai
             vbTreesByPath.TryAdd(tree.FilePath, tree);
         }
 
-        using var symbolAnalysisPhase = DebugLog.Phase("methods.symbol-analysis");
-        foreach (var sourceFilePath in sourcesToInspect)
+        // Dispatch indexes are built once, up front: they are shared read-only state for the
+        // per-file workers below, and building them eagerly also gives their non-trivial cost
+        // (every object-creation site in the compilation) its own phase instead of hiding it in
+        // the first file's slice of the symbol-analysis clock.
+        using (DebugLog.Phase("methods.dispatch-index"))
         {
+            if (csharpTrees.Count > 0)
+            {
+                dispatchIndexes[csharpCompilation] = DispatchResolver.SourceIndex.Create(csharpCompilation);
+            }
+
+            if (vbTrees.Count > 0)
+            {
+                dispatchIndexes[vbCompilation] = DispatchResolver.SourceIndex.Create(vbCompilation);
+            }
+        }
+
+        using var symbolAnalysisPhase = DebugLog.Phase("methods.symbol-analysis");
+
+        // The per-file body below is pure with respect to its file: everything it produces goes
+        // into the per-file collector, and everything it reads (compilations, tree lookups,
+        // dispatch indexes, the base path) is immutable by the time the first file starts. That
+        // is what lets the same body run on one thread or on the worker team (issue #65).
+        SourceFileSymbols AnalyzeSourceFile(string sourceFilePath)
+        {
+            var symbols = new SourceFileSymbols();
+            var sourceMethods = symbols.Methods;
+            var allUsingDirectives = symbols.UsingDirectives;
+            var allMethodCalls = symbols.MethodCalls;
+            var properties = symbols.Properties;
+            var fields = symbols.Fields;
+            var events = symbols.Events;
+            var constructors = symbols.Constructors;
+            var sourceDiagnostics = symbols.Diagnostics;
             var fileName = Path.GetFileName(sourceFilePath);
             var extn = Path.GetExtension(sourceFilePath);
             SemanticModel? model;
@@ -1892,7 +1966,8 @@ public static class Dosai
             {
                 if (!csharpTreesByPath.TryGetValue(sourceFilePath, out var tree))
                 {
-                    continue;
+                    // The loop's `continue` over an unparseable file is an empty result here.
+                    return symbols;
                 }
                 csRoot = tree.GetCompilationUnitRoot();
                 model = csharpCompilation.GetSemanticModel(tree);
@@ -1901,14 +1976,14 @@ public static class Dosai
             {
                 if (!vbTreesByPath.TryGetValue(sourceFilePath, out var tree))
                 {
-                    continue;
+                    return symbols;
                 }
                 vbRoot = tree.GetCompilationUnitRoot();
                 model = vbCompilation.GetSemanticModel(tree);
             }
             else
             {
-                continue;
+                return symbols;
             }
 
             if (OperationDepthGuard.Describe(model.SyntaxTree) is { } depthDiagnostic)
@@ -1967,7 +2042,7 @@ public static class Dosai
                             Module = methodSymbol.ContainingModule.ToDisplayString(),
                             Namespace = methodSymbol.ContainingNamespace.ToDisplayString(),
                             ClassName = GetNamedContainingTypeName(methodSymbol),
-                            Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
+                            Attributes = TitleCase(string.Join(", ", modifiers)),
                             Name = methodSymbol.Name,
                             ReturnType = methodSymbol.ReturnType.ToDisplayString(),
                             LineNumber = lineNumber,
@@ -1975,7 +2050,7 @@ public static class Dosai
                             Parameters = methodSymbol.Parameters.Select(p => new Parameter
                             {
                                 Name = p.Name,
-                                Type = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(p.Type.ToString()!),
+                                Type = TitleCase(p.Type.ToString()!),
                                 TypeFullName = p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
                                 IsGenericParameter = p.Type is ITypeParameterSymbol
                             }).ToList(),
@@ -2017,7 +2092,7 @@ public static class Dosai
                     Parameters = topLevelMain.Parameters.Select(p => new Parameter
                     {
                         Name = p.Name,
-                        Type = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(p.Type.ToString()!),
+                        Type = TitleCase(p.Type.ToString()!),
                         TypeFullName = p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
                         IsGenericParameter = p.Type is ITypeParameterSymbol
                     }).ToList(),
@@ -2058,14 +2133,14 @@ public static class Dosai
                             Module = method.ContainingModule.ToDisplayString(),
                             Namespace = method.ContainingNamespace.ToDisplayString(),
                             ClassName = method.ContainingType.Name,
-                            Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
+                            Attributes = TitleCase(string.Join(", ", modifiers)),
                             Name = method.Name,
                             ReturnType = method.ReturnType.Name,
                             LineNumber = lineNumber,
                             ColumnNumber = columnNumber,
                             Parameters = method.Parameters.Select(p => new Parameter {
                                 Name = p.Name,
-                                Type = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(p.Type.ToString()!),
+                                Type = TitleCase(p.Type.ToString()!),
                                 TypeFullName = p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
                             }).ToList(),
                             CustomAttributes = ExtractCustomAttributes(method, sourceDiagnostics),
@@ -2108,7 +2183,7 @@ public static class Dosai
                             Module = propertySymbol.ContainingModule.ToDisplayString(),
                             Namespace = propertySymbol.ContainingNamespace.ToDisplayString(),
                             ClassName = GetNamedContainingTypeName(propertySymbol),
-                            Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
+                            Attributes = TitleCase(string.Join(", ", modifiers)),
                             Name = propertySymbol.Name,
                             Type = propertySymbol.Type.Name,
                             TypeFullName = propertySymbol.Type.ToDisplayString(),
@@ -2166,7 +2241,7 @@ public static class Dosai
                             Module = propertySymbol.ContainingModule.ToDisplayString(),
                             Namespace = propertySymbol.ContainingNamespace.ToDisplayString(),
                             ClassName = GetNamedContainingTypeName(propertySymbol),
-                            Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
+                            Attributes = TitleCase(string.Join(", ", modifiers)),
                             Name = propertySymbol.Name,
                             Type = propertySymbol.Type.Name,
                             TypeFullName = propertySymbol.Type.ToDisplayString(),
@@ -2227,7 +2302,7 @@ public static class Dosai
                             Module = model.Compilation.Assembly.Modules.FirstOrDefault()?.ToDisplayString(),
                             Namespace = containingTypeSymbol?.ContainingNamespace?.ToDisplayString() ?? model.Compilation.Assembly.Name,
                             ClassName = GetContainingTypeName(fieldDeclaration),
-                            Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
+                            Attributes = TitleCase(string.Join(", ", modifiers)),
                             Name = variable.Identifier.Text,
                             Type = typeSymbol?.Name ?? type.ToString(),
                             TypeFullName = typeSymbol?.ToDisplayString() ?? type.ToString(),
@@ -2288,7 +2363,7 @@ public static class Dosai
                                 Module = model?.Compilation.Assembly.Modules.FirstOrDefault()?.ToDisplayString(),
                                 Namespace = containingTypeSymbol?.ContainingNamespace?.ToDisplayString() ?? model?.Compilation.Assembly.Name,
                                 ClassName = GetContainingTypeNameVb(fieldDeclaration), // Use VB-specific method
-                                Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
+                                Attributes = TitleCase(string.Join(", ", modifiers)),
                                 Name = variable.Names.FirstOrDefault()?.Identifier.Text ?? "",
                                 Type = typeSymbol?.Name ?? type?.ToString() ?? "Unknown",
                                 TypeFullName = typeSymbol?.ToDisplayString() ?? type?.ToString(),
@@ -2344,7 +2419,7 @@ public static class Dosai
                             Module = eventSymbol.ContainingModule.ToDisplayString(),
                             Namespace = eventSymbol.ContainingNamespace.ToDisplayString(),
                             ClassName = GetNamedContainingTypeName(eventSymbol),
-                            Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
+                            Attributes = TitleCase(string.Join(", ", modifiers)),
                             Name = eventSymbol.Name,
                             Type = eventSymbol.Type.Name,
                             TypeFullName = eventSymbol.Type.ToDisplayString(),
@@ -2392,7 +2467,7 @@ public static class Dosai
                             Module = variableSymbol?.ContainingModule.ToDisplayString() ?? model?.Compilation.Assembly.Modules.FirstOrDefault()?.ToDisplayString(),
                             Namespace = variableSymbol?.ContainingNamespace.ToDisplayString() ?? model?.Compilation.Assembly.Name,
                             ClassName = variableSymbol is null ? GetContainingTypeName(eventFieldDeclaration) : GetNamedContainingTypeName(variableSymbol),
-                            Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
+                            Attributes = TitleCase(string.Join(", ", modifiers)),
                             Name = variable.Identifier.Text,
                             Type = typeSymbol?.Name ?? type.ToString(),
                             TypeFullName = typeSymbol?.ToDisplayString() ?? type.ToString(),
@@ -2447,7 +2522,7 @@ public static class Dosai
                             Module = eventSymbol.ContainingModule.ToDisplayString(),
                             Namespace = eventSymbol.ContainingNamespace.ToDisplayString(),
                             ClassName = GetNamedContainingTypeName(eventSymbol),
-                            Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
+                            Attributes = TitleCase(string.Join(", ", modifiers)),
                             Name = eventSymbol.Name,
                             Type = eventSymbol.Type.Name,
                             TypeFullName = eventSymbol.Type.ToDisplayString(),
@@ -2497,7 +2572,7 @@ public static class Dosai
                             Module = constructorSymbol.ContainingModule.ToDisplayString(),
                             Namespace = constructorSymbol.ContainingNamespace.ToDisplayString(),
                             ClassName = containingType?.Name,
-                            Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
+                            Attributes = TitleCase(string.Join(", ", modifiers)),
                             Name = containingType?.Name,
                             ReturnType = "Void",
                             LineNumber = lineNumber,
@@ -2507,7 +2582,7 @@ public static class Dosai
                             Parameters = constructorSymbol.Parameters.Select(p => new Parameter
                             {
                                 Name = p.Name,
-                                Type = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(p.Type.ToString()!),
+                                Type = TitleCase(p.Type.ToString()!),
                                 TypeFullName = p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
                                 IsGenericParameter = p.Type is ITypeParameterSymbol
                             }).ToList(),
@@ -2554,14 +2629,14 @@ public static class Dosai
                                 Module = constructorSymbol.ContainingModule.ToDisplayString(),
                                 Namespace = constructorSymbol.ContainingNamespace.ToDisplayString(),
                                 ClassName = GetNamedContainingTypeName(constructorSymbol),
-                                Attributes = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(string.Join(", ", modifiers)),
+                                Attributes = TitleCase(string.Join(", ", modifiers)),
                                 Name = constructorSymbol.ContainingType.Name,
                                 ReturnType = "Void",
                                 LineNumber = lineNumber,
                                 ColumnNumber = columnNumber,
                                 Parameters = constructorSymbol.Parameters.Select(p => new Parameter {
                                     Name = p.Name,
-                                    Type = CultureInfo.CurrentCulture.TextInfo.ToTitleCase(p.Type.ToString()!)
+                                    Type = TitleCase(p.Type.ToString()!)
                                 }).ToList(),
                                 CustomAttributes = ExtractCustomAttributes(constructorSymbol, sourceDiagnostics),
                                 IsStatic = constructorSymbol.IsStatic,
@@ -2704,7 +2779,7 @@ public static class Dosai
             // method calls / object creation / property access / event assignment
             if (model is not null)
             {
-                var walker = new MethodCallOperationWalker(model, GetDispatchIndex(model.Compilation), allMethodCalls, path, sourceFilePath, fileName);
+                var walker = new MethodCallOperationWalker(model, dispatchIndexes[model.Compilation], allMethodCalls, path, sourceFilePath, fileName);
                 var operationNodes = csRoot is not null
                     ? csRoot.DescendantNodes().Where(node => node is Microsoft.CodeAnalysis.CSharp.Syntax.BlockSyntax or ArrowExpressionClauseSyntax or EqualsValueClauseSyntax or ConstructorInitializerSyntax or GlobalStatementSyntax)
                     : vbRoot?.DescendantNodes().Where(node => node is Microsoft.CodeAnalysis.VisualBasic.Syntax.StatementSyntax or Microsoft.CodeAnalysis.VisualBasic.Syntax.EqualsValueSyntax) ?? [];
@@ -2724,9 +2799,63 @@ public static class Dosai
                     sourceDiagnostics.Add($"{sourceFilePath}: operations nested past the call-graph walker's depth budget were skipped; calls inside them are missing from MethodCalls and the call graph.");
                 }
             }
+
+            return symbols;
         }
 
-        // The per-file symbol-analysis phase ends with the loop; the frontends run on their own
+        // One worker per processor, bounded by the file count and DOSAI_SYMBOL_ANALYSIS_WORKERS.
+        // Files are dealt round-robin so one huge generated file cannot strand a worker, and the
+        // per-file results merge in file order afterwards, so the output is byte-identical to a
+        // sequential run regardless of the worker count (issue #65).
+        var workerCount = sourcesToInspect.Count <= 1 ? 1 : Math.Clamp(MaxSymbolAnalysisWorkers, 1, sourcesToInspect.Count);
+        DebugLog.Count("symbol analysis workers", workerCount);
+        var fileSymbols = new SourceFileSymbols?[sourcesToInspect.Count];
+        if (workerCount > 1)
+        {
+            DedicatedStack.RunPartitions("Dosai symbol analysis", workerCount, worker =>
+            {
+                for (var index = worker; index < fileSymbols.Length; index += workerCount)
+                {
+                    fileSymbols[index] = AnalyzeSourceFile(sourcesToInspect[index]);
+                }
+            });
+        }
+        else
+        {
+            for (var index = 0; index < fileSymbols.Length; index++)
+            {
+                fileSymbols[index] = AnalyzeSourceFile(sourcesToInspect[index]);
+            }
+        }
+
+        foreach (var fileResult in fileSymbols)
+        {
+            if (fileResult is null)
+            {
+                continue;
+            }
+
+            mergedMethods.AddRange(fileResult.Methods);
+            mergedUsings.AddRange(fileResult.UsingDirectives);
+            mergedMethodCalls.AddRange(fileResult.MethodCalls);
+            mergedProperties.AddRange(fileResult.Properties);
+            mergedFields.AddRange(fileResult.Fields);
+            mergedEvents.AddRange(fileResult.Events);
+            mergedConstructors.AddRange(fileResult.Constructors);
+            mergedDiagnostics.AddRange(fileResult.Diagnostics);
+        }
+
+        // Issue #64: every count is a call site that keeps its direct edge but lost its
+        // synthesized dispatch-candidate edge to a Roslyn failure. Visible without --debug,
+        // because a quietly thinner call graph is exactly what consumers cannot diagnose.
+        var abandonedDispatchResolutions = dispatchIndexes.Values.Sum(index => index.AbandonedResolutions);
+        DebugLog.Count("dispatch resolutions abandoned after a Roslyn failure", abandonedDispatchResolutions);
+        if (abandonedDispatchResolutions > 0)
+        {
+            mergedDiagnostics.Add($"Dispatch resolution failed for {abandonedDispatchResolutions} call site(s) (Roslyn error resolving a generic method on a generic interface); those virtual dispatch candidate edges are missing from the call graph.");
+        }
+
+        // The per-file symbol-analysis phase ends with the merge; the frontends run on their own
         // clock because they cover F#, R, and C/C++ files the Roslyn loop never visits.
         symbolAnalysisPhase.Dispose();
 
@@ -2739,11 +2868,11 @@ public static class Dosai
             (frontendMethods, frontendDependencies, frontendMethodCalls) = LanguageFrontendAnalyzer.GetMethods(path, includeFSharp: true);
         }
         DebugLog.Count("language-frontend methods (F#, R, C/C++)", frontendMethods.Count);
-        sourceMethods.AddRange(frontendMethods);
-        allUsingDirectives.AddRange(frontendDependencies);
-        allMethodCalls.AddRange(frontendMethodCalls);
+        mergedMethods.AddRange(frontendMethods);
+        mergedUsings.AddRange(frontendDependencies);
+        mergedMethodCalls.AddRange(frontendMethodCalls);
         var methodNodeLookup = new Dictionary<string, MethodNode>(StringComparer.Ordinal);
-        foreach (var method in sourceMethods.Where(m => !string.IsNullOrWhiteSpace(m.Name)))
+        foreach (var method in mergedMethods.Where(m => !string.IsNullOrWhiteSpace(m.Name)))
         {
             var id = !string.IsNullOrWhiteSpace(method.SourceSignature)
                 ? method.SourceSignature!
@@ -2751,7 +2880,7 @@ public static class Dosai
             AddNode(id, method.Name!, method.ClassName, method.Namespace, method.FileName, method.Assembly, method.Module, "Method", method.LineNumber, method.ColumnNumber, false);
         }
 
-        foreach (var constructor in constructors.Where(c => !string.IsNullOrWhiteSpace(c.ClassName)))
+        foreach (var constructor in mergedConstructors.Where(c => !string.IsNullOrWhiteSpace(c.ClassName)))
         {
             var constructorClassName = constructor.GenericParameters is { Count: > 0 } && constructor.ClassName?.Contains('<', StringComparison.Ordinal) != true
                 ? $"{constructor.ClassName}<{string.Join(',', constructor.GenericParameters)}>"
@@ -2766,7 +2895,7 @@ public static class Dosai
             AddNode(id, ".ctor", constructorClassName, constructorNamespace, constructor.FileName, constructor.Assembly, constructor.Module, "Constructor", constructor.LineNumber, constructor.ColumnNumber, false);
         }
 
-        foreach (var call in allMethodCalls.Where(c => !string.IsNullOrWhiteSpace(c.SourceId) && !string.IsNullOrWhiteSpace(c.TargetId)))
+        foreach (var call in mergedMethodCalls.Where(c => !string.IsNullOrWhiteSpace(c.SourceId) && !string.IsNullOrWhiteSpace(c.TargetId)))
         {
             if (!methodNodeLookup.ContainsKey(call.SourceId!))
             {
@@ -2780,7 +2909,7 @@ public static class Dosai
         }
 
         var methodNodes = methodNodeLookup.Values.OrderBy(n => n.Id, StringComparer.Ordinal).ToList();
-        var callEdges = allMethodCalls
+        var callEdges = mergedMethodCalls
             .Where(call => !string.IsNullOrWhiteSpace(call.SourceId) && !string.IsNullOrWhiteSpace(call.TargetId))
             .Select(call =>
             {
@@ -2841,11 +2970,11 @@ public static class Dosai
             candidates.Add(asmMethod);
         }
 
-        foreach (var method in sourceMethods)
+        foreach (var method in mergedMethods)
         {
             AddMapping(method, "Method");
         }
-        return (sourceMethods, allUsingDirectives, allMethodCalls, properties, fields, events, constructors, callGraph, sourceAssemblyMappings, sourceMode, new Frameworks.SourceCompilations { CSharp = csharpCompilation, VisualBasic = vbCompilation }, sourceDiagnostics);
+        return (mergedMethods, mergedUsings, mergedMethodCalls, mergedProperties, mergedFields, mergedEvents, mergedConstructors, callGraph, sourceAssemblyMappings, sourceMode, new Frameworks.SourceCompilations { CSharp = csharpCompilation, VisualBasic = vbCompilation }, mergedDiagnostics);
 
         void AddNode(string id, string name, string? className, string? namespaceName, string? file, string? assembly, string? module, string kind, int lineNumber, int columnNumber, bool isExternal)
         {
@@ -2937,16 +3066,6 @@ public static class Dosai
                     : !string.IsNullOrWhiteSpace(assemblyMethod?.Path)
                         ? Path.GetFileName(assemblyMethod.Path)
                         : fallback;
-
-        DispatchResolver.SourceIndex GetDispatchIndex(Compilation compilation)
-        {
-            if (!dispatchIndexes.TryGetValue(compilation, out var index))
-            {
-                index = DispatchResolver.SourceIndex.Create(compilation);
-                dispatchIndexes[compilation] = index;
-            }
-            return index;
-        }
 
         static bool TryFindAssemblyMethodMatch(Method sourceMethod, IReadOnlyList<Method> candidates, out Method? match)
         {

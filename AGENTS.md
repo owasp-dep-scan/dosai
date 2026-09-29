@@ -70,6 +70,22 @@ dotnet test ./Dosai.sln
   reached through source analysis. Request operations only through
   `OperationDepthGuard.GetOperation`, which skips members too deep for even the dedicated stack
   and reports them per file (`OperationDepthGuard.Describe`).
+- The per-file symbol-analysis loop in `GetSourceMethods` runs on a worker team of dedicated
+  large-stack threads (`DedicatedStack.RunPartitions`; one per processor, capped by
+  `Dosai.MaxSymbolAnalysisWorkers` / `DOSAI_SYMBOL_ANALYSIS_WORKERS`). Its body must stay
+  file-pure: everything it produces goes into that file's `SourceFileSymbols` collector, and
+  everything it reads must be immutable before the first worker starts. Collectors merge in file
+  order afterwards, which is what keeps the output byte-identical to a sequential run - do not
+  add shared mutable state or merge inside the loop.
+- Virtual/interface dispatch resolution goes through `DispatchResolver.SourceIndex`: buckets by
+  interface/base-type original definitions, memoized per (target, receiver) symbol pair, and a
+  guard that abandons a candidate when Roslyn throws resolving it (generic-method-on-generic-
+  interface shapes, issue #64) instead of aborting the scan - the counter surfaces as a slice
+  diagnostic. Route any new dispatch inference through the index rather than scanning types.
+- Analysis output is locale-independent (issue #63): title-case member modifiers and parameter
+  types only through the invariant-culture `Dosai.TitleCase`, and format numbers inside
+  JSON-bound strings with `string.Create(CultureInfo.InvariantCulture, ...)` - a Turkish or
+  Swedish locale must not change any output byte except `Metadata.GeneratedAt`.
 - Operation walkers derive from `DepthBoundedOperationWalker`. Its budget bounds cost, not stack
   (the stack is checked separately): walkers that render call text keep the 1,024-level default,
   and the call-graph walker follows the stack so long chains keep their head call.

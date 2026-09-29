@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 
 namespace Depscan;
 
@@ -154,7 +155,7 @@ public static class BuildPreparation
                 process.WaitForExit();
                 if (watch is not null)
                 {
-                    DebugLog.Log($"dotnet {verb} timed out after {watch.Elapsed.TotalSeconds:F3}s (exit forced)");
+                    DebugLog.Log(string.Create(CultureInfo.InvariantCulture, $"dotnet {verb} timed out after {watch.Elapsed.TotalSeconds:F3}s (exit forced)"));
                 }
                 Console.Error.WriteLine($"dosai: dotnet {verb} {Path.GetFileName(target)} timed out after {timeoutMs / 1000}s and was stopped; analyzing the tree as-is.");
                 return;
@@ -164,7 +165,7 @@ public static class BuildPreparation
             _ = stderrTask.GetAwaiter().GetResult();
             if (watch is not null)
             {
-                DebugLog.Log($"dotnet {verb} exit code {exitCode} in {watch.Elapsed.TotalSeconds:F3}s");
+                DebugLog.Log(string.Create(CultureInfo.InvariantCulture, $"dotnet {verb} exit code {exitCode} in {watch.Elapsed.TotalSeconds:F3}s"));
             }
             if (exitCode != 0)
             {

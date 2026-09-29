@@ -1,4 +1,5 @@
 using System.Collections;
+using System.Globalization;
 using System.Text.RegularExpressions;
 
 namespace Depscan;
@@ -588,7 +589,7 @@ public static class ReachabilityAnalyzer
             ComputeReachableBucketsBudgeted(facts, forward, diagnostics);
             if (bucketWatch is not null)
             {
-                DebugLog.Log($"reachability bucketing (budgeted walk) completed in {bucketWatch.Elapsed.TotalSeconds:F3}s");
+                DebugLog.Log(string.Create(CultureInfo.InvariantCulture, $"reachability bucketing (budgeted walk) completed in {bucketWatch.Elapsed.TotalSeconds:F3}s"));
             }
             return;
         }
@@ -667,7 +668,7 @@ public static class ReachabilityAnalyzer
 
         if (bucketWatch is not null)
         {
-            DebugLog.Log($"reachability bucketing (condensed bitsets) completed in {bucketWatch.Elapsed.TotalSeconds:F3}s");
+            DebugLog.Log(string.Create(CultureInfo.InvariantCulture, $"reachability bucketing (condensed bitsets) completed in {bucketWatch.Elapsed.TotalSeconds:F3}s"));
         }
     }
 

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 
 namespace Depscan;
 
@@ -37,6 +38,12 @@ public static class DebugLog
     private static int heartbeatGeneration;
 
     public static bool Enabled { get; private set; }
+
+    /// <summary>
+    ///     Timestamp prefix for every line, always with an invariant decimal separator: a locale
+    ///     decimal comma made the timestamp format itself locale-dependent (issue #63).
+    /// </summary>
+    private static string Timestamp => string.Create(CultureInfo.InvariantCulture, $"[dosai +{Clock.Elapsed.TotalSeconds:F3}s]");
 
     private static long excludedDirectories;
     private static long excludedFiles;
@@ -100,7 +107,7 @@ public static class DebugLog
 
         lock (Gate)
         {
-            Console.Error.WriteLine($"[dosai +{Clock.Elapsed.TotalSeconds:F3}s] {message}");
+            Console.Error.WriteLine($"{Timestamp} {message}");
         }
     }
 
@@ -141,7 +148,7 @@ public static class DebugLog
         lock (Gate)
         {
             ActivePhases.Add(scope);
-            Console.Error.WriteLine($"[dosai +{Clock.Elapsed.TotalSeconds:F3}s] start {name}");
+            Console.Error.WriteLine($"{Timestamp} start {name}");
             StartHeartbeatLocked();
         }
 
@@ -197,15 +204,15 @@ public static class DebugLog
                 return;
             }
 
-            Console.Error.WriteLine($"[dosai +{Clock.Elapsed.TotalSeconds:F3}s] still in {ActivePhases[^1].Name}, managed heap {FormatBytes(GC.GetTotalMemory(forceFullCollection: false))}, working set {FormatBytes(Environment.WorkingSet)}");
+            Console.Error.WriteLine($"{Timestamp} still in {ActivePhases[^1].Name}, managed heap {FormatBytes(GC.GetTotalMemory(forceFullCollection: false))}, working set {FormatBytes(Environment.WorkingSet)}");
         }
     }
 
     internal static string FormatBytes(long bytes) => bytes switch
     {
-        >= 1_073_741_824 => $"{bytes / (double)1_073_741_824:F1} GB",
-        >= 1_048_576 => $"{bytes / (double)1_048_576:F0} MB",
-        >= 1024 => $"{bytes / (double)1024:F0} KB",
+        >= 1_073_741_824 => string.Create(CultureInfo.InvariantCulture, $"{bytes / (double)1_073_741_824:F1} GB"),
+        >= 1_048_576 => string.Create(CultureInfo.InvariantCulture, $"{bytes / (double)1_048_576:F0} MB"),
+        >= 1024 => string.Create(CultureInfo.InvariantCulture, $"{bytes / (double)1024:F0} KB"),
         _ => $"{bytes} B"
     };
 
@@ -236,7 +243,7 @@ public static class DebugLog
 
                 _disposed = true;
                 ActivePhases.Remove(this);
-                Console.Error.WriteLine($"[dosai +{Clock.Elapsed.TotalSeconds:F3}s] end {Name} in {_watch.Elapsed.TotalSeconds:F3}s, managed heap {FormatBytes(GC.GetTotalMemory(forceFullCollection: false))}, working set {FormatBytes(Environment.WorkingSet)}");
+                Console.Error.WriteLine($"{Timestamp} end {Name} in {string.Create(CultureInfo.InvariantCulture, $"{_watch.Elapsed.TotalSeconds:F3}")}s, managed heap {FormatBytes(GC.GetTotalMemory(forceFullCollection: false))}, working set {FormatBytes(Environment.WorkingSet)}");
                 StopHeartbeatIfIdleLocked();
             }
         }

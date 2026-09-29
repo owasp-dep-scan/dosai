@@ -33,9 +33,8 @@ internal static class DedicatedStack
     /// <summary>
     ///     Run <paramref name="work" /> on a dedicated thread with <see cref="AnalysisStackSize" />
     ///     of stack and return its result; exceptions propagate to the caller unchanged. The
-    ///     worker carries the caller's culture (member modifiers are title-cased through it) and,
-    ///     through the captured execution context, its ambient scopes such as
-    ///     <see cref="PathExclusions" />.
+    ///     worker carries the caller's culture and, through the captured execution context, its
+    ///     ambient scopes such as <see cref="PathExclusions" />.
     /// </summary>
     internal static T Run<T>(string threadName, Func<T> work)
     {
@@ -82,5 +81,86 @@ internal static class DedicatedStack
         worker.Join();
         failure?.Throw();
         return result!;
+    }
+
+    /// <summary>
+    ///     Run <paramref name="workerCount" /> independent partitions, each on its own thread with
+    ///     <see cref="AnalysisStackSize" /> of stack, and return when every partition has finished
+    ///     (issue #65: the per-file symbol-analysis loop). Every worker needs the large stack, not
+    ///     just the coordinating thread - <see cref="OperationDepthGuard" /> sizes its depth budget
+    ///     from the thread it runs on, so a thread-pool worker would both skip members the
+    ///     dedicated thread analyzes and lose the overflow protection. Workers carry the caller's
+    ///     culture and ambient scopes; the first failure by worker index is rethrown after all
+    ///     workers have joined, so a failing scan still reports one deterministic exception.
+    /// </summary>
+    /// <param name="workerBody">Receives the worker index in <c>[0, workerCount)</c>.</param>
+    internal static void RunPartitions(string threadName, int workerCount, Action<int> workerBody)
+    {
+        if (workerCount <= 1)
+        {
+            workerBody(0);
+            return;
+        }
+
+        var culture = CultureInfo.CurrentCulture;
+        var uiCulture = CultureInfo.CurrentUICulture;
+        var failures = new ExceptionDispatchInfo?[workerCount];
+        var workers = new Thread[workerCount];
+        var started = new bool[workerCount];
+        for (var index = 0; index < workerCount; index++)
+        {
+            var partition = index;
+            workers[index] = new Thread(() =>
+            {
+                onAnalysisThread = true;
+                CultureInfo.CurrentCulture = culture;
+                CultureInfo.CurrentUICulture = uiCulture;
+                try
+                {
+                    workerBody(partition);
+                }
+                catch (Exception e)
+                {
+                    failures[partition] = ExceptionDispatchInfo.Capture(e);
+                }
+            }, AnalysisStackSize)
+            {
+                Name = $"{threadName} #{partition + 1}",
+                IsBackground = true
+            };
+        }
+
+        for (var index = 0; index < workerCount; index++)
+        {
+            try
+            {
+                workers[index].Start();
+                started[index] = true;
+            }
+            catch (OutOfMemoryException)
+            {
+                // Same fallback as Run: without a reservation the partition runs inline. The
+                // coordinator is normally an analysis thread; on a small caller stack the
+                // OperationDepthGuard budget tightens and skips members instead of crashing.
+                started[index] = false;
+            }
+        }
+
+        for (var index = 0; index < workerCount; index++)
+        {
+            if (started[index])
+            {
+                workers[index].Join();
+            }
+            else
+            {
+                workerBody(index);
+            }
+        }
+
+        foreach (var failure in failures)
+        {
+            failure?.Throw();
+        }
     }
 }
