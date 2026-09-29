@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Reflection.PortableExecutable;
 using System.Runtime.CompilerServices;
 using System.Text.Encodings.Web;
@@ -3780,7 +3781,9 @@ public static partial class DataFlowAnalyzer
                 FieldPaths = trace.FieldPaths.Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
                 Confidence = sinkPattern?.Confidence ?? "Medium",
                 Severity = TransparencyBuilder.SeverityForPattern(sinkPattern?.Category ?? sinkNode.Category, sinkPattern?.Severity, sinkPattern?.Confidence),
-                Summary = $"Data flows from {firstSource} to {sinkNode.Name} argument {sinkArgumentIndex}."
+                // Invariant culture: a negative argument index formats through the current
+                // culture otherwise, and a Swedish locale rendered "-1" with U+2212 (issue #63).
+                Summary = string.Create(CultureInfo.InvariantCulture, $"Data flows from {firstSource} to {sinkNode.Name} argument {sinkArgumentIndex}.")
             });
         }
 

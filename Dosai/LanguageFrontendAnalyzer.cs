@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -756,7 +757,7 @@ write.table(pd, file = "", sep = "\t", row.names = FALSE, col.names = TRUE, quot
         get
         {
             var configured = Environment.GetEnvironmentVariable("DOSAI_R_PARSE_TIMEOUT_MS");
-            return int.TryParse(configured, out var milliseconds) && milliseconds > 0
+            return int.TryParse(configured, NumberStyles.Integer, CultureInfo.InvariantCulture, out var milliseconds) && milliseconds > 0
                 ? TimeSpan.FromMilliseconds(milliseconds)
                 : DefaultRParserTimeout;
         }
@@ -783,7 +784,7 @@ write.table(pd, file = "", sep = "\t", row.names = FALSE, col.names = TRUE, quot
         {
             if (string.IsNullOrWhiteSpace(line)) continue;
             var parts = line.TrimEnd('\r').Split('\t');
-            if (parts.Length < 6 || !int.TryParse(parts[0], out var lineNumber) || !int.TryParse(parts[1], out var column)) continue;
+            if (parts.Length < 6 || !int.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out var lineNumber) || !int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var column)) continue;
             yield return new RParseRow(lineNumber, column, parts[2], parts[3], parts[4], parts[5]);
         }
     }

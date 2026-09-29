@@ -494,7 +494,7 @@ internal static class ToolSchemaBuilder
         "int" or "long" or "short" or "byte" or "System.Int32" or "System.Int64" => "integer",
         "double" or "float" or "decimal" or "System.Double" or "System.Single" or "System.Decimal" => "number",
         "bool" or "System.Boolean" => "boolean",
-        _ when clrType.EndsWith("[]") || clrType.StartsWith("List<") || clrType.StartsWith("IEnumerable<") || clrType.StartsWith("System.Collections") => "array",
+        _ when clrType.EndsWith("[]", StringComparison.Ordinal) || clrType.StartsWith("List<", StringComparison.Ordinal) || clrType.StartsWith("IEnumerable<", StringComparison.Ordinal) || clrType.StartsWith("System.Collections", StringComparison.Ordinal) => "array",
         _ => "string"
     };
 

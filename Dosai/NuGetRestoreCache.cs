@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using System.Text.Json;
 using Microsoft.CodeAnalysis;
+using System.Globalization;
 
 namespace Depscan;
 
@@ -226,7 +227,7 @@ public static class NuGetRestoreCache
             return -1;
         }
         var match = TargetFrameworkRegex.Match(name);
-        return match.Success && int.TryParse(match.Groups[1].Value, out var major) ? major : 0;
+        return match.Success && int.TryParse(match.Groups[1].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var major) ? major : 0;
     }
 
     private static readonly System.Text.RegularExpressions.Regex TargetFrameworkRegex =

@@ -70,6 +70,33 @@ dotnet test ./Dosai.sln
   reached through source analysis. Request operations only through
   `OperationDepthGuard.GetOperation`, which skips members too deep for even the dedicated stack
   and reports them per file (`OperationDepthGuard.Describe`).
+- The per-file symbol-analysis loop in `GetSourceMethods` and the dispatch index's
+  object-creation scan run on a worker team of dedicated large-stack threads
+  (`DedicatedStack.ForEach`; one per processor, capped by `Dosai.MaxSymbolAnalysisWorkers` /
+  `DOSAI_SYMBOL_ANALYSIS_WORKERS`). Workers claim the next file as they free up. The per-file
+  body must stay file-pure: everything it produces goes into that file's `SourceFileSymbols`
+  collector (counts included), and everything it reads must be immutable, or memoized
+  thread-safely with a result that does not depend on which thread computed it, before the
+  first worker starts. Collectors merge in file order afterwards, which is what keeps the output
+  byte-identical for every worker count - do not add shared mutable state, counters or merges
+  inside the loop.
+- Virtual/interface dispatch resolution goes through `DispatchResolver.SourceIndex`: concrete
+  types bucketed once per interface/base-type original definition, lookups memoized per
+  (target, receiver) symbol pair. Route any new dispatch inference through the index rather
+  than scanning types. `FindImplementationForInterfaceMember` takes the member as its
+  interface declares it: pass `ConstructedFrom`, never a method constructed with a call's type
+  arguments, which makes Roslyn throw (issue #64). A resolution that still throws abandons only
+  that candidate; the walker counts the call site and the count surfaces as a slice diagnostic.
+  Only virtual invocations (`IInvocationOperation.IsVirtual`) get candidates: `base.M()` runs
+  exactly the bound method.
+- Analysis output is locale-independent (issue #63): a Turkish, Swedish, German, Hungarian or
+  Danish locale must not change any output byte except the per-run timestamps. The Dosai
+  project builds with `Dosai/Globalization.globalconfig`, which makes the culture-sensitive
+  overload rules (CA1304, CA1305, CA1310, CA1311) errors: format and parse through
+  `CultureInfo.InvariantCulture`, compare strings ordinally, and title-case only through the
+  invariant-culture `Dosai.TitleCase`. The analyzers do not see interpolated strings, so format
+  numbers inside JSON-bound strings with `string.Create(CultureInfo.InvariantCulture, ...)`;
+  `Cli_Outputs_AreByteIdenticalAcrossLocales` compares every command's output across locales.
 - Operation walkers derive from `DepthBoundedOperationWalker`. Its budget bounds cost, not stack
   (the stack is checked separately): walkers that render call text keep the 1,024-level default,
   and the call-graph walker follows the stack so long chains keep their head call.

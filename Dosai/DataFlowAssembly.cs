@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Reflection;
 using System.Reflection.Emit;
 using System.Reflection.Metadata;
@@ -1533,7 +1534,7 @@ public static partial class DataFlowAnalyzer
             }
 
             var separator = marker.IndexOf(':');
-            if (!int.TryParse(marker[(separator + 1)..], out var slotIndex))
+            if (!int.TryParse(marker[(separator + 1)..], NumberStyles.None, CultureInfo.InvariantCulture, out var slotIndex))
             {
                 continue;
             }
@@ -2150,7 +2151,9 @@ public static partial class DataFlowAnalyzer
                 FieldPaths = trace.FieldPaths.Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
                 Confidence = effectiveConfidence,
                 Severity = TransparencyBuilder.SeverityForPattern(sliceCategory, sinkPattern?.Severity, effectiveConfidence),
-                Summary = $"Assembly IL data flows from {firstSource} to {sinkNode.Name} argument {sinkArgumentIndex}{guardDependentNote}."
+                // Invariant culture, matching the source-mode summaries: a negative argument
+                // index must not pick up a locale minus sign (issue #63).
+                Summary = string.Create(CultureInfo.InvariantCulture, $"Assembly IL data flows from {firstSource} to {sinkNode.Name} argument {sinkArgumentIndex}{guardDependentNote}.")
             });
         }
 

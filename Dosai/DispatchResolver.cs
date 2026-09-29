@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.Operations;
 
@@ -7,16 +8,40 @@ internal static class DispatchResolver
 {
     internal sealed class SourceIndex
     {
-        private readonly List<INamedTypeSymbol> _concreteTypes;
-        private readonly HashSet<string> _instantiatedTypeKeys;
+        /// <summary>
+        ///     Candidates one lookup keeps, instantiated types first. The call-graph walker takes
+        ///     at most 16 of them per call site.
+        /// </summary>
+        private const int MaxCandidatesPerLookup = 32;
 
-        private SourceIndex(List<INamedTypeSymbol> concreteTypes, HashSet<string> instantiatedTypeKeys)
+        /// <summary>Resolution failures logged individually under --debug before the log samples them.</summary>
+        private const int LoggedFailureLimit = 10;
+
+        private static readonly AsyncLocal<Action<INamedTypeSymbol, IMethodSymbol>?> BeforeInterfaceResolution = new();
+
+        private readonly List<ConcreteTypeEntry> _concreteTypes;
+        private readonly bool _hasInstantiationEvidence;
+        private readonly Dictionary<ISymbol, List<ConcreteTypeEntry>> _typesByInterface;
+        private readonly Dictionary<ISymbol, List<ConcreteTypeEntry>> _typesByBaseType;
+        private readonly ConcurrentDictionary<DispatchLookupKey, DispatchLookup> _lookups = new(new DispatchLookupKeyComparer());
+        private int _loggedFailures;
+
+        private SourceIndex(List<ConcreteTypeEntry> concreteTypes, bool hasInstantiationEvidence,
+            Dictionary<ISymbol, List<ConcreteTypeEntry>> typesByInterface, Dictionary<ISymbol, List<ConcreteTypeEntry>> typesByBaseType)
         {
             _concreteTypes = concreteTypes;
-            _instantiatedTypeKeys = instantiatedTypeKeys;
+            _hasInstantiationEvidence = hasInstantiationEvidence;
+            _typesByInterface = typesByInterface;
+            _typesByBaseType = typesByBaseType;
         }
 
-        public static SourceIndex Create(Compilation compilation)
+        /// <summary>
+        ///     Build the index for <paramref name="compilation" />. Collecting instantiation
+        ///     evidence binds every member holding an object creation, a full binding pass over the
+        ///     compilation, so the per-tree scan runs on <paramref name="workerCount" /> dedicated
+        ///     large-stack workers; per-tree results are unioned, which is order-independent.
+        /// </summary>
+        public static SourceIndex Create(Compilation compilation, int workerCount = 1)
         {
             var allTypes = new List<INamedTypeSymbol>();
             CollectTypes(compilation.Assembly.GlobalNamespace, allTypes);
@@ -25,25 +50,72 @@ internal static class DispatchResolver
                 .Where(type => !type.IsAbstract)
                 .Where(type => type.Locations.Any(location => location.IsInSource) || SymbolEqualityComparer.Default.Equals(type.ContainingAssembly, compilation.Assembly))
                 .ToList();
-            var instantiated = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var syntaxTree in compilation.SyntaxTrees)
-            {
-                var semanticModel = compilation.GetSemanticModel(syntaxTree);
-                var root = syntaxTree.GetRoot();
-                foreach (var objectCreationNode in root.DescendantNodes().Where(IsObjectCreationSyntax))
-                {
-                    if (OperationDepthGuard.GetOperation(semanticModel, objectCreationNode) is not IObjectCreationOperation objectCreation)
-                    {
-                        continue;
-                    }
 
-                    if (objectCreation.Type is INamedTypeSymbol type)
-                    {
-                        AddTypeKeys(instantiated, type);
-                    }
+            var trees = compilation.SyntaxTrees.ToList();
+            var instantiatedPerTree = new HashSet<string>?[trees.Count];
+            DedicatedStack.ForEach("Dosai dispatch index", workerCount, trees.Count,
+                index => instantiatedPerTree[index] = CollectInstantiatedTypeKeys(compilation, trees[index]));
+            var instantiated = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var treeKeys in instantiatedPerTree)
+            {
+                if (treeKeys is not null)
+                {
+                    instantiated.UnionWith(treeKeys);
                 }
             }
-            return new SourceIndex(concreteTypes, instantiated);
+
+            var hasInstantiationEvidence = instantiated.Count > 0;
+            var entries = new List<ConcreteTypeEntry>(concreteTypes.Count);
+            foreach (var type in concreteTypes)
+            {
+                // Resolved once here so a lookup never re-renders display strings per candidate.
+                var isInstantiated = hasInstantiationEvidence && TypeKeys(type).Any(instantiated.Contains);
+                entries.Add(new ConcreteTypeEntry(type, isInstantiated));
+            }
+
+            // Candidate scanning used to walk every concrete type for every call site, which made
+            // symbol analysis super-linear in the file count (issue #65). The buckets hold exactly
+            // the types the per-type receiver filter accepted - implementers of an interface's
+            // original definition, a class's original definition and everything deriving from it -
+            // each once and in type order, so a lookup reads its bucket instead.
+            var typesByInterface = new Dictionary<ISymbol, List<ConcreteTypeEntry>>(SymbolEqualityComparer.Default);
+            var typesByBaseType = new Dictionary<ISymbol, List<ConcreteTypeEntry>>(SymbolEqualityComparer.Default);
+            var implementedDefinitions = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
+            foreach (var entry in entries)
+            {
+                // A type implementing two constructions of one generic interface (IHandler<int> and
+                // IHandler<string>) shares their original definition; bucketing it per construction
+                // made every lookup through that interface visit the type twice and emit the same
+                // candidate edge twice.
+                implementedDefinitions.Clear();
+                foreach (var implemented in entry.Type.AllInterfaces)
+                {
+                    if (implementedDefinitions.Add(implemented.OriginalDefinition))
+                    {
+                        AddToBucket(typesByInterface, implemented.OriginalDefinition, entry);
+                    }
+                }
+
+                AddToBucket(typesByBaseType, entry.Type.OriginalDefinition, entry);
+                for (var current = entry.Type.BaseType; current is not null; current = current.BaseType)
+                {
+                    AddToBucket(typesByBaseType, current.OriginalDefinition, entry);
+                }
+            }
+
+            return new SourceIndex(entries, hasInstantiationEvidence, typesByInterface, typesByBaseType);
+        }
+
+        /// <summary>
+        ///     Test hook: <paramref name="probe" /> runs before every interface-member resolution in
+        ///     the current execution context (and the analysis threads it starts), so a test can make
+        ///     a resolution throw and exercise the containment path.
+        /// </summary>
+        internal static IDisposable OverrideBeforeInterfaceResolution(Action<INamedTypeSymbol, IMethodSymbol> probe)
+        {
+            var previous = BeforeInterfaceResolution.Value;
+            BeforeInterfaceResolution.Value = probe;
+            return new Restore(() => BeforeInterfaceResolution.Value = previous);
         }
 
         public IEnumerable<IMethodSymbol> FindDispatchCandidates(IMethodSymbol targetMethod, ITypeSymbol? receiverType = null)
@@ -55,38 +127,46 @@ internal static class DispatchResolver
         ///     RTA-instantiated types before uninstantiated CHA candidates.
         /// </summary>
         public IEnumerable<(IMethodSymbol Method, string Confidence)> FindRankedDispatchCandidates(IMethodSymbol targetMethod, ITypeSymbol? receiverType = null)
+            => Lookup(targetMethod, receiverType).Candidates.Select(candidate => (candidate.Method, candidate.Confidence));
+
+        /// <summary>
+        ///     The ranked candidates for a call of <paramref name="targetMethod" /> on
+        ///     <paramref name="receiverType" />, with any implementing member Roslyn failed to
+        ///     resolve. Memoized per (target, receiver) symbol pair, so repeated call sites of the
+        ///     same method pay for the hierarchy walk once (issue #65). The result is shared
+        ///     between callers and threads and must not be mutated.
+        /// </summary>
+        public DispatchLookup Lookup(IMethodSymbol targetMethod, ITypeSymbol? receiverType = null)
         {
             if (targetMethod.IsStatic || targetMethod.MethodKind != MethodKind.Ordinary || targetMethod.ContainingType is null)
             {
-                yield break;
+                return DispatchLookup.Empty;
             }
 
+            return _lookups.GetOrAdd(new DispatchLookupKey(targetMethod, receiverType), static (key, index) => index.ComputeLookup(key.Target, key.Receiver), this);
+        }
+
+        private DispatchLookup ComputeLookup(IMethodSymbol targetMethod, ITypeSymbol? receiverType)
+        {
             var normalizedTarget = targetMethod.OriginalDefinition;
+            DispatchResolutionFailure? failure = null;
 
             // A sealed (or struct) receiver has exactly one possible implementation, resolve it
             // directly instead of emitting a candidate set.
             if (receiverType is INamedTypeSymbol namedReceiver && (namedReceiver.IsSealed || namedReceiver.IsValueType || namedReceiver.TypeKind == TypeKind.Struct))
             {
-                var exact = ResolveSourceCandidate(namedReceiver, normalizedTarget, targetMethod);
-                if (exact is not null && !SymbolEqualityComparer.Default.Equals(exact.OriginalDefinition, normalizedTarget) && exact.Locations.Any(location => location.IsInSource))
-                {
-                    yield return (exact, "exact");
-                }
-
-                yield break;
+                var exact = ResolveSourceCandidate(namedReceiver, normalizedTarget, targetMethod, ref failure);
+                return exact is not null && !SymbolEqualityComparer.Default.Equals(exact.OriginalDefinition, normalizedTarget) && exact.Locations.Any(location => location.IsInSource)
+                    ? new DispatchLookup([new DispatchCandidate(exact, "exact")], failure)
+                    : new DispatchLookup([], failure);
             }
 
-            var requireInstantiated = _instantiatedTypeKeys.Count > 0;
-            var rtaCandidates = new List<(IMethodSymbol Method, string Confidence)>();
-            var chaCandidates = new List<(IMethodSymbol Method, string Confidence)>();
-            foreach (var type in _concreteTypes)
+            var requireInstantiated = _hasInstantiationEvidence;
+            var rtaCandidates = new List<DispatchCandidate>();
+            var chaCandidates = new List<DispatchCandidate>();
+            foreach (var entry in CandidateTypesFor(receiverType))
             {
-                if (receiverType is INamedTypeSymbol receiverNamed && !MayDispatchTo(type, receiverNamed))
-                {
-                    continue;
-                }
-
-                var candidate = ResolveSourceCandidate(type, normalizedTarget, targetMethod);
+                var candidate = ResolveSourceCandidate(entry.Type, normalizedTarget, targetMethod, ref failure);
                 if (candidate is null || SymbolEqualityComparer.Default.Equals(candidate.OriginalDefinition, normalizedTarget))
                 {
                     continue;
@@ -98,45 +178,86 @@ internal static class DispatchResolver
                 }
 
                 // RTA evidence: the candidate type was instantiated in this compilation.
-                if (requireInstantiated && IsInstantiated(type))
+                if (requireInstantiated && entry.IsInstantiated)
                 {
-                    rtaCandidates.Add((candidate, "rta-candidate"));
+                    rtaCandidates.Add(new DispatchCandidate(candidate, "rta-candidate"));
                 }
-                else if (!requireInstantiated || MayBeFrameworkInstantiated(type, receiverType))
+                else if (!requireInstantiated || MayBeFrameworkInstantiated(entry.Type, receiverType))
                 {
-                    chaCandidates.Add((candidate, "cha-candidate"));
+                    chaCandidates.Add(new DispatchCandidate(candidate, "cha-candidate"));
                 }
             }
 
             // Instantiated types outrank pure CHA candidates before the cap is applied. Exact
             // resolution stays reserved for sealed/struct static receiver types, RTA singleton
             // promotions would inflate candidate edges to direct evidence.
-            foreach (var candidate in rtaCandidates.Concat(chaCandidates))
-            {
-                yield return candidate;
-                if (rtaCandidates.Count + chaCandidates.Count >= 32)
-                {
-                    yield break;
-                }
-            }
+            var result = new List<DispatchCandidate>(Math.Min(rtaCandidates.Count + chaCandidates.Count, MaxCandidatesPerLookup));
+            result.AddRange(rtaCandidates.Take(MaxCandidatesPerLookup));
+            result.AddRange(chaCandidates.Take(MaxCandidatesPerLookup - result.Count));
+            return new DispatchLookup(result, failure);
         }
 
-        private bool IsInstantiated(INamedTypeSymbol type) => TypeKeys(type).Any(key => _instantiatedTypeKeys.Contains(key));
+        /// <summary>
+        ///     The concrete types a call on <paramref name="receiverType" /> could dispatch to:
+        ///     implementers of the receiver interface, or the receiver type and its derived types.
+        ///     A non-named receiver (null, type parameter, array) keeps the full scan.
+        /// </summary>
+        private IEnumerable<ConcreteTypeEntry> CandidateTypesFor(ITypeSymbol? receiverType)
+        {
+            if (receiverType is INamedTypeSymbol named)
+            {
+                if (named.TypeKind == TypeKind.Interface)
+                {
+                    return _typesByInterface.TryGetValue(named.OriginalDefinition, out var implementers) ? implementers : [];
+                }
+
+                return _typesByBaseType.TryGetValue(named.OriginalDefinition, out var derived) ? derived : [];
+            }
+
+            return _concreteTypes;
+        }
 
         private static bool MayBeFrameworkInstantiated(INamedTypeSymbol type, ITypeSymbol? receiverType) =>
             receiverType is not INamedTypeSymbol receiverNamed || receiverNamed.TypeKind == TypeKind.Interface || InheritsFrom(type, receiverNamed);
 
-        private static bool MayDispatchTo(INamedTypeSymbol candidateType, INamedTypeSymbol receiverType) =>
-            receiverType.TypeKind == TypeKind.Interface
-                ? candidateType.AllInterfaces.Any(iface => SymbolEqualityComparer.Default.Equals(iface.OriginalDefinition, receiverType.OriginalDefinition))
-                : SymbolEqualityComparer.Default.Equals(candidateType.OriginalDefinition, receiverType.OriginalDefinition) || InheritsFrom(candidateType, receiverType);
-
-        private static IMethodSymbol? ResolveSourceCandidate(INamedTypeSymbol type, IMethodSymbol normalizedTarget, IMethodSymbol originalTarget)
+        private IMethodSymbol? ResolveSourceCandidate(INamedTypeSymbol type, IMethodSymbol normalizedTarget, IMethodSymbol originalTarget, ref DispatchResolutionFailure? failure)
         {
             if (normalizedTarget.ContainingType?.TypeKind == TypeKind.Interface)
             {
-                return type.FindImplementationForInterfaceMember(normalizedTarget) as IMethodSymbol
-                    ?? type.FindImplementationForInterfaceMember(originalTarget) as IMethodSymbol;
+                try
+                {
+                    BeforeInterfaceResolution.Value?.Invoke(type, originalTarget);
+
+                    // FindImplementationForInterfaceMember takes the member as its interface
+                    // declares it. A call to a generic method binds the method constructed with the
+                    // call's type arguments (IBuilder<Thing>.Join<TEntity>), and Roslyn constructs
+                    // the member again while matching the implementation, which throws on an
+                    // already-constructed method - on a generic interface, where the definition
+                    // lookup below misses and this fallback runs, that aborted the scan (issue #64).
+                    // ConstructedFrom is the same member of the same constructed interface before
+                    // the call's type arguments, which is the form the API expects.
+                    return type.FindImplementationForInterfaceMember(normalizedTarget) as IMethodSymbol
+                        ?? type.FindImplementationForInterfaceMember(originalTarget.ConstructedFrom) as IMethodSymbol;
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException)
+                {
+                    // Containment for shapes Roslyn still fails on: this one candidate is lost,
+                    // the call keeps its direct edge and the other candidates, and the walker
+                    // reports the call site in the slice diagnostics.
+                    failure = failure is null
+                        ? new DispatchResolutionFailure(1, type.ToDisplayString(), originalTarget.ToDisplayString(), exception.GetType().Name)
+                        : failure with { Count = failure.Count + 1 };
+                    var logged = Interlocked.Increment(ref _loggedFailures);
+                    if (DebugLog.Enabled && (logged <= LoggedFailureLimit || logged % 1000 == 0))
+                    {
+                        DebugLog.Log(
+                            $"dispatch resolution failure #{logged} on '{type.ToDisplayString()}'"
+                            + $" for '{originalTarget.ToDisplayString()}':"
+                            + $" {exception.GetType().Name}: {exception.Message}");
+                    }
+
+                    return null;
+                }
             }
 
             if (!InheritsFrom(type, normalizedTarget.ContainingType))
@@ -147,6 +268,21 @@ internal static class DispatchResolver
             return type.GetMembers(normalizedTarget.Name)
                 .OfType<IMethodSymbol>()
                 .FirstOrDefault(method => method.IsOverride && Overrides(method, normalizedTarget));
+        }
+
+        private static HashSet<string>? CollectInstantiatedTypeKeys(Compilation compilation, SyntaxTree syntaxTree)
+        {
+            HashSet<string>? keys = null;
+            var semanticModel = compilation.GetSemanticModel(syntaxTree);
+            foreach (var objectCreationNode in syntaxTree.GetRoot().DescendantNodes().Where(IsObjectCreationSyntax))
+            {
+                if (OperationDepthGuard.GetOperation(semanticModel, objectCreationNode) is IObjectCreationOperation { Type: INamedTypeSymbol type })
+                {
+                    AddTypeKeys(keys ??= new HashSet<string>(StringComparer.Ordinal), type);
+                }
+            }
+
+            return keys;
         }
 
         private static void CollectTypes(INamespaceSymbol namespaceSymbol, List<INamedTypeSymbol> types)
@@ -184,6 +320,17 @@ internal static class DispatchResolver
             return false;
         }
 
+        private static void AddToBucket(Dictionary<ISymbol, List<ConcreteTypeEntry>> buckets, ISymbol key, ConcreteTypeEntry entry)
+        {
+            if (!buckets.TryGetValue(key, out var bucket))
+            {
+                bucket = [];
+                buckets[key] = bucket;
+            }
+
+            bucket.Add(entry);
+        }
+
         private static void AddTypeKeys(HashSet<string> keys, INamedTypeSymbol type)
         {
             foreach (var key in TypeKeys(type)) keys.Add(key);
@@ -196,6 +343,39 @@ internal static class DispatchResolver
             yield return type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat).Replace("global::", string.Empty, StringComparison.Ordinal);
             yield return type.OriginalDefinition.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat).Replace("global::", string.Empty, StringComparison.Ordinal);
         }
+
+        private readonly record struct ConcreteTypeEntry(INamedTypeSymbol Type, bool IsInstantiated);
+
+        private readonly record struct DispatchLookupKey(IMethodSymbol Target, ITypeSymbol? Receiver);
+
+        private sealed class DispatchLookupKeyComparer : IEqualityComparer<DispatchLookupKey>
+        {
+            public bool Equals(DispatchLookupKey x, DispatchLookupKey y) =>
+                SymbolEqualityComparer.Default.Equals(x.Target, y.Target) &&
+                SymbolEqualityComparer.Default.Equals(x.Receiver, y.Receiver);
+
+            public int GetHashCode(DispatchLookupKey key) =>
+                HashCode.Combine(SymbolEqualityComparer.Default.GetHashCode(key.Target), key.Receiver is null ? 0 : SymbolEqualityComparer.Default.GetHashCode(key.Receiver));
+        }
+
+        private sealed class Restore(Action restore) : IDisposable
+        {
+            public void Dispose() => restore();
+        }
+    }
+
+    internal readonly record struct DispatchCandidate(IMethodSymbol Method, string Confidence);
+
+    /// <summary>
+    ///     An implementing-member resolution Roslyn threw on: <see cref="Count" /> candidate types
+    ///     failed for one lookup, the first of them <see cref="TypeName" />.
+    /// </summary>
+    internal sealed record DispatchResolutionFailure(int Count, string TypeName, string MemberName, string ExceptionType);
+
+    /// <summary>Ranked candidates for one (target, receiver) pair, and the resolution failure that thinned them, if any.</summary>
+    internal sealed record DispatchLookup(IReadOnlyList<DispatchCandidate> Candidates, DispatchResolutionFailure? Failure)
+    {
+        public static readonly DispatchLookup Empty = new([], null);
     }
 
     internal sealed class AssemblyIndex

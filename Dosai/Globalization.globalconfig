@@ -1,0 +1,16 @@
+is_global = true
+
+# Analysis output must be byte-identical on every machine whatever its locale (issue #63): format
+# and parse numbers through CultureInfo.InvariantCulture, case through the invariant culture, and
+# compare strings ordinally. These rules do not see interpolated strings, so numbers interpolated
+# into JSON-bound text go through string.Create(CultureInfo.InvariantCulture, ...) by convention
+# (AGENTS.md), and IssueRegressionTests compares whole outputs across locales.
+
+# Specify CultureInfo (culture-sensitive overloads such as ToUpper()/ToLower()).
+dotnet_diagnostic.CA1304.severity = error
+# Specify IFormatProvider (ToString(), Parse, string.Format and friends).
+dotnet_diagnostic.CA1305.severity = error
+# Specify StringComparison for correctness (culture-sensitive StartsWith, EndsWith, Compare, IndexOf).
+dotnet_diagnostic.CA1310.severity = error
+# Specify a culture or use an invariant version (ToUpper/ToLower).
+dotnet_diagnostic.CA1311.severity = error

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -169,7 +170,7 @@ public sealed class SuppressionSet
             }
 
             var parts = location.Split(':');
-            return parts.Length >= 2 && int.TryParse(parts[^2], out line);
+            return parts.Length >= 2 && int.TryParse(parts[^2], NumberStyles.None, CultureInfo.InvariantCulture, out line);
         }
     }
 }

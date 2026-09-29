@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using System.Globalization;
 
 namespace Depscan.Frameworks.Providers;
 
@@ -34,7 +35,7 @@ public sealed class MlRuntimeProvider : IFrameworkProvider
             {
                 var name = ProviderHelpers.InvocationName(invocation);
                 var line = invocation.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
-                if (name is "Load" or "LoadFromFile" or "Save" || name.EndsWith("Session"))
+                if (name is "Load" or "LoadFromFile" or "Save" || name.EndsWith("Session", StringComparison.Ordinal))
                 {
                     var artifact = ProviderHelpers.StringArguments(invocation).FirstOrDefault(IsModelFile);
                     if (artifact is not null)
@@ -135,7 +136,7 @@ public sealed class MlRuntimeProvider : IFrameworkProvider
                 Confidence = ConfidenceTiers.Heuristic,
                 Location = CodeLocation.From(ctx.BasePath, artifactPath),
                 Evidence = new AnalysisEvidence { Kind = AnalysisEvidenceKind.FrameworkModel, Source = "ml-runtime", Description = size > MaxHashableArtifactBytes ? $"On-disk model artifact ({size} bytes); SHA-256 skipped over the {MaxHashableArtifactBytes / (1024 * 1024)} MB cap." : $"On-disk model artifact ({size} bytes).", Confidence = ConfidenceTiers.Heuristic },
-                Properties = { ["sizeBytes"] = size.ToString() }
+                Properties = { ["sizeBytes"] = size.ToString(CultureInfo.InvariantCulture) }
             });
         }
     }

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security;
 using System.Text;
 
@@ -127,11 +128,11 @@ public static class CallGraphExporter
                 AppendGraphMlData(builder, "reachableEntryPoints", string.Join(",", facts.ReachableEntryPoints), 6);
                 if (facts.DepthFromEntryPoint is { } depth)
                 {
-                    AppendGraphMlData(builder, "minDepthFromEntryPoint", depth.ToString(), 6);
+                    AppendGraphMlData(builder, "minDepthFromEntryPoint", depth.ToString(CultureInfo.InvariantCulture), 6);
                 }
 
-                AppendGraphMlData(builder, "fanIn", facts.FanIn.ToString(), 6);
-                AppendGraphMlData(builder, "fanOut", facts.FanOut.ToString(), 6);
+                AppendGraphMlData(builder, "fanIn", facts.FanIn.ToString(CultureInfo.InvariantCulture), 6);
+                AppendGraphMlData(builder, "fanOut", facts.FanOut.ToString(CultureInfo.InvariantCulture), 6);
                 AppendGraphMlData(builder, "inRecursiveCycle", facts.InRecursiveCycle.ToString().ToLowerInvariant(), 6);
             }
 
@@ -147,7 +148,7 @@ public static class CallGraphExporter
             AppendGraphMlData(builder, "sourcePurl", edge.SourcePurl, 6);
             AppendGraphMlData(builder, "targetPurl", edge.TargetPurl, 6);
             AppendGraphMlData(builder, "location", FormatLocation(edge.CallLocation), 6);
-            AppendGraphMlData(builder, "callSiteCount", edge.CallSiteCount.ToString(), 6);
+            AppendGraphMlData(builder, "callSiteCount", edge.CallSiteCount.ToString(CultureInfo.InvariantCulture), 6);
             AppendGraphMlData(builder, "dispatchConfidence", edge.DispatchConfidence, 6);
             builder.AppendLine("    </edge>");
         }
@@ -197,11 +198,11 @@ public static class CallGraphExporter
                 AppendGexfValue(builder, "reachableEntryPoints", string.Join(",", facts.ReachableEntryPoints), 10);
                 if (facts.DepthFromEntryPoint is { } depth)
                 {
-                    AppendGexfValue(builder, "minDepthFromEntryPoint", depth.ToString(), 10);
+                    AppendGexfValue(builder, "minDepthFromEntryPoint", depth.ToString(CultureInfo.InvariantCulture), 10);
                 }
 
-                AppendGexfValue(builder, "fanIn", facts.FanIn.ToString(), 10);
-                AppendGexfValue(builder, "fanOut", facts.FanOut.ToString(), 10);
+                AppendGexfValue(builder, "fanIn", facts.FanIn.ToString(CultureInfo.InvariantCulture), 10);
+                AppendGexfValue(builder, "fanOut", facts.FanOut.ToString(CultureInfo.InvariantCulture), 10);
                 AppendGexfValue(builder, "inRecursiveCycle", facts.InRecursiveCycle.ToString().ToLowerInvariant(), 10);
             }
 
@@ -220,7 +221,7 @@ public static class CallGraphExporter
             AppendGexfValue(builder, "sourcePurl", edge.SourcePurl, 10);
             AppendGexfValue(builder, "targetPurl", edge.TargetPurl, 10);
             AppendGexfValue(builder, "location", FormatLocation(edge.CallLocation), 10);
-            AppendGexfValue(builder, "callSiteCount", edge.CallSiteCount.ToString(), 10);
+            AppendGexfValue(builder, "callSiteCount", edge.CallSiteCount.ToString(CultureInfo.InvariantCulture), 10);
             AppendGexfValue(builder, "dispatchConfidence", edge.DispatchConfidence, 10);
             builder.AppendLine("        </attvalues>");
             builder.AppendLine("      </edge>");
