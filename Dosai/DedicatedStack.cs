@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Runtime.ExceptionServices;
 
@@ -84,83 +85,120 @@ internal static class DedicatedStack
     }
 
     /// <summary>
-    ///     Run <paramref name="workerCount" /> independent partitions, each on its own thread with
-    ///     <see cref="AnalysisStackSize" /> of stack, and return when every partition has finished
-    ///     (issue #65: the per-file symbol-analysis loop). Every worker needs the large stack, not
-    ///     just the coordinating thread - <see cref="OperationDepthGuard" /> sizes its depth budget
-    ///     from the thread it runs on, so a thread-pool worker would both skip members the
-    ///     dedicated thread analyzes and lose the overflow protection. Workers carry the caller's
-    ///     culture and ambient scopes; the first failure by worker index is rethrown after all
-    ///     workers have joined, so a failing scan still reports one deterministic exception.
+    ///     Run <paramref name="body" /> for every index in <c>[0, itemCount)</c> on up to
+    ///     <paramref name="workerCount" /> threads, each with <see cref="AnalysisStackSize" /> of
+    ///     stack, and return when all of them have finished (issue #65: the per-file symbol
+    ///     analysis and the dispatch-index scan). Every worker needs the large stack, not just the
+    ///     coordinating thread: <see cref="OperationDepthGuard" /> sizes its depth budget from the
+    ///     thread it runs on, so a thread-pool worker would skip members the dedicated thread
+    ///     analyzes and lose the overflow protection.
+    ///     <para>
+    ///         Workers claim the next unclaimed index as they free up, so one large file occupies
+    ///         one worker while the others keep draining the rest. <paramref name="body" /> must
+    ///         write only to its own index's slot. Failures keep sequential semantics: no index
+    ///         past the lowest failing one is started, and that lowest failure is rethrown after
+    ///         every worker has joined - the exception a sequential loop would have stopped on.
+    ///         Workers carry the caller's culture and, through the captured execution context,
+    ///         its ambient scopes such as <see cref="PathExclusions" />.
+    ///     </para>
     /// </summary>
-    /// <param name="workerBody">Receives the worker index in <c>[0, workerCount)</c>.</param>
-    internal static void RunPartitions(string threadName, int workerCount, Action<int> workerBody)
+    internal static void ForEach(string threadName, int workerCount, int itemCount, Action<int> body)
     {
-        if (workerCount <= 1)
+        if (itemCount <= 0)
         {
-            workerBody(0);
             return;
         }
 
+        workerCount = Math.Min(workerCount, itemCount);
+        if (workerCount <= 1)
+        {
+            for (var index = 0; index < itemCount; index++)
+            {
+                body(index);
+            }
+
+            return;
+        }
+
+        var nextIndex = -1;
+        var lowestFailure = int.MaxValue;
+        var failures = new ConcurrentDictionary<int, ExceptionDispatchInfo>();
         var culture = CultureInfo.CurrentCulture;
         var uiCulture = CultureInfo.CurrentUICulture;
-        var failures = new ExceptionDispatchInfo?[workerCount];
-        var workers = new Thread[workerCount];
-        var started = new bool[workerCount];
-        for (var index = 0; index < workerCount; index++)
+        var workers = new List<Thread>(workerCount);
+        for (var worker = 0; worker < workerCount; worker++)
         {
-            var partition = index;
-            workers[index] = new Thread(() =>
+            var thread = new Thread(() =>
             {
                 onAnalysisThread = true;
                 CultureInfo.CurrentCulture = culture;
                 CultureInfo.CurrentUICulture = uiCulture;
-                try
-                {
-                    workerBody(partition);
-                }
-                catch (Exception e)
-                {
-                    failures[partition] = ExceptionDispatchInfo.Capture(e);
-                }
+                Drain();
             }, AnalysisStackSize)
             {
-                Name = $"{threadName} #{partition + 1}",
+                Name = $"{threadName} #{worker + 1}",
+                // The caller always joins; a background worker can never hold the process open.
                 IsBackground = true
             };
-        }
-
-        for (var index = 0; index < workerCount; index++)
-        {
             try
             {
-                workers[index].Start();
-                started[index] = true;
+                thread.Start();
+                workers.Add(thread);
             }
             catch (OutOfMemoryException)
             {
-                // Same fallback as Run: without a reservation the partition runs inline. The
-                // coordinator is normally an analysis thread; on a small caller stack the
-                // OperationDepthGuard budget tightens and skips members instead of crashing.
-                started[index] = false;
+                // No address space or commit for another reservation: the workers already running
+                // share the remaining indexes between them.
+                break;
             }
         }
 
-        for (var index = 0; index < workerCount; index++)
+        if (workers.Count == 0)
         {
-            if (started[index])
-            {
-                workers[index].Join();
-            }
-            else
-            {
-                workerBody(index);
-            }
+            // Same fallback as Run: without any reservation the loop runs on the caller's stack.
+            Drain();
         }
 
-        foreach (var failure in failures)
+        foreach (var thread in workers)
         {
-            failure?.Throw();
+            thread.Join();
+        }
+
+        if (lowestFailure != int.MaxValue)
+        {
+            failures[lowestFailure].Throw();
+        }
+
+        void Drain()
+        {
+            while (true)
+            {
+                var index = Interlocked.Increment(ref nextIndex);
+                if (index >= itemCount || index > Volatile.Read(ref lowestFailure))
+                {
+                    return;
+                }
+
+                try
+                {
+                    body(index);
+                }
+                catch (Exception exception)
+                {
+                    failures[index] = ExceptionDispatchInfo.Capture(exception);
+                    var observed = Volatile.Read(ref lowestFailure);
+                    while (index < observed)
+                    {
+                        var replaced = Interlocked.CompareExchange(ref lowestFailure, index, observed);
+                        if (replaced == observed)
+                        {
+                            break;
+                        }
+
+                        observed = replaced;
+                    }
+                }
+            }
         }
     }
 }

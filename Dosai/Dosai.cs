@@ -1685,18 +1685,19 @@ public static class Dosai
     private static string TitleCase(string value) => CultureInfo.InvariantCulture.TextInfo.ToTitleCase(value);
 
     /// <summary>
-    ///     Upper bound on the parallel per-file symbol-analysis workers (issue #65). Defaults to
-    ///     one worker per processor; <c>DOSAI_SYMBOL_ANALYSIS_WORKERS</c> overrides it for
-    ///     memory-constrained hosts. Each worker reserves a large analysis stack, so the bound
-    ///     also bounds reserved address space. Internal and mutable so tests can pin the count
-    ///     and compare a parallel run against a sequential one.
+    ///     Upper bound on the parallel symbol-analysis workers (issue #65): the per-file loop and
+    ///     the dispatch index's object-creation scan. Defaults to one worker per processor;
+    ///     <c>DOSAI_SYMBOL_ANALYSIS_WORKERS</c> overrides it for memory-constrained hosts, since
+    ///     each worker holds one file's semantic model at a time. Each worker reserves a large
+    ///     analysis stack, so the bound also bounds reserved address space. Internal and mutable
+    ///     so tests can pin the count and compare a parallel run against a sequential one.
     /// </summary>
     internal static int MaxSymbolAnalysisWorkers { get; set; } = ResolveDefaultSymbolAnalysisWorkers();
 
     private static int ResolveDefaultSymbolAnalysisWorkers()
     {
         var raw = Environment.GetEnvironmentVariable("DOSAI_SYMBOL_ANALYSIS_WORKERS");
-        return int.TryParse(raw, out var parsed) && parsed > 0 ? parsed : Environment.ProcessorCount;
+        return int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) && parsed > 0 ? parsed : Environment.ProcessorCount;
     }
 
     /// <summary>
@@ -1715,6 +1716,8 @@ public static class Dosai
         public List<EventInfo> Events { get; } = [];
         public List<ConstructorInfo> Constructors { get; } = [];
         public List<string> Diagnostics { get; } = [];
+        public int AbandonedDispatchSites { get; set; }
+        public string? FirstAbandonedDispatch { get; set; }
     }
 
     private static Method CreateMethodFromSymbol(
@@ -1923,19 +1926,21 @@ public static class Dosai
         }
 
         // Dispatch indexes are built once, up front: they are shared read-only state for the
-        // per-file workers below, and building them eagerly also gives their non-trivial cost
-        // (every object-creation site in the compilation) its own phase instead of hiding it in
-        // the first file's slice of the symbol-analysis clock.
+        // per-file workers below. Their instantiation evidence binds every member holding an
+        // object creation, so the scan runs on the same worker team and gets its own phase
+        // instead of hiding in the first file's slice of the symbol-analysis clock.
+        var workerCount = Math.Max(1, MaxSymbolAnalysisWorkers);
+        DebugLog.Count("symbol analysis workers", Math.Min(workerCount, Math.Max(1, sourcesToInspect.Count)));
         using (DebugLog.Phase("methods.dispatch-index"))
         {
             if (csharpTrees.Count > 0)
             {
-                dispatchIndexes[csharpCompilation] = DispatchResolver.SourceIndex.Create(csharpCompilation);
+                dispatchIndexes[csharpCompilation] = DispatchResolver.SourceIndex.Create(csharpCompilation, workerCount);
             }
 
             if (vbTrees.Count > 0)
             {
-                dispatchIndexes[vbCompilation] = DispatchResolver.SourceIndex.Create(vbCompilation);
+                dispatchIndexes[vbCompilation] = DispatchResolver.SourceIndex.Create(vbCompilation, workerCount);
             }
         }
 
@@ -1962,7 +1967,7 @@ public static class Dosai
             CompilationUnitSyntax? csRoot = null;
             Microsoft.CodeAnalysis.VisualBasic.Syntax.CompilationUnitSyntax? vbRoot = null;
 
-            if (extn.Equals(Constants.CSharpSourceExtension))
+            if (extn.Equals(Constants.CSharpSourceExtension, StringComparison.OrdinalIgnoreCase))
             {
                 if (!csharpTreesByPath.TryGetValue(sourceFilePath, out var tree))
                 {
@@ -1972,7 +1977,7 @@ public static class Dosai
                 csRoot = tree.GetCompilationUnitRoot();
                 model = csharpCompilation.GetSemanticModel(tree);
             }
-            else if (extn.Equals(Constants.VBSourceExtension))
+            else if (extn.Equals(Constants.VBSourceExtension, StringComparison.OrdinalIgnoreCase))
             {
                 if (!vbTreesByPath.TryGetValue(sourceFilePath, out var tree))
                 {
@@ -2798,36 +2803,23 @@ public static class Dosai
                 {
                     sourceDiagnostics.Add($"{sourceFilePath}: operations nested past the call-graph walker's depth budget were skipped; calls inside them are missing from MethodCalls and the call graph.");
                 }
+
+                symbols.AbandonedDispatchSites = walker.AbandonedDispatchSites;
+                symbols.FirstAbandonedDispatch = walker.FirstAbandonedDispatch;
             }
 
             return symbols;
         }
 
-        // One worker per processor, bounded by the file count and DOSAI_SYMBOL_ANALYSIS_WORKERS.
-        // Files are dealt round-robin so one huge generated file cannot strand a worker, and the
-        // per-file results merge in file order afterwards, so the output is byte-identical to a
-        // sequential run regardless of the worker count (issue #65).
-        var workerCount = sourcesToInspect.Count <= 1 ? 1 : Math.Clamp(MaxSymbolAnalysisWorkers, 1, sourcesToInspect.Count);
-        DebugLog.Count("symbol analysis workers", workerCount);
+        // Workers claim files as they free up and each file fills its own collector; collectors
+        // merge in file order afterwards, so the output is byte-identical to a sequential run
+        // regardless of the worker count or scheduling (issue #65).
         var fileSymbols = new SourceFileSymbols?[sourcesToInspect.Count];
-        if (workerCount > 1)
-        {
-            DedicatedStack.RunPartitions("Dosai symbol analysis", workerCount, worker =>
-            {
-                for (var index = worker; index < fileSymbols.Length; index += workerCount)
-                {
-                    fileSymbols[index] = AnalyzeSourceFile(sourcesToInspect[index]);
-                }
-            });
-        }
-        else
-        {
-            for (var index = 0; index < fileSymbols.Length; index++)
-            {
-                fileSymbols[index] = AnalyzeSourceFile(sourcesToInspect[index]);
-            }
-        }
+        DedicatedStack.ForEach("Dosai symbol analysis", workerCount, fileSymbols.Length,
+            index => fileSymbols[index] = AnalyzeSourceFile(sourcesToInspect[index]));
 
+        var abandonedDispatchSites = 0;
+        string? firstAbandonedDispatch = null;
         foreach (var fileResult in fileSymbols)
         {
             if (fileResult is null)
@@ -2843,16 +2835,18 @@ public static class Dosai
             mergedEvents.AddRange(fileResult.Events);
             mergedConstructors.AddRange(fileResult.Constructors);
             mergedDiagnostics.AddRange(fileResult.Diagnostics);
+            abandonedDispatchSites += fileResult.AbandonedDispatchSites;
+            firstAbandonedDispatch ??= fileResult.FirstAbandonedDispatch;
         }
 
-        // Issue #64: every count is a call site that keeps its direct edge but lost its
-        // synthesized dispatch-candidate edge to a Roslyn failure. Visible without --debug,
-        // because a quietly thinner call graph is exactly what consumers cannot diagnose.
-        var abandonedDispatchResolutions = dispatchIndexes.Values.Sum(index => index.AbandonedResolutions);
-        DebugLog.Count("dispatch resolutions abandoned after a Roslyn failure", abandonedDispatchResolutions);
-        if (abandonedDispatchResolutions > 0)
+        // Issue #64 containment: each counted call site keeps its direct edge but lost at least
+        // one synthesized dispatch-candidate edge to a Roslyn failure. Counted per call site in
+        // file order, so the number is the same for every worker count, and reported without
+        // --debug, because a quietly thinner call graph is exactly what consumers cannot diagnose.
+        DebugLog.Count("call sites with a failed dispatch resolution", abandonedDispatchSites);
+        if (abandonedDispatchSites > 0)
         {
-            mergedDiagnostics.Add($"Dispatch resolution failed for {abandonedDispatchResolutions} call site(s) (Roslyn error resolving a generic method on a generic interface); those virtual dispatch candidate edges are missing from the call graph.");
+            mergedDiagnostics.Add($"Dispatch resolution failed at {abandonedDispatchSites} call site(s), first {firstAbandonedDispatch}; Roslyn threw while resolving an implementing member, so those virtual dispatch candidate edges are missing from the call graph (direct call edges are kept).");
         }
 
         // The per-file symbol-analysis phase ends with the merge; the frontends run on their own
@@ -3609,11 +3603,30 @@ public static class Dosai
             });
         }
 
+        /// <summary>Call sites of this file whose dispatch lookup lost a candidate to a Roslyn failure (issue #64).</summary>
+        public int AbandonedDispatchSites { get; private set; }
+
+        /// <summary>Location and member of the first such call site, for the slice diagnostic.</summary>
+        public string? FirstAbandonedDispatch { get; private set; }
+
         private void AddSourceDispatchCandidates(IInvocationOperation operation)
         {
-            if (!ShouldInferDispatchCandidates(operation.TargetMethod))
+            // A non-virtual invocation of a virtual member - `base.M()`, VB `MyBase.M()` /
+            // `MyClass.M()` - runs exactly the bound method, so no override is a candidate.
+            if (!operation.IsVirtual || !ShouldInferDispatchCandidates(operation.TargetMethod))
             {
                 return;
+            }
+
+            var lookup = dispatchIndex.Lookup(operation.TargetMethod, operation.Instance?.Type);
+            if (lookup.Failure is { } failure)
+            {
+                AbandonedDispatchSites++;
+                if (FirstAbandonedDispatch is null)
+                {
+                    var line = operation.Syntax.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
+                    FirstAbandonedDispatch = string.Create(CultureInfo.InvariantCulture, $"{sourceFilePath}:{line} ('{failure.MemberName}' on '{failure.TypeName}', {failure.ExceptionType})");
+                }
             }
 
             // Sealed/struct receivers resolve to the exact implementation; remaining candidates
@@ -3621,7 +3634,7 @@ public static class Dosai
             // *synthesized* edge, not a witnessed call site, so it keeps the VirtualCandidate
             // evidence kind, consumers that trust SourceRoslynDirect must only see real call
             // sites. DispatchConfidence = "exact" carries the resolution fact.
-            foreach (var (candidate, dispatchConfidence) in dispatchIndex.FindRankedDispatchCandidates(operation.TargetMethod, operation.Instance?.Type).Take(16))
+            foreach (var (candidate, dispatchConfidence) in lookup.Candidates.Take(16))
             {
                 var isExact = dispatchConfidence == "exact";
                 AddInferredMethodCall(
