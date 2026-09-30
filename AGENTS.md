@@ -70,20 +70,47 @@ dotnet test ./Dosai.sln
   reached through source analysis. Request operations only through
   `OperationDepthGuard.GetOperation`, which skips members too deep for even the dedicated stack
   and reports them per file (`OperationDepthGuard.Describe`).
-- The per-file symbol-analysis loop in `GetSourceMethods` and the dispatch index's
-  object-creation scan run on a worker team of dedicated large-stack threads
-  (`DedicatedStack.ForEach`; one per processor, capped by `Dosai.MaxSymbolAnalysisWorkers` /
-  `DOSAI_SYMBOL_ANALYSIS_WORKERS`). Workers claim the next file as they free up. The per-file
-  body must stay file-pure: everything it produces goes into that file's `SourceFileSymbols`
-  collector (counts included), and everything it reads must be immutable, or memoized
-  thread-safely with a result that does not depend on which thread computed it, before the
-  first worker starts. Collectors merge in file order afterwards, which is what keeps the output
+- The per-file symbol-analysis loop in `GetSourceMethods`, the dispatch index's
+  object-creation scan and the parse itself run on a worker team of dedicated large-stack
+  threads (`DedicatedStack.ForEach`; one per processor, capped by
+  `Dosai.MaxSymbolAnalysisWorkers` / `DOSAI_SYMBOL_ANALYSIS_WORKERS`). Workers claim the next
+  file as they free up. The per-file body must stay file-pure: everything it produces goes into
+  that file's `SourceFileSymbols` collector (counts included), and everything it reads must be
+  immutable, or memoized thread-safely with a result that does not depend on which thread
+  computed it. Collectors merge in file order afterwards, which is what keeps the output
   byte-identical for every worker count - do not add shared mutable state, counters or merges
-  inside the loop.
+  inside the loop. Parse fills a tree array by index, so tree order stays the file order of a
+  sequential parse.
+- Every string rendered from a Roslyn symbol during source analysis goes through the per-run
+  `SourceRenderCache` (signatures, display strings, interface-name lists). It is keyed by
+  symbol reference through a `ConditionalWeakTable` on purpose: Roslyn symbol hash codes are
+  not cached on the symbol (each hash walks the containing-symbol chain), so a hash-keyed
+  table slows the worker loop, and a strongly-keyed table pins every symbol - including
+  per-callsite constructed generics - for the whole run. Render through the cache; never
+  re-render per call site, and never key symbol data by `SymbolEqualityComparer` in a table
+  that outlives one file.
+- Graph de-duplication and ordering go through `GraphAssembly`: an `EdgeSiteKey` struct
+  instead of a concatenated key string per edge, stable in-place sorts instead of `OrderBy`
+  chains. Dedupe the call record before building the edge. String legs of the key compare by
+  reference first, so route edge endpoint ids through the render cache (single instance per
+  distinct member) rather than fresh strings.
+- Phase order in `BuildMethodsSlice` is a memory contract: framework analysis and the security
+  analyzer run immediately after source analysis (they are the only compilation consumers),
+  then the compilations are dropped before the assembly IL call graph, enrichment,
+  reachability and serialization - the syntax trees are the largest object the pipeline holds,
+  and pinning them through those phases is the memory wall on very large trees (issue #65).
+  Anything new that needs a `SemanticModel` must run before that release.
+- The process runs with server GC (`Dosai.csproj`): parse, dispatch index and symbol analysis
+  are wide parallel allocators, and workstation GC's single collector thread fell behind them
+  on large trees. `DOSAI_DEBUG_GC=1` forces a full collection before each `--debug` phase-end
+  heap read so figures compare without GC-timing noise.
 - Virtual/interface dispatch resolution goes through `DispatchResolver.SourceIndex`: concrete
   types bucketed once per interface/base-type original definition, lookups memoized per
   (target, receiver) symbol pair. Route any new dispatch inference through the index rather
-  than scanning types. `FindImplementationForInterfaceMember` takes the member as its
+  than scanning types. Instantiation evidence is symbol-exact (the created type's symbol and,
+  for constructed generics, its original definition); the string aliases this replaced also
+  matched same-named types in other namespaces and promoted them to RTA rank.
+  `FindImplementationForInterfaceMember` takes the member as its
   interface declares it: pass `ConstructedFrom`, never a method constructed with a call's type
   arguments, which makes Roslyn throw (issue #64). A resolution that still throws abandons only
   that candidate; the walker counts the call site and the count surfaces as a slice diagnostic.
@@ -102,7 +129,11 @@ dotnet test ./Dosai.sln
   and the call-graph walker follows the stack so long chains keep their head call.
 - Enumerate the scanned tree through `SafeFileRead.EnumerateAllFilesSafe` (or filter through
   `PathExclusions.IsExcluded`), so `--exclude` globs (`PathExclusions`, an ambient scope the CLI
-  applies per command) hold for every analyzer.
+  applies per command) hold for every analyzer. Parse options resolve from the scan root
+  (`CSharpSourceParser.Parse(text, file, rootPath)`), never from the file's own directory: the
+  per-directory form ran one recursive TFM detection per distinct source directory and gave
+  subdirectory files a different define set than the root project (and than the
+  `Metadata.GuardTargetFramework` the slice reports).
 - Keep edge endpoints valid: every graph edge must reference existing nodes.
 - Preserve JSON compatibility unless a task explicitly allows breaking changes.
 - PURL enrichment must be best-effort and must never fail analysis.

@@ -40,6 +40,13 @@ public static class DebugLog
     public static bool Enabled { get; private set; }
 
     /// <summary>
+    ///     <c>DOSAI_DEBUG_GC=1</c> forces a full blocking collection before each phase-end heap
+    ///     read, so heap figures compare runs without GC-timing noise. Debug-only measurement
+    ///     aid; it slows the run and never ships behavior.
+    /// </summary>
+    internal static bool CollectBeforeHeapRead { get; set; } = IsTruthyEnvironmentValue(Environment.GetEnvironmentVariable("DOSAI_DEBUG_GC"));
+
+    /// <summary>
     ///     Timestamp prefix for every line, always with an invariant decimal separator: a locale
     ///     decimal comma made the timestamp format itself locale-dependent (issue #63).
     /// </summary>
@@ -243,6 +250,11 @@ public static class DebugLog
 
                 _disposed = true;
                 ActivePhases.Remove(this);
+                if (CollectBeforeHeapRead)
+                {
+                    GC.Collect(generation: GC.MaxGeneration, mode: GCCollectionMode.Forced, blocking: true, compacting: true);
+                }
+
                 Console.Error.WriteLine($"{Timestamp} end {Name} in {string.Create(CultureInfo.InvariantCulture, $"{_watch.Elapsed.TotalSeconds:F3}")}s, managed heap {FormatBytes(GC.GetTotalMemory(forceFullCollection: false))}, working set {FormatBytes(Environment.WorkingSet)}");
                 StopHeartbeatIfIdleLocked();
             }

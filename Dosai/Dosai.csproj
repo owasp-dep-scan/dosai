@@ -4,6 +4,12 @@
     <TargetFramework>net11.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <!-- Source analysis is a wide parallel workload (parse, dispatch index and the per-file
+         symbol loop all run on a worker team), but the process defaulted to workstation GC:
+         one GC thread behind fourteen allocating workers. On the large trees of issue #65 that
+         showed up as CPU collapsing to a single core "while the GC was under pressure" while
+         the heap kept climbing; server GC keeps reclamation parallel to allocation. -->
+    <ServerGarbageCollection>true</ServerGarbageCollection>
     <Platform>x64</Platform>
     <OutputType>Exe</OutputType>
     <PackageReadmeFile>README.md</PackageReadmeFile>

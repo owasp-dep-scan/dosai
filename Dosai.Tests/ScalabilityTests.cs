@@ -1,0 +1,202 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using Depscan;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Xunit;
+
+namespace Dosai.Tests;
+
+// Issue #65 memory/performance work: the heuristics that changed behavior while keeping the
+// output stable at small scale each get a pinning test here - symbol-exact instantiation
+// evidence in the dispatch index, the struct call-site key that replaced concatenated key
+// strings, and the per-symbol render memoization that dedups id strings across files.
+public class ScalabilityTests
+{
+    private static MethodsSlice ReadMethods(string path)
+    {
+        var resultJson = Depscan.Dosai.GetMethods(path);
+        var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(resultJson, new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() }
+        });
+        Assert.NotNull(methodsSlice);
+        Assert.NotNull(methodsSlice.CallGraph);
+        return methodsSlice!;
+    }
+
+    private static List<MethodCalls> DispatchCandidates(MethodsSlice slice, string sourceIdFragment) => slice.MethodCalls!
+        .Where(call => call.EvidenceKind == AnalysisEvidenceKind.SourceRoslynVirtualCandidate &&
+                       call.SourceId?.Contains(sourceIdFragment, StringComparison.Ordinal) == true)
+        .ToList();
+
+    // Instantiation evidence is symbol-exact. Two types sharing a simple name in different
+    // namespaces used to alias onto one RTA flag ("Listener" created marked every Listener
+    // instantiated), promoting an unrelated type's overrides to instantiated-evidence rank.
+    // The actually-created type ranks rta-candidate; its same-named twin stays cha-candidate.
+    [Fact]
+    public void GetMethods_SameSimpleNameInTwoNamespaces_OnlyTheInstantiatedTypeRanksRta()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Listeners.cs"), """
+public interface IListener
+{
+    void OnCreated(object source);
+}
+
+namespace Telemetry
+{
+    public class Listener : IListener
+    {
+        public void OnCreated(object source) { }
+    }
+}
+
+namespace Diagnostics
+{
+    // Same simple name as Telemetry.Listener; never instantiated by this tree.
+    public class Listener : IListener
+    {
+        public void OnCreated(object source) { }
+    }
+}
+
+public static class Boot
+{
+    public static void Wire(IListener listener)
+    {
+        var created = new Telemetry.Listener();
+        created.OnCreated(created);
+        listener.OnCreated("boot");
+    }
+}
+""");
+
+        var slice = ReadMethods(tempDirectory.Path);
+
+        var viaInterface = DispatchCandidates(slice, "Boot.Wire")
+            .Where(call => call.TargetId?.Contains("Diagnostics.Listener.OnCreated", StringComparison.Ordinal) == true ||
+                           call.TargetId?.Contains("Telemetry.Listener.OnCreated", StringComparison.Ordinal) == true)
+            .ToList();
+        var telemetry = Assert.Single(viaInterface, call => call.TargetId!.Contains("Telemetry.Listener.OnCreated", StringComparison.Ordinal));
+        Assert.Equal("rta-candidate", telemetry.DispatchConfidence);
+        var diagnostics = Assert.Single(viaInterface, call => call.TargetId!.Contains("Diagnostics.Listener.OnCreated", StringComparison.Ordinal));
+        Assert.Equal("cha-candidate", diagnostics.DispatchConfidence);
+    }
+
+    // The struct call-site key must collapse exactly what the concatenated key string
+    // collapsed: duplicate records for one site - including string instances that are equal
+    // but not reference-equal - become one edge, while anything the old key distinguished
+    // (call type, evidence kind, position) stays distinct.
+    [Fact]
+    public void EdgeSiteKey_CollapsesSameSiteAcrossDistinctStringInstances()
+    {
+        var first = new GraphAssembly.EdgeSiteKey(new string('a', 3) + "1", "Ns.Type.Method", "File.cs", 12, 3, GraphAssembly.CallTypeName(CallType.MethodCall), GraphAssembly.EvidenceKindName(AnalysisEvidenceKind.SourceRoslynDirect));
+        var duplicate = new GraphAssembly.EdgeSiteKey(new string('a', 3) + "1", "Ns.Type." + "Method", "File" + ".cs", 12, 3, GraphAssembly.CallTypeName(CallType.MethodCall), GraphAssembly.EvidenceKindName(AnalysisEvidenceKind.SourceRoslynDirect));
+        Assert.Equal(first, duplicate);
+        Assert.Equal(first.GetHashCode(), duplicate.GetHashCode());
+
+        var otherLine = new GraphAssembly.EdgeSiteKey("aaa1", "Ns.Type.Method", "File.cs", 13, 3, GraphAssembly.CallTypeName(CallType.MethodCall), GraphAssembly.EvidenceKindName(AnalysisEvidenceKind.SourceRoslynDirect));
+        var otherKind = new GraphAssembly.EdgeSiteKey("aaa1", "Ns.Type.Method", "File.cs", 12, 3, GraphAssembly.CallTypeName(CallType.MethodCall), GraphAssembly.EvidenceKindName(AnalysisEvidenceKind.SourceRoslynVirtualCandidate));
+        var otherType = new GraphAssembly.EdgeSiteKey("aaa1", "Ns.Type.Method", "File.cs", 12, 3, GraphAssembly.CallTypeName(CallType.ConstructorCall), GraphAssembly.EvidenceKindName(AnalysisEvidenceKind.SourceRoslynDirect));
+        Assert.NotEqual(first, otherLine);
+        Assert.NotEqual(first, otherKind);
+        Assert.NotEqual(first, otherType);
+    }
+
+    // The enum-name tables back the key's tag legs; they must stay identical to what enum
+    // interpolation produced, or dedup silently changes meaning when a value is added.
+    [Fact]
+    public void GraphAssembly_NameTables_MatchEnumToString()
+    {
+        foreach (var value in Enum.GetValues<CallType>())
+        {
+            Assert.Equal(value.ToString(), GraphAssembly.CallTypeName(value));
+        }
+
+        foreach (var value in Enum.GetValues<AnalysisEvidenceKind>())
+        {
+            Assert.Equal(value.ToString(), GraphAssembly.EvidenceKindName(value));
+        }
+    }
+
+    // The render memo returns one instance per symbol so call sites, inventories, nodes and
+    // edges can share the same string object instead of one copy per mention.
+    [Fact]
+    public void SourceRenderCache_ReturnsTheSameStringInstancePerSymbol()
+    {
+        var tree = CSharpSyntaxTree.ParseText("namespace N { public class C { public void M(int a) { } } }");
+        var compilation = CSharpCompilation.Create(
+            "RenderCacheTest",
+            syntaxTrees: [tree],
+            references: [MetadataReference.CreateFromFile(typeof(object).Assembly.Location)]);
+        var model = compilation.GetSemanticModel(tree);
+        var method = model.GetDeclaredSymbol(tree.GetRoot().DescendantNodes()
+            .OfType<MethodDeclarationSyntax>().Single())!;
+
+        var cache = new SourceRenderCache();
+        Assert.Same(cache.Signature(method), cache.Signature(method));
+        Assert.Same(cache.Display(method.ContainingNamespace), cache.Display(method.ContainingNamespace));
+        Assert.Equal(cache.Signature(method), Depscan.Dosai.FormatMethodSignature(method));
+    }
+
+    // Parse options resolve from the scan root, not each file's directory: a project rooted at
+    // the scan path decides the preprocessor symbols for every file below it, so a
+    // representative net8.0 build compiles `#if NET8_0` arms in subdirectories too (the
+    // per-directory fallback used to inherit the latest-modern-net define set there).
+    [Fact]
+    public void GetMethods_GuardsInSubdirectories_ResolveAgainstTheScanRootProject()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "App.csproj"), """
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+  </PropertyGroup>
+</Project>
+""");
+        Directory.CreateDirectory(Path.Combine(tempDirectory.Path, "Generated"));
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Generated", "Guards.cs"), """
+public static class Guards
+{
+#if NET8_0
+    public static void Net8Arm() { }
+#endif
+#if NET10_0
+    public static void Net10Arm() { }
+#endif
+}
+""");
+
+        var slice = ReadMethods(tempDirectory.Path);
+
+        Assert.Contains(slice.Methods!, method => method is { ClassName: "Guards", Name: "Net8Arm" });
+        Assert.DoesNotContain(slice.Methods!, method => method is { ClassName: "Guards", Name: "Net10Arm" });
+    }
+
+    private sealed class TemporaryDirectory : IDisposable
+    {
+        public TemporaryDirectory()
+        {
+            Path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "dosai-scalability-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path);
+        }
+
+        public string Path { get; }
+
+        public void Dispose()
+        {
+            try
+            {
+                Directory.Delete(Path, recursive: true);
+            }
+            catch (IOException)
+            {
+            }
+            catch (UnauthorizedAccessException)
+            {
+            }
+        }
+    }
+}

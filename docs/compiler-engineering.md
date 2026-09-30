@@ -84,6 +84,15 @@ Id@Version` directive surfaces in `Dependencies[]` (namespace `nuget`, module `F
 the way `#r "nuget: ..."` does for F# scripts, because a file-based app declares its NuGet
 references nowhere else.
 
+Parsing runs on the same dedicated large-stack worker team as the per-file symbol loop
+(`DedicatedStack.ForEach`), one file per index, results stored by index: the tree order every
+downstream phase relies on stays the file order of a sequential parse. Parse options resolve
+from the **scan root**, not each file's directory - one `TargetFrameworkDetection` pass for
+the whole tree instead of one recursive enumeration per distinct source directory (which was
+both quadratic-ish I/O and serialized behind the parse-options lock), and a subdirectory's
+`#if` arms then resolve against the root project's representative target, matching how the
+data-flow and crypto pipelines already parsed.
+
 References are populated from:
 
 1. `typeof(object).Assembly.Location`
@@ -129,11 +138,25 @@ Supported operation kinds include:
 
 Every block, initializer, constructor initializer and top-level statement (every statement in VB) is handed to the walker as a root. Nested roots already sit inside their parent's operation tree, so the walker visits each operation once per file; a call is recorded once, not once per enclosing block.
 
+Every string rendered from a symbol during source analysis - method signatures, containing
+assembly/module/namespace displays, argument-type displays, error-format method names,
+interface-name lists - goes through one per-run `SourceRenderCache`. A method's signature was
+previously rendered once per call site it contains, its containing-assembly display once per
+member of its type; the cache renders each distinct symbol once and returns the same string
+instance everywhere, so a graph holding millions of call records keeps one string per distinct
+member instead of one per mention. The cache is keyed by symbol **reference** through a
+`ConditionalWeakTable`: Roslyn's symbol hash code is not cached on the symbol (each hash walks
+the containing-symbol chain), so a hash-keyed table slowed the worker loop, and a strong table
+would pin every symbol - and through constructed generics, per-callsite instantiations - for
+the whole run; weak reference keys cost nothing to drop and still dedup everything, because
+one compilation hands out one instance per source and metadata symbol. The per-file relative
+path is likewise computed once per file, not per record.
+
 Deep nesting has two limits. All Roslyn operation work runs on a `DedicatedStack` thread (256 MB reserved on 64-bit), and walkers stop descending at a depth budget or when the stack runs low. The call-graph walker's budget follows the stack, so every call of a long fluent chain, head included, reaches the graph. The data-flow and crypto walkers render each visited call's source text and stop at 1,024 levels. Separately, the Roslyn operation factory builds a member's whole operation tree with unguarded recursion, so `OperationDepthGuard` keeps any member nesting deeper than the stack can carry (about 131,000 syntax levels on 64-bit) away from `GetOperation`. That member is skipped and its file is named in `Diagnostics`, instead of the process terminating with no output. Files shorter than the limit cannot exceed it and are never walked for the check.
 
 The graph builder guarantees that every edge endpoint exists as a node. External targets become external nodes when no source declaration exists. Repeated call sites of the same `(source, target, callType, evidence)` pair collapse into one counted edge (`CallSiteCount`) whose argument and evidence annotations are merged. Assembly call graph edge de-duplication includes evidence kind so direct IL, generated-state, delegate-target, and inferred candidate edges are not accidentally collapsed into one classification. Source and assembly call graphs are merged with dictionary-backed node lookups so duplicate node evidence can be combined without repeatedly scanning large node lists.
 
-Source and binary call graph extraction share a small CHA/RTA-style dispatch resolver. For source, it indexes concrete application types, interface implementations, overrides, and instantiated types observed from object creation operations. The source index is built once per Roslyn compilation (its object-creation scan in parallel per syntax tree), buckets concrete types by interface and base-type original definition, and memoizes each (target, receiver) lookup for the per-file walkers. Only virtual invocations get candidates - `base.M()` runs exactly the bound method - and a call site keeps at most 16, instantiated types first. Interface implementations resolve through `FindImplementationForInterfaceMember` with the member as the interface declares it (`ConstructedFrom`): handed a generic method constructed with a call's type arguments, Roslyn throws. For assemblies, it matches known methods against decoded type metadata, base types, implemented interfaces, and instantiated IL types. Inferred virtual and interface edges carry a dispatch confidence tier: `exact` when the static receiver type is sealed or a struct, `rta-candidate` when the implementing type is instantiated in the compilation, or `cha-candidate`.
+Source and binary call graph extraction share a small CHA/RTA-style dispatch resolver. For source, it indexes concrete application types, interface implementations, overrides, and instantiated types observed from object creations. Instantiation evidence is **symbol-exact**: the created type's symbol (and, for a constructed generic, its original definition) marks exactly that type instantiated, because every symbol below the scan resolves through the one compilation. The string aliases this replaced also matched any same-named type in another namespace, which promoted unrelated types to RTA rank (`My.Own.Task` marking `System.Threading.Tasks.Task` instantiated). The index is built once per Roslyn compilation (its object-creation scan runs per syntax tree on the worker team, using `GetTypeInfo` on the creation expression rather than the operation factory, so it needs neither the deep-stack guard nor a full operation tree), buckets concrete types by interface and base-type original definition, and memoizes each (target, receiver) lookup for the per-file walkers. Only virtual invocations get candidates - `base.M()` runs exactly the bound method - and a call site keeps at most 16, instantiated types first. Interface implementations resolve through `FindImplementationForInterfaceMember` with the member as the interface declares it (`ConstructedFrom`): handed a generic method constructed with a call's type arguments, Roslyn throws. For assemblies, it matches known methods against decoded type metadata, base types, implemented interfaces, and instantiated IL types. Inferred virtual and interface edges carry a dispatch confidence tier: `exact` when the static receiver type is sealed or a struct, `rta-candidate` when the implementing type is instantiated in the compilation, or `cha-candidate`.
 
 Instantiated-generic IL ids (`Method<args>`) never match a source id exactly because the instantiation rewrites parameter types too, so the merged graph normalizes them onto the source original-definition node keyed by an instantiation-free identity, keeping the original instantiated id in `MethodNode.GenericInstantiation`.
 
@@ -293,6 +316,41 @@ Severity defaults by sink category (injection primitives are `high`, exposure cl
 - `Low` for weaker evidence.
 
 Catastrophically-backtracking literal regexes (`new Regex("(a+)*$")`, `[GeneratedRegex("literal")]`) are additionally detected statically as ReDoS candidates (CWE-1333); `RegexOptions.NonBacktracking` and an explicit match timeout suppress the finding, and overlong patterns get a review-needed diagnostic instead of a silent skip. Security findings derived from framework metadata (endpoint security, MCP transport integrity, configuration security) use content-derived ids (kind, file, and line) so they stay stable across diffs.
+
+## Scaling and memory
+
+The phases below order how a `methods` run spends time and memory on very large trees
+(issue #65 measured `dotnet/runtime`-scale scans; the numbers there: parsing 1/6 of the run,
+the dispatch index and the per-file symbol loop most of the rest, and a long graph-assembly
+tail after symbol analysis had finished during which the heap kept climbing):
+
+- **Graph assembly allocates no key strings.** Call-site de-duplication and the canonical
+  edge/node orderings run through `GraphAssembly`: an `EdgeSiteKey` struct (source, target,
+  file, line, column, call-type tag, evidence-kind tag) replaces one concatenated
+  ~200-byte string per edge, and stable in-place sorts (an index sort with an
+  original-position tiebreak) replace `OrderBy` chains. At millions of edges the old key
+  strings alone were gigabytes of garbage allocated exactly in the tail, and duplicate call
+  sites used to allocate their edge object before the de-duplication discarded it - dedup now
+  happens on the call record before the edge exists. String legs compare by reference first
+  (ids rendered through the `SourceRenderCache` and per-file names are single instances) and
+  fall back to ordinal comparison, so keys built from non-pooled strings behave exactly like
+  the concatenated form.
+- **The compilations are released before the IL phase.** Framework analysis and the security
+  analyzer - the only compilation consumers - run immediately after source analysis; the
+  syntax trees (the largest object the pipeline ever holds) and the framework context's
+  per-file text cache are then dropped before the assembly call graph, enrichment,
+  reachability and serialization, instead of surviving behind those phases. On the issue's
+  112k-file tree this is what moves the memory wall out of the run's way: the death happened
+  entering `assembly-call-graph` with tens of GB still pinned by trees.
+- **Per-file collectors and dispatch indexes are dropped as soon as they are merged**, so the
+  per-file list backing arrays - a near-copy of every record collected - do not sit next to
+  the merged graph until the method returns.
+- **Server GC.** Parse, the dispatch index and the symbol loop all run on a worker team; with
+  the previous workstation-GC default a single GC thread fell behind a dozen allocating
+  workers (visible as CPU collapsing to one core "while the GC was under pressure"). Server
+  GC keeps reclamation parallel to allocation.
+- `DOSAI_DEBUG_GC=1` forces a full compacting collection before each `--debug` phase-end heap
+  read, so heap figures compare runs without GC-timing noise.
 
 ## Current limitations
 
