@@ -469,7 +469,8 @@ namespace App
 
         var duplicate = Assert.Single(diagnostics, diagnostic => diagnostic.Contains("declared by more than one file", StringComparison.Ordinal));
         Assert.StartsWith("1 type(s)", duplicate, StringComparison.Ordinal);
-        Assert.Contains("App.Handler (Handler.cs, Handler.Windows.cs)", duplicate, StringComparison.Ordinal);
+        // Files in ordinal path order, whatever order the file system enumerated them in.
+        Assert.Contains("App.Handler (Handler.Windows.cs, Handler.cs)", duplicate, StringComparison.Ordinal);
         Assert.DoesNotContain("Split", duplicate, StringComparison.Ordinal);
     }
 

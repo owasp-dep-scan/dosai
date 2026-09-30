@@ -218,11 +218,13 @@ internal static class ReferenceSources
     /// </summary>
     internal static IEnumerable<string> Diagnostics(PartitionResult partition, string basePath)
     {
+        // Trees come in file-system enumeration order, which differs between OSes: every list
+        // below is ordered by relative path so the text is the same everywhere.
         string Relative(SyntaxTree tree) => Path.GetRelativePath(basePath, tree.FilePath).Replace('\\', '/');
 
         if (partition.Skipped.Count > 0)
         {
-            var examples = string.Join(", ", partition.Skipped.Take(3).Select(Relative));
+            var examples = string.Join(", ", partition.Skipped.Select(Relative).Order(StringComparer.Ordinal).Take(3));
             yield return string.Create(CultureInfo.InvariantCulture,
                 $"Skipped {partition.Skipped.Count} reference-assembly source file(s) (API-surface stubs whose members only `throw null`, such as dotnet/runtime ref/ folders) that only redeclare types implemented elsewhere in the tree, e.g. {examples}. Compiling both declared every member twice, and calls on those members bound ambiguously and differently between runs.");
         }
@@ -230,8 +232,9 @@ internal static class ReferenceSources
         if (partition.Trimmed.Count > 0)
         {
             var keptTypes = partition.Trimmed.Sum(trimmed => trimmed.KeptTypes.Count);
-            var typeExamples = string.Join(", ", partition.Trimmed.SelectMany(trimmed => trimmed.KeptTypes).Take(3).Select(DisplayName));
-            var fileExamples = string.Join(", ", partition.Trimmed.Take(3).Select(trimmed => Relative(trimmed.Tree)));
+            var trimmedByPath = partition.Trimmed.OrderBy(trimmed => Relative(trimmed.Tree), StringComparer.Ordinal).ToList();
+            var typeExamples = string.Join(", ", trimmedByPath.SelectMany(trimmed => trimmed.KeptTypes).Take(3).Select(DisplayName));
+            var fileExamples = string.Join(", ", trimmedByPath.Take(3).Select(trimmed => Relative(trimmed.Tree)));
             yield return string.Create(CultureInfo.InvariantCulture,
                 $"Trimmed {partition.Trimmed.Count} reference-assembly source file(s) to the {keptTypes} type(s) that no other file declares, e.g. {typeExamples} (in {fileExamples}): their redeclarations of types implemented elsewhere are left out for the same reason as a skipped stub, and the API surface only they declare is still analyzed.");
         }
@@ -255,13 +258,14 @@ internal static class ReferenceSources
 
         var duplicates = declaringFiles
             .Where(entry => entry.Value.Count > 1 && nonPartial.Contains(entry.Key))
-            .OrderBy(entry => entry.Value[0])
-            .ThenBy(entry => entry.Key, StringComparer.Ordinal)
+            .Select(entry => (Type: entry.Key, Files: entry.Value.Select(index => Relative(partition.Kept[index])).Order(StringComparer.Ordinal).ToList()))
+            .OrderBy(entry => entry.Files[0], StringComparer.Ordinal)
+            .ThenBy(entry => entry.Type, StringComparer.Ordinal)
             .ToList();
         if (duplicates.Count > 0)
         {
             var examples = string.Join("; ", duplicates.Take(3).Select(entry =>
-                $"{DisplayName(entry.Key)} ({string.Join(", ", entry.Value.Take(3).Select(index => Relative(partition.Kept[index])))})"));
+                $"{DisplayName(entry.Type)} ({string.Join(", ", entry.Files.Take(3))})"));
             yield return string.Create(CultureInfo.InvariantCulture,
                 $"{duplicates.Count} type(s) are declared by more than one file without all declarations being partial, e.g. {examples}: typically per-platform or per-target variants that no single build compiles together. Dosai compiles every file into one compilation, so such a type's members are declared twice and calls on them bind ambiguously, possibly differently between runs; excluding the variants a build does not use (--exclude) keeps the result stable.");
         }
