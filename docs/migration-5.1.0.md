@@ -102,6 +102,36 @@ such record reported the compilation's name (`Dosai.SourceAnalysis.CSharp`) as `
 `ImplementedInterfaces` and the compilation's assembly and module. They now carry the event's
 real namespace, containing type, interfaces, assembly and module, like `add`/`remove` events.
 
+## Lambda and local-function call-graph ids (breaking for their ids)
+
+An anonymous function's symbol has no name, so its call-graph id was `Ns.Type.(params):ret`: every
+lambda of a type with the same parameter and return types was one node, whose callees merged
+across every member that declared such a lambda (a lambda in an unreachable method looked
+reachable through its twin in a reachable one). A local function's id was that of a same-named
+member of the type. Both are now named after the member that declares them, the way the compiler
+names the methods it generates:
+
+- `Ns.Type.<Run>lambda2():void` - the second anonymous function (lambda or `delegate { }`) in the
+  type's members named `Run`, counting every overload and partial part in source order and
+  nested lambdas after the one containing them. Constructors are `<.ctor>`, getters `<get_P>`,
+  field and auto-property initializers the field or property name, top-level statements
+  `<<Main>$>`. Visual Basic lambdas follow the same scheme.
+- `Ns.Type.<Run>Helper():int` - a local function; a second local function of the same name in
+  the same members is `<Run>Helper|2`.
+- `Ns.Type.<Run>query1(int):bool` - a lambda the compiler makes of a query expression's clause
+  (`where`, `select`, `from ... from`, `join`, ...), named after the query: the first query
+  expression in `Run`'s members. Its clauses' lambdas share that name and differ by signature.
+
+The ids appear in `CallGraph.Nodes[].Id`, edge `SourceId`/`TargetId`, `MethodCalls[]`, reachability
+and data-flow `methodId` properties. `MethodCalls[].CallerMethod` and, for a lambda or local
+function target, `CalledMethod` carry the same name (`<Run>lambda2`) instead of an empty string,
+`lambda expression` or the local name. Like the compiler's `<Run>b__0_0`, these nodes are
+compiler-generated for the `DeadCode[]` report, which no longer lists lambdas on their own.
+
+Calls in a primary constructor's base-type arguments (`class D(int x) : B(x)`, records
+included) were missing from the call graph, the base constructor call among them. They are now
+the constructor's calls, like a `: base(...)` initializer's.
+
 ## Reference-assembly sources and duplicate declarations (behavioral, `Diagnostics`)
 
 Reference-assembly source - GenAPI API-surface stubs whose bodies only `throw null` (or return

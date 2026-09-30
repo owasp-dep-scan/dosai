@@ -95,6 +95,11 @@ dotnet test ./Dosai.sln
   re-render per call site. Symbol-keyed tables that must compare by symbol equality (the
   dispatch index's buckets and lookup memo) are per compilation and are dropped as soon as
   the symbol loop has merged.
+- Method ids come from `Dosai.FormatMethodSignature` (source rendering through
+  `SourceRenderCache.Signature`). Anonymous and local functions are named after their declaring
+  member by `Dosai.NestedFunctionName` (`<Run>lambda2`, `<Run>Helper`); a lambda's symbol name
+  is empty and a local function's only unique in its scope, so never build a call-graph id or
+  node name from `IMethodSymbol.Name` directly - use `SourceRenderCache.MemberName`.
 - Graph de-duplication and ordering go through `GraphAssembly`: an `EdgeSiteKey` struct
   instead of a concatenated key string per edge, stable in-place sorts instead of `OrderBy`
   chains. Dedupe the call record before building the edge. String legs of the key compare by

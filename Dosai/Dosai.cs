@@ -117,9 +117,12 @@ public static class Dosai
 
         var method = methodSymbol.ReducedFrom ?? methodSymbol.OriginalDefinition;
         var containingType = NormalizeSymbolName(method.ContainingType?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty);
-        var methodName = method.MethodKind == MethodKind.Constructor
-            ? ".ctor"
-            : method.MetadataName;
+        var methodName = method.MethodKind switch
+        {
+            MethodKind.Constructor => ".ctor",
+            _ when IsNestedFunction(method) => NestedFunctionName(method),
+            _ => method.MetadataName
+        };
         var returnType = method.MethodKind == MethodKind.Constructor ? "" : NormalizeSymbolName(method.ReturnType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat));
 
         var parameters = method.Parameters.Select(p => NormalizeSymbolName(p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat))).ToList();
@@ -139,6 +142,140 @@ public static class Dosai
     ///     memoizes per symbol so one member costs one render and one string instance per run.
     /// </summary>
     internal static string FormatMethodSignature(IMethodSymbol methodSymbol) => GenerateMethodSignature(methodSymbol);
+
+    /// <summary>An anonymous function (lambda, anonymous method) or a local function: named after the member that declares it.</summary>
+    internal static bool IsNestedFunction(IMethodSymbol method) => method.MethodKind is MethodKind.AnonymousFunction or MethodKind.LocalFunction;
+
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<INamedTypeSymbol, System.Collections.Concurrent.ConcurrentDictionary<string, IReadOnlyDictionary<(SyntaxTree Tree, Microsoft.CodeAnalysis.Text.TextSpan Span, bool Query), string>>> NestedFunctionNamesByType = new();
+
+    /// <summary>
+    ///     The name of an anonymous or local function, after the member that declares it, the way
+    ///     the compiler names the methods it generates for them: <c>&lt;Run&gt;lambda2</c> is the
+    ///     second anonymous function in the type's members named <c>Run</c> (every overload and
+    ///     partial part, in source order, nested ones included), <c>&lt;Run&gt;Helper</c> a local
+    ///     function (<c>&lt;Run&gt;Helper|2</c> for a second one of that name), and
+    ///     <c>&lt;Run&gt;query1</c> the lambdas the compiler makes of the first query expression's
+    ///     clauses (<c>from</c>, <c>where</c>, <c>select</c>, ...), one node per query. An
+    ///     anonymous function has no name and a local function one that is only unique in its
+    ///     scope, so their plain signatures merged every lambda of a type with the same shape into
+    ///     one call-graph node (<c>Ns.Type.():void</c>), and a local function into a same-named
+    ///     member. Ordinals come from syntax alone, so the name is the same in every run and worker.
+    /// </summary>
+    internal static string NestedFunctionName(IMethodSymbol function)
+    {
+        ISymbol? member = function.ContainingSymbol;
+        while (member is IMethodSymbol enclosing && IsNestedFunction(enclosing))
+        {
+            member = enclosing.ContainingSymbol;
+        }
+
+        // An auto-property initializer belongs to the property's backing field.
+        if (member is IFieldSymbol { AssociatedSymbol: IPropertySymbol property })
+        {
+            member = property;
+        }
+
+        var memberName = member?.MetadataName ?? string.Empty;
+        // A query clause's lambda is implicit: C# declares it by the clause's expression, Visual
+        // Basic only locates it. Either way it belongs to the nearest query expression around
+        // that expression - not to a query that is the expression (`select from c in ...`).
+        var isQuery = function is { IsImplicitlyDeclared: true, MethodKind: MethodKind.AnonymousFunction };
+        SyntaxNode? syntax;
+        if (isQuery)
+        {
+            var clause = function.Locations.FirstOrDefault(location => location.IsInSource) is { SourceTree: { } tree } location
+                ? tree.GetRoot().FindNode(location.SourceSpan, getInnermostNodeForTie: true)
+                : null;
+            syntax = (clause is not null && IsQueryExpression(clause) ? clause.Parent : clause)?.AncestorsAndSelf().FirstOrDefault(IsQueryExpression);
+        }
+        else
+        {
+            syntax = function.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax();
+        }
+
+        if (syntax is Microsoft.CodeAnalysis.VisualBasic.Syntax.LambdaHeaderSyntax { Parent: { } lambda })
+        {
+            syntax = lambda;
+        }
+
+        if (member?.ContainingType is { } type && syntax is not null
+            && NestedFunctionNamesByType.GetOrCreateValue(type).GetOrAdd(memberName, name => IndexNestedFunctions(type, name)).TryGetValue((syntax.SyntaxTree, syntax.Span, isQuery), out var nestedName))
+        {
+            return nestedName;
+        }
+
+        // Outside its member's declarations - not a shape the compiler produces - the position
+        // still tells it apart.
+        var position = function.Locations.FirstOrDefault()?.GetLineSpan().StartLinePosition ?? default;
+        var kind = function.MethodKind == MethodKind.LocalFunction ? function.MetadataName : "lambda";
+        return string.Create(CultureInfo.InvariantCulture, $"<{memberName}>{kind}@{position.Line + 1}_{position.Character + 1}");
+    }
+
+    /// <summary>The name of every anonymous and local function declared by the type's members of one name, keyed by syntax.</summary>
+    private static IReadOnlyDictionary<(SyntaxTree Tree, Microsoft.CodeAnalysis.Text.TextSpan Span, bool Query), string> IndexNestedFunctions(INamedTypeSymbol type, string memberName)
+    {
+        var declarations = type.GetMembers(memberName)
+            .SelectMany(member => member switch
+            {
+                IMethodSymbol { PartialImplementationPart: { } implementation } method => method.DeclaringSyntaxReferences.Concat(implementation.DeclaringSyntaxReferences),
+                IPropertySymbol { PartialImplementationPart: { } implementation } property => property.DeclaringSyntaxReferences.Concat(implementation.DeclaringSyntaxReferences),
+                _ => member.DeclaringSyntaxReferences
+            })
+            .Select(reference => reference.GetSyntax())
+            .Distinct()
+            // '/' and '\' sort differently against letters: one separator keeps the ordinals, and so
+            // the ids, the same on every OS.
+            .OrderBy(declaration => declaration.SyntaxTree.FilePath.Replace('\\', '/'), StringComparer.Ordinal)
+            .ThenBy(declaration => declaration.SpanStart);
+        var names = new Dictionary<(SyntaxTree, Microsoft.CodeAnalysis.Text.TextSpan, bool), string>();
+        var anonymousFunctions = 0;
+        var queries = 0;
+        var localFunctions = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var root in declarations.SelectMany(NestedFunctionScope))
+        {
+            foreach (var node in root.DescendantNodesAndSelf())
+            {
+                switch (node)
+                {
+                    case AnonymousFunctionExpressionSyntax or Microsoft.CodeAnalysis.VisualBasic.Syntax.LambdaExpressionSyntax:
+                        names[(node.SyntaxTree, node.Span, false)] = string.Create(CultureInfo.InvariantCulture, $"<{memberName}>lambda{++anonymousFunctions}");
+                        break;
+                    case var query when IsQueryExpression(query):
+                        names[(node.SyntaxTree, node.Span, true)] = string.Create(CultureInfo.InvariantCulture, $"<{memberName}>query{++queries}");
+                        break;
+                    case LocalFunctionStatementSyntax local:
+                        // Arity-free, like every method id (MetadataName carries no arity for methods).
+                        var localName = local.Identifier.ValueText;
+                        var occurrence = localFunctions[localName] = localFunctions.GetValueOrDefault(localName) + 1;
+                        names[(node.SyntaxTree, node.Span, false)] = occurrence == 1
+                            ? $"<{memberName}>{localName}"
+                            : string.Create(CultureInfo.InvariantCulture, $"<{memberName}>{localName}|{occurrence}");
+                        break;
+                }
+            }
+        }
+
+        return names;
+    }
+
+    private static bool IsQueryExpression(SyntaxNode node) =>
+        node is Microsoft.CodeAnalysis.CSharp.Syntax.QueryExpressionSyntax or Microsoft.CodeAnalysis.VisualBasic.Syntax.QueryExpressionSyntax;
+
+    /// <summary>
+    ///     The syntax a member's nested functions live in: its declaration, except top-level
+    ///     statements (<c>&lt;Main&gt;$</c>, declared by the whole file) and a primary constructor
+    ///     (declared by the whole type), whose own code is only their statements, parameters and
+    ///     base-type arguments. Visual Basic declares a member by its header statement and a
+    ///     field by its name, so the scope is the block or declarator around them.
+    /// </summary>
+    private static IEnumerable<SyntaxNode> NestedFunctionScope(SyntaxNode declaration) => declaration switch
+    {
+        CompilationUnitSyntax unit => unit.Members.OfType<GlobalStatementSyntax>(),
+        TypeDeclarationSyntax type => new SyntaxNode?[] { type.ParameterList, type.BaseList }.OfType<SyntaxNode>(),
+        Microsoft.CodeAnalysis.VisualBasic.Syntax.StatementSyntax { Parent: Microsoft.CodeAnalysis.VisualBasic.Syntax.MethodBlockBaseSyntax or Microsoft.CodeAnalysis.VisualBasic.Syntax.PropertyBlockSyntax or Microsoft.CodeAnalysis.VisualBasic.Syntax.EventBlockSyntax } header => [header.Parent!],
+        Microsoft.CodeAnalysis.VisualBasic.Syntax.ModifiedIdentifierSyntax { Parent: Microsoft.CodeAnalysis.VisualBasic.Syntax.VariableDeclaratorSyntax declarator } => [declarator],
+        _ => [declaration]
+    };
 
     internal static string NormalizeSymbolName(string symbolName) => symbolName
         .Replace("global::", string.Empty, StringComparison.Ordinal)
@@ -3047,7 +3184,9 @@ public static class Dosai
             {
                 var walker = new MethodCallOperationWalker(model, dispatchIndexes[model.Compilation], allMethodCalls, sourceFilePath, fileName, relativePath, renderCache);
                 var operationNodes = csRoot is not null
-                    ? csRoot.DescendantNodes().Where(node => node is Microsoft.CodeAnalysis.CSharp.Syntax.BlockSyntax or ArrowExpressionClauseSyntax or EqualsValueClauseSyntax or ConstructorInitializerSyntax or GlobalStatementSyntax)
+                    // A primary constructor's base-type arguments (`class D(int x) : B(x)`) are its
+                    // constructor initializer.
+                    ? csRoot.DescendantNodes().Where(node => node is Microsoft.CodeAnalysis.CSharp.Syntax.BlockSyntax or ArrowExpressionClauseSyntax or EqualsValueClauseSyntax or ConstructorInitializerSyntax or PrimaryConstructorBaseTypeSyntax or GlobalStatementSyntax)
                     : vbRoot?.DescendantNodes().Where(node => node is Microsoft.CodeAnalysis.VisualBasic.Syntax.StatementSyntax or Microsoft.CodeAnalysis.VisualBasic.Syntax.EqualsValueSyntax) ?? [];
                 foreach (var operationNode in operationNodes)
                 {
@@ -3677,7 +3816,7 @@ public static class Dosai
                 CallType = isCreation ? CallType.ConstructorCall : CallType.MethodCall,
                 SourceId = renderCache.Signature(callerSymbol),
                 TargetId = $"Unresolved:{cleanName}",
-                CallerMethod = callerSymbol.Name,
+                CallerMethod = renderCache.MemberName(callerSymbol),
                 CallerNamespace = renderCache.Display(callerSymbol.ContainingNamespace),
                 CallerClass = GetNamedContainingTypeName(callerSymbol),
                 IsInternal = false,
@@ -3826,7 +3965,12 @@ public static class Dosai
 
         private void AddMethodCall(IOperation operation, IMethodSymbol? targetMethod, CallType callType, IEnumerable<IArgumentOperation> arguments)
         {
-            if (targetMethod is null || EnclosingSymbol(operation.Syntax.SpanStart) is not IMethodSymbol callerSymbol)
+            // A primary constructor's base call binds at the base type's name, where the
+            // enclosing symbol is the type; inside its argument list it is the constructor.
+            var callerPosition = operation.Syntax is PrimaryConstructorBaseTypeSyntax baseType
+                ? baseType.ArgumentList.OpenParenToken.Span.End
+                : operation.Syntax.SpanStart;
+            if (targetMethod is null || EnclosingSymbol(callerPosition) is not IMethodSymbol callerSymbol)
             {
                 return;
             }
@@ -3847,7 +3991,7 @@ public static class Dosai
             var isInternal = isInSource || SymbolEqualityComparer.Default.Equals(targetMethod.ContainingAssembly, model.Compilation.Assembly);
             var calledMethod = targetMethod.MethodKind == MethodKind.Constructor
                 ? targetMethod.ContainingType?.Name ?? targetMethod.Name
-                : renderCache.NormalizedErrorMessage(targetMethod);
+                : IsNestedFunction(targetMethod) ? renderCache.MemberName(targetMethod) : renderCache.NormalizedErrorMessage(targetMethod);
 
             methodCalls.Add(new MethodCalls
             {
@@ -3865,7 +4009,7 @@ public static class Dosai
                 CallType = callType,
                 SourceId = sourceId,
                 TargetId = targetId,
-                CallerMethod = callerSymbol.Name,
+                CallerMethod = renderCache.MemberName(callerSymbol),
                 CallerNamespace = renderCache.Display(callerSymbol.ContainingNamespace),
                 CallerClass = GetNamedContainingTypeName(callerSymbol),
                 IsInternal = isInternal && !isInMetadata,
@@ -4138,7 +4282,8 @@ public static class Dosai
                 Module = renderCache.Display(targetMethod.ContainingModule),
                 Namespace = renderCache.Display(targetMethod.ContainingNamespace),
                 ClassName = GetNamedContainingTypeName(targetMethod),
-                CalledMethod = targetMethod.MethodKind == MethodKind.Constructor ? targetMethod.ContainingType?.Name ?? targetMethod.Name : renderCache.NormalizedErrorMessage(targetMethod),
+                CalledMethod = targetMethod.MethodKind == MethodKind.Constructor ? targetMethod.ContainingType?.Name ?? targetMethod.Name
+                    : IsNestedFunction(targetMethod) ? renderCache.MemberName(targetMethod) : renderCache.NormalizedErrorMessage(targetMethod),
                 LineNumber = location.Line + 1,
                 ColumnNumber = location.Character + 1,
                 Arguments = argumentList,
@@ -4146,7 +4291,7 @@ public static class Dosai
                 CallType = callType,
                 SourceId = sourceId,
                 TargetId = targetId,
-                CallerMethod = callerSymbol.Name,
+                CallerMethod = renderCache.MemberName(callerSymbol),
                 CallerNamespace = callerSymbol.ContainingNamespace?.ToDisplayString() ?? string.Empty,
                 CallerClass = GetNamedContainingTypeName(callerSymbol),
                 IsInternal = (isInSource || SymbolEqualityComparer.Default.Equals(targetMethod.ContainingAssembly, model.Compilation.Assembly)) && !isInMetadata,

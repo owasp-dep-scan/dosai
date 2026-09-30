@@ -195,6 +195,8 @@ Source-to-assembly mapping prefers exact stable signatures. If a fallback name m
 
 Package reachability is built after method identities and call graph evidence are attached, so evidence kinds and confidence reflect source, IL, inferred, and external-summary observations on nodes as well as edges.
 
+Anonymous and local functions are call-graph nodes of their own: the enclosing member has a `DelegateInvoke` edge to each lambda it creates, and the lambda's calls come from the lambda. Their ids are named after the member that declares them (`Dosai.NestedFunctionName`): `Ns.Type.<Run>lambda2():void` for the second anonymous function in the type's members named `Run` (all overloads and partial parts, in source order), `Ns.Type.<Run>Helper():int` for a local function, `Ns.Type.<Run>query1(...)` for the implicit lambdas of a query expression's clauses (located by the clause, since Visual Basic gives them no declaring syntax). The ordinals come from syntax, indexed once per (type, member name), so the id is the same in every run and for every worker count; a lambda's own symbol name is empty, and without this every same-shaped lambda of a type was one node.
+
 The source walker also emits explicit inferred evidence for common callback and framework patterns. Delegate creation, event subscription, lambda callbacks, DI registrations such as `AddSingleton`, service resolution helpers such as `GetRequiredService`, and simple reflection forms such as `Activator.CreateInstance<T>()` or `typeof(T).GetMethod("Name")` are represented as `FrameworkModel` or `ReflectionHeuristic` edges rather than folded into direct Roslyn calls.
 
 ```text

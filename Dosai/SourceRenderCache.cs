@@ -39,6 +39,7 @@ internal sealed class SourceRenderCache
     private readonly ConditionalWeakTable<INamedTypeSymbol, List<string>> _interfaceNames = new();
     private readonly ConditionalWeakTable<ITypeSymbol, string> _normalizedTypeDisplays = new();
     private readonly ConditionalWeakTable<IMethodSymbol, string> _errorMessageDisplays = new();
+    private readonly ConditionalWeakTable<IMethodSymbol, string> _nestedFunctionNames = new();
 
     /// <summary>Dosai's stable signature for a method symbol; see <see cref="Dosai.FormatMethodSignature" />.</summary>
     public string Signature(IMethodSymbol? methodSymbol) => methodSymbol is null
@@ -52,6 +53,15 @@ internal sealed class SourceRenderCache
     public string NormalizedFullyQualified(ITypeSymbol? type) => type is null
         ? string.Empty
         : _normalizedTypeDisplays.GetValue(type, static t => Dosai.NormalizeSymbolName(t.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)));
+
+    /// <summary>
+    ///     The member name a call-graph node shows for a method: its symbol name, or for an
+    ///     anonymous or local function the name its signature uses (<see cref="Dosai.NestedFunctionName" />),
+    ///     which a lambda's empty name and a local function's scope-local one are not.
+    /// </summary>
+    public string MemberName(IMethodSymbol methodSymbol) => Dosai.IsNestedFunction(methodSymbol)
+        ? _nestedFunctionNames.GetValue(methodSymbol, Dosai.NestedFunctionName)
+        : methodSymbol.Name;
 
     /// <summary>The <see cref="SymbolDisplayFormat.CSharpErrorMessageFormat" /> display of a method, normalized, memoized.</summary>
     public string NormalizedErrorMessage(IMethodSymbol methodSymbol) => _errorMessageDisplays.GetValue(methodSymbol,
