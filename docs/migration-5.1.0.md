@@ -69,6 +69,63 @@ project declares several targets, a `Diagnostics` note repeats the choice.
 Consumers that group or diff results by target should read `GuardTargetFramework`, not the first
 entry of `TargetFrameworks` - the list is in declaration order, which is frequently oldest-first.
 
+## Guards resolve per project; `Metadata.ProjectGuardTargetFrameworks` (behavioral, additive)
+
+Each C# and F# file's `#if` arms now resolve against its **nearest project** at or above it within
+the scan root (the project's own target framework, else the nearest `Directory.Build.props`, else
+`Directory.Build.targets`), instead of one target for the whole tree. In a tree holding a net48
+project and a net8.0 project, the net48 project's `#if NETFRAMEWORK` members appear again and the
+net8.0 project keeps its `#if NET8_0` members. Files outside every project, and files of a project
+whose target is an MSBuild property reference (`$(NetCoreAppCurrent)`), resolve against
+`GuardTargetFramework` as before. A single-file scan (`--path src/App/Program.cs`) reads its
+project from the file's directory, so its guards, `TargetFrameworks` and `GuardTargetFramework`
+follow that project instead of the latest-modern-net fallback.
+
+On a tree with more than one project whose target is readable,
+`Metadata.ProjectGuardTargetFrameworks` lists each project (path relative to the scan root,
+`/`-separated), its detected targets and the one its files' guards used, sorted by path; the
+multiple-targets `Diagnostics` note says the evaluation was per project. Single-project trees
+leave it null.
+
+```json
+"ProjectGuardTargetFrameworks": [
+  { "Project": "Legacy/Legacy.csproj", "TargetFrameworks": ["net48"], "GuardTargetFramework": "net48" },
+  { "Project": "Modern/Modern.csproj", "TargetFrameworks": ["net8.0"], "GuardTargetFramework": "net8.0" }
+]
+```
+
+## Field-like `Events[]` resolve their event symbol (behavioral)
+
+A field-like event (`public event EventHandler Changed;`) is declared by its variable declarator,
+which Roslyn resolves to an event symbol; the previous field-symbol cast was always null, so every
+such record reported the compilation's name (`Dosai.SourceAnalysis.CSharp`) as `Namespace`, no
+`ImplementedInterfaces` and the compilation's assembly and module. They now carry the event's
+real namespace, containing type, interfaces, assembly and module, like `add`/`remove` events.
+
+## Reference-assembly sources and duplicate declarations (behavioral, `Diagnostics`)
+
+Reference-assembly source - GenAPI API-surface stubs whose bodies only `throw null` (or return
+`null`/`default`), or that carry the `aka.ms/api-review` header, such as dotnet/runtime's `ref/`
+folders - is left out of the compilation when a non-stub file of the tree declares one of its
+types. Compiling both declared every member twice, and calls on those members bound ambiguously
+and differently between runs. The skipped files no longer contribute `Methods[]`, `Properties[]`
+or other inventory records (they duplicated the implementation's), and a `Diagnostics` entry
+names how many were skipped with examples. A stub folder scanned on its own is analyzed as
+before. Types still declared by more than one file without all declarations being partial
+(per-platform or per-target variants compiled together) get a `Diagnostics` entry of their own.
+The same partition applies to `dataflows` and `crypto`.
+
+## Framework references in self-contained builds (behavioral, `Diagnostics`)
+
+The self-contained single-file `-full` binaries analyzed with no framework metadata references
+at all on any machine without a shared framework at least as new as their own, so every BCL call
+was `Unresolved:` and framework purls were wrong or Low. They now reference their bundled
+runtime; any build falls back to the newest installed shared framework of any version, with a
+`Diagnostics` note when that is older than Dosai's own. When no framework reference can be
+resolved at all, `Diagnostics` says so and the unresolved-call note no longer recommends
+restoring the tree. The restore hint "Found project.assets.json but no package assemblies were
+resolved" now appears only when the assets file declares packages.
+
 ## Containment (behavioral)
 
 A malformed attribute no longer aborts the scan, on either pipeline: the affected symbol's

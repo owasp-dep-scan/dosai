@@ -478,7 +478,9 @@ public static class Dosai
         var unresolvedCallCount = methodCalls.Count(call => call.EvidenceKind == AnalysisEvidenceKind.SourceUnresolved);
         if (unresolvedCallCount > 0)
         {
-            sliceDiagnostics.Add($"Semantic binding failed for {unresolvedCallCount} call sites: target assemblies were missing or conflicted with other references. Restore or build the tree (--restore/--build) to raise reachability confidence.");
+            sliceDiagnostics.Add(FrameworkReferences.Current.References.Count == 0
+                ? $"Semantic binding failed for {unresolvedCallCount} call sites: Dosai resolved no framework metadata references (see the framework-reference diagnostic), so every framework call is unresolved regardless of the tree's restore state."
+                : $"Semantic binding failed for {unresolvedCallCount} call sites: target assemblies were missing or conflicted with other references. Restore or build the tree (--restore/--build) to raise reachability confidence.");
         }
 
         // Conditional-compilation guards were evaluated against the detected target frameworks;
@@ -494,7 +496,18 @@ public static class Dosai
             if (detectedTargetFrameworks.Count > 1 && FrameworkPreprocessorDefines.TrySelectRepresentative(detectedTargetFrameworks, out var representative))
             {
                 metadata.GuardTargetFramework = representative;
-                sliceDiagnostics.Add($"Multiple target frameworks detected ({string.Join(", ", detectedTargetFrameworks)}); conditional-compilation guards were evaluated against '{representative}'. Arms exclusive to the other targets are not analyzed.");
+                // Each file's guards resolve against its nearest project's targets; the root-wide
+                // representative only covers files outside any project with a readable target.
+                var projectGuards = ProjectGuardTargets(path);
+                if (projectGuards.Count > 1)
+                {
+                    metadata.ProjectGuardTargetFrameworks = projectGuards;
+                    sliceDiagnostics.Add($"Multiple target frameworks detected ({string.Join(", ", detectedTargetFrameworks)}); conditional-compilation guards were evaluated per project against each project's most modern target (Metadata.ProjectGuardTargetFrameworks, {projectGuards.Count} projects), and against '{representative}' for files outside a project with a readable target. Arms exclusive to a project's other targets are not analyzed.");
+                }
+                else
+                {
+                    sliceDiagnostics.Add($"Multiple target frameworks detected ({string.Join(", ", detectedTargetFrameworks)}); conditional-compilation guards were evaluated against '{representative}'. Arms exclusive to the other targets are not analyzed.");
+                }
             }
             else if (detectedTargetFrameworks.Count == 1)
             {
@@ -578,6 +591,31 @@ public static class Dosai
     private sealed class ScopeRestore(Action restore) : IDisposable
     {
         public void Dispose() => restore();
+    }
+
+    /// <summary>
+    ///     The guard target each C# and F# project with a readable target framework resolved to,
+    ///     sorted by project path: the per-project decisions the parser made
+    ///     (<see cref="TargetFrameworkDetection.ForFile" />).
+    /// </summary>
+    private static List<ProjectGuardTarget> ProjectGuardTargets(string path)
+    {
+        var guards = new List<ProjectGuardTarget>();
+        foreach (var project in TargetFrameworkDetection.ProjectsUnder(path, ".csproj").Concat(TargetFrameworkDetection.ProjectsUnder(path, ".fsproj")))
+        {
+            if (project.ProjectFile is not null && FrameworkPreprocessorDefines.TrySelectRepresentative(project.TargetFrameworks, out var guard))
+            {
+                guards.Add(new ProjectGuardTarget
+                {
+                    Project = project.ProjectFile.Replace('\\', '/'),
+                    TargetFrameworks = [.. project.TargetFrameworks],
+                    GuardTargetFramework = guard
+                });
+            }
+        }
+
+        guards.Sort((x, y) => string.CompareOrdinal(x.Project, y.Project));
+        return guards;
     }
 
     /// <summary>
@@ -1311,12 +1349,22 @@ public static class Dosai
             : (new Version(0, 0), false);
     }
 
+    private static readonly Lazy<HashSet<string>> DotnetSharedRuntimeRoots = new(ListDotnetSharedRuntimeRoots, LazyThreadSafetyMode.ExecutionAndPublication);
+
+    /// <summary>
+    ///     The shared roots (<c>.../dotnet/shared</c>) of every installed .NET runtime, from
+    ///     <c>dotnet --list-runtimes</c>, run once per process.
+    /// </summary>
+    internal static IReadOnlyCollection<string> GetDotnetSharedRuntimeRoots() => DotnetSharedRuntimeRoots.Value;
+
+    private static HashSet<string> GetDotnetSharedRuntimePaths() => DotnetSharedRuntimeRoots.Value;
+
     /// <summary>
     /// Discovers the paths of all installed .NET shared runtimes (like Microsoft.NETCore.App
     /// and Microsoft.AspNetCore.App) by executing 'dotnet --list-runtimes'.
     /// </summary>
     /// <returns>A HashSet of directory paths containing the shared runtime assemblies.</returns>
-    private static HashSet<string> GetDotnetSharedRuntimePaths()
+    private static HashSet<string> ListDotnetSharedRuntimeRoots()
     {
         var runtimePaths = new HashSet<string>();
         try
@@ -1349,9 +1397,11 @@ public static class Dosai
         }
         catch (Exception ex)
         {
-            Console.ForegroundColor = ConsoleColor.Red;
-            Console.WriteLine($"Error: Could not execute 'dotnet --list-runtimes' to find shared frameworks. Please ensure the .NET SDK is installed and that 'dotnet' is in your system's PATH. Details: {ex.Message}");
-            Console.ResetColor();
+            // Not an error: a self-contained Dosai runs with no `dotnet` on PATH by design and
+            // references its bundled runtime (FrameworkReferences). This used to print a red
+            // "Error:" line to stdout on every such run, into the same stream a caller may be
+            // reading JSON from.
+            DebugLog.Log($"'dotnet --list-runtimes' unavailable, installed shared frameworks are not probed: {ex.Message}");
         }
         return runtimePaths;
     }
@@ -1835,6 +1885,66 @@ public static class Dosai
     ///     it, and the collectors merge in file order afterwards, keeping the aggregated output
     ///     byte-identical to a sequential run (issue #65).
     /// </summary>
+    /// <summary>
+    ///     Under --debug, the compilation's declaration errors (issue #69): the total, how many
+    ///     files carry one, and the full histogram by diagnostic id - a tree whose names mostly
+    ///     fail to resolve is otherwise indistinguishable from a healthy one. One
+    ///     compilation-wide pass after the symbol loop: a per-tree request completes the whole
+    ///     assembly under a location filter each time, which is quadratic in the file count.
+    ///     Only under --debug, because even the single pass is costly on a large unbuilt tree and
+    ///     --debug never changes the JSON. Roslyn's declaration completion can itself throw on
+    ///     hostile input (an InvalidCastException on the dotnet/runtime tree); that is logged,
+    ///     never fatal.
+    /// </summary>
+    private static void LogDeclarationErrors(Compilation compilation, bool hasTrees)
+    {
+        if (!hasTrees)
+        {
+            return;
+        }
+
+        var language = compilation.Language;
+        using var phase = DebugLog.Phase($"methods.declaration-diagnostics ({language})");
+        var errors = new Dictionary<string, int>(StringComparer.Ordinal);
+        var files = new HashSet<SyntaxTree>();
+        try
+        {
+            foreach (var diagnostic in compilation.GetDeclarationDiagnostics())
+            {
+                if (diagnostic.Severity == DiagnosticSeverity.Error)
+                {
+                    errors[diagnostic.Id] = errors.GetValueOrDefault(diagnostic.Id) + 1;
+                    if (diagnostic.Location.SourceTree is { } tree)
+                    {
+                        files.Add(tree);
+                    }
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException)
+        {
+            // Roslyn 5.9 throws InvalidCastException from
+            // SourceNamedTypeSymbol.GetCorrespondingBaseListLocation when top-level statements
+            // and a `partial class Program : ISomething` that leaves a member unimplemented meet
+            // in one compilation: the synthesized Program's declaration is a compilation unit.
+            var inner = ex is AggregateException aggregate ? aggregate.Flatten().InnerExceptions.FirstOrDefault() ?? ex : ex;
+            var frame = inner.StackTrace?.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault();
+            DebugLog.Log($"{language} declaration diagnostics failed inside the compiler, no histogram: {inner.GetType().Name}: {inner.Message} {frame}");
+            return;
+        }
+
+        DebugLog.Count($"{language} source declaration errors", errors.Values.Sum());
+        DebugLog.Count($"{language} source files with declaration errors", files.Count);
+        DebugLog.Count($"{language} compiled syntax trees", compilation.SyntaxTrees.Count());
+        if (errors.Count > 0)
+        {
+            DebugLog.Log($"{language} source declaration errors by id: " + string.Join(", ", errors
+                .OrderByDescending(entry => entry.Value)
+                .ThenBy(entry => entry.Key, StringComparer.Ordinal)
+                .Select(entry => string.Create(CultureInfo.InvariantCulture, $"{entry.Key} {entry.Value}"))));
+        }
+    }
+
     private sealed class SourceFileSymbols
     {
         public List<Method> Methods { get; } = [];
@@ -1955,34 +2065,15 @@ public static class Dosai
         var mergedDiagnostics = new List<string>();
         var dispatchIndexes = new Dictionary<Compilation, DispatchResolver.SourceIndex>();
         var metadataReferences = new Dictionary<string, PortableExecutableReference>(StringComparer.OrdinalIgnoreCase);
-#pragma warning disable IL3000
-        // Single-file bundles give the core assembly no file location and set no
-        // TRUSTED_PLATFORM_ASSEMBLIES entries; combining the app directory with an empty
-        // location used to make CreateFromFile open the directory itself and crash.
-        if (Path.IsPathRooted(typeof(object).Assembly.Location))
+        // Framework references: the host's trusted platform assemblies, a self-contained
+        // bundle's own runtime, or the newest installed shared framework (issue #67).
+        var frameworkReferences = FrameworkReferences.Current;
+        foreach (var (key, reference) in frameworkReferences.References)
         {
-            var mscorlib = MetadataReference.CreateFromFile(typeof(object).Assembly.Location);
-            metadataReferences[mscorlib.FilePath ?? "System.Private.CoreLib"] = mscorlib;
+            metadataReferences.TryAdd(key, reference);
         }
-#pragma warning restore IL3000
-        if (AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES") is string trustedPlatformAssemblies)
-        {
-            foreach (var referencePath in trustedPlatformAssemblies.Split(Path.PathSeparator).Where(File.Exists))
-            {
-                metadataReferences.TryAdd(referencePath, MetadataReference.CreateFromFile(referencePath));
-            }
-        }
-        // Single-file fallback: with no core location and no trusted-platform entries, seed
-        // framework references from the newest probeable shared framework so source analysis
-        // keeps a usable semantic model. Only one framework directory is used - mixing
-        // versions would give Roslyn duplicate assembly identities.
-        if (metadataReferences.Count == 0 && GetSharedFrameworkProbingPaths().FirstOrDefault(Directory.Exists) is { } frameworkDirectory)
-        {
-            foreach (var referencePath in SafeFileRead.EnumerateAllFilesSafe(frameworkDirectory, "*.dll"))
-            {
-                metadataReferences.TryAdd(referencePath, MetadataReference.CreateFromFile(referencePath));
-            }
-        }
+
+        DebugLog.Count($"framework metadata references ({frameworkReferences.Source})", frameworkReferences.References.Count);
         foreach (var externalAssembly in assembliesToInspect.Where(IsManagedAssembly))
         {
             metadataReferences.TryAdd(externalAssembly, MetadataReference.CreateFromFile(externalAssembly));
@@ -2009,15 +2100,28 @@ public static class Dosai
             .Where(source => Path.GetExtension(source).Equals(Constants.CSharpSourceExtension, StringComparison.OrdinalIgnoreCase))
             .ToArray();
         var parsedCsharpTrees = new CSharpSyntaxTree?[csharpSources.Length];
+        var parsedClassifications = new ReferenceSources.Classification?[csharpSources.Length];
         using (DebugLog.Phase("methods.parse-csharp"))
         {
-            DedicatedStack.ForEach("Dosai parse csharp", Math.Max(1, MaxSymbolAnalysisWorkers), csharpSources.Length,
-                index => parsedCsharpTrees[index] = SafeFileRead.TryReadAllText(csharpSources[index], out var content)
-                    ? CSharpSourceParser.Parse(content, csharpSources[index], path)
-                    : null);
+            DedicatedStack.ForEach("Dosai parse csharp", Math.Max(1, MaxSymbolAnalysisWorkers), csharpSources.Length, index =>
+            {
+                if (SafeFileRead.TryReadAllText(csharpSources[index], out var content))
+                {
+                    var tree = CSharpSourceParser.Parse(content, csharpSources[index], path);
+                    parsedCsharpTrees[index] = tree;
+                    parsedClassifications[index] = ReferenceSources.Classify(tree);
+                }
+            });
         }
 
-        var csharpTrees = parsedCsharpTrees.OfType<CSharpSyntaxTree>().ToList();
+        // API-surface stubs compiled beside their implementation declare every member twice
+        // and make binding nondeterministic (issue #69); they stay out of the compilation.
+        var partition = ReferenceSources.Partition(
+            parsedCsharpTrees.OfType<CSharpSyntaxTree>().ToList(),
+            parsedClassifications.OfType<ReferenceSources.Classification>().ToList());
+        var csharpTrees = partition.Kept;
+        DebugLog.Count("reference-assembly sources skipped", partition.Skipped.Count);
+        mergedDiagnostics.AddRange(ReferenceSources.Diagnostics(partition, TargetFrameworkDetection.ProjectContextRoot(Path.GetFullPath(path))));
         // Implicit-usings projects rely on global usings their compiler injects; without the
         // synthetic tree every BCL call in them fails to bind and vanishes from the graph.
         if (CSharpSourceParser.TryCreateImplicitUsingsTree(path) is { } implicitUsingsTree)
@@ -2049,6 +2153,10 @@ public static class Dosai
             references: referenceList,
             options: new VisualBasicCompilationOptions(Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary));
         DebugLog.Count("visualbasic syntax trees", vbTrees.Count);
+        if ((csharpTrees.Count > 0 || vbTrees.Count > 0) && frameworkReferences.Diagnostic is { } frameworkDiagnostic)
+        {
+            mergedDiagnostics.Add(frameworkDiagnostic);
+        }
 
         // Keyed lookups: a linear search per file was quadratic in the file count.
         var csharpTreesByPath = new Dictionary<string, CSharpSyntaxTree>(StringComparer.Ordinal);
@@ -2141,6 +2249,7 @@ public static class Dosai
             {
                 sourceDiagnostics.Add(depthDiagnostic);
             }
+
 
             var csMethodDeclarations = csRoot?.DescendantNodes().OfType<MethodDeclarationSyntax>();
             var vbMethodDeclarations = vbRoot?.DescendantNodes().OfType<MethodStatementSyntax>();
@@ -2597,31 +2706,36 @@ public static class Dosai
                     
                     foreach(var variable in variables)
                     {
-                        var variableSymbol = model.GetDeclaredSymbol(variable) as IFieldSymbol;
+                        // A field-like event's declarator declares the event itself: Roslyn hands
+                        // back an IEventSymbol there, never an IFieldSymbol. Casting to the field
+                        // symbol left it null for every such event, so each one reported the
+                        // compilation's name as its namespace, no interfaces and no token.
+                        var eventSymbol = model.GetDeclaredSymbol(variable) as IEventSymbol;
                         var codeSpan = variable.SyntaxTree.GetLineSpan(variable.Span);
                         var lineNumber = codeSpan.StartLinePosition.Line + 1;
                         var columnNumber = codeSpan.Span.Start.Character + 1;
                         // Get inheritance information
-                        var containingType = variableSymbol?.ContainingType;
+                        var containingType = eventSymbol?.ContainingType;
                         var baseType = containingType?.BaseType?.Name;
                         var implementedInterfaces = renderCache.InterfaceNames(containingType);
                         var metadataToken = 0;
-                        if (variableSymbol is not null && SymbolEqualityComparer.Default.Equals(variableSymbol.ContainingAssembly, model?.Compilation.Assembly))
+                        if (eventSymbol is not null && SymbolEqualityComparer.Default.Equals(eventSymbol.ContainingAssembly, model?.Compilation.Assembly))
                         {
-                            metadataToken = variableSymbol.MetadataToken;
+                            metadataToken = eventSymbol.MetadataToken;
                         }
+                        var eventType = eventSymbol?.Type ?? typeSymbol;
                         events.Add(new EventInfo
                         {
                             Path = relativePath,
                             FileName = fileName,
-                            Assembly = variableSymbol?.ContainingAssembly.ToDisplayString() ?? model?.Compilation.Assembly.ToDisplayString(),
-                            Module = variableSymbol?.ContainingModule.ToDisplayString() ?? model?.Compilation.Assembly.Modules.FirstOrDefault()?.ToDisplayString(),
-                            Namespace = variableSymbol?.ContainingNamespace.ToDisplayString() ?? model?.Compilation.Assembly.Name,
-                            ClassName = variableSymbol is null ? GetContainingTypeName(eventFieldDeclaration) : GetNamedContainingTypeName(variableSymbol),
+                            Assembly = eventSymbol is not null ? renderCache.Display(eventSymbol.ContainingAssembly) : model?.Compilation.Assembly.ToDisplayString(),
+                            Module = eventSymbol is not null ? renderCache.Display(eventSymbol.ContainingModule) : model?.Compilation.Assembly.Modules.FirstOrDefault()?.ToDisplayString(),
+                            Namespace = eventSymbol is not null ? renderCache.Display(eventSymbol.ContainingNamespace) : model?.Compilation.Assembly.Name,
+                            ClassName = eventSymbol is null ? GetContainingTypeName(eventFieldDeclaration) : GetNamedContainingTypeName(eventSymbol),
                             Attributes = TitleCase(string.Join(", ", modifiers)),
                             Name = variable.Identifier.Text,
-                            Type = typeSymbol?.Name ?? type.ToString(),
-                            TypeFullName = typeSymbol?.ToDisplayString() ?? type.ToString(),
+                            Type = eventType?.Name ?? type.ToString(),
+                            TypeFullName = eventType?.ToDisplayString() ?? type.ToString(),
                             LineNumber = lineNumber,
                             ColumnNumber = columnNumber,
                             CustomAttributes = eventFieldDeclaration.AttributeLists.SelectMany(al => 
@@ -3000,6 +3114,12 @@ public static class Dosai
         if (abandonedDispatchSites > 0)
         {
             mergedDiagnostics.Add($"Dispatch resolution failed at {abandonedDispatchSites} call site(s), first {firstAbandonedDispatch}; Roslyn threw while resolving an implementing member, so those virtual dispatch candidate edges are missing from the call graph (direct call edges are kept).");
+        }
+
+        if (DebugLog.Enabled)
+        {
+            LogDeclarationErrors(csharpCompilation, csharpTrees.Count > 0);
+            LogDeclarationErrors(vbCompilation, vbTrees.Count > 0);
         }
 
         // The per-file symbol-analysis phase ends with the merge; the frontends run on their own

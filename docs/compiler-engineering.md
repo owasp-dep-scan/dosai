@@ -86,18 +86,43 @@ references nowhere else.
 
 Parsing runs on the same dedicated large-stack worker team as the per-file symbol loop
 (`DedicatedStack.ForEach`), one file per index, results stored by index: the tree order every
-downstream phase relies on stays the file order of a sequential parse. Parse options resolve
-from the **scan root**, not each file's directory - one `TargetFrameworkDetection` pass for
-the whole tree instead of one recursive enumeration per distinct source directory (which was
-both quadratic-ish I/O and serialized behind the parse-options lock), and a subdirectory's
-`#if` arms then resolve against the root project's representative target, matching how the
-data-flow and crypto pipelines already parsed.
+downstream phase relies on stays the file order of a sequential parse. Each file's preprocessor
+symbols are those of its **nearest project** at or above it within the scan root
+(`TargetFrameworkDetection.ForFile`): the project's own target framework, else the nearest
+`Directory.Build.props`, else `Directory.Build.targets`, reduced to the most modern target it
+declares. One compilation holds every file, but parse options are per tree, so a net48 project
+beside a net8.0 one keeps its `#if NETFRAMEWORK` code while the net8.0 project keeps its
+`#if NET8_0` code. The walk is one non-recursive directory listing per directory, memoized, in
+place of the earlier one recursive enumeration per distinct source directory (which also got a
+project's subdirectories wrong). A file outside every project, or under one whose target is an
+MSBuild property reference (`$(NetCoreAppCurrent)`), uses the scan root's detection; a
+single-file scan reads its project context from the file's directory. The data-flow and crypto
+pipelines and the F# frontend (nearest `.fsproj`) resolve the same way.
+
+Before the compilation is created, reference-assembly source is partitioned out
+(`ReferenceSources`): GenAPI API-surface stubs - every member body `throw null`, empty, or
+returning `null`/`default`, or a file carrying the `aka.ms/api-review` header - that declare a
+type some non-stub file of the tree also declares. dotnet/runtime keeps a library's API surface
+under `ref/` beside its implementation under `src/`; compiled together, the merged type declared
+every member twice, calls on those members bound ambiguously (CS0229), and Roslyn resolved the
+ambiguity differently between runs, so the call graph changed from run to run (issue #69). A stub
+with no implementation beside it is kept. The same syntactic pass reports types still declared
+non-partially by more than one file (per-platform or per-target variants that no single build
+compiles together). Under `--debug` the compiler's declaration errors are logged as a histogram
+by id per run; that pass costs more than half again of the symbol loop, so it is not run
+otherwise.
 
 References are populated from:
 
-1. `typeof(object).Assembly.Location`
-2. `TRUSTED_PLATFORM_ASSEMBLIES`
-3. managed assemblies under the inspected tree
+1. framework references (`FrameworkReferences`, resolved once per process): the host's
+   `TRUSTED_PLATFORM_ASSEMBLIES` for a framework-dependent Dosai; for a self-contained
+   single-file Dosai, which has no framework files on disk (issue #67), the bundled runtime's
+   own assemblies, loaded by the names the build embedded from its reference pack and
+   referenced through their in-memory metadata; otherwise the newest installed
+   `Microsoft.NETCore.App` shared framework of any version. With none, a `Diagnostics` entry
+   says so, and the unresolved-call diagnostic stops recommending a restore
+2. managed assemblies under the inspected tree
+3. package assemblies from NuGet restore output (`project.assets.json`)
 
 This improves cross-file symbol resolution compared with one-file compilations. It also lets the data-flow walker observe method calls, constructor calls, property references, field references, and invalid operations with better context.
 

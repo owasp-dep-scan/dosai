@@ -312,27 +312,14 @@ public sealed class FrameworkContext
 
     private static List<MetadataReference> BuildMetadataReferences(string basePath)
     {
-        var referencePaths = new List<string>();
-#pragma warning disable IL3000
-        var coreLib = typeof(object).Assembly.Location;
-#pragma warning restore IL3000
-        if (!string.IsNullOrWhiteSpace(coreLib))
+        var frameworkReferences = FrameworkReferences.Current.References;
+        var referencePaths = frameworkReferences.Select(framework => framework.Key).ToList();
+        var references = frameworkReferences.Select(framework => (MetadataReference)framework.Reference).ToList();
+        foreach (var assemblyPath in EnumerateFilesSafe(basePath, Constants.AssemblyExtension))
         {
-            referencePaths.Add(coreLib);
+            referencePaths.Add(assemblyPath);
+            references.Add(MetadataReference.CreateFromFile(assemblyPath));
         }
-
-        if (AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES") is string trustedPlatformAssemblies)
-        {
-            foreach (var referencePath in trustedPlatformAssemblies.Split(Path.PathSeparator).Where(File.Exists))
-            {
-                referencePaths.Add(referencePath);
-            }
-        }
-
-        referencePaths.AddRange(EnumerateFilesSafe(basePath, Constants.AssemblyExtension));
-        var references = referencePaths
-            .Select(path => (MetadataReference)MetadataReference.CreateFromFile(path))
-            .ToList();
 
         // Restored-but-unbuilt trees: package DLLs from the NuGet cache, unpinned from bytes so
         // the shared packages folder is never locked. Deduped against the FULL reference set -

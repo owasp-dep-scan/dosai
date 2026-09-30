@@ -90,10 +90,10 @@ public static partial class LanguageFrontendAnalyzer
         var currentDeclarationIndent = int.MaxValue;
         int? typeDeclarationIndent = null;
         var lexerState = new FSharpLexerState();
-        // The define set mirrors the C# pipeline: preprocessor symbols of the target framework
-        // detected for the scan root, falling back to the latest modern net when no project file
-        // narrows it.
-        var preprocessor = new FSharpPreprocessor(FrameworkPreprocessorDefines.ForRoot(basePath));
+        // The define set mirrors the C# pipeline: preprocessor symbols of the nearest fsproj's
+        // target framework, else the scan root's, falling back to the latest modern net when no
+        // project file narrows it.
+        var preprocessor = new FSharpPreprocessor(FrameworkPreprocessorDefines.ForFile(basePath, file, ".fsproj"));
         for (var i = 0; i < lines.Length; i++)
         {
             var line = lines[i];
@@ -356,8 +356,8 @@ public static partial class LanguageFrontendAnalyzer
     /// <summary>
     ///     Tracks F# conditional-compilation regions (`#if`/`#elif`/`#else`/`#endif`, with `#elif`
     ///     itself new in F# 11) across the lines of one file. Dosai compiles nothing, so the
-    ///     define set is the analysis one: the preprocessor symbols of the target framework
-    ///     detected for the scan root (<see cref="FrameworkPreprocessorDefines.ForRoot" />),
+    ///     define set is the analysis one: the preprocessor symbols of the file's nearest fsproj's
+    ///     target framework, else the scan root's (<see cref="FrameworkPreprocessorDefines.ForFile" />),
     ///     matching what the analyzed project's own build defines, while `DEBUG`/`TRACE` stay
     ///     undefined - a Release-shaped build. Multi-target guards (`#if NET8_0_OR_GREATER`) are
     ///     near-universal in real F# libraries; treating them as undefined turned their bodies

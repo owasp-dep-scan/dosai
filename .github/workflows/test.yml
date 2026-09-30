@@ -288,6 +288,61 @@ jobs:
         assert any(d['Module'] == 'R.NativeParser' and d['Name'] == 'DBI' for d in r_methods['Dependencies'])
         PY
 
+  # The `-full` release binaries are self-contained single-file bundles: the runtime lives inside
+  # the executable, so Roslyn gets no framework files to reference. Issue #67: they analyzed with
+  # zero framework references on any machine without a shared framework at least as new as their
+  # own. This publishes one the way the release job does and runs it with no `dotnet` reachable.
+  smoke-self-contained:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      with:
+        persist-credentials: false
+    - name: Setup .NET
+      uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68  # v6.0.0
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}
+        dotnet-quality: ${{ env.DOTNET_QUALITY }}
+        source-url: https://nuget.pkg.github.com/owasp-dep-scan/index.json
+      env:
+        NUGET_AUTH_TOKEN: ${{secrets.GITHUB_TOKEN}}
+    - name: Publish a self-contained single-file build
+      run: |
+        dotnet restore Dosai.sln
+        dotnet publish ./Dosai/ -r linux-x64 --property:PublishDir=/tmp/dosai-full -p:PublishSingleFile=true --self-contained true /p:UseAppHost=true /p:AssemblyName=Dosai-full
+    - name: Analyze with the bundled runtime only
+      run: |
+        mkdir -p /tmp/dosai-sc-smoke
+        cat > /tmp/dosai-sc-smoke/Program.cs <<'CS'
+        namespace Repro;
+        public class Greeter
+        {
+            public string Greet(string name) => string.Concat("Hello, ", name);
+        }
+        public static class Program
+        {
+            public static void Main() => System.Console.WriteLine(new Greeter().Greet("world"));
+        }
+        CS
+        for command in methods dataflows crypto; do
+          env -i HOME="$HOME" PATH=/usr/bin:/bin /tmp/dosai-full/Dosai-full "$command" --path /tmp/dosai-sc-smoke --o "/tmp/dosai-sc-$command.json" --debug 2> "/tmp/dosai-sc-$command.log"
+        done
+        grep -F 'framework metadata references (bundled-runtime)' /tmp/dosai-sc-methods.log
+        python3 - <<'PY'
+        import json
+        methods = json.load(open('/tmp/dosai-sc-methods.json'))
+        targets = {edge['TargetId'] for edge in methods['CallGraph']['Edges']}
+        assert 'System.Console.WriteLine(string):void' in targets, targets
+        assert 'string.Concat(string,string):string' in targets, targets
+        assert not any(target.startswith('Unresolved:') for target in targets), targets
+        for name in ('methods', 'dataflows', 'crypto'):
+            diagnostics = json.load(open(f'/tmp/dosai-sc-{name}.json')).get('Diagnostics') or []
+            assert not any('No .NET framework metadata references' in d for d in diagnostics), (name, diagnostics)
+        PY
+
   publish:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')

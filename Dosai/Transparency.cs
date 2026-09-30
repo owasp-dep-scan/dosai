@@ -26,6 +26,24 @@ public sealed class AnalysisMetadata
     ///     is not derivable from the list; null when nothing was detected.
     /// </summary>
     public string? GuardTargetFramework { get; set; }
+
+    /// <summary>
+    ///     On a tree with more than one project whose target framework is readable, the target
+    ///     each project's files had their guards evaluated against: a file resolves against its
+    ///     nearest project at or above it, and <see cref="GuardTargetFramework" /> then covers only
+    ///     files outside every such project. Sorted by project path (relative to the scan root,
+    ///     `/`-separated); null on single-project trees, where <see cref="GuardTargetFramework" />
+    ///     already says everything.
+    /// </summary>
+    public List<ProjectGuardTarget>? ProjectGuardTargetFrameworks { get; set; }
+}
+
+/// <summary>One project's detected target frameworks and the one its files' guards resolved against.</summary>
+public sealed class ProjectGuardTarget
+{
+    public required string Project { get; set; }
+    public List<string> TargetFrameworks { get; set; } = [];
+    public required string GuardTargetFramework { get; set; }
 }
 
 public sealed class EntryPoint

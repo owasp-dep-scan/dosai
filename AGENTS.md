@@ -42,16 +42,21 @@ dotnet test ./Dosai.sln
   enables the `FileBasedProgram` feature so file-based app `#:` directives parse as trivia;
   `#:package` lines surface as dependencies in `GetSourceMethods`.
 - Conditional compilation resolves against preprocessor symbols derived from the analyzed
-  project's detected target framework (`TargetFrameworkDetection` feeding the per-root
-  `CSharpSourceParser` parse options and the F# line frontend's `#if`/`#elif` tracking): each
+  project's detected target framework (`TargetFrameworkDetection.ForFile` feeding the per-file
+  `CSharpSourceParser` parse options and the F# line frontend's `#if`/`#elif` tracking). A file
+  resolves against its nearest project (`.csproj` for C#, `.fsproj` for F#) at or above it
+  within the scan root - that project's own target, else the nearest `Directory.Build.props`,
+  else `Directory.Build.targets` - and against the scan root's detection when it sits outside
+  every project or its project's target is an MSBuild property reference. Each
   detected TFM contributes what its own build defines (`net8.0` -> `NET`, `NET8_0`, the
   `NET5_0_OR_GREATER` chain, the `NETCOREAPP` family; `netstandard2.0` and `net472` -> their
   families), a multi-target project resolves to one representative target (the most modern it
   declares - never the union of all of them, which would hide every `#if !SYMBOL` arm), and with
   no detectable TFM the fallback is the historical `FrameworkPreprocessorDefines.ModernNet` set
   (`NET`, `NET11_0`, the modern chain) so bare-directory scans behave as before. Detected TFMs
-  surface in `Metadata.TargetFrameworks`, the representative as
-  `Metadata.GuardTargetFramework`, and the fallback appends a `Diagnostics` note. `DEBUG`/`TRACE` stay undefined - a
+  surface in `Metadata.TargetFrameworks`, the root-wide representative as
+  `Metadata.GuardTargetFramework`, each project's decision on a multi-project tree in
+  `Metadata.ProjectGuardTargetFrameworks`, and the fallback appends a `Diagnostics` note. `DEBUG`/`TRACE` stay undefined - a
   Release-shaped build. The F# frontend also ignores `#:`-prefixed lines (FS-1337). Bump the
   ceiling with `TargetFramework`.
 - Never leave an inspected file locked. Metadata readers open with
@@ -138,13 +143,28 @@ dotnet test ./Dosai.sln
   and the call-graph walker follows the stack so long chains keep their head call.
 - Enumerate the scanned tree through `SafeFileRead.EnumerateAllFilesSafe` (or filter through
   `PathExclusions.IsExcluded`), so `--exclude` globs (`PathExclusions`, an ambient scope the CLI
-  applies per command) hold for every analyzer. Parse options resolve from the scan root
-  (`CSharpSourceParser.Parse(text, file, rootPath)`), never from the file's own directory: the
-  per-directory form ran one recursive TFM detection per distinct source directory and gave
-  subdirectory files a different define set than the root project (and than the
-  `Metadata.GuardTargetFramework` the slice reports). A single-file root reads its project
+  applies per command) hold for every analyzer. Always parse with the scan root
+  (`CSharpSourceParser.Parse(text, file, rootPath)`): the nearest-project walk is bounded by
+  it and memoized per directory. Never go back to recursive TFM detection per source
+  directory - one recursive enumeration per distinct directory, and a project's
+  subdirectories fell back to the latest-modern-net set. A single-file root reads its project
   context from the file's directory (`TargetFrameworkDetection.ProjectContextRoot`), for the
   parse options, the implicit-usings decision and the reported target frameworks alike.
+- Seed every Roslyn compilation of analyzed source from `FrameworkReferences.Current`, never
+  from `typeof(object).Assembly.Location` or `TRUSTED_PLATFORM_ASSEMBLIES` directly: a
+  self-contained single-file Dosai has neither (issue #67), and the provider falls back to the
+  bundled runtime's in-memory metadata (names embedded at build time by the
+  `EmbedFrameworkAssemblyNames` target) and then to the newest installed shared framework.
+  Surface `FrameworkReferences.Diagnostic` in the command's diagnostics. The
+  `smoke-self-contained` CI job runs a published `-full` build with no `dotnet` reachable.
+- Partition parsed C# trees through `ReferenceSources.Partition` before creating a
+  compilation (methods, data-flow and crypto all do): reference-assembly source (GenAPI
+  API-surface stubs, `throw null` bodies or the `aka.ms/api-review` header) that redeclares a
+  type implemented elsewhere in the tree stays out, and `ReferenceSources.Diagnostics` reports
+  the skip and any type still declared non-partially by more than one file (issue #69: the
+  duplicate members bound ambiguously and differently between runs). The compiler's full
+  declaration-error histogram is `--debug`-only: that pass costs more than half again of the
+  symbol loop, and `--debug` must not change the JSON.
 - Synthetic syntax trees (the implicit-usings tree) have no file behind them: never read a
   tree back from disk by `tree.FilePath` without excluding them.
 - Keep edge endpoints valid: every graph edge must reference existing nodes.

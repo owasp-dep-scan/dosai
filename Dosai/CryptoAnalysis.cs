@@ -314,6 +314,11 @@ public static class CryptoAnalyzer
                 ? CSharpSourceParser.Parse(content, file, basePath)
                 : null)
             .OfType<CSharpSyntaxTree>().ToList();
+        // Same rule as the methods pipeline: API-surface stubs beside their implementation stay
+        // out of the compilation (issue #69).
+        var partition = ReferenceSources.Partition(csharpTrees);
+        csharpTrees = partition.Kept;
+        result.Diagnostics.AddRange(ReferenceSources.Diagnostics(partition, TargetFrameworkDetection.ProjectContextRoot(Path.GetFullPath(basePath))));
         var implicitUsingsTree = CSharpSourceParser.TryCreateImplicitUsingsTree(basePath);
         if (implicitUsingsTree is not null)
         {
@@ -1018,12 +1023,15 @@ public static class CryptoAnalyzer
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or BadImageFormatException) { diagnostics.Add($"Could not add metadata reference {referencePath}: {ex.Message}"); }
         }
 
-#pragma warning disable IL3000
-        AddReference(typeof(object).Assembly.Location);
-#pragma warning restore IL3000
-        if (AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES") is string tpa)
+        var frameworkReferences = FrameworkReferences.Current;
+        foreach (var (key, reference) in frameworkReferences.References)
         {
-            foreach (var referencePath in tpa.Split(Path.PathSeparator)) AddReference(referencePath);
+            references.TryAdd(key, reference);
+        }
+
+        if (frameworkReferences.Diagnostic is { } frameworkDiagnostic)
+        {
+            diagnostics.Add(frameworkDiagnostic);
         }
         var root = Directory.Exists(path) ? path : Path.GetDirectoryName(path);
         if (!string.IsNullOrWhiteSpace(root) && Directory.Exists(root))

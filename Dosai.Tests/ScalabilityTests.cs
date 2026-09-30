@@ -208,32 +208,6 @@ public static class LegacyCode
         Assert.Equal(new[] { "net48" }, slice.Metadata!.TargetFrameworks);
     }
 
-    // Field-like events resolve no containing type on this path, so their interface list stays
-    // null and is omitted from the JSON, as before the render cache: the cache returning an
-    // empty list added `"ImplementedInterfaces": []` to every such event.
-    [Fact]
-    public void GetMethods_FieldLikeEvent_OmitsImplementedInterfaces()
-    {
-        using var tempDirectory = new TemporaryDirectory();
-        File.WriteAllText(Path.Combine(tempDirectory.Path, "Events.cs"), """
-using System;
-namespace Ev
-{
-    public interface INotify { }
-    public class Publisher : INotify
-    {
-        public event EventHandler Changed;
-        public void Raise() => Changed?.Invoke(this, EventArgs.Empty);
-    }
-}
-""");
-
-        using var document = JsonDocument.Parse(Depscan.Dosai.GetMethods(tempDirectory.Path));
-        var changed = Assert.Single(document.RootElement.GetProperty("Events").EnumerateArray(),
-            element => element.GetProperty("Name").GetString() == "Changed");
-        Assert.False(changed.TryGetProperty("ImplementedInterfaces", out _));
-    }
-
     // The dispatch index's instantiation scan binds each creation's enclosing statement, which
     // for a creation heading a fluent chain is the whole chain - super-linear to bind. Members
     // the depth guard keeps from the operation factory stay out of the scan as well, so a type

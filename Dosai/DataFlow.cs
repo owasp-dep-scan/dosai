@@ -316,6 +316,11 @@ public static partial class DataFlowAnalyzer
                     : null)
                 .OfType<CSharpSyntaxTree>()
                 .ToList();
+            // Same rule as the methods pipeline: API-surface stubs beside their implementation
+            // stay out of the compilation (issue #69).
+            var partition = ReferenceSources.Partition(csharpTrees);
+            csharpTrees = partition.Kept;
+            result.Diagnostics.AddRange(ReferenceSources.Diagnostics(partition, TargetFrameworkDetection.ProjectContextRoot(Path.GetFullPath(path))));
             if (CSharpSourceParser.TryCreateImplicitUsingsTree(path) is { } implicitUsingsTree)
             {
                 csharpTrees.Insert(0, implicitUsingsTree);
@@ -1293,15 +1298,17 @@ public static partial class DataFlowAnalyzer
             }
         }
 
-#pragma warning disable IL3000
-        AddReference(typeof(object).Assembly.Location);
-#pragma warning restore IL3000
-        if (AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES") is string trustedPlatformAssemblies)
+        var frameworkReferences = FrameworkReferences.Current;
+        foreach (var (key, reference) in frameworkReferences.References)
         {
-            foreach (var referencePath in trustedPlatformAssemblies.Split(Path.PathSeparator))
-            {
-                AddReference(referencePath);
-            }
+            references.TryAdd(key, reference);
+        }
+
+        DebugLog.Count($"framework metadata references ({frameworkReferences.Source})", frameworkReferences.References.Count);
+
+        if (frameworkReferences.Diagnostic is { } frameworkDiagnostic)
+        {
+            diagnostics.Add(frameworkDiagnostic);
         }
 
         var rootDirectory = Directory.Exists(path) ? path : Path.GetDirectoryName(path);

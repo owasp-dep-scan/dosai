@@ -173,6 +173,16 @@ internal static class FrameworkPreprocessorDefines
         return symbols;
     }
 
+    /// <summary>
+    ///     The define set for one file under a scan root: its nearest project's targets (of
+    ///     <paramref name="projectExtension" /> kind), else the root's, else <see cref="ModernNet" />.
+    /// </summary>
+    public static IReadOnlySet<string> ForFile(string? rootPath, string filePath, string projectExtension)
+    {
+        var targets = TargetFrameworkDetection.ForFile(rootPath, filePath, projectExtension).TargetFrameworks;
+        return targets.Count > 0 ? ForTargetFrameworks(targets) : ModernNet;
+    }
+
     /// <summary>Detects the target frameworks for a scan root and returns its define set, falling back to <see cref="ModernNet" />.</summary>
     public static IReadOnlySet<string> ForRoot(string? rootPath)
     {
@@ -403,8 +413,27 @@ public static class CSharpSourceParser
 {
     private static readonly CSharpParseOptions DefaultParseOptions = BuildParseOptions();
 
+    /// <summary>
+    ///     Parses one file. With a scan root, the preprocessor symbols are those of the file's
+    ///     nearest project at or above it within the root (<see cref="TargetFrameworkDetection.ForFile" />),
+    ///     falling back to the root's own detection; without one, those detected under the file's
+    ///     directory.
+    /// </summary>
     public static CSharpSyntaxTree Parse(string content, string path, string? rootPath = null) =>
-        (CSharpSyntaxTree)CSharpSyntaxTree.ParseText(content, GetParseOptions(rootPath ?? TryGetDirectory(path)), path);
+        (CSharpSyntaxTree)CSharpSyntaxTree.ParseText(content,
+            rootPath is null ? GetParseOptions(TryGetDirectory(path)) : GetParseOptionsForFile(rootPath, path), path);
+
+    /// <summary>Parse options for one file under a scan root: its nearest project's targets, else the root's.</summary>
+    internal static CSharpParseOptions GetParseOptionsForFile(string rootPath, string filePath) =>
+        OptionsForTargets(TargetFrameworkDetection.ForFile(rootPath, filePath, ".csproj").TargetFrameworks);
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, CSharpParseOptions> ParseOptionsByTargets = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>One options instance per distinct target set, shared by every tree that resolves to it.</summary>
+    private static CSharpParseOptions OptionsForTargets(IReadOnlyList<string> targetFrameworks) =>
+        targetFrameworks.Count == 0
+            ? DefaultParseOptions
+            : ParseOptionsByTargets.GetOrAdd(string.Join(';', targetFrameworks), _ => BuildParseOptions(targetFrameworks));
 
     /// <summary>
     ///     Parse options for a scan root: the language-version and FileBasedProgram decisions
