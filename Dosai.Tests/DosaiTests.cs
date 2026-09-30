@@ -18,7 +18,9 @@ namespace Dosai.Tests;
 // is only safe when the two files never run in parallel.
 public partial class DosaiTests
 {
-    private static readonly object ConsoleOutputLock = new();
+    // Console.Out and Console.Error are process-wide: every test that swaps them, in any class,
+    // holds this lock, or a parallel test class redirects the other's output mid-run.
+    internal static readonly object ConsoleOutputLock = new();
 
     #region GetMethods
     [Fact]
