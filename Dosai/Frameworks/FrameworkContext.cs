@@ -159,7 +159,7 @@ public sealed class FrameworkContext
             .Where(file => file.EndsWith(Constants.CSharpSourceExtension, StringComparison.OrdinalIgnoreCase))
             .Select(context.TryReadFile)
             .Where(read => read.Text is not null)
-            .Select(read => CSharpSourceParser.Parse(read.Text!, read.Path))
+            .Select(read => CSharpSourceParser.Parse(read.Text!, read.Path, basePath))
             .ToList();
         if (CSharpSourceParser.TryCreateImplicitUsingsTree(basePath) is { } implicitUsingsTree)
         {

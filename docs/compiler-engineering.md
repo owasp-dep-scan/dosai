@@ -156,7 +156,7 @@ Deep nesting has two limits. All Roslyn operation work runs on a `DedicatedStack
 
 The graph builder guarantees that every edge endpoint exists as a node. External targets become external nodes when no source declaration exists. Repeated call sites of the same `(source, target, callType, evidence)` pair collapse into one counted edge (`CallSiteCount`) whose argument and evidence annotations are merged. Assembly call graph edge de-duplication includes evidence kind so direct IL, generated-state, delegate-target, and inferred candidate edges are not accidentally collapsed into one classification. Source and assembly call graphs are merged with dictionary-backed node lookups so duplicate node evidence can be combined without repeatedly scanning large node lists.
 
-Source and binary call graph extraction share a small CHA/RTA-style dispatch resolver. For source, it indexes concrete application types, interface implementations, overrides, and instantiated types observed from object creations. Instantiation evidence is **symbol-exact**: the created type's symbol (and, for a constructed generic, its original definition) marks exactly that type instantiated, because every symbol below the scan resolves through the one compilation. The string aliases this replaced also matched any same-named type in another namespace, which promoted unrelated types to RTA rank (`My.Own.Task` marking `System.Threading.Tasks.Task` instantiated). The index is built once per Roslyn compilation (its object-creation scan runs per syntax tree on the worker team, using `GetTypeInfo` on the creation expression rather than the operation factory, so it needs neither the deep-stack guard nor a full operation tree), buckets concrete types by interface and base-type original definition, and memoizes each (target, receiver) lookup for the per-file walkers. Only virtual invocations get candidates - `base.M()` runs exactly the bound method - and a call site keeps at most 16, instantiated types first. Interface implementations resolve through `FindImplementationForInterfaceMember` with the member as the interface declares it (`ConstructedFrom`): handed a generic method constructed with a call's type arguments, Roslyn throws. For assemblies, it matches known methods against decoded type metadata, base types, implemented interfaces, and instantiated IL types. Inferred virtual and interface edges carry a dispatch confidence tier: `exact` when the static receiver type is sealed or a struct, `rta-candidate` when the implementing type is instantiated in the compilation, or `cha-candidate`.
+Source and binary call graph extraction share a small CHA/RTA-style dispatch resolver. For source, it indexes concrete application types, interface implementations, overrides, and instantiated types observed from object creations. Instantiation evidence is **symbol-exact**: the created type's symbol (and, for a constructed generic, its original definition) marks exactly that type instantiated, because every symbol below the scan resolves through the one compilation. The string aliases this replaced also matched any same-named type in another namespace, which promoted unrelated types to RTA rank (`My.Own.Task` marking `System.Threading.Tasks.Task` instantiated). The index is built once per Roslyn compilation (its object-creation scan runs per syntax tree on the worker team and reads the created type with `GetTypeInfo` rather than building an operation tree; that still binds the creation's enclosing statement - for a creation heading a fluent chain, the whole chain, which is super-linear to bind - so creations inside members `OperationDepthGuard` skips are skipped here too. `GetTypeInfo` also knows the created type when the constructor call fails to bind, where the operation form was an `IInvalidOperation`, so `new T(unresolvedArgument)` - routine in unrestored trees - counts as instantiating `T`), buckets concrete types by interface and base-type original definition, and memoizes each (target, receiver) lookup for the per-file walkers. Only virtual invocations get candidates - `base.M()` runs exactly the bound method - and a call site keeps at most 16, instantiated types first. Interface implementations resolve through `FindImplementationForInterfaceMember` with the member as the interface declares it (`ConstructedFrom`): handed a generic method constructed with a call's type arguments, Roslyn throws. For assemblies, it matches known methods against decoded type metadata, base types, implemented interfaces, and instantiated IL types. Inferred virtual and interface edges carry a dispatch confidence tier: `exact` when the static receiver type is sealed or a struct, `rta-candidate` when the implementing type is instantiated in the compilation, or `cha-candidate`.
 
 Instantiated-generic IL ids (`Method<args>`) never match a source id exactly because the instantiation rewrites parameter types too, so the merged graph normalizes them onto the source original-definition node keyed by an instantiation-free identity, keeping the original instantiated id in `MethodNode.GenericInstantiation`.
 
@@ -336,10 +336,15 @@ tail after symbol analysis had finished during which the heap kept climbing):
   fall back to ordinal comparison, so keys built from non-pooled strings behave exactly like
   the concatenated form.
 - **The compilations are released before the IL phase.** Framework analysis and the security
-  analyzer - the only compilation consumers - run immediately after source analysis; the
-  syntax trees (the largest object the pipeline ever holds) and the framework context's
-  per-file text cache are then dropped before the assembly call graph, enrichment,
-  reachability and serialization, instead of surviving behind those phases. On the issue's
+  analyzer - the only compilation consumers - run immediately after source analysis, inside
+  one helper (`AnalyzeSourcesAndFrameworks`) that returns only their results; the syntax trees
+  (the largest object the pipeline ever holds) and the framework context's per-file text cache
+  are unreachable once it returns, before the assembly call graph, enrichment, reachability
+  and serialization, instead of surviving behind those phases. The helper frame is the
+  mechanism: a local in the once-run slice builder stays reported live until it returns (it
+  runs at Tier-0, and the security-analysis lambda captured the context into a closure), so
+  reassigning one did not free anything. `GetMethodsSlice_ReleasesSourceCompilationsBeforeTheIlPhase`
+  checks the compilations themselves through weak references. On the issue's
   112k-file tree this is what moves the memory wall out of the run's way: the death happened
   entering `assembly-call-graph` with tens of GB still pinned by trees.
 - **Per-file collectors and dispatch indexes are dropped as soon as they are merged**, so the
@@ -348,7 +353,9 @@ tail after symbol analysis had finished during which the heap kept climbing):
 - **Server GC.** Parse, the dispatch index and the symbol loop all run on a worker team; with
   the previous workstation-GC default a single GC thread fell behind a dozen allocating
   workers (visible as CPU collapsing to one core "while the GC was under pressure"). Server
-  GC keeps reclamation parallel to allocation.
+  GC keeps reclamation parallel to allocation. On .NET 9 and later it runs with dynamic heap
+  count adaptation (DATAS) by default, so small scans do not pay for one heap per core;
+  `DOTNET_gcServer=0` restores workstation GC for a host that needs it.
 - `DOSAI_DEBUG_GC=1` forces a full compacting collection before each `--debug` phase-end heap
   read, so heap figures compare runs without GC-timing noise.
 

@@ -282,9 +282,20 @@ internal static class DispatchResolver
             var semanticModel = compilation.GetSemanticModel(syntaxTree);
             foreach (var objectCreationNode in syntaxTree.GetRoot().DescendantNodes().Where(IsObjectCreationSyntax))
             {
-                // GetTypeInfo binds the creation expression alone; it does not build the
-                // IOperation tree (whose factory recurses per call in a chain and needs the
-                // deep-stack guard), and it returns the same created-type symbol.
+                // GetTypeInfo skips the IOperation factory, but it still binds the creation's
+                // whole enclosing statement - for a creation heading a fluent chain, the entire
+                // chain - and binding a chain is super-linear in its length (a 400,000-call chain
+                // bound for about 14 minutes here). Members the depth guard keeps off the
+                // operation factory are kept out of this scan too: the call-graph walker never
+                // analyzes them, so their creations were never evidence.
+                if (!OperationDepthGuard.IsSafe(objectCreationNode))
+                {
+                    continue;
+                }
+
+                // The created type is known even when its constructor call fails to bind (an
+                // argument of an unresolved type), where the operation form was an
+                // IInvalidOperation: `new T(unresolved)` still instantiates T.
                 if (semanticModel.GetTypeInfo(objectCreationNode).Type is INamedTypeSymbol type)
                 {
                     AddInstantiatedTypes(types ??= new HashSet<INamedTypeSymbol>(SymbolEqualityComparer.Default), type);

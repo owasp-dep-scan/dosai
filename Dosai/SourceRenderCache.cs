@@ -60,14 +60,10 @@ internal sealed class SourceRenderCache
     /// <summary>
     ///     Simple names of every interface a type implements, computed once per type and shared
     ///     by every member of that type. Never mutated after construction (all consumers read).
+    ///     Null for a null type, like the <c>containingType?.AllInterfaces...ToList()</c> it
+    ///     replaces: records serialize with null-omission, so an empty list here would add
+    ///     <c>"ImplementedInterfaces": []</c> to every member without a containing type.
     /// </summary>
-    public List<string> InterfaceNames(INamedTypeSymbol? type)
-    {
-        if (type is null)
-        {
-            return [];
-        }
-
-        return _interfaceNames.GetValue(type, static t => t.AllInterfaces.Select(i => i.Name).ToList());
-    }
+    public List<string>? InterfaceNames(INamedTypeSymbol? type) =>
+        type is null ? null : _interfaceNames.GetValue(type, static t => t.AllInterfaces.Select(i => i.Name).ToList());
 }

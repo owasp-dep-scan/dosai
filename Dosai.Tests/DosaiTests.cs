@@ -3529,6 +3529,49 @@ class CryptoSample
         }
     }
 
+    // The synthetic implicit-usings tree has no file behind it. The line fallback read every
+    // tree back from disk by path, so each scan of an ImplicitUsings project printed
+    // "skipping unreadable source file <implicit-usings>" (resolved against the working
+    // directory) - on crypto and on agent-context, which runs it.
+    [Fact]
+    public void CryptoAnalysis_ImplicitUsingsProject_DoesNotReadTheSyntheticTreeFromDisk()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "App.csproj"), """
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+</Project>
+""");
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Hashing.cs"), """
+public static class Hashing
+{
+    public static byte[] Digest(byte[] data) => System.Security.Cryptography.MD5.HashData(data);
+}
+""");
+
+        using var capturedError = new StringWriter();
+        CryptoAnalysisResult result;
+        lock (ConsoleOutputLock)
+        {
+            var originalError = Console.Error;
+            try
+            {
+                Console.SetError(capturedError);
+                result = CryptoAnalyzer.Analyze(tempDirectory.Path);
+            }
+            finally
+            {
+                Console.SetError(originalError);
+            }
+        }
+
+        Assert.DoesNotContain("<implicit-usings>", capturedError.ToString(), StringComparison.Ordinal);
+        Assert.Contains(result.Assets, asset => asset.Name == "MD5");
+    }
+
     [Fact]
     public void CryptoAnalysis_DetectsNativeTlsSymbolsWithUnderscoreAndVersionPrefixes()
     {

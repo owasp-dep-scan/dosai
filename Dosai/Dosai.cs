@@ -375,44 +375,44 @@ public static class Dosai
         }
         DebugLog.Count("assembly methods", methods.Count);
 
-        var (sourceMethods, usings, methodCalls, properties, fields, events, constructors, callGraph, sourceAssemblyMapping, sourceMode, compilations, sourceDiagnostics) = AnalyzeSourcesWithDebugLogging(path, methods);
-        DebugLog.Count("source methods", sourceMethods.Count);
-        DebugLog.Count("call graph (source) nodes", callGraph.Nodes.Count);
-        DebugLog.Count("call graph (source) edges", callGraph.Edges.Count);
-
-        // Every consumer of the compilations runs here, immediately after source analysis,
-        // because the trees they pin are the largest object the pipeline ever holds (green
-        // nodes for every parsed file). The IL call-graph phase, graph merges, enrichment,
-        // reachability and serialization that follow used to run with those trees - and the
-        // per-file text the framework context caches - still alive behind them, which is the
-        // memory wall a 112k-file tree hit in issue #65: the run died entering
-        // assembly-call-graph with the heap already tens of GB. Framework analysis and the
-        // security analyzer read only the compilations and their own results; none of them
-        // reads the IL graph, so they lose nothing by running first, and dropping the
-        // compilations afterwards frees the trees before the graph is assembled.
-        Frameworks.FrameworkAnalysisResult frameworkResult;
-        List<ApiEndpoint> legacyEndpoints;
-        List<ApiEndpoint> apiEndpoints;
-        List<Frameworks.SecurityFinding> securityFindings;
-        using (DebugLog.Phase("methods.framework-analysis"))
+        // Source analysis and every consumer of its compilations (framework analysis, the
+        // security analyzer) run inside AnalyzeSourcesAndFrameworks, which returns only their
+        // results. The compilations pin every parsed tree - the largest object the pipeline
+        // holds - and none of the phases below reads them, so they must be unreachable before
+        // the IL call graph, merges, enrichment, reachability and serialization run (the memory
+        // wall of issue #65). Scoping them in a helper frame is what makes that true. Holding
+        // them in a local here and reassigning it did not: the security-analysis lambda
+        // captured the framework context into a closure object, and this method runs once, so
+        // it stays at Tier-0, where the JIT reports every IL local (the closure's included)
+        // live until the method returns - a heap snapshot at enrichment still held the
+        // compilation and every syntax tree.
+        var stage = AnalyzeSourcesAndFrameworks(path, methods, purlResolver, frameworkOptions);
+        if (CompilationReleaseProbe.Value is { } releaseProbe)
         {
-            var frameworkContext = Frameworks.FrameworkContext.FromCompilations(path, compilations.CSharp, compilations.VisualBasic, purlResolver);
-            frameworkResult = Frameworks.FrameworkRegistry.Analyze(frameworkContext, frameworkOptions);
-            // ApiEndpointAnalyzer now only covers what no provider owns (VB.NET); the framework providers
-            // own every C# endpoint. Entry points are therefore built from the analyzer's endpoints ALONE;
-            // feeding it the combined list produced a second, MethodId-less copy of every provider endpoint.
-            legacyEndpoints = DebugLog.Measure("methods.legacy-api-endpoints", () => ApiEndpointAnalyzer.GetApiEndpoints(path));
-            DebugLog.Count("legacy analyzer api endpoints (VB remainder)", legacyEndpoints.Count);
-            apiEndpoints = frameworkResult.ApiEndpoints.Concat(legacyEndpoints).ToList();
-            securityFindings = DebugLog.Measure("methods.security-analysis", () => Frameworks.SecurityAnalyzer.Run(frameworkContext, frameworkResult, apiEndpoints));
+            releaseProbe.RecordAfterRelease();
         }
 
-        compilations = Frameworks.SourceCompilations.Empty;
         if (DebugLog.Enabled)
         {
             GC.Collect(generation: GC.MaxGeneration, mode: GCCollectionMode.Forced, blocking: true, compacting: false);
             DebugLog.Log("released source compilations after framework analysis");
         }
+
+        var sourceMethods = stage.SourceMethods;
+        var usings = stage.UsingDirectives;
+        var methodCalls = stage.MethodCalls;
+        var properties = stage.Properties;
+        var fields = stage.Fields;
+        var events = stage.Events;
+        var constructors = stage.Constructors;
+        var callGraph = stage.CallGraph;
+        var sourceAssemblyMapping = stage.SourceAssemblyMappings;
+        var sourceMode = stage.SourceMode;
+        var sourceDiagnostics = stage.Diagnostics;
+        var frameworkResult = stage.FrameworkResult;
+        var legacyEndpoints = stage.LegacyEndpoints;
+        var apiEndpoints = stage.ApiEndpoints;
+        var securityFindings = stage.SecurityFindings;
 
         List<MethodCalls> assemblyMethodCalls;
         CallGraph assemblyCallGraph;
@@ -531,6 +531,116 @@ public static class Dosai
             Frameworks = frameworkResult.Frameworks,
             Diagnostics = sliceDiagnostics
         };
+    }
+
+    private static readonly AsyncLocal<ReleaseProbe?> CompilationReleaseProbe = new();
+
+    /// <summary>
+    ///     Test hook for the compilation-release contract: weakly observes the source
+    ///     compilations when they are built and, once source and framework analysis have
+    ///     returned, forces a full collection and records whether any of them survived. Applies
+    ///     to the current execution context and the analysis threads it starts.
+    /// </summary>
+    internal static IDisposable ObserveCompilationRelease(out ReleaseProbe probe)
+    {
+        var previous = CompilationReleaseProbe.Value;
+        var current = new ReleaseProbe();
+        probe = current;
+        CompilationReleaseProbe.Value = current;
+        return new ScopeRestore(() => CompilationReleaseProbe.Value = previous);
+    }
+
+    internal sealed class ReleaseProbe
+    {
+        private readonly List<WeakReference> _compilations = [];
+
+        /// <summary>Compilations observed; zero means source analysis built none.</summary>
+        public int Observed => _compilations.Count;
+
+        /// <summary>Compilations still reachable after the release point, or null before it ran.</summary>
+        public int? AliveAfterRelease { get; private set; }
+
+        internal void Observe(Frameworks.SourceCompilations compilations)
+        {
+            if (compilations.CSharp is not null) _compilations.Add(new WeakReference(compilations.CSharp));
+            if (compilations.VisualBasic is not null) _compilations.Add(new WeakReference(compilations.VisualBasic));
+        }
+
+        internal void RecordAfterRelease()
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+            AliveAfterRelease = _compilations.Count(reference => reference.IsAlive);
+        }
+    }
+
+    private sealed class ScopeRestore(Action restore) : IDisposable
+    {
+        public void Dispose() => restore();
+    }
+
+    /// <summary>
+    ///     Everything the methods slice needs from source analysis and its compilation consumers,
+    ///     without the compilations themselves.
+    /// </summary>
+    private sealed record SourceStage(
+        List<Method> SourceMethods,
+        List<Dependency> UsingDirectives,
+        List<MethodCalls> MethodCalls,
+        List<PropertyInfo> Properties,
+        List<FieldInfo> Fields,
+        List<EventInfo> Events,
+        List<ConstructorInfo> Constructors,
+        CallGraph CallGraph,
+        List<SourceAssemblyMapping> SourceAssemblyMappings,
+        bool SourceMode,
+        List<string> Diagnostics,
+        Frameworks.FrameworkAnalysisResult FrameworkResult,
+        List<ApiEndpoint> LegacyEndpoints,
+        List<ApiEndpoint> ApiEndpoints,
+        List<Frameworks.SecurityFinding> SecurityFindings);
+
+    /// <summary>
+    ///     Source analysis followed by the only phases that read its compilations: framework
+    ///     analysis and the security analyzer (neither reads the IL call graph, so running them
+    ///     before it loses nothing). The compilations and the framework context - with its
+    ///     per-file text cache - live only in this frame, so they are collectable as soon as it
+    ///     returns; see <see cref="BuildMethodsSlice" />. Never inlined, which would move them
+    ///     back into the caller's frame.
+    /// </summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static SourceStage AnalyzeSourcesAndFrameworks(string path, List<Method> assemblyMethods, PackageUrlResolver purlResolver, Frameworks.FrameworkAnalysisOptions? frameworkOptions)
+    {
+        var (sourceMethods, usings, methodCalls, properties, fields, events, constructors, callGraph, sourceAssemblyMapping, sourceMode, compilations, sourceDiagnostics) = AnalyzeSourcesWithDebugLogging(path, assemblyMethods);
+        CompilationReleaseProbe.Value?.Observe(compilations);
+        DebugLog.Count("source methods", sourceMethods.Count);
+        DebugLog.Count("call graph (source) nodes", callGraph.Nodes.Count);
+        DebugLog.Count("call graph (source) edges", callGraph.Edges.Count);
+
+        Frameworks.FrameworkAnalysisResult frameworkResult;
+        List<ApiEndpoint> legacyEndpoints;
+        List<ApiEndpoint> apiEndpoints;
+        List<Frameworks.SecurityFinding> securityFindings;
+        using (DebugLog.Phase("methods.framework-analysis"))
+        {
+            var frameworkContext = Frameworks.FrameworkContext.FromCompilations(path, compilations.CSharp, compilations.VisualBasic, purlResolver);
+            frameworkResult = Frameworks.FrameworkRegistry.Analyze(frameworkContext, frameworkOptions);
+            DebugLog.Count("framework api endpoints", frameworkResult.ApiEndpoints.Count);
+            DebugLog.Count("framework services", frameworkResult.Services.Count);
+            DebugLog.Count("framework ai components", frameworkResult.AiComponents.Count);
+            DebugLog.Count("framework entry points", frameworkResult.EntryPoints.Count);
+            // ApiEndpointAnalyzer now only covers what no provider owns (VB.NET); the framework providers
+            // own every C# endpoint. Entry points are therefore built from the analyzer's endpoints ALONE;
+            // feeding it the combined list produced a second, MethodId-less copy of every provider endpoint.
+            legacyEndpoints = DebugLog.Measure("methods.legacy-api-endpoints", () => ApiEndpointAnalyzer.GetApiEndpoints(path));
+            DebugLog.Count("legacy analyzer api endpoints (VB remainder)", legacyEndpoints.Count);
+            apiEndpoints = frameworkResult.ApiEndpoints.Concat(legacyEndpoints).ToList();
+            securityFindings = DebugLog.Measure("methods.security-analysis", () => Frameworks.SecurityAnalyzer.Run(frameworkContext, frameworkResult, apiEndpoints));
+        }
+
+        return new SourceStage(sourceMethods, usings, methodCalls, properties, fields, events, constructors, callGraph, sourceAssemblyMapping, sourceMode, sourceDiagnostics,
+            frameworkResult, legacyEndpoints, apiEndpoints, securityFindings);
     }
 
     /// <summary>
@@ -1742,9 +1852,8 @@ public static class Dosai
     private static Method CreateMethodFromSymbol(
         IMethodSymbol methodSymbol,
         SemanticModel model,
-        string sourceFilePath,
+        string relativePath,
         string fileName,
-        string basePath,
         int lineNumber,
         int columnNumber,
         List<string> diagnostics,
@@ -1785,11 +1894,11 @@ public static class Dosai
         string assemblySignature = renderCache.Display(methodSymbol);
 
         var baseType = containingType?.BaseType?.Name ?? "Object";
-        var implementedInterfaces = renderCache.InterfaceNames(containingType);
+        var implementedInterfaces = renderCache.InterfaceNames(containingType) ?? [];
 
         return new Method
         {
-            Path = Path.GetRelativePath(basePath, sourceFilePath),
+            Path = relativePath,
             FileName = fileName,
             Assembly = assembly is null ? "" : renderCache.Display(assembly),
             Module = module is null ? "" : renderCache.Display(module),
@@ -2241,12 +2350,12 @@ public static class Dosai
                         });
                         if (propertySymbol.GetMethod is not null)
                         {
-                            var getterMethod = CreateMethodFromSymbol(propertySymbol.GetMethod, model, sourceFilePath, fileName, path, lineNumber, columnNumber, sourceDiagnostics, renderCache);
+                            var getterMethod = CreateMethodFromSymbol(propertySymbol.GetMethod, model, relativePath, fileName, lineNumber, columnNumber, sourceDiagnostics, renderCache);
                             sourceMethods.Add(getterMethod);    
                         }
                         if (propertySymbol.SetMethod is not null)
                         {
-                            var setterMethod = CreateMethodFromSymbol(propertySymbol.SetMethod, model, sourceFilePath, fileName, path, lineNumber, columnNumber, sourceDiagnostics, renderCache);
+                            var setterMethod = CreateMethodFromSymbol(propertySymbol.SetMethod, model, relativePath, fileName, lineNumber, columnNumber, sourceDiagnostics, renderCache);
                             sourceMethods.Add(setterMethod);
                         }
                     }
@@ -2299,13 +2408,13 @@ public static class Dosai
                         });
                         if (propertySymbol.GetMethod is not null)
                         {
-                            var getterMethod = CreateMethodFromSymbol(propertySymbol.GetMethod, model, sourceFilePath, fileName, path, lineNumber, columnNumber, sourceDiagnostics, renderCache);
+                            var getterMethod = CreateMethodFromSymbol(propertySymbol.GetMethod, model, relativePath, fileName, lineNumber, columnNumber, sourceDiagnostics, renderCache);
                             sourceMethods.Add(getterMethod);
                         }
 
                         if (propertySymbol.SetMethod is not null)
                         {
-                            var setterMethod = CreateMethodFromSymbol(propertySymbol.SetMethod, model, sourceFilePath, fileName, path, lineNumber, columnNumber, sourceDiagnostics, renderCache);
+                            var setterMethod = CreateMethodFromSymbol(propertySymbol.SetMethod, model, relativePath, fileName, lineNumber, columnNumber, sourceDiagnostics, renderCache);
                             sourceMethods.Add(setterMethod);
                         }
                     }

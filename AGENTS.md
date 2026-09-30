@@ -86,9 +86,10 @@ dotnet test ./Dosai.sln
   symbol reference through a `ConditionalWeakTable` on purpose: Roslyn symbol hash codes are
   not cached on the symbol (each hash walks the containing-symbol chain), so a hash-keyed
   table slows the worker loop, and a strongly-keyed table pins every symbol - including
-  per-callsite constructed generics - for the whole run. Render through the cache; never
-  re-render per call site, and never key symbol data by `SymbolEqualityComparer` in a table
-  that outlives one file.
+  per-callsite constructed generics - for the whole run. Render through the cache and never
+  re-render per call site. Symbol-keyed tables that must compare by symbol equality (the
+  dispatch index's buckets and lookup memo) are per compilation and are dropped as soon as
+  the symbol loop has merged.
 - Graph de-duplication and ordering go through `GraphAssembly`: an `EdgeSiteKey` struct
   instead of a concatenated key string per edge, stable in-place sorts instead of `OrderBy`
   chains. Dedupe the call record before building the edge. String legs of the key compare by
@@ -99,17 +100,25 @@ dotnet test ./Dosai.sln
   then the compilations are dropped before the assembly IL call graph, enrichment,
   reachability and serialization - the syntax trees are the largest object the pipeline holds,
   and pinning them through those phases is the memory wall on very large trees (issue #65).
-  Anything new that needs a `SemanticModel` must run before that release.
+  Anything new that needs a `SemanticModel` must run before that release, inside
+  `AnalyzeSourcesAndFrameworks`: that helper frame is what makes the release real. Never hold
+  a compilation, the framework context, or a lambda capturing either in `BuildMethodsSlice` -
+  it runs once at Tier-0, where every IL local stays live until it returns
+  (`GetMethodsSlice_ReleasesSourceCompilationsBeforeTheIlPhase` checks this).
 - The process runs with server GC (`Dosai.csproj`): parse, dispatch index and symbol analysis
   are wide parallel allocators, and workstation GC's single collector thread fell behind them
-  on large trees. `DOSAI_DEBUG_GC=1` forces a full collection before each `--debug` phase-end
-  heap read so figures compare without GC-timing noise.
+  on large trees (`DOTNET_gcServer=0` opts a host back into workstation GC).
+  `DOSAI_DEBUG_GC=1` forces a full collection before each `--debug` phase-end heap read so
+  figures compare without GC-timing noise.
 - Virtual/interface dispatch resolution goes through `DispatchResolver.SourceIndex`: concrete
   types bucketed once per interface/base-type original definition, lookups memoized per
   (target, receiver) symbol pair. Route any new dispatch inference through the index rather
   than scanning types. Instantiation evidence is symbol-exact (the created type's symbol and,
   for constructed generics, its original definition); the string aliases this replaced also
-  matched same-named types in other namespaces and promoted them to RTA rank.
+  matched same-named types in other namespaces and promoted them to RTA rank. The scan reads
+  the created type with `GetTypeInfo`, which binds the creation's whole enclosing statement,
+  so it skips members `OperationDepthGuard.IsSafe` rejects exactly like the operation walkers;
+  a creation whose constructor fails to bind still counts.
   `FindImplementationForInterfaceMember` takes the member as its
   interface declares it: pass `ConstructedFrom`, never a method constructed with a call's type
   arguments, which makes Roslyn throw (issue #64). A resolution that still throws abandons only
@@ -133,7 +142,11 @@ dotnet test ./Dosai.sln
   (`CSharpSourceParser.Parse(text, file, rootPath)`), never from the file's own directory: the
   per-directory form ran one recursive TFM detection per distinct source directory and gave
   subdirectory files a different define set than the root project (and than the
-  `Metadata.GuardTargetFramework` the slice reports).
+  `Metadata.GuardTargetFramework` the slice reports). A single-file root reads its project
+  context from the file's directory (`TargetFrameworkDetection.ProjectContextRoot`), for the
+  parse options, the implicit-usings decision and the reported target frameworks alike.
+- Synthetic syntax trees (the implicit-usings tree) have no file behind them: never read a
+  tree back from disk by `tree.FilePath` without excluding them.
 - Keep edge endpoints valid: every graph edge must reference existing nodes.
 - Preserve JSON compatibility unless a task explicitly allows breaking changes.
 - PURL enrichment must be best-effort and must never fail analysis.

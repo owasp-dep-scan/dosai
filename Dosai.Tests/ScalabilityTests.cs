@@ -175,6 +175,163 @@ public static class Guards
         Assert.DoesNotContain(slice.Methods!, method => method is { ClassName: "Guards", Name: "Net10Arm" });
     }
 
+    // A single-file scan reads its project context from the file's directory. Resolving the
+    // parse options from the file path itself enumerated no project file and evaluated a
+    // net48 project's guards against the latest-modern-net fallback.
+    [Fact]
+    public void GetMethods_SingleFileScan_ResolvesGuardsAgainstItsOwnProject()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Legacy.csproj"), """
+<Project>
+  <PropertyGroup>
+    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+  </PropertyGroup>
+</Project>
+""");
+        var file = Path.Combine(tempDirectory.Path, "LegacyCode.cs");
+        File.WriteAllText(file, """
+public static class LegacyCode
+{
+#if NETFRAMEWORK
+    public static void FrameworkOnly() { }
+#else
+    public static void NotFramework() { }
+#endif
+}
+""");
+
+        var slice = ReadMethods(file);
+
+        Assert.Contains(slice.Methods!, method => method is { ClassName: "LegacyCode", Name: "FrameworkOnly" });
+        Assert.DoesNotContain(slice.Methods!, method => method is { ClassName: "LegacyCode", Name: "NotFramework" });
+        Assert.Equal(new[] { "net48" }, slice.Metadata!.TargetFrameworks);
+    }
+
+    // Field-like events resolve no containing type on this path, so their interface list stays
+    // null and is omitted from the JSON, as before the render cache: the cache returning an
+    // empty list added `"ImplementedInterfaces": []` to every such event.
+    [Fact]
+    public void GetMethods_FieldLikeEvent_OmitsImplementedInterfaces()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Events.cs"), """
+using System;
+namespace Ev
+{
+    public interface INotify { }
+    public class Publisher : INotify
+    {
+        public event EventHandler Changed;
+        public void Raise() => Changed?.Invoke(this, EventArgs.Empty);
+    }
+}
+""");
+
+        using var document = JsonDocument.Parse(Depscan.Dosai.GetMethods(tempDirectory.Path));
+        var changed = Assert.Single(document.RootElement.GetProperty("Events").EnumerateArray(),
+            element => element.GetProperty("Name").GetString() == "Changed");
+        Assert.False(changed.TryGetProperty("ImplementedInterfaces", out _));
+    }
+
+    // The dispatch index's instantiation scan binds each creation's enclosing statement, which
+    // for a creation heading a fluent chain is the whole chain - super-linear to bind. Members
+    // the depth guard keeps from the operation factory stay out of the scan as well, so a type
+    // created only inside such a member is not instantiation evidence (the call-graph walker
+    // never analyzes that member either) and ranks cha-candidate.
+    [Fact]
+    public void GetMethods_DispatchIndex_SkipsCreationsInMembersTheDepthGuardSkips()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var chain = "new OnlyInDeep()" + string.Concat(Enumerable.Repeat(".M()", 150));
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Deep.cs"), $$"""
+public interface ISvc { void Run(); }
+public class OnlyInDeep : ISvc { public void Run() { } public OnlyInDeep M() => this; }
+public class Plain : ISvc { public void Run() { } }
+public static class Deep
+{
+    public static object Chain() => {{chain}};
+}
+public static class Boot
+{
+    public static void Go(ISvc service)
+    {
+        var plain = new Plain();
+        service.Run();
+    }
+}
+""");
+
+        using (OperationDepthGuard.OverrideMaxSyntaxDepth(200))
+        {
+            var slice = ReadMethods(tempDirectory.Path);
+
+            Assert.Contains(slice.Diagnostics!, diagnostic => diagnostic.Contains("Deep.cs", StringComparison.Ordinal) && diagnostic.Contains("nest deeper than 200 syntax levels", StringComparison.Ordinal));
+            var candidates = DispatchCandidates(slice, "Boot.Go");
+            Assert.Equal("rta-candidate", Assert.Single(candidates, call => call.TargetId!.StartsWith("Plain.Run", StringComparison.Ordinal)).DispatchConfidence);
+            Assert.Equal("cha-candidate", Assert.Single(candidates, call => call.TargetId!.StartsWith("OnlyInDeep.Run", StringComparison.Ordinal)).DispatchConfidence);
+        }
+    }
+
+    // The created type is instantiation evidence even when its constructor call fails to bind -
+    // an argument of an unresolved type, routine in unrestored trees. The operation form of the
+    // scan saw an IInvalidOperation there and missed the creation.
+    [Fact]
+    public void GetMethods_CreationWithUnboundConstructorArgument_CountsAsInstantiated()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Widen.cs"), """
+namespace W
+{
+    public interface ISvc { void Run(); }
+    public class Created : ISvc { public void Run() { } }
+    public class BrokenCtorArg : ISvc { public BrokenCtorArg(Missing.Type missing) { } public void Run() { } }
+    public class NeverCreated : ISvc { public void Run() { } }
+    public static class Boot
+    {
+        public static void Go(ISvc service, object value)
+        {
+            var created = new Created();
+            var broken = new BrokenCtorArg(value);
+            service.Run();
+        }
+    }
+}
+""");
+
+        var candidates = DispatchCandidates(ReadMethods(tempDirectory.Path), "W.Boot.Go");
+
+        Assert.Equal("rta-candidate", Assert.Single(candidates, call => call.TargetId!.StartsWith("W.Created.Run", StringComparison.Ordinal)).DispatchConfidence);
+        Assert.Equal("rta-candidate", Assert.Single(candidates, call => call.TargetId!.StartsWith("W.BrokenCtorArg.Run", StringComparison.Ordinal)).DispatchConfidence);
+        Assert.Equal("cha-candidate", Assert.Single(candidates, call => call.TargetId!.StartsWith("W.NeverCreated.Run", StringComparison.Ordinal)).DispatchConfidence);
+    }
+
+    // The memory contract of issue #65: the source compilations (and through them every syntax
+    // tree) are unreachable once source and framework analysis return, before the IL call
+    // graph, enrichment, reachability and serialization. Reassigning a local in the slice
+    // builder did not release them - a captured closure and Tier-0 liveness kept them alive -
+    // so the contract is checked on the objects themselves.
+    [Fact]
+    public void GetMethodsSlice_ReleasesSourceCompilationsBeforeTheIlPhase()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "App.cs"), """
+public class Handler
+{
+    public void Handle() => System.Console.WriteLine("handled");
+}
+""");
+
+        Depscan.Dosai.ReleaseProbe probe;
+        using (Depscan.Dosai.ObserveCompilationRelease(out probe))
+        {
+            Depscan.Dosai.GetMethodsSlice(tempDirectory.Path);
+        }
+
+        Assert.True(probe.Observed > 0);
+        Assert.Equal(0, probe.AliveAfterRelease);
+    }
+
     private sealed class TemporaryDirectory : IDisposable
     {
         public TemporaryDirectory()

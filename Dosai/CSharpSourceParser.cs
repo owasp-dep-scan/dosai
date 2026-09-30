@@ -423,7 +423,7 @@ public static class CSharpSourceParser
         string root;
         try
         {
-            root = Path.GetFullPath(rootPath);
+            root = TargetFrameworkDetection.ProjectContextRoot(Path.GetFullPath(rootPath));
         }
         catch (ArgumentException)
         {
@@ -529,7 +529,7 @@ public static class CSharpSourceParser
         string root;
         try
         {
-            root = System.IO.Path.GetFullPath(path);
+            root = TargetFrameworkDetection.ProjectContextRoot(System.IO.Path.GetFullPath(path));
         }
         catch (ArgumentException)
         {

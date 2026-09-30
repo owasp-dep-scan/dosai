@@ -314,7 +314,8 @@ public static class CryptoAnalyzer
                 ? CSharpSourceParser.Parse(content, file, basePath)
                 : null)
             .OfType<CSharpSyntaxTree>().ToList();
-        if (CSharpSourceParser.TryCreateImplicitUsingsTree(basePath) is { } implicitUsingsTree)
+        var implicitUsingsTree = CSharpSourceParser.TryCreateImplicitUsingsTree(basePath);
+        if (implicitUsingsTree is not null)
         {
             csharpTrees.Insert(0, implicitUsingsTree);
         }
@@ -335,7 +336,9 @@ public static class CryptoAnalyzer
             {
                 new CryptoOperationWalker(model, basePath, tree.FilePath, reachability, result).Visit(operation);
             }
-            if (SafeFileRead.TryReadAllLines(tree.FilePath) is { } csharpLines)
+            // The synthetic implicit-usings tree has no file behind it: reading its path printed
+            // an unreadable-file warning on every scan of an ImplicitUsings project.
+            if (!ReferenceEquals(tree, implicitUsingsTree) && SafeFileRead.TryReadAllLines(tree.FilePath) is { } csharpLines)
             {
                 AnalyzeLineFallback(basePath, tree.FilePath, csharpLines, reachability, result, language: "csharp");
             }

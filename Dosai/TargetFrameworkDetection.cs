@@ -30,7 +30,7 @@ internal static class TargetFrameworkDetection
         string root;
         try
         {
-            root = Path.GetFullPath(path);
+            root = ProjectContextRoot(Path.GetFullPath(path));
         }
         catch (ArgumentException)
         {
@@ -49,6 +49,17 @@ internal static class TargetFrameworkDetection
             return detected;
         }
     }
+
+    /// <summary>
+    ///     The directory whose projects describe a scan root: the root itself, or for a
+    ///     single-file scan (<c>--path src/App/Program.cs</c>) the file's directory. Enumerating
+    ///     project files under a file path finds nothing, which silently evaluated a single
+    ///     file's guards against the latest-modern-net fallback instead of its own project.
+    ///     Parse options, the implicit-usings decision and the reported target frameworks all
+    ///     resolve through this, so they agree for file and directory roots alike.
+    /// </summary>
+    internal static string ProjectContextRoot(string fullPath) =>
+        File.Exists(fullPath) ? Path.GetDirectoryName(fullPath) ?? fullPath : fullPath;
 
     private static IReadOnlyList<string> DetectNoCache(string root)
     {
