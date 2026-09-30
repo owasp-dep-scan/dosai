@@ -1,6 +1,8 @@
+using System.Globalization;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.CodeAnalysis.Text;
 
 namespace Depscan;
 
@@ -20,10 +22,11 @@ namespace Depscan;
 ///         run and lost edges outright.
 ///     </para>
 ///     <para>
-///         A file is only dropped when it is reference source <i>and</i> it declares a type that
-///         a non-reference file of the same compilation also declares: scanning an API-surface
-///         folder on its own keeps it. Detection is syntactic and per tree, so it runs with the
-///         parse.
+///         Only a reference source's redeclarations of types a non-reference file of the same
+///         compilation also declares are left out: a stub that declares nothing else is dropped,
+///         one that also declares types nothing else does keeps those, and scanning an
+///         API-surface folder on its own keeps all of it. Detection is syntactic and per tree, so
+///         it runs with the parse.
 ///     </para>
 /// </remarks>
 internal static class ReferenceSources
@@ -34,8 +37,15 @@ internal static class ReferenceSources
     /// </summary>
     internal sealed record Classification(bool IsReferenceSource, IReadOnlyList<string> DeclaredTypes, IReadOnlyList<string> NonPartialTypes);
 
-    /// <summary>The trees to compile (with their classifications, index-aligned) and the reference sources left out.</summary>
-    internal sealed record PartitionResult(List<CSharpSyntaxTree> Kept, List<Classification> KeptClassifications, List<CSharpSyntaxTree> Skipped);
+    /// <summary>A reference source compiled without its redeclarations of implemented types, and the top-level types it kept.</summary>
+    internal sealed record TrimmedSource(CSharpSyntaxTree Tree, IReadOnlyList<string> KeptTypes);
+
+    /// <summary>
+    ///     The trees to compile (with their classifications, index-aligned; trimmed reference
+    ///     sources in place of their originals), the reference sources left out whole, and the
+    ///     trimmed ones.
+    /// </summary>
+    internal sealed record PartitionResult(List<CSharpSyntaxTree> Kept, List<Classification> KeptClassifications, List<CSharpSyntaxTree> Skipped, List<TrimmedSource> Trimmed);
 
     internal static Classification Classify(SyntaxTree tree)
     {
@@ -93,8 +103,9 @@ internal static class ReferenceSources
     }
 
     /// <summary>
-    ///     Splits trees into those to compile and the reference-source trees that redeclare a type
-    ///     some other tree implements. Order is preserved. <paramref name="classifications" />,
+    ///     Splits trees into those to compile and the reference-source trees that only redeclare
+    ///     types some other tree implements; a reference source that also declares types nothing
+    ///     else does is compiled trimmed to those. Order is preserved. <paramref name="classifications" />,
     ///     when given, is index-aligned with <paramref name="trees" /> (computed during a parallel
     ///     parse); otherwise each tree is classified here.
     /// </summary>
@@ -113,21 +124,89 @@ internal static class ReferenceSources
         var kept = new List<CSharpSyntaxTree>(trees.Count);
         var keptClassifications = new List<Classification>(trees.Count);
         var skipped = new List<CSharpSyntaxTree>();
+        var trimmed = new List<TrimmedSource>();
         for (var index = 0; index < trees.Count; index++)
         {
             var classification = classified[index];
-            if (classification.IsReferenceSource && classification.DeclaredTypes.Any(implemented.Contains))
-            {
-                skipped.Add(trees[index]);
-            }
-            else
+            if (!classification.IsReferenceSource || !classification.DeclaredTypes.Any(implemented.Contains))
             {
                 kept.Add(trees[index]);
                 keptClassifications.Add(classification);
             }
+            else if (TrimImplementedTypes(trees[index], implemented) is { } trimmedSource)
+            {
+                kept.Add(trimmedSource.Tree);
+                keptClassifications.Add(Classify(trimmedSource.Tree));
+                trimmed.Add(trimmedSource);
+            }
+            else
+            {
+                skipped.Add(trees[index]);
+            }
         }
 
-        return new PartitionResult(kept, keptClassifications, skipped);
+        return new PartitionResult(kept, keptClassifications, skipped, trimmed);
+    }
+
+    /// <summary>
+    ///     The reference source with its top-level declarations of implemented types blanked out,
+    ///     or null when it declares no other type. Blanking replaces each such declaration's
+    ///     tokens with spaces and keeps line breaks, comments and preprocessor directives, so the
+    ///     directive structure is untouched and every type left keeps its line numbers.
+    /// </summary>
+    private static TrimmedSource? TrimImplementedTypes(CSharpSyntaxTree tree, HashSet<string> implemented)
+    {
+        var redeclarations = new List<SyntaxNode>();
+        var keptTypes = new List<string>();
+        foreach (var node in tree.GetRoot().DescendantNodes(node => node is CompilationUnitSyntax or BaseNamespaceDeclarationSyntax))
+        {
+            var key = node switch
+            {
+                BaseTypeDeclarationSyntax type => TypeKey(type, type.Identifier.ValueText, type is TypeDeclarationSyntax { TypeParameterList: { } parameters } ? parameters.Parameters.Count : 0),
+                DelegateDeclarationSyntax @delegate => TypeKey(@delegate, @delegate.Identifier.ValueText, @delegate.TypeParameterList?.Parameters.Count ?? 0),
+                _ => null
+            };
+            if (key is null)
+            {
+                continue;
+            }
+
+            if (implemented.Contains(key))
+            {
+                redeclarations.Add(node);
+            }
+            else
+            {
+                keptTypes.Add(key);
+            }
+        }
+
+        if (keptTypes.Count == 0)
+        {
+            return null;
+        }
+
+        var text = tree.GetText();
+        var changes = new List<TextChange>(redeclarations.Count);
+        foreach (var declaration in redeclarations)
+        {
+            var span = declaration.Span;
+            var blanked = text.ToString(span).ToCharArray();
+            foreach (var token in declaration.DescendantTokens())
+            {
+                for (var position = token.Span.Start; position < token.Span.End; position++)
+                {
+                    if (!SyntaxFacts.IsNewLine(blanked[position - span.Start]))
+                    {
+                        blanked[position - span.Start] = ' ';
+                    }
+                }
+            }
+
+            changes.Add(new TextChange(span, new string(blanked)));
+        }
+
+        return new TrimmedSource((CSharpSyntaxTree)tree.WithChangedText(text.WithChanges(changes)), keptTypes);
     }
 
     /// <summary>
@@ -144,7 +223,17 @@ internal static class ReferenceSources
         if (partition.Skipped.Count > 0)
         {
             var examples = string.Join(", ", partition.Skipped.Take(3).Select(Relative));
-            yield return $"Skipped {partition.Skipped.Count} reference-assembly source file(s) (API-surface stubs whose members only `throw null`, such as dotnet/runtime ref/ folders) that redeclare types implemented elsewhere in the tree, e.g. {examples}. Compiling both declared every member twice, and calls on those members bound ambiguously and differently between runs.";
+            yield return string.Create(CultureInfo.InvariantCulture,
+                $"Skipped {partition.Skipped.Count} reference-assembly source file(s) (API-surface stubs whose members only `throw null`, such as dotnet/runtime ref/ folders) that only redeclare types implemented elsewhere in the tree, e.g. {examples}. Compiling both declared every member twice, and calls on those members bound ambiguously and differently between runs.");
+        }
+
+        if (partition.Trimmed.Count > 0)
+        {
+            var keptTypes = partition.Trimmed.Sum(trimmed => trimmed.KeptTypes.Count);
+            var typeExamples = string.Join(", ", partition.Trimmed.SelectMany(trimmed => trimmed.KeptTypes).Take(3).Select(DisplayName));
+            var fileExamples = string.Join(", ", partition.Trimmed.Take(3).Select(trimmed => Relative(trimmed.Tree)));
+            yield return string.Create(CultureInfo.InvariantCulture,
+                $"Trimmed {partition.Trimmed.Count} reference-assembly source file(s) to the {keptTypes} type(s) that no other file declares, e.g. {typeExamples} (in {fileExamples}): their redeclarations of types implemented elsewhere are left out for the same reason as a skipped stub, and the API surface only they declare is still analyzed.");
         }
 
         var declaringFiles = new Dictionary<string, List<int>>(StringComparer.Ordinal);
@@ -173,7 +262,7 @@ internal static class ReferenceSources
         {
             var examples = string.Join("; ", duplicates.Take(3).Select(entry =>
                 $"{DisplayName(entry.Key)} ({string.Join(", ", entry.Value.Take(3).Select(index => Relative(partition.Kept[index])))})"));
-            yield return string.Create(System.Globalization.CultureInfo.InvariantCulture,
+            yield return string.Create(CultureInfo.InvariantCulture,
                 $"{duplicates.Count} type(s) are declared by more than one file without all declarations being partial, e.g. {examples}: typically per-platform or per-target variants that no single build compiles together. Dosai compiles every file into one compilation, so such a type's members are declared twice and calls on them bind ambiguously, possibly differently between runs; excluding the variants a build does not use (--exclude) keeps the result stable.");
         }
     }

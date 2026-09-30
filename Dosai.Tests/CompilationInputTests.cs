@@ -59,15 +59,22 @@ public static class Program
     }
 
     // References built from loaded assemblies' in-memory metadata - the bundled-runtime path -
-    // bind framework calls exactly like file references do. Exercised in-process here: the
-    // metadata read is the same for a bundled and a file-loaded assembly.
+    // bind framework calls exactly like file references do, including types the runtime's
+    // facades forward to its System.Private.* implementation assemblies (Uri, XmlDocument,
+    // XDocument, DataContractSerializer), and reference the shared framework only. Exercised
+    // in-process here: the metadata read is the same for a bundled and a file-loaded assembly.
     [Fact]
     public void FrameworkReferences_FromLoadedAssemblies_BindsFrameworkCalls()
     {
         var warnings = new List<string>();
-        var references = FrameworkReferences.FromLoadedAssemblies(FrameworkReferences.EmbeddedFrameworkAssemblyNames(), warnings);
+        var names = FrameworkReferences.EmbeddedFrameworkAssemblyNames();
+        var references = FrameworkReferences.FromLoadedAssemblies(names, warnings);
 
         Assert.Empty(warnings);
+        var referenced = references.Select(reference => Path.GetFileNameWithoutExtension(reference.Key)).ToList();
+        Assert.All(referenced, name => Assert.True(names.Contains(name) || name.StartsWith("System.Private.", StringComparison.Ordinal), name));
+        Assert.Contains("System.Private.Uri", referenced);
+        Assert.Contains("System.Private.Xml", referenced);
         var tree = CSharpSyntaxTree.ParseText("""
 class C
 {
@@ -77,6 +84,10 @@ class C
         var items = new System.Collections.Generic.List<int> { 1 };
         _ = System.Linq.Enumerable.Count(items);
         using var client = new System.Net.Http.HttpClient();
+        System.Console.WriteLine(new System.Uri("https://example.com").Host);
+        new System.Xml.XmlDocument().LoadXml("<a/>");
+        _ = System.Xml.Linq.XDocument.Parse("<a/>").Root;
+        _ = new System.Runtime.Serialization.DataContractSerializer(typeof(string));
     }
 }
 """);
@@ -84,6 +95,24 @@ class C
             new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
 
         Assert.Empty(compilation.GetDiagnostics().Where(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error));
+    }
+
+    // A non-bundled host (this test host, dotnet run, a local self-contained build) lists Dosai's
+    // own dependencies as trusted platform assemblies too; referencing them bound an unrestored
+    // tree's Roslyn or System.CommandLine calls to Dosai's copies, which no released build does.
+    // Every build references the same framework assemblies as the bundled runtime.
+    [Fact]
+    public void FrameworkReferences_TrustedPlatformAssemblies_AreTheBundledFrameworkSet()
+    {
+        var current = FrameworkReferences.Current;
+
+        Assert.Equal(FrameworkReferences.TrustedPlatformSource, current.Source);
+        Assert.False(FrameworkReferences.IsFrameworkAssemblyName("Microsoft.CodeAnalysis"));
+        Assert.False(FrameworkReferences.IsFrameworkAssemblyName("System.CommandLine"));
+        var trusted = current.References.Select(reference => Path.GetFileNameWithoutExtension(reference.Key)).Order(StringComparer.Ordinal).ToList();
+        var bundled = FrameworkReferences.FromLoadedAssemblies(FrameworkReferences.EmbeddedFrameworkAssemblyNames(), [])
+            .Select(reference => Path.GetFileNameWithoutExtension(reference.Key)).Order(StringComparer.Ordinal).ToList();
+        Assert.Equal(bundled, trusted);
     }
 
     // The installed-framework fallback takes the newest Microsoft.NETCore.App of any version -
@@ -242,10 +271,11 @@ namespace Lib
         Assert.False(ReferenceSources.Classify(initializer).IsReferenceSource);
     }
 
-    // The issue's shape: a library's ref/ stub and its src/ implementation in one tree. The
-    // stub stays out of the compilation, the property set on the implementation binds (it was
-    // CS0229-ambiguous with the stub's copy), and the skip is reported. A stub with no
-    // implementation beside it is kept.
+    // The issue's shape: a library's ref/ stubs and its src/ implementation in one tree. A stub
+    // that only redeclares implemented types stays out of the compilation; one that also declares
+    // a type nothing else does is compiled with just that type, on its original lines. The
+    // property set on the implementation binds (it was CS0229-ambiguous with the stub's copy),
+    // the stub-only type still binds, and both are reported. A stub folder on its own is kept.
     [Fact]
     public void GetMethods_ReferenceSourceBesideImplementation_IsLeftOutOfTheCompilation()
     {
@@ -264,7 +294,11 @@ namespace Lib.Caching
     }
     public static partial class CacheExtensions
     {
+#if NET
         public static ICacheEntry SetSize(this ICacheEntry entry, long size) { throw null; }
+#else
+        public static ICacheEntry SetSize(this ICacheEntry entry, int size) { throw null; }
+#endif
     }
 }
 namespace Lib.Caching.Unimplemented
@@ -272,6 +306,15 @@ namespace Lib.Caching.Unimplemented
     public partial class OnlyInRef
     {
         public void Run() { throw null; }
+    }
+}
+""");
+        File.WriteAllText(Path.Combine(library, "ref", "Lib.Caching.Manual.cs"), """
+namespace Lib.Caching
+{
+    public static partial class CacheExtensions
+    {
+        public static ICacheEntry SetSize(this ICacheEntry entry, long size) { throw null; }
     }
 }
 """);
@@ -306,6 +349,7 @@ namespace Lib.Caching.Tests
         public void SetsSize(Lib.Caching.ICacheEntry entry)
         {
             entry.Size = 4;
+            new Lib.Caching.Unimplemented.OnlyInRef().Run();
         }
     }
 }
@@ -314,16 +358,83 @@ namespace Lib.Caching.Tests
         var slice = ReadMethods(tempDirectory.Path);
 
         Assert.Contains(slice.Diagnostics!, diagnostic => diagnostic.StartsWith("Skipped 1 reference-assembly source file(s)", StringComparison.Ordinal)
-                                                         && diagnostic.Contains("Lib.Caching/ref/Lib.Caching.cs", StringComparison.Ordinal));
+                                                         && diagnostic.Contains("Lib.Caching/ref/Lib.Caching.Manual.cs", StringComparison.Ordinal));
+        Assert.Contains(slice.Diagnostics!, diagnostic => diagnostic.StartsWith("Trimmed 1 reference-assembly source file(s) to the 1 type(s)", StringComparison.Ordinal)
+                                                         && diagnostic.Contains("Lib.Caching.Unimplemented.OnlyInRef (in Lib.Caching/ref/Lib.Caching.cs)", StringComparison.Ordinal));
         Assert.Contains(slice.CallGraph!.Edges, edge => edge.SourceId.StartsWith("Lib.Caching.Tests.CapacityTests.SetsSize", StringComparison.Ordinal)
                                                        && edge.TargetId == "Lib.Caching.ICacheEntry.set_Size(long?):void");
-        Assert.DoesNotContain(slice.Methods!, method => method.Path!.Contains("ref", StringComparison.Ordinal));
-        Assert.DoesNotContain(slice.Diagnostics!, diagnostic => diagnostic.Contains("duplicate declarations", StringComparison.Ordinal));
+        Assert.Contains(slice.CallGraph!.Edges, edge => edge.SourceId.StartsWith("Lib.Caching.Tests.CapacityTests.SetsSize", StringComparison.Ordinal)
+                                                       && edge.TargetId == "Lib.Caching.Unimplemented.OnlyInRef.Run():void");
+        var refMethod = Assert.Single(slice.Methods!, method => method.Path!.Replace('\\', '/').Contains("/ref/", StringComparison.Ordinal));
+        Assert.Equal(("OnlyInRef", "Run", 21), (refMethod.ClassName, refMethod.Name, refMethod.LineNumber));
+        Assert.DoesNotContain(slice.Diagnostics!, diagnostic => diagnostic.Contains("declared by more than one file", StringComparison.Ordinal));
 
         // The API surface alone is not a duplicate of anything and is analyzed as scanned.
         var refOnly = ReadMethods(Path.Combine(library, "ref"));
         Assert.DoesNotContain(refOnly.Diagnostics!, diagnostic => diagnostic.Contains("reference-assembly source", StringComparison.Ordinal));
         Assert.Contains(refOnly.Methods!, method => method is { ClassName: "OnlyInRef", Name: "Run" });
+        Assert.Contains(refOnly.Methods!, method => method is { ClassName: "CacheExtensions", Name: "SetSize" });
+    }
+
+    // Trimming blanks only the redeclarations' tokens: line breaks, comments and preprocessor
+    // directives survive, so the trimmed stub parses cleanly, keeps its line count and declares
+    // only what nothing else does.
+    [Fact]
+    public void ReferenceSources_Partition_TrimsAStubToTheTypesOnlyItDeclares()
+    {
+        const string stub = """
+// Changes to this file must follow the https://aka.ms/api-review process.
+namespace Lib
+{
+    /// <summary>Implemented in src.</summary>
+    [System.Obsolete("x")]
+    public partial class Implemented
+    {
+#if NET
+        public string Name => throw null;
+#endif
+        public const string Multiline = @"first
+second";
+        public partial class Nested { }
+    }
+    public delegate void Handler(object sender);
+    public partial class StubOnly<T>
+    {
+        public T Get() { throw null; }
+    }
+}
+""";
+        const string implementation = """
+namespace Lib
+{
+    public class Implemented
+    {
+        public string Name => nameof(Name);
+        public class Nested { }
+    }
+    public delegate void Handler(object sender);
+}
+""";
+        var parseOptions = CSharpParseOptions.Default.WithPreprocessorSymbols("NET");
+        var stubTree = (CSharpSyntaxTree)CSharpSyntaxTree.ParseText(stub, parseOptions, path: "ref/Lib.cs");
+        var implementationTree = (CSharpSyntaxTree)CSharpSyntaxTree.ParseText(implementation, parseOptions, path: "src/Lib.cs");
+
+        var partition = ReferenceSources.Partition([stubTree, implementationTree]);
+
+        Assert.Empty(partition.Skipped);
+        var trimmed = Assert.Single(partition.Trimmed);
+        Assert.Equal(new[] { "Lib.StubOnly`1" }, trimmed.KeptTypes);
+        Assert.Same(trimmed.Tree, partition.Kept[0]);
+        Assert.Equal("ref/Lib.cs", trimmed.Tree.FilePath);
+        Assert.Contains("NET", trimmed.Tree.Options.PreprocessorSymbolNames);
+        Assert.Equal(stubTree.GetText().Lines.Count, trimmed.Tree.GetText().Lines.Count);
+        Assert.DoesNotContain(trimmed.Tree.GetDiagnostics(), diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.Equal(new[] { "Lib.StubOnly`1" }, partition.KeptClassifications[0].DeclaredTypes);
+        var getLine = stubTree.GetText().Lines.IndexOf(stub.IndexOf("public T Get()", StringComparison.Ordinal));
+        var trimmedGet = trimmed.Tree.GetRoot().DescendantNodes().OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>().Single();
+        Assert.Equal(getLine, trimmedGet.GetLocation().GetLineSpan().StartLinePosition.Line);
+        Assert.Contains("#if NET", trimmed.Tree.GetText().ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("Implemented", trimmed.Tree.GetRoot().DescendantTokens().Select(token => token.ValueText));
     }
 
     // Types declared by more than one file without all declarations being partial are the

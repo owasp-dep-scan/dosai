@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Reflection;
 using Microsoft.CodeAnalysis;
 
@@ -16,7 +17,8 @@ namespace Depscan;
 ///     <list type="number">
 ///         <item>
 ///             <b>Trusted platform assemblies</b>: a framework-dependent Dosai runs on an installed
-///             shared framework, and the host lists its assemblies.
+///             shared framework, and the host lists its assemblies - by framework name, never
+///             Dosai's own dependencies, which a non-bundled host lists too.
 ///         </item>
 ///         <item>
 ///             <b>The bundled runtime</b>: a self-contained single-file Dosai carries its runtime
@@ -46,6 +48,7 @@ internal static class FrameworkReferences
     internal const string NoneSource = "none";
 
     private const string FrameworkNamesResource = "Dosai.framework-assemblies.txt";
+    private const string RuntimeImplementationPrefix = "System.Private.";
 
     private static readonly Lazy<FrameworkReferenceSet> Resolved = new(Resolve, LazyThreadSafetyMode.ExecutionAndPublication);
     private static readonly AsyncLocal<FrameworkReferenceSet?> Override = new();
@@ -88,7 +91,7 @@ internal static class FrameworkReferences
             if (references.Count > 0)
             {
                 var diagnostic = installed.Version.Major < Environment.Version.Major
-                    ? $"Framework metadata references came from the installed .NET {installed.Version} shared framework ('{installed.Directory}'), older than the .NET {Environment.Version.Major} runtime Dosai targets; calls to newer framework APIs do not bind."
+                    ? string.Create(CultureInfo.InvariantCulture, $"Framework metadata references came from the installed .NET {installed.Version} shared framework ('{installed.Directory}'), older than the .NET {Environment.Version.Major} runtime Dosai targets; calls to newer framework APIs do not bind.")
                     : null;
                 return new FrameworkReferenceSet(references, InstalledFrameworkSource, diagnostic, warnings);
             }
@@ -116,7 +119,13 @@ internal static class FrameworkReferences
 
         if (AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES") is string trustedPlatformAssemblies)
         {
-            candidates.AddRange(trustedPlatformAssemblies.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries));
+            // A non-bundled host (dotnet run, a local build, the test host) also lists the
+            // application's own dependencies - Roslyn, System.CommandLine, ... - which bound an
+            // analyzed tree's calls to Dosai's copies of those packages; a self-contained local
+            // build even keeps them in the framework's directory. Released builds reference the
+            // framework only, so every build keeps the framework's names.
+            candidates.AddRange(trustedPlatformAssemblies.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
+                .Where(candidate => IsFrameworkAssemblyName(Path.GetFileNameWithoutExtension(candidate))));
         }
 
         foreach (var candidate in candidates)
@@ -129,6 +138,19 @@ internal static class FrameworkReferences
 
         return references;
     }
+
+    private static readonly Lazy<HashSet<string>> FrameworkAssemblyNames =
+        new(() => new HashSet<string>(EmbeddedFrameworkAssemblyNames(), StringComparer.OrdinalIgnoreCase));
+
+    /// <summary>
+    ///     A shared-framework assembly: one the reference pack names, or a runtime implementation
+    ///     assembly (<c>System.Private.*</c>) its facades forward to. Every name passes when no
+    ///     names were embedded.
+    /// </summary>
+    internal static bool IsFrameworkAssemblyName(string name) =>
+        FrameworkAssemblyNames.Value.Count == 0
+        || FrameworkAssemblyNames.Value.Contains(name)
+        || name.StartsWith(RuntimeImplementationPrefix, StringComparison.Ordinal);
 
     /// <summary>
     ///     Framework assembly names embedded at build time: every assembly of the
@@ -155,7 +177,8 @@ internal static class FrameworkReferences
     }
 
     /// <summary>
-    ///     References built from the metadata of loaded assemblies, loading each named one first.
+    ///     References built from the metadata of the named assemblies and the runtime
+    ///     implementation assemblies (<c>System.Private.*</c>) they reference, loading each first.
     ///     In a single-file bundle the framework assemblies load from the executable and expose no
     ///     file; <see cref="System.Reflection.Metadata.AssemblyExtensions.TryGetRawMetadata" /> hands
     ///     Roslyn their metadata where the runtime mapped it, which stays valid for the process
@@ -166,7 +189,15 @@ internal static class FrameworkReferences
     internal static List<(string Key, PortableExecutableReference Reference)> FromLoadedAssemblies(IEnumerable<string> assemblyNames, List<string> warnings)
     {
         var references = new List<(string, PortableExecutableReference)>();
-        foreach (var name in assemblyNames)
+        // The runtime's System.Runtime, System.Xml.ReaderWriter, ... are facades forwarding to
+        // implementation assemblies no reference pack names (System.Private.Uri,
+        // System.Private.Xml, ...); without those, Uri or XmlDocument does not bind. Only those
+        // are followed: compatibility facades such as System.Configuration also reference
+        // out-of-band packages (System.Configuration.ConfigurationManager) that are not part of
+        // the shared framework, and in a bundle would resolve to Dosai's own dependencies.
+        var pending = new Queue<string>(assemblyNames);
+        var seen = new HashSet<string>(pending, StringComparer.OrdinalIgnoreCase);
+        while (pending.TryDequeue(out var name))
         {
             Assembly assembly;
             try
@@ -186,6 +217,16 @@ internal static class FrameworkReferences
             else
             {
                 warnings.Add($"framework assembly '{name}' exposes no metadata");
+            }
+
+            foreach (var referenced in assembly.GetReferencedAssemblies())
+            {
+                if (referenced.Name is { } referencedName
+                    && referencedName.StartsWith(RuntimeImplementationPrefix, StringComparison.Ordinal)
+                    && seen.Add(referencedName))
+                {
+                    pending.Enqueue(referencedName);
+                }
             }
         }
 

@@ -106,12 +106,14 @@ real namespace, containing type, interfaces, assembly and module, like `add`/`re
 
 Reference-assembly source - GenAPI API-surface stubs whose bodies only `throw null` (or return
 `null`/`default`), or that carry the `aka.ms/api-review` header, such as dotnet/runtime's `ref/`
-folders - is left out of the compilation when a non-stub file of the tree declares one of its
-types. Compiling both declared every member twice, and calls on those members bound ambiguously
-and differently between runs. The skipped files no longer contribute `Methods[]`, `Properties[]`
-or other inventory records (they duplicated the implementation's), and a `Diagnostics` entry
-names how many were skipped with examples. A stub folder scanned on its own is analyzed as
-before. Types still declared by more than one file without all declarations being partial
+folders - no longer compiles its redeclarations of types a non-stub file of the tree also
+declares. Compiling both declared every member twice, and calls on those members bound
+ambiguously and differently between runs. A stub that declares nothing else is left out whole; a
+stub that also declares types no other file does is compiled with only those, on their original
+lines, so calls into API surface that has no implementation in the tree still bind. The
+redeclarations no longer contribute `Methods[]`, `Properties[]` or other inventory records (they
+duplicated the implementation's), and `Diagnostics` entries name how many stubs were skipped and
+how many trimmed, with examples. A stub folder scanned on its own is analyzed as before. Types still declared by more than one file without all declarations being partial
 (per-platform or per-target variants compiled together) get a `Diagnostics` entry of their own.
 The same partition applies to `dataflows` and `crypto`.
 
@@ -125,6 +127,13 @@ runtime; any build falls back to the newest installed shared framework of any ve
 resolved at all, `Diagnostics` says so and the unresolved-call note no longer recommends
 restoring the tree. The restore hint "Found project.assets.json but no package assemblies were
 resolved" now appears only when the assets file declares packages.
+
+Every build now references the same framework: the shared framework's assemblies, including the
+`System.Private.*` implementations its facades forward to (without them a bundled build left
+`Uri`, `XmlDocument`, `XDocument` and `DataContractSerializer` unresolved). A non-bundled run
+(`dotnet run`, the test host) no longer references Dosai's own dependencies as well - Roslyn,
+System.CommandLine, FSharp.Compiler.Service - which bound an unrestored tree's calls into those
+packages to Dosai's copies; released builds never did.
 
 ## Containment (behavioral)
 

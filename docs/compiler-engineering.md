@@ -101,12 +101,16 @@ pipelines and the F# frontend (nearest `.fsproj`) resolve the same way.
 
 Before the compilation is created, reference-assembly source is partitioned out
 (`ReferenceSources`): GenAPI API-surface stubs - every member body `throw null`, empty, or
-returning `null`/`default`, or a file carrying the `aka.ms/api-review` header - that declare a
-type some non-stub file of the tree also declares. dotnet/runtime keeps a library's API surface
-under `ref/` beside its implementation under `src/`; compiled together, the merged type declared
-every member twice, calls on those members bound ambiguously (CS0229), and Roslyn resolved the
-ambiguity differently between runs, so the call graph changed from run to run (issue #69). A stub
-with no implementation beside it is kept. The same syntactic pass reports types still declared
+returning `null`/`default`, or a file carrying the `aka.ms/api-review` header - lose their
+declarations of types some non-stub file of the tree also declares. dotnet/runtime keeps a
+library's API surface under `ref/` beside its implementation under `src/`; compiled together, the
+merged type declared every member twice, calls on those members bound ambiguously (CS0229), and
+Roslyn resolved the ambiguity differently between runs, so the call graph changed from run to run
+(issue #69). A stub that declares nothing else is dropped. One that also declares types nothing
+else does is trimmed: the redeclarations' tokens are blanked to spaces with line breaks, comments
+and directives kept, so the directive structure is untouched and the types left keep their line
+numbers (crypto's line fallback reads the same compiled text). A stub with no implementation
+beside it is kept whole. The same syntactic pass reports types still declared
 non-partially by more than one file (per-platform or per-target variants that no single build
 compiles together). Under `--debug` the compiler's declaration errors are logged as a histogram
 by id per run; that pass costs more than half again of the symbol loop, so it is not run
@@ -115,10 +119,12 @@ otherwise.
 References are populated from:
 
 1. framework references (`FrameworkReferences`, resolved once per process): the host's
-   `TRUSTED_PLATFORM_ASSEMBLIES` for a framework-dependent Dosai; for a self-contained
-   single-file Dosai, which has no framework files on disk (issue #67), the bundled runtime's
-   own assemblies, loaded by the names the build embedded from its reference pack and
-   referenced through their in-memory metadata; otherwise the newest installed
+   `TRUSTED_PLATFORM_ASSEMBLIES` in the core library's directory for a framework-dependent Dosai
+   (a non-bundled host also lists Dosai's own dependencies, which no released build references);
+   for a self-contained single-file Dosai, which has no framework files on disk (issue #67), the
+   bundled runtime's own assemblies, loaded by the names the build embedded from its reference
+   pack plus the `System.Private.*` implementations those facades forward to, and referenced
+   through their in-memory metadata; otherwise the newest installed
    `Microsoft.NETCore.App` shared framework of any version. With none, a `Diagnostics` entry
    says so, and the unresolved-call diagnostic stops recommending a restore
 2. managed assemblies under the inspected tree

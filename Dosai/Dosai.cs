@@ -479,8 +479,8 @@ public static class Dosai
         if (unresolvedCallCount > 0)
         {
             sliceDiagnostics.Add(FrameworkReferences.Current.References.Count == 0
-                ? $"Semantic binding failed for {unresolvedCallCount} call sites: Dosai resolved no framework metadata references (see the framework-reference diagnostic), so every framework call is unresolved regardless of the tree's restore state."
-                : $"Semantic binding failed for {unresolvedCallCount} call sites: target assemblies were missing or conflicted with other references. Restore or build the tree (--restore/--build) to raise reachability confidence.");
+                ? string.Create(CultureInfo.InvariantCulture, $"Semantic binding failed for {unresolvedCallCount} call sites: Dosai resolved no framework metadata references (see the framework-reference diagnostic), so every framework call is unresolved regardless of the tree's restore state.")
+                : string.Create(CultureInfo.InvariantCulture, $"Semantic binding failed for {unresolvedCallCount} call sites: target assemblies were missing or conflicted with other references. Restore or build the tree (--restore/--build) to raise reachability confidence."));
         }
 
         // Conditional-compilation guards were evaluated against the detected target frameworks;
@@ -502,7 +502,7 @@ public static class Dosai
                 if (projectGuards.Count > 1)
                 {
                     metadata.ProjectGuardTargetFrameworks = projectGuards;
-                    sliceDiagnostics.Add($"Multiple target frameworks detected ({string.Join(", ", detectedTargetFrameworks)}); conditional-compilation guards were evaluated per project against each project's most modern target (Metadata.ProjectGuardTargetFrameworks, {projectGuards.Count} projects), and against '{representative}' for files outside a project with a readable target. Arms exclusive to a project's other targets are not analyzed.");
+                    sliceDiagnostics.Add(string.Create(CultureInfo.InvariantCulture, $"Multiple target frameworks detected ({string.Join(", ", detectedTargetFrameworks)}); conditional-compilation guards were evaluated per project against each project's most modern target (Metadata.ProjectGuardTargetFrameworks, {projectGuards.Count} projects), and against '{representative}' for files outside a project with a readable target. Arms exclusive to a project's other targets are not analyzed."));
                 }
                 else
                 {
@@ -2121,6 +2121,7 @@ public static class Dosai
             parsedClassifications.OfType<ReferenceSources.Classification>().ToList());
         var csharpTrees = partition.Kept;
         DebugLog.Count("reference-assembly sources skipped", partition.Skipped.Count);
+        DebugLog.Count("reference-assembly sources trimmed", partition.Trimmed.Count);
         mergedDiagnostics.AddRange(ReferenceSources.Diagnostics(partition, TargetFrameworkDetection.ProjectContextRoot(Path.GetFullPath(path))));
         // Implicit-usings projects rely on global usings their compiler injects; without the
         // synthetic tree every BCL call in them fails to bind and vanishes from the graph.

@@ -473,7 +473,7 @@ public static class CSharpSourceParser
     }
 
     private static readonly Lock ParseOptionsLock = new();
-    private static readonly Dictionary<string, CSharpParseOptions> ParseOptionsByRoot = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, CSharpParseOptions> ParseOptionsByRoot = new(SafeFileRead.PathComparer);
 
     private static CSharpParseOptions BuildParseOptions(IReadOnlyList<string>? detectedTargetFrameworks = null)
     {
@@ -542,7 +542,7 @@ public static class CSharpSourceParser
         new(@"<ImplicitUsings(?:\s[^>]*)?>\s*enable\s*</ImplicitUsings\s*>", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 
     private static readonly System.Threading.Lock DetectionLock = new();
-    private static readonly Dictionary<string, bool> EnabledByRoot = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, bool> EnabledByRoot = new(SafeFileRead.PathComparer);
 
     /// <summary>
     ///     True when any project file or Directory.Build.props/targets under the path enables

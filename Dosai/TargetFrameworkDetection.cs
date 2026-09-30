@@ -18,7 +18,7 @@ namespace Depscan;
 internal static class TargetFrameworkDetection
 {
     private static readonly Lock DetectionLock = new();
-    private static readonly Dictionary<string, IReadOnlyList<string>> DetectedByRoot = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, IReadOnlyList<string>> DetectedByRoot = new(SafeFileRead.PathComparer);
 
     public static IReadOnlyList<string> Detect(string? path)
     {
@@ -61,8 +61,8 @@ internal static class TargetFrameworkDetection
     internal static string ProjectContextRoot(string fullPath) =>
         File.Exists(fullPath) ? Path.GetDirectoryName(fullPath) ?? fullPath : fullPath;
 
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string?> NearestProjectDirectoryCache = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, ProjectTargets?> ProjectTargetsCache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string?> NearestProjectDirectoryCache = new(SafeFileRead.PathComparer);
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, ProjectTargets?> ProjectTargetsCache = new(SafeFileRead.PathComparer);
 
     /// <summary>
     ///     The target frameworks governing one source file: those of the nearest project at or
@@ -138,7 +138,7 @@ internal static class TargetFrameworkDetection
             .Where(file => !IsUnderBuildDirectory(root, file))
             .Select(Path.GetDirectoryName)
             .OfType<string>()
-            .Distinct(StringComparer.OrdinalIgnoreCase);
+            .Distinct(SafeFileRead.PathComparer);
         foreach (var projectDirectory in projectDirectories)
         {
             if (TargetsOfProjectIn(projectDirectory, root, projectExtension) is { } project)
@@ -170,7 +170,7 @@ internal static class TargetFrameworkDetection
         {
             nearest = directory;
         }
-        else if (string.Equals(directory, root, StringComparison.OrdinalIgnoreCase) || Path.GetDirectoryName(directory) is not { } parent)
+        else if (string.Equals(directory, root, SafeFileRead.PathComparison) || Path.GetDirectoryName(directory) is not { } parent)
         {
             nearest = null;
         }
@@ -244,7 +244,7 @@ internal static class TargetFrameworkDetection
                 return candidate;
             }
 
-            if (string.Equals(current, root, StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(current, root, SafeFileRead.PathComparison))
             {
                 break;
             }

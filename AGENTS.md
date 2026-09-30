@@ -155,14 +155,20 @@ dotnet test ./Dosai.sln
   self-contained single-file Dosai has neither (issue #67), and the provider falls back to the
   bundled runtime's in-memory metadata (names embedded at build time by the
   `EmbedFrameworkAssemblyNames` target) and then to the newest installed shared framework.
+  Every build references the same set: trusted platform assemblies are filtered to the core
+  library's directory (a non-bundled host also lists Dosai's own dependencies), and the bundled
+  names are followed into the `System.Private.*` implementations their facades forward to.
   Surface `FrameworkReferences.Diagnostic` in the command's diagnostics. The
   `smoke-self-contained` CI job runs a published `-full` build with no `dotnet` reachable.
 - Partition parsed C# trees through `ReferenceSources.Partition` before creating a
   compilation (methods, data-flow and crypto all do): reference-assembly source (GenAPI
-  API-surface stubs, `throw null` bodies or the `aka.ms/api-review` header) that redeclares a
-  type implemented elsewhere in the tree stays out, and `ReferenceSources.Diagnostics` reports
-  the skip and any type still declared non-partially by more than one file (issue #69: the
-  duplicate members bound ambiguously and differently between runs). The compiler's full
+  API-surface stubs, `throw null` bodies or the `aka.ms/api-review` header) loses its
+  redeclarations of types implemented elsewhere in the tree - dropped whole when it declares
+  nothing else, otherwise trimmed by blanking those declarations' tokens so the types left keep
+  their lines - and `ReferenceSources.Diagnostics` reports skipped and trimmed stubs and any
+  type still declared non-partially by more than one file (issue #69: the duplicate members
+  bound ambiguously and differently between runs). Read a compiled tree's text from the tree,
+  not from `tree.FilePath`: a trimmed stub's file still holds what the compilation left out. The compiler's full
   declaration-error histogram is `--debug`-only: that pass costs more than half again of the
   symbol loop, and `--debug` must not change the JSON.
 - Synthetic syntax trees (the implicit-usings tree) have no file behind them: never read a
