@@ -7,7 +7,7 @@ In this lesson we generate a source-to-sink data-flow slice, read it like a stac
 ## Prerequisites
 
 ```text
-.NET SDK 8.0 or newer
+.NET SDK 11.0 or newer
 The Dosai repository cloned locally
 ```
 

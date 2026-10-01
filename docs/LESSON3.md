@@ -7,7 +7,7 @@ In this lesson we publish a small application, discard the source, and recover i
 ## Prerequisites
 
 ```text
-.NET SDK 8.0 or newer
+.NET SDK 11.0 or newer
 The Dosai repository cloned locally
 ```
 
@@ -93,7 +93,7 @@ With the PDB present, frames carry real file, line, and column from sequence poi
 
 A few properties of the IL pass are worth knowing when you interpret results. Sink arguments get stable labels such as `arg0` or `receiver` when no source expression exists in IL. Compiler-generated async, iterator, and display-class fields are pre-seeded so taint crosses `await` boundaries. Catch and filter handlers receive exception-object state, so flows that reach a sink from an exception path are still followed. And `Code` source patterns from a custom rules file apply only to IL string literals, because metadata names are the only reliable comparison surface in a binary.
 
-The interpreter's opcode rules track what compilers lower patterns into. A type test or downcast (`castclass`/`isinst`) re-packages the same value, so taint survives `object o = args[0]; Process.Start((string)o)` and the `is`-pattern bindings of union and closed-hierarchy dispatch. Positional patterns (`state is GateOpen(var cmd)`, switch arms) lower to a `Deconstruct` call that takes the address of the bound local; the interpreter writes the payload taint back through that address, and reads through such an address (`ldind`, `ldobj`) follow the referenced slot. Because IL does not record which parameter the callee copied into which `out` slot, every by-ref slot receives the union of the call's arguments — exact for `Deconstruct`, over-tainting for `TryGetValue`-shaped calls. Arithmetic combines operands, so `args.Length + 1` keeps the source, just like source mode. Knowing these lowerings tells you which source shapes should produce binary slices - and when a missing slice means an unsupported opcode rather than a clean flow.
+The interpreter's opcode rules track what compilers lower patterns into. A type test or downcast (`castclass`/`isinst`) re-packages the same value, so taint survives `object o = args[0]; Process.Start((string)o)` and the `is`-pattern bindings of union and closed-hierarchy dispatch. Positional patterns (`state is GateOpen(var cmd)`, switch arms) lower to a `Deconstruct` call that takes the address of the bound local; the interpreter writes the payload taint back through that address, and reads through such an address (`ldind`, `ldobj`) follow the referenced slot. Because IL does not record which parameter the callee copied into which `out` slot, every by-ref slot receives the union of the call's arguments - exact for `Deconstruct`, over-tainting for `TryGetValue`-shaped calls. Arithmetic combines operands, so `args.Length + 1` keeps the source, just like source mode. Knowing these lowerings tells you which source shapes should produce binary slices - and when a missing slice means an unsupported opcode rather than a clean flow.
 
 Node identity is normalized before results are reported: an instantiated-generic IL id (`Method<System.String>`) is merged onto the source original-definition node, with the original instantiated id kept in `GenericInstantiation`, so source and binary views of the same generic method do not produce twin nodes. Two reachability-shaped outputs behave differently for assembly-only inputs: per-node reachability facts are computed wherever the merged graph has entry points, but the dead-code report is empty, because "declared in source and unreachable" is a claim about source files a binary cannot make.
 
@@ -103,7 +103,7 @@ A common real-world shape is a repository with source for some projects and publ
 
 ## Honesty about the limits
 
-Binary analysis cannot recover what was never emitted: source-level `Code` patterns, comments, and preprocessor shapes do not exist in IL. Dispatch through interfaces and virtual methods is approximated with candidate sets over instantiated application types, and those inferred edges carry a dispatch confidence tier so you can tell them apart: `exact` when the receiver is sealed or only one implementation was instantiated, `rta-candidate`, or `cha-candidate` for the widest approximation. Repeated call sites of the same edge collapse into one counted edge (`CallSiteCount`). Treat binary slices as strong triage input, and confirm high-impact findings against source when source exists.
+Binary analysis cannot recover what was never emitted: source-level `Code` patterns, comments, and preprocessor shapes do not exist in IL. Dispatch through interfaces and virtual methods is approximated with candidate sets over instantiated application types, and those inferred edges carry a dispatch confidence tier so you can tell them apart: `exact` when the static receiver type is sealed or a struct, `rta-candidate` when the implementing type was instantiated in the scan, or `cha-candidate` for the widest approximation. Repeated call sites of the same edge collapse into one counted edge (`CallSiteCount`). Treat binary slices as strong triage input, and confirm high-impact findings against source when source exists.
 
 ## Try next
 

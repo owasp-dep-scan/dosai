@@ -7,7 +7,7 @@ In this lesson we read the service inventory that the `methods` command produces
 ## Prerequisites
 
 ```text
-.NET SDK 8.0 or newer
+.NET SDK 11.0 or newer
 The Dosai repository cloned locally
 ```
 
@@ -124,6 +124,8 @@ Two schema 4.1.0 additions turn this inventory into review findings. `SecurityFi
 ## Performance expectations
 
 Framework analysis is keyword-gated, so code without routed surfaces pays effectively nothing. Measured on framework-heavy repositories, the overhead is 0 to 8 percent on `methods` and 5 to 12 percent on `dataflows`, with the worst case a gRPC and minimal-API dense tree.
+
+The rest of the pipeline is built for large trees. Parsing, the dispatch index, and the per-file symbol loop run on one worker per processor, each on a dedicated large-stack thread, and every file's results merge in file order, so the output is byte-identical regardless of how many workers ran or which locale the host uses. When you want to see where a slow run spends its time, `--debug` prints a phase log with timings and heap figures; [lesson 12](LESSON12.md) walks through reading it and the knobs that exist for memory-constrained hosts.
 
 ## Try next
 

@@ -7,7 +7,7 @@ In this lesson we trace NuGet packages through code: which dependencies are actu
 ## Prerequisites
 
 ```text
-.NET SDK 8.0 or newer
+.NET SDK 11.0 or newer
 The Dosai repository cloned locally
 A .NET project, ideally with restored dependencies or a lock file
 ```

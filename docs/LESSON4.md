@@ -7,7 +7,7 @@ In this lesson we detect weak cryptography and hardcoded key material in a small
 ## Prerequisites
 
 ```text
-.NET SDK 8.0 or newer
+.NET SDK 11.0 or newer
 The Dosai repository cloned locally
 ```
 

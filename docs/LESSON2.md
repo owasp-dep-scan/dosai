@@ -7,7 +7,7 @@ In this lesson we analyze a minimal ASP.NET API with both vulnerable and paramet
 ## Prerequisites
 
 ```text
-.NET SDK 8.0 or newer
+.NET SDK 11.0 or newer
 The Dosai repository cloned locally
 ```
 

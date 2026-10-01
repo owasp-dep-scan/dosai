@@ -95,3 +95,7 @@ An agent that can point Dosai at any path is an agent that can read any path. Co
 ## What this lesson taught
 
 MCP turns Dosai from a command you run into a service an agent can reason with. The agent-context-first loop keeps prompts small, the query tool keeps payloads exact, and `--mcp-root` keeps the blast radius of a misbehaving client inside one directory.
+
+## Try next
+
+[Lesson 11](LESSON11.md) turns to the trees themselves: a whole mixed-target solution in one scan, with per-project guards, honestly named lambda nodes, and API stubs handled.

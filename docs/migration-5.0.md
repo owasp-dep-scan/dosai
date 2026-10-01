@@ -2,7 +2,7 @@
 
 Schema 5.0.0 is the .NET 11 / C# 15 release. The output changes are **additive only**: every
 4.1.0 consumer keeps working, and no field was removed, renamed, or retyped. The major version
-marks the platform move — Dosai now targets `net11.0` and requires the .NET 11 SDK to build —
+marks the platform move - Dosai now targets `net11.0` and requires the .NET 11 SDK to build -
 rather than a break in the JSON contract.
 
 The one field every consumer sees change value is `Metadata.SchemaVersion`, which now reads
@@ -15,7 +15,7 @@ The one field every consumer sees change value is `Metadata.SchemaVersion`, whic
 | -------------------- | --------- | ------------------------------------------------------------- |
 | Target framework     | `net10.0` | `net11.0`                                                     |
 | SDK to build         | 10.0.x    | 11.0.x (a 10.0.x SDK cannot build this target)                |
-| Runtime to run       | 10.0.x    | Bundled — published binaries are self-contained               |
+| Runtime to run       | 10.0.x    | Bundled - published binaries are self-contained               |
 | Analyzable languages | C# 14     | C# 15 (including union declarations), F# 11, VB.NET, R, C/C++ |
 
 While .NET 11 is prerelease, the `FSharp.Compiler.Service`, `FSharp.Core`, and
@@ -40,7 +40,7 @@ previously missing or silently dropped.
 
 ### Pattern-bound taint (`dataflows`)
 
-Taint now flows from a matched value into the locals a pattern binds — `case var message:`,
+Taint now flows from a matched value into the locals a pattern binds - `case var message:`,
 `case string message:`, recursive patterns over union cases and positional records
 (`case Success(var message):`), list patterns, and the same forms in switch expressions and `is`
 patterns. Slices whose sink consumes a pattern-bound payload were previously invisible.
@@ -66,8 +66,8 @@ The rest of the C# 15 feature set parses and analyzes like ordinary code:
   the collection and through indexer reads (`names[0]`).
 - Labeled `break`/`continue` (`outer: for (...) { continue outer; }`) do not disturb slice
   construction.
-- The memory-safety preview shapes — `unsafe(...)` expressions in field initializers, and the
-  pointer relaxations (`&x`, `fixed`, `stackalloc`, `sizeof` outside an `unsafe` context) — parse
+- The memory-safety preview shapes - `unsafe(...)` expressions in field initializers, and the
+  pointer relaxations (`&x`, `fixed`, `stackalloc`, `sizeof` outside an `unsafe` context) - parse
   and inventory without requiring the updated safety rules. The `safe` contextual keyword on an
   `extern` member (`safe static extern int Read();`) and on fields of an explicit-layout struct
   parses too, and the members are inventoried like ordinary fields and methods.
@@ -139,10 +139,10 @@ id. It is informational: the API works, its surface is not yet stable.
 
 ### F# 11
 
-`FSharp.Compiler.Service` moves to the .NET 11-aligned release, so F# 11 syntax — record
+`FSharp.Compiler.Service` moves to the .NET 11-aligned release, so F# 11 syntax - record
 spreads (`{ ...record; Field = v }`), record constructors (`Point(0, 0)` and
 `Point(Y = 20, X = 10)`), direct delegate construction (`Func<...>(Calculator.Add)`), and the
-efficient interpolated strings — parses instead of degrading to reduced coverage.
+efficient interpolated strings - parses instead of degrading to reduced coverage.
 
 The F# line frontend additionally follows the F# 11 compiler's preprocessor semantics:
 
@@ -162,14 +162,14 @@ The F# line frontend additionally follows the F# 11 compiler's preprocessor sema
 
 - `[ShortCircuit]` (on a minimal-API lambda handler or an MVC action) does not hide the
   endpoint from `ApiEndpoints[]`.
-- Inline lambda handlers (`app.MapPost("/pets", (PetUnion pet) => ...)` — including .NET 11's
+- Inline lambda handlers (`app.MapPost("/pets", (PetUnion pet) => ...)` - including .NET 11's
   union-typed JSON bodies) now seed their bound parameters as HTTP taint sources, like method
   groups always did. Infrastructure parameters (`CancellationToken`, `HttpContext`,
   `ClaimsPrincipal`, `IServiceProvider`, `ILogger*`, `[FromServices]`, and `I`-prefixed
   interfaces) stay excluded. Taint from a deserialized union payload reaching a sink is now a
   slice where it was previously invisible.
 
-### R 4.4–4.6 syntax
+### R 4.4-4.6 syntax
 
 The R fallback parser handles the null-coalescing `%||%` operator (R 4.4+), `%notin%` (R 4.6+),
 and the `declare()` primitive (R 4.4+) without minting phantom function names from the infix
@@ -186,7 +186,7 @@ that left a restored-but-unbuilt tree indistinguishable from a package that is o
   need `bin/` output. Call edges stay `SourceRoslynDirect` and package reachability stays
   `ExternalCallGraphNode`/High.
 - **`SourceUnresolved` evidence.** When the target assembly still is not available, the call
-  site — previously dropped entirely — is recorded from syntax with the new
+  site - previously dropped entirely - is recorded from syntax with the new
   `SourceUnresolved` evidence kind (score 1, below every direct kind) and a
   `Unresolved:<name>` target id. A package purl is attributed only when the receiver's own
   qualification states the namespace (`Newtonsoft.Json.JsonConvert.SerializeObject`); names
@@ -199,14 +199,14 @@ that left a restored-but-unbuilt tree indistinguishable from a package that is o
   through a poisoned argument) keeps its candidates and is a downstream symptom of a
   different missing reference.
 - **Implicit global usings are honored.** Compiling analyzed source without the project's
-  MSBuild context used to drop every BCL name an `ImplicitUsings` project relies on —
-  `Path`, `File`, `Console`, LINQ — because the SDK-injected `global using`s were absent.
+  MSBuild context used to drop every BCL name an `ImplicitUsings` project relies on -
+  `Path`, `File`, `Console`, LINQ - because the SDK-injected `global using`s were absent.
   When any `csproj` or `Directory.Build.props`/`.targets` under the scanned path enables
   `ImplicitUsings`, a synthetic global-usings tree joins the compilation. On the Dosai
   self-scan this alone recovered thousands of previously invisible call edges. The decision
   is per scan root (`global using`s are compilation-wide and one compilation covers every
   scanned file): in a mixed monorepo, files from classic sibling projects also receive the
-  synthetic usings, so a BCL name their own compiler would reject can bind there — accepted
+  synthetic usings, so a BCL name their own compiler would reject can bind there - accepted
   as the rarer failure mode versus silently dropping the enabling projects' calls.
 - **`--restore` / `--build`** CLI flags (methods, dataflows, crypto, agent-context) run the
   corresponding `dotnet` command before analysis. Opt-in, because executing MSBuild from the
@@ -220,7 +220,7 @@ The following bugs are fixed. All of them could **remove** or corrupt results in
 - **Shared-framework probing order.** Framework references were probed in directory-enumeration
   order, so on a machine with several .NET runtimes installed the oldest usually won. Types
   referencing anything newer failed to load and were dropped from `Methods[]` with only a
-  console warning — a machine with .NET 10 and 11 side by side lost every C# 15 union type,
+  console warning - a machine with .NET 10 and 11 side by side lost every C# 15 union type,
   because unions implement `System.Runtime.CompilerServices.IUnion`, which exists only in .NET
   11's `System.Runtime`. Probing is now running-runtime-first, then newest-first.
 - **Inspected assemblies are no longer locked.** Assemblies were memory-mapped from their path

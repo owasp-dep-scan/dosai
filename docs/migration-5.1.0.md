@@ -23,20 +23,20 @@ form:
 }
 ```
 
-- A null constant — `[Attr(null)]`, including a null array reference — sets `IsNull`; `Value` and
+- A null constant - `[Attr(null)]`, including a null array reference - sets `IsNull`; `Value` and
   `Elements` are null. Reading these was the issue-#56 crash: `FormatTypedConstant` threw
   `NullReferenceException` on them and one attribute aborted the whole scan.
 - An array constant sets `IsArray` and lists its elements in `Elements`, in source order. An
   empty array is an empty list, distinct from `IsNull`. Elements recurse, so jagged arrays nest.
 - A scalar constant carries its text in `Value` (formatted invariantly).
 - `Type` carries the argument type's display string (`"string[]"` from the Roslyn source path,
-  `"System.String[]"` from the assembly/reflection path — the two paths agree on everything
+  `"System.String[]"` from the assembly/reflection path - the two paths agree on everything
   else by test).
 
 `IsArray` and `IsNull` are nullable and omitted when false, so scalar output stays compact.
 
 This restructure is what makes `[Attr(null)]`, `[Attr]`, `[Attr("")]`, and
-`[Attr(new object?[] { null })]` distinguishable — impossible in the old comma-joined string,
+`[Attr(new object?[] { null })]` distinguishable - impossible in the old comma-joined string,
 where a null array, an empty array, and a wrapped empty string all collapsed to `""`.
 
 ## `NamedArguments[].Value` can be null (additive)

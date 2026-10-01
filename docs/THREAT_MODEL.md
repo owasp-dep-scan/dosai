@@ -87,7 +87,7 @@ analysis, because restoring output and build output give semantic binding its fu
 reference set. Both are **off by default** and deliberately not exposed through the MCP
 server: restoring evaluates MSBuild props/targets (including `Directory.Build.*` imports and
 inline tasks from restored packages), and building additionally runs source generators and
-pre/post-build targets — that is executing code from the repository under inspection, a trust
+pre/post-build targets - that is executing code from the repository under inspection, a trust
 decision the operator must make consciously.
 
 Mitigations when the flags are used:
@@ -100,7 +100,7 @@ Mitigations when the flags are used:
 - A timeout kills the whole process tree (`Kill(entireProcessTree)`).
 - Failures, missing `dotnet`, and unreadable projects degrade to analyzing the tree as-is;
   they never fail the scan and never retry.
-- Reading `project.assets.json` (the default, no-flag path — `NuGetRestoreCache`) evaluates
+- Reading `project.assets.json` (the default, no-flag path - `NuGetRestoreCache`) evaluates
   no target code: it only locates already-restored assemblies in the NuGet packages cache and
   opens them read-only, unpinned, with delete-sharing.
 

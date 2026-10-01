@@ -2,12 +2,12 @@
 
 `Dosai.Tests/CorpusTests.cs` runs integration analysis against **real sample applications** kept
 outside the repository in `~/sandbox/dosai-corpus`. The tests self-skip when the corpus is absent,
-so CI environments without the corpus stay green — but new analysis features should be validated
+so CI environments without the corpus stay green - but new analysis features should be validated
 against these apps before release.
 
 ## Setup
 
-Run the pinned setup script — it clones both apps at the exact commits the corpus tests' numeric
+Run the pinned setup script - it clones both apps at the exact commits the corpus tests' numeric
 floors were calibrated against, then builds them:
 
 ```bash
@@ -24,7 +24,7 @@ you do):
 | modular-monolith-with-ddd | kgrzybek/modular-monolith-with-ddd | `91c8ef24b4cb6ef558c95d8267fa07d68c7059f8` |
 | grpc-dotnet (Grpc.Net.Client) | grpc/grpc-dotnet | `74de8cad36e5d4a987b44f78eb4ef9f2d60592f1` |
 
-**Always build the sample apps before running the corpus tests** — several assertions rely on
+**Always build the sample apps before running the corpus tests** - several assertions rely on
 restore metadata (`project.assets.json`) and the built assemblies under `bin/`. The tests SKIP
 (not pass) when the corpus is absent, so CI runs without the corpus are visibly skipped rather
 than silently green.

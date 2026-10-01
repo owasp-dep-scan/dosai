@@ -54,7 +54,7 @@ missing minor as 0, so the equivalent compact spelling (`/v1/Orders`) is capture
 
 Framework analysis adds work proportional to the number of routed surfaces: keyword-gated
 provider passes, taint seeding, and four extra default pattern packs. Measured on real repos
-(eShop, grpc-dotnet): **0–8% on `methods`, 5–12% on `dataflows`** for framework-heavy code
+(eShop, grpc-dotnet): **0-8% on `methods`, 5-12% on `dataflows`** for framework-heavy code
 (the worst case is a gRPC/minimal-API-dense tree), and effectively zero on code without routed
 surfaces. Mount registrations are resolved from the compiled syntax trees, never by re-reading
 files from disk, and model artifacts over 256 MB skip hashing (see THREAT_MODEL.md).

@@ -7,7 +7,7 @@ In this lesson we inventory the AI components of an application, then detect two
 ## Prerequisites
 
 ```text
-.NET SDK 8.0 or newer
+.NET SDK 11.0 or newer
 The Dosai repository cloned locally
 ```
 

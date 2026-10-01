@@ -261,7 +261,7 @@ The `docs` directory doubles as a Docsify site (see `docs/index.html`, `docs/_si
 - Graph exports: `docs/graph-formats.md`
 - Compliance and audit: `docs/compliance.md`
 - Use case catalog: `docs/USE_CASES.md`
-- Tutorials: `docs/LESSON1.md` through `docs/LESSON10.md`
+- Tutorials: `docs/LESSON1.md` through `docs/LESSON12.md`
 - Threat model: `docs/THREAT_MODEL.md`
 - blint integration: `docs/BLINT-INTEGRATION.md`
 - YARA usage: `docs/YARA-USAGE.md`

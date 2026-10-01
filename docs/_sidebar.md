@@ -39,6 +39,8 @@
 - [Lesson 8. Custom patterns for legacy code](LESSON8.md)
 - [Lesson 9. Package reachability and blast radius](LESSON9.md)
 - [Lesson 10. Driving Dosai from an AI agent over MCP](LESSON10.md)
+- [Lesson 11. A whole solution in one scan](LESSON11.md)
+- [Lesson 12. Big trees and constrained hosts](LESSON12.md)
 
 - **Integrations**
 - [Complementary analysis with blint](BLINT-INTEGRATION.md)
