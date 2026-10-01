@@ -67,7 +67,9 @@ internal static class SafeFileRead
 
     private const int MaxEnumerationDepth = 128;
     private const int MaxRememberedWarnings = 1024;
-    private static readonly StringComparer PathComparer = OperatingSystem.IsLinux() ? StringComparer.Ordinal : StringComparer.OrdinalIgnoreCase;
+    /// <summary>Path equality as the file system decides it: case-sensitive on Linux, not on Windows or macOS.</summary>
+    internal static readonly StringComparer PathComparer = OperatingSystem.IsLinux() ? StringComparer.Ordinal : StringComparer.OrdinalIgnoreCase;
+    internal static readonly StringComparison PathComparison = OperatingSystem.IsLinux() ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
     private static readonly HashSet<string> ReportedWarnings = new(StringComparer.Ordinal);
 
     // Every discovery pass builds its own reporter, so process-wide de-duplication is what keeps

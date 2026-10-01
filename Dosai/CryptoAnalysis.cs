@@ -295,6 +295,19 @@ public static class CryptoAnalyzer
         }
     }
 
+    /// <summary>A tree's text split the way <see cref="File.ReadAllLines(string)" /> splits the file it was parsed from.</summary>
+    private static string[] CompiledLines(SyntaxTree tree)
+    {
+        var lines = new List<string>();
+        using var reader = new StringReader(tree.GetText().ToString());
+        while (reader.ReadLine() is { } line)
+        {
+            lines.Add(line);
+        }
+
+        return [.. lines];
+    }
+
     private static CryptoOutputFormat ParseFormat(string? format)
     {
         var normalized = (format ?? "dosai").Replace("-", string.Empty, StringComparison.Ordinal).ToLowerInvariant();
@@ -314,7 +327,13 @@ public static class CryptoAnalyzer
                 ? CSharpSourceParser.Parse(content, file, basePath)
                 : null)
             .OfType<CSharpSyntaxTree>().ToList();
-        if (CSharpSourceParser.TryCreateImplicitUsingsTree(basePath) is { } implicitUsingsTree)
+        // Same rule as the methods pipeline: API-surface stubs beside their implementation stay
+        // out of the compilation (issue #69).
+        var partition = ReferenceSources.Partition(csharpTrees);
+        csharpTrees = partition.Kept;
+        result.Diagnostics.AddRange(ReferenceSources.Diagnostics(partition, TargetFrameworkDetection.ProjectContextRoot(Path.GetFullPath(basePath))));
+        var implicitUsingsTree = CSharpSourceParser.TryCreateImplicitUsingsTree(basePath);
+        if (implicitUsingsTree is not null)
         {
             csharpTrees.Insert(0, implicitUsingsTree);
         }
@@ -335,9 +354,12 @@ public static class CryptoAnalyzer
             {
                 new CryptoOperationWalker(model, basePath, tree.FilePath, reachability, result).Visit(operation);
             }
-            if (SafeFileRead.TryReadAllLines(tree.FilePath) is { } csharpLines)
+            // The synthetic implicit-usings tree has no file behind it. The lines are the
+            // compiled text rather than the file's: a trimmed reference source must not report
+            // the declarations its compilation left out.
+            if (!ReferenceEquals(tree, implicitUsingsTree))
             {
-                AnalyzeLineFallback(basePath, tree.FilePath, csharpLines, reachability, result, language: "csharp");
+                AnalyzeLineFallback(basePath, tree.FilePath, CompiledLines(tree), reachability, result, language: "csharp");
             }
         }
 
@@ -1015,12 +1037,17 @@ public static class CryptoAnalyzer
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or BadImageFormatException) { diagnostics.Add($"Could not add metadata reference {referencePath}: {ex.Message}"); }
         }
 
-#pragma warning disable IL3000
-        AddReference(typeof(object).Assembly.Location);
-#pragma warning restore IL3000
-        if (AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES") is string tpa)
+        var frameworkReferences = FrameworkReferences.Current;
+        foreach (var (key, reference) in frameworkReferences.References)
         {
-            foreach (var referencePath in tpa.Split(Path.PathSeparator)) AddReference(referencePath);
+            references.TryAdd(key, reference);
+        }
+
+        DebugLog.Count($"framework metadata references ({frameworkReferences.Source})", frameworkReferences.References.Count);
+
+        if (frameworkReferences.Diagnostic is { } frameworkDiagnostic)
+        {
+            diagnostics.Add(frameworkDiagnostic);
         }
         var root = Directory.Exists(path) ? path : Path.GetDirectoryName(path);
         if (!string.IsNullOrWhiteSpace(root) && Directory.Exists(root))

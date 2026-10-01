@@ -32,7 +32,7 @@ internal static class AssemblyCallGraphAnalyzer
         var calls = new List<MethodCalls>();
         var nodes = new Dictionary<string, MethodNode>(StringComparer.Ordinal);
         var edges = new List<MethodCallEdge>();
-        var edgeKeys = new HashSet<string>(StringComparer.Ordinal);
+        var edgeKeys = new HashSet<GraphAssembly.EdgeSiteKey>(GraphAssembly.EdgeSiteKeyComparer.Instance);
 
         foreach (var method in knownMethods.Where(method => !string.IsNullOrWhiteSpace(method.AssemblySignature)))
         {
@@ -120,7 +120,7 @@ internal static class AssemblyCallGraphAnalyzer
                             Evidence = [CreateEvidence(evidenceKind, location, evidenceDescription)]
                         };
                         calls.Add(call);
-                        var edgeKey = $"{sourceId}\u001f{targetId}\u001f{location.FilePath}\u001f{location.LineNumber}\u001f{location.ColumnNumber}\u001f{callType}\u001f{evidenceKind}";
+                        var edgeKey = GraphAssembly.EdgeSiteKey.Tagged(sourceId, targetId, location.FilePath, location.LineNumber, location.ColumnNumber, GraphAssembly.CallTypeName(callType), GraphAssembly.EvidenceKindName(evidenceKind));
                         if (edgeKeys.Add(edgeKey))
                         {
                             edges.Add(new MethodCallEdge
@@ -148,7 +148,7 @@ internal static class AssemblyCallGraphAnalyzer
                             {
                                 var candidateId = candidate.AssemblySignature!;
                                 AddNode(nodes, candidateId, candidate.Name ?? candidateId, candidate.ClassName, candidate.Namespace, candidate.FileName, candidate.Assembly, candidate.Module, "Method", candidate.LineNumber, candidate.ColumnNumber, isExternal: false);
-                                var candidateKey = $"{sourceId}\u001f{candidateId}\u001f{location.FilePath}\u001f{location.LineNumber}\u001f{location.ColumnNumber}\u001fVirtualCandidate";
+                                var candidateKey = GraphAssembly.EdgeSiteKey.Tagged(sourceId, candidateId, location.FilePath, location.LineNumber, location.ColumnNumber, GraphAssembly.CallTypeName(CallType.MethodCall), "VirtualCandidate");
                                 if (edgeKeys.Add(candidateKey))
                                 {
                                     calls.Add(new MethodCalls
@@ -203,19 +203,11 @@ internal static class AssemblyCallGraphAnalyzer
             }
         }
 
-        var orderedEdges = edges
-            .OrderBy(edge => edge.SourceId, StringComparer.Ordinal)
-            .ThenBy(edge => edge.TargetId, StringComparer.Ordinal)
-            .ThenBy(edge => edge.CallLocation.FileName, StringComparer.Ordinal)
-            .ThenBy(edge => edge.CallLocation.LineNumber)
-            .ThenBy(edge => edge.CallLocation.ColumnNumber)
-            .Select((edge, index) =>
-            {
-                edge.Id = $"ae{index + 1}";
-                return edge;
-            })
-            .ToList();
-        return (calls, new CallGraph { Nodes = nodes.Values.OrderBy(node => node.Id, StringComparer.Ordinal).ToList(), Edges = orderedEdges });
+        GraphAssembly.SortEdgesInPlace(edges);
+        GraphAssembly.AssignEdgeIds(edges, "ae");
+        var orderedNodes = nodes.Values.ToList();
+        GraphAssembly.SortNodesInPlace(orderedNodes);
+        return (calls, new CallGraph { Nodes = orderedNodes, Edges = edges });
     }
 
     private static IEnumerable<AssemblyResolvedDelegateCall> TrackDelegateInstruction(MetadataReader reader, AssemblyCallInstruction instruction, AssemblyDelegateState state, string assemblyPath, AssemblyCallSourceMap sourceMap, string assemblyFullPath, IReadOnlyDictionary<(string Path, int Token), Method> methodLookup)
@@ -300,7 +292,7 @@ internal static class AssemblyCallGraphAnalyzer
         ApplyDefaultDelegateStackBehaviour(opCode, state);
     }
 
-    private static void AddResolvedDelegateEdge(List<MethodCalls> calls, Dictionary<string, MethodNode> nodes, List<MethodCallEdge> edges, HashSet<string> edgeKeys, Method sourceMethod, string sourceId, AssemblyResolvedDelegateCall resolved, AssemblyCallSourceLocation location, string inspectedPath)
+    private static void AddResolvedDelegateEdge(List<MethodCalls> calls, Dictionary<string, MethodNode> nodes, List<MethodCallEdge> edges, HashSet<GraphAssembly.EdgeSiteKey> edgeKeys, Method sourceMethod, string sourceId, AssemblyResolvedDelegateCall resolved, AssemblyCallSourceLocation location, string inspectedPath)
     {
         var target = resolved.Target.Member;
         var targetId = resolved.Target.TargetId;
@@ -329,7 +321,7 @@ internal static class AssemblyCallGraphAnalyzer
             Evidence = [CreateEvidence(AnalysisEvidenceKind.AssemblyIlDelegateTarget, location, resolved.Description)]
         };
         calls.Add(call);
-        var edgeKey = $"{sourceId}\u001f{targetId}\u001f{location.FilePath}\u001f{location.LineNumber}\u001f{location.ColumnNumber}\u001f{resolved.CallType}\u001fResolvedDelegate";
+        var edgeKey = GraphAssembly.EdgeSiteKey.Tagged(sourceId, targetId, location.FilePath, location.LineNumber, location.ColumnNumber, GraphAssembly.CallTypeName(resolved.CallType), "ResolvedDelegate");
         if (edgeKeys.Add(edgeKey))
         {
             edges.Add(new MethodCallEdge

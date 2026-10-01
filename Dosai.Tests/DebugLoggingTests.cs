@@ -54,6 +54,82 @@ public partial class DosaiTests
         return directory;
     }
 
+    // Issue #69: under --debug the compilation's declaration errors are logged as a histogram
+    // by id, so a tree whose names mostly fail to resolve is visible as a number. The pass runs
+    // once per compilation and only under --debug, and the JSON does not change.
+    [Fact]
+    public void Debug_Methods_LogsTheDeclarationErrorHistogram()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Handler.cs"), """
+namespace App
+{
+    public class Handler
+    {
+        public Missing.Widget Build(Missing.Options options) => null;
+    }
+}
+""");
+
+        var recorder = new LineRecorder();
+        lock (ConsoleOutputLock)
+        {
+            var originalError = Console.Error;
+            Console.SetError(recorder);
+            try
+            {
+                DebugLog.Configure(true);
+                _ = Depscan.Dosai.GetMethods(tempDirectory.Path);
+            }
+            finally
+            {
+                DebugLog.Configure(false);
+                Console.SetError(originalError);
+            }
+        }
+
+        var lines = recorder.Snapshot();
+        Assert.Contains(lines, line => line.Contains("C# source declaration errors: 2", StringComparison.Ordinal));
+        Assert.Contains(lines, line => line.Contains("C# source declaration errors by id: CS0246 2", StringComparison.Ordinal));
+        Assert.Contains(lines, line => line.Contains("C# source files with declaration errors: 1", StringComparison.Ordinal));
+        Assert.Contains(lines, line => line.Contains("end methods.declaration-diagnostics (C#)", StringComparison.Ordinal));
+    }
+
+    // Roslyn's declaration completion throws (InvalidCastException in
+    // GetCorrespondingBaseListLocation) when top-level statements and a partial Program with an
+    // unimplemented interface meet in one compilation - dotnet/runtime has both. The --debug
+    // histogram pass contains it and the run completes, with and without --debug.
+    [Fact]
+    public void Debug_Methods_CompilerFailureInDeclarationDiagnostics_IsContained()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Main.cs"), "System.Console.WriteLine(1);");
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Program.cs"), "partial class Program : System.IDisposable { }");
+
+        var recorder = new LineRecorder();
+        string json;
+        lock (ConsoleOutputLock)
+        {
+            var originalError = Console.Error;
+            Console.SetError(recorder);
+            try
+            {
+                DebugLog.Configure(true);
+                json = Depscan.Dosai.GetMethods(tempDirectory.Path);
+            }
+            finally
+            {
+                DebugLog.Configure(false);
+                Console.SetError(originalError);
+            }
+        }
+
+        Assert.Contains(recorder.Snapshot(), line => line.Contains("C# declaration diagnostics failed inside the compiler", StringComparison.Ordinal));
+        using var document = JsonDocument.Parse(json);
+        Assert.Contains(document.RootElement.GetProperty("Methods").EnumerateArray(), method => method.GetProperty("Name").GetString() == "<Main>$");
+        Assert.NotEmpty(JsonDocument.Parse(Depscan.Dosai.GetMethods(tempDirectory.Path)).RootElement.GetProperty("Methods").EnumerateArray());
+    }
+
     /// <summary>
     ///     The methods JSON is byte-identical between a --debug and a plain run except for the
     ///     pre-existing GeneratedAt timestamp, which differs between any two runs regardless of

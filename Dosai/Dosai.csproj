@@ -4,6 +4,12 @@
     <TargetFramework>net11.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <!-- Source analysis is a wide parallel workload (parse, dispatch index and the per-file
+         symbol loop all run on a worker team), but the process defaulted to workstation GC:
+         one GC thread behind fourteen allocating workers. On the large trees of issue #65 that
+         showed up as CPU collapsing to a single core "while the GC was under pressure" while
+         the heap kept climbing; server GC keeps reclamation parallel to allocation. -->
+    <ServerGarbageCollection>true</ServerGarbageCollection>
     <Platform>x64</Platform>
     <OutputType>Exe</OutputType>
     <PackageReadmeFile>README.md</PackageReadmeFile>
@@ -35,4 +41,25 @@
   <ItemGroup>
     <GlobalAnalyzerConfigFiles Include="Globalization.globalconfig" />
   </ItemGroup>
+
+  <!-- A self-contained single-file Dosai carries its runtime inside the executable and gives
+       Roslyn no framework files to reference (issue #67). FrameworkReferences loads each
+       framework assembly from the bundle and references its in-memory metadata; the names come
+       from the Microsoft.NETCore.App reference pack this build compiles against, embedded here
+       so the list always matches the bundled runtime. The metadata read is the one unsafe call
+       (AssemblyExtensions.TryGetRawMetadata hands out a pointer). -->
+  <PropertyGroup>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <Target Name="EmbedFrameworkAssemblyNames" AfterTargets="ResolveTargetingPackAssets" BeforeTargets="PrepareResources">
+    <ItemGroup>
+      <_DosaiFrameworkAssemblyName Include="@(Reference->'%(Filename)')" Condition="'%(Reference.FrameworkReferenceName)' == 'Microsoft.NETCore.App'" />
+    </ItemGroup>
+    <Error Condition="'@(_DosaiFrameworkAssemblyName)' == ''" Text="No Microsoft.NETCore.App reference assemblies were resolved; FrameworkReferences needs their names for self-contained builds." />
+    <WriteLinesToFile File="$(IntermediateOutputPath)framework-assemblies.txt" Lines="@(_DosaiFrameworkAssemblyName->Distinct())" Overwrite="true" WriteOnlyWhenDifferent="true" />
+    <ItemGroup>
+      <EmbeddedResource Include="$(IntermediateOutputPath)framework-assemblies.txt" LogicalName="Dosai.framework-assemblies.txt" />
+      <FileWrites Include="$(IntermediateOutputPath)framework-assemblies.txt" />
+    </ItemGroup>
+  </Target>
 </Project>

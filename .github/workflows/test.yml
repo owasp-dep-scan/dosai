@@ -288,6 +288,76 @@ jobs:
         assert any(d['Module'] == 'R.NativeParser' and d['Name'] == 'DBI' for d in r_methods['Dependencies'])
         PY
 
+  # The `-full` release binaries are self-contained single-file bundles: the runtime lives inside
+  # the executable, so Roslyn gets no framework files to reference. Issue #67: they analyzed with
+  # zero framework references on any machine without a shared framework at least as new as their
+  # own. This publishes one the way the release job does and runs it with no `dotnet` reachable.
+  smoke-self-contained:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      with:
+        persist-credentials: false
+    - name: Setup .NET
+      uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68  # v6.0.0
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}
+        dotnet-quality: ${{ env.DOTNET_QUALITY }}
+        source-url: https://nuget.pkg.github.com/owasp-dep-scan/index.json
+      env:
+        NUGET_AUTH_TOKEN: ${{secrets.GITHUB_TOKEN}}
+    - name: Publish a self-contained single-file build
+      run: |
+        dotnet restore Dosai.sln
+        dotnet publish ./Dosai/ -r linux-x64 --property:PublishDir=/tmp/dosai-full -p:PublishSingleFile=true --self-contained true /p:UseAppHost=true /p:AssemblyName=Dosai-full
+    - name: Analyze with the bundled runtime only
+      run: |
+        mkdir -p /tmp/dosai-sc-smoke /tmp/dosai-sc-out
+        cat > /tmp/dosai-sc-smoke/Program.cs <<'CS'
+        namespace Repro;
+        public class Greeter
+        {
+            public string Greet(string name) => string.Concat("Hello, ", name);
+        }
+        public static class Program
+        {
+            public static void Main()
+            {
+                System.Console.WriteLine(new Greeter().Greet("world"));
+                System.Console.WriteLine(new System.Uri("https://example.com").Host);
+                new System.Xml.XmlDocument().LoadXml("<a/>");
+            }
+        }
+        CS
+        # The runner has .NET under /usr/share/dotnet (and /usr/bin/dotnet), which the
+        # installed-framework fallback would find. runtime-deps carries only the native
+        # libraries a self-contained app needs and no .NET at all, like the machine in issue #67.
+        for command in methods dataflows crypto; do
+          docker run --rm -v /tmp/dosai-full:/dosai:ro -v /tmp/dosai-sc-smoke:/src:ro -v /tmp/dosai-sc-out:/out \
+            mcr.microsoft.com/dotnet/runtime-deps:10.0 /dosai/Dosai-full "$command" --path /src --o "/out/$command.json" --debug \
+            > /dev/null 2> "/tmp/dosai-sc-$command.log"
+        done
+        for command in methods dataflows crypto; do
+          grep -F 'framework metadata references (bundled-runtime)' "/tmp/dosai-sc-$command.log"
+        done
+        python3 - <<'PY'
+        import json
+        methods = json.load(open('/tmp/dosai-sc-out/methods.json'))
+        targets = {edge['TargetId'] for edge in methods['CallGraph']['Edges']}
+        # Uri and XmlDocument live in System.Private.* implementation assemblies the bundled
+        # facades forward to.
+        for expected in ('System.Console.WriteLine(string):void', 'string.Concat(string,string):string',
+                         'System.Uri..ctor(string)', 'System.Xml.XmlDocument.LoadXml(string):void'):
+            assert expected in targets, (expected, targets)
+        assert not any(target.startswith('Unresolved:') for target in targets), targets
+        for name in ('methods', 'dataflows', 'crypto'):
+            diagnostics = json.load(open(f'/tmp/dosai-sc-out/{name}.json')).get('Diagnostics') or []
+            assert not any('No .NET framework metadata references' in d for d in diagnostics), (name, diagnostics)
+        PY
+
   publish:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')

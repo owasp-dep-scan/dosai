@@ -18,7 +18,7 @@ namespace Depscan;
 internal static class TargetFrameworkDetection
 {
     private static readonly Lock DetectionLock = new();
-    private static readonly Dictionary<string, IReadOnlyList<string>> DetectedByRoot = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, IReadOnlyList<string>> DetectedByRoot = new(SafeFileRead.PathComparer);
 
     public static IReadOnlyList<string> Detect(string? path)
     {
@@ -30,7 +30,7 @@ internal static class TargetFrameworkDetection
         string root;
         try
         {
-            root = Path.GetFullPath(path);
+            root = ProjectContextRoot(Path.GetFullPath(path));
         }
         catch (ArgumentException)
         {
@@ -48,6 +48,209 @@ internal static class TargetFrameworkDetection
             DetectedByRoot[root] = detected;
             return detected;
         }
+    }
+
+    /// <summary>
+    ///     The directory whose projects describe a scan root: the root itself, or for a
+    ///     single-file scan (<c>--path src/App/Program.cs</c>) the file's directory. Enumerating
+    ///     project files under a file path finds nothing, which silently evaluated a single
+    ///     file's guards against the latest-modern-net fallback instead of its own project.
+    ///     Parse options, the implicit-usings decision and the reported target frameworks all
+    ///     resolve through this, so they agree for file and directory roots alike.
+    /// </summary>
+    internal static string ProjectContextRoot(string fullPath) =>
+        File.Exists(fullPath) ? Path.GetDirectoryName(fullPath) ?? fullPath : fullPath;
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string?> NearestProjectDirectoryCache = new(SafeFileRead.PathComparer);
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, ProjectTargets?> ProjectTargetsCache = new(SafeFileRead.PathComparer);
+
+    /// <summary>
+    ///     The target frameworks governing one source file: those of the nearest project at or
+    ///     above the file's directory, up to the scan root - the project that compiles it - and
+    ///     the scan root's detection for a file outside every project or under one whose target
+    ///     cannot be read without evaluating MSBuild (<c>$(NetCoreAppCurrent)</c>).
+    /// </summary>
+    /// <remarks>
+    ///     Dosai compiles every file of a tree in one compilation, but parse options are per
+    ///     file. Resolving one representative for the whole tree evaluated a net48 project's
+    ///     guards as net8.0 next to a net8.0 project, dropping its <c>#if NETFRAMEWORK</c> code;
+    ///     the per-directory recursive detection before that got a project's own files right but
+    ///     not its subdirectories', and cost one recursive enumeration per directory. The nearest
+    ///     project is found by walking up, one non-recursive listing per directory, memoized.
+    ///     A project's targets come from its own file, else from the nearest
+    ///     <c>Directory.Build.props</c>, else <c>Directory.Build.targets</c>, at or above it
+    ///     within the scan root.
+    /// </remarks>
+    /// <param name="projectExtension">The project kind that compiles the file: <c>.csproj</c> for C#, <c>.fsproj</c> for F#.</param>
+    internal static ProjectTargets ForFile(string? rootPath, string filePath, string projectExtension)
+    {
+        if (string.IsNullOrWhiteSpace(rootPath))
+        {
+            return new ProjectTargets(null, []);
+        }
+
+        string root;
+        string? directory;
+        try
+        {
+            root = Path.TrimEndingDirectorySeparator(ProjectContextRoot(Path.GetFullPath(rootPath)));
+            directory = Path.GetDirectoryName(Path.GetFullPath(filePath));
+        }
+        catch (ArgumentException)
+        {
+            return new ProjectTargets(null, []);
+        }
+
+        if (directory is not null && IsWithin(root, directory)
+            && NearestProjectDirectory(directory, root, projectExtension) is { } projectDirectory
+            && TargetsOfProjectIn(projectDirectory, root, projectExtension) is { } project)
+        {
+            return project;
+        }
+
+        return new ProjectTargets(null, Detect(root));
+    }
+
+    /// <summary>
+    ///     Every project of <paramref name="projectExtension" /> kind under the root whose own
+    ///     targets were readable, sorted by path: the per-project guard decisions
+    ///     <see cref="ForFile" /> makes, for the slice metadata.
+    /// </summary>
+    internal static List<ProjectTargets> ProjectsUnder(string? rootPath, string projectExtension)
+    {
+        var projects = new List<ProjectTargets>();
+        if (string.IsNullOrWhiteSpace(rootPath))
+        {
+            return projects;
+        }
+
+        string root;
+        try
+        {
+            root = Path.TrimEndingDirectorySeparator(ProjectContextRoot(Path.GetFullPath(rootPath)));
+        }
+        catch (ArgumentException)
+        {
+            return projects;
+        }
+
+        var projectDirectories = SafeFileRead.EnumerateAllFilesSafe(root, "*" + projectExtension)
+            .Where(file => !IsUnderBuildDirectory(root, file))
+            .Select(Path.GetDirectoryName)
+            .OfType<string>()
+            .Distinct(SafeFileRead.PathComparer);
+        foreach (var projectDirectory in projectDirectories)
+        {
+            if (TargetsOfProjectIn(projectDirectory, root, projectExtension) is { } project)
+            {
+                projects.Add(project);
+            }
+        }
+
+        projects.Sort((x, y) => string.CompareOrdinal(x.ProjectFile, y.ProjectFile));
+        return projects;
+    }
+
+    private static bool IsWithin(string root, string directory)
+    {
+        var relative = Path.GetRelativePath(root, directory);
+        return relative == "." || (!Path.IsPathRooted(relative) && !relative.StartsWith("..", StringComparison.Ordinal));
+    }
+
+    private static string? NearestProjectDirectory(string directory, string root, string projectExtension)
+    {
+        var key = projectExtension + "|" + directory;
+        if (NearestProjectDirectoryCache.TryGetValue(key, out var cached))
+        {
+            return cached;
+        }
+
+        string? nearest;
+        if (ProjectFilesIn(directory, root, projectExtension).Count > 0)
+        {
+            nearest = directory;
+        }
+        else if (string.Equals(directory, root, SafeFileRead.PathComparison) || Path.GetDirectoryName(directory) is not { } parent)
+        {
+            nearest = null;
+        }
+        else
+        {
+            nearest = NearestProjectDirectory(parent, root, projectExtension);
+        }
+
+        NearestProjectDirectoryCache[key] = nearest;
+        return nearest;
+    }
+
+    private static List<string> ProjectFilesIn(string directory, string root, string projectExtension)
+    {
+        try
+        {
+            return Directory.EnumerateFiles(directory, "*" + projectExtension, SearchOption.TopDirectoryOnly)
+                .Where(file => !IsUnderBuildDirectory(root, file) && !PathExclusions.IsExcluded(file, isDirectory: false))
+                .Order(StringComparer.Ordinal)
+                .ToList();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            return [];
+        }
+    }
+
+    private static ProjectTargets? TargetsOfProjectIn(string projectDirectory, string root, string projectExtension)
+    {
+        return ProjectTargetsCache.GetOrAdd(projectExtension + "|" + root + "|" + projectDirectory, _ =>
+        {
+            var projectFiles = ProjectFilesIn(projectDirectory, root, projectExtension);
+            if (projectFiles.Count == 0)
+            {
+                return null;
+            }
+
+            var detected = new List<string>();
+            foreach (var projectFile in projectFiles)
+            {
+                CollectTargetFrameworks(projectFile, detected);
+            }
+
+            if (detected.Count == 0)
+            {
+                foreach (var buildFile in new[] { "Directory.Build.props", "Directory.Build.targets" })
+                {
+                    if (NearestFileUpwards(projectDirectory, root, buildFile) is { } inherited)
+                    {
+                        CollectTargetFrameworks(inherited, detected);
+                        if (detected.Count > 0)
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            var targets = detected.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            return targets.Count == 0 ? null : new ProjectTargets(Path.GetRelativePath(root, projectFiles[0]), targets);
+        });
+    }
+
+    private static string? NearestFileUpwards(string directory, string root, string fileName)
+    {
+        for (var current = directory; current is not null; current = Path.GetDirectoryName(current))
+        {
+            var candidate = Path.Combine(current, fileName);
+            if (File.Exists(candidate) && !PathExclusions.IsExcluded(candidate, isDirectory: false))
+            {
+                return candidate;
+            }
+
+            if (string.Equals(current, root, SafeFileRead.PathComparison))
+            {
+                break;
+            }
+        }
+
+        return null;
     }
 
     private static IReadOnlyList<string> DetectNoCache(string root)
@@ -199,3 +402,10 @@ internal static class TargetFrameworkDetection
         return false;
     }
 }
+
+/// <summary>
+///     The target frameworks one file's guards resolve against, and the project (relative to the
+///     scan root) they were read from; <see cref="ProjectFile" /> is null when the scan root's
+///     detection applied instead.
+/// </summary>
+internal sealed record ProjectTargets(string? ProjectFile, IReadOnlyList<string> TargetFrameworks);

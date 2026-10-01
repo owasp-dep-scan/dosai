@@ -52,15 +52,15 @@ internal static class DispatchResolver
                 .ToList();
 
             var trees = compilation.SyntaxTrees.ToList();
-            var instantiatedPerTree = new HashSet<string>?[trees.Count];
+            var instantiatedPerTree = new HashSet<INamedTypeSymbol>?[trees.Count];
             DedicatedStack.ForEach("Dosai dispatch index", workerCount, trees.Count,
-                index => instantiatedPerTree[index] = CollectInstantiatedTypeKeys(compilation, trees[index]));
-            var instantiated = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var treeKeys in instantiatedPerTree)
+                index => instantiatedPerTree[index] = CollectInstantiatedTypes(compilation, trees[index]));
+            var instantiated = new HashSet<INamedTypeSymbol>(SymbolEqualityComparer.Default);
+            foreach (var treeTypes in instantiatedPerTree)
             {
-                if (treeKeys is not null)
+                if (treeTypes is not null)
                 {
-                    instantiated.UnionWith(treeKeys);
+                    instantiated.UnionWith(treeTypes);
                 }
             }
 
@@ -68,8 +68,14 @@ internal static class DispatchResolver
             var entries = new List<ConcreteTypeEntry>(concreteTypes.Count);
             foreach (var type in concreteTypes)
             {
-                // Resolved once here so a lookup never re-renders display strings per candidate.
-                var isInstantiated = hasInstantiationEvidence && TypeKeys(type).Any(instantiated.Contains);
+                // Instantiation evidence is symbol-exact: every type below resolved through
+                // this one compilation, so the created-type symbol (and, for a constructed
+                // generic, its original definition) identifies exactly the types this
+                // compilation instantiated. The string aliases this replaces also matched any
+                // same-named type in another namespace, promoting unrelated types to RTA
+                // evidence (an "Own.Task" marked System.Threading.Tasks.Task instantiated).
+                var isInstantiated = hasInstantiationEvidence
+                                     && (instantiated.Contains(type) || (type.IsGenericType && instantiated.Contains(type.OriginalDefinition)));
                 entries.Add(new ConcreteTypeEntry(type, isInstantiated));
             }
 
@@ -270,19 +276,33 @@ internal static class DispatchResolver
                 .FirstOrDefault(method => method.IsOverride && Overrides(method, normalizedTarget));
         }
 
-        private static HashSet<string>? CollectInstantiatedTypeKeys(Compilation compilation, SyntaxTree syntaxTree)
+        private static HashSet<INamedTypeSymbol>? CollectInstantiatedTypes(Compilation compilation, SyntaxTree syntaxTree)
         {
-            HashSet<string>? keys = null;
+            HashSet<INamedTypeSymbol>? types = null;
             var semanticModel = compilation.GetSemanticModel(syntaxTree);
             foreach (var objectCreationNode in syntaxTree.GetRoot().DescendantNodes().Where(IsObjectCreationSyntax))
             {
-                if (OperationDepthGuard.GetOperation(semanticModel, objectCreationNode) is IObjectCreationOperation { Type: INamedTypeSymbol type })
+                // GetTypeInfo skips the IOperation factory, but it still binds the creation's
+                // whole enclosing statement - for a creation heading a fluent chain, the entire
+                // chain - and binding a chain is super-linear in its length (a 400,000-call chain
+                // bound for about 14 minutes here). Members the depth guard keeps off the
+                // operation factory are kept out of this scan too: the call-graph walker never
+                // analyzes them, so their creations were never evidence.
+                if (!OperationDepthGuard.IsSafe(objectCreationNode))
                 {
-                    AddTypeKeys(keys ??= new HashSet<string>(StringComparer.Ordinal), type);
+                    continue;
+                }
+
+                // The created type is known even when its constructor call fails to bind (an
+                // argument of an unresolved type), where the operation form was an
+                // IInvalidOperation: `new T(unresolved)` still instantiates T.
+                if (semanticModel.GetTypeInfo(objectCreationNode).Type is INamedTypeSymbol type)
+                {
+                    AddInstantiatedTypes(types ??= new HashSet<INamedTypeSymbol>(SymbolEqualityComparer.Default), type);
                 }
             }
 
-            return keys;
+            return types;
         }
 
         private static void CollectTypes(INamespaceSymbol namespaceSymbol, List<INamedTypeSymbol> types)
@@ -331,17 +351,13 @@ internal static class DispatchResolver
             bucket.Add(entry);
         }
 
-        private static void AddTypeKeys(HashSet<string> keys, INamedTypeSymbol type)
+        private static void AddInstantiatedTypes(HashSet<INamedTypeSymbol> types, INamedTypeSymbol type)
         {
-            foreach (var key in TypeKeys(type)) keys.Add(key);
-        }
-
-        private static IEnumerable<string> TypeKeys(INamedTypeSymbol type)
-        {
-            yield return type.Name;
-            yield return type.MetadataName;
-            yield return type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat).Replace("global::", string.Empty, StringComparison.Ordinal);
-            yield return type.OriginalDefinition.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat).Replace("global::", string.Empty, StringComparison.Ordinal);
+            types.Add(type);
+            if (!SymbolEqualityComparer.Default.Equals(type, type.OriginalDefinition))
+            {
+                types.Add(type.OriginalDefinition);
+            }
         }
 
         private readonly record struct ConcreteTypeEntry(INamedTypeSymbol Type, bool IsInstantiated);

@@ -402,9 +402,9 @@ public class MixedController
     // ----- CLI/docs drift guard -----
 
     [Fact]
-    public async Task CommandLine_PatternPackHelp_ListsEveryShippedPack()
+    public void CommandLine_PatternPackHelp_ListsEveryShippedPack()
     {
-        var helpText = await CaptureHelpAsync("dataflows");
+        var helpText = CaptureHelp("dataflows");
         foreach (var pack in DataFlowAnalyzer.DefaultPatternPackNames)
         {
             Assert.Contains(pack, helpText, StringComparison.Ordinal);
@@ -423,18 +423,23 @@ public class MixedController
             result.Patterns.PatternPacks.Order(StringComparer.OrdinalIgnoreCase));
     }
 
-    private static async Task<string> CaptureHelpAsync(string command)
+    private static string CaptureHelp(string command)
     {
-        var original = Console.Out;
         using var writer = new StringWriter();
-        Console.SetOut(writer);
-        try
+        // The lock every console-swapping test holds: DosaiTests runs in parallel with this class
+        // and its CLI runs point Console.Out at TextWriter.Null.
+        lock (DosaiTests.ConsoleOutputLock)
         {
-            _ = await Task.Run(() => CommandLine.Main([$"{command}", "--help"]));
-        }
-        finally
-        {
-            Console.SetOut(original);
+            var original = Console.Out;
+            Console.SetOut(writer);
+            try
+            {
+                _ = CommandLine.Main([command, "--help"]);
+            }
+            finally
+            {
+                Console.SetOut(original);
+            }
         }
 
         return writer.ToString();

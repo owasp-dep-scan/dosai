@@ -117,9 +117,12 @@ public static class Dosai
 
         var method = methodSymbol.ReducedFrom ?? methodSymbol.OriginalDefinition;
         var containingType = NormalizeSymbolName(method.ContainingType?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty);
-        var methodName = method.MethodKind == MethodKind.Constructor
-            ? ".ctor"
-            : method.MetadataName;
+        var methodName = method.MethodKind switch
+        {
+            MethodKind.Constructor => ".ctor",
+            _ when IsNestedFunction(method) => NestedFunctionName(method),
+            _ => method.MetadataName
+        };
         var returnType = method.MethodKind == MethodKind.Constructor ? "" : NormalizeSymbolName(method.ReturnType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat));
 
         var parameters = method.Parameters.Select(p => NormalizeSymbolName(p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat))).ToList();
@@ -135,10 +138,146 @@ public static class Dosai
     /// <summary>
     ///     Signature for an IMethodSymbol in Dosai's stable format. Exposed for framework
     ///     providers so ServiceOperation.MethodId matches Methods[].SourceSignature exactly.
+    ///     Uncached: the source pipeline renders through <see cref="SourceRenderCache" />, which
+    ///     memoizes per symbol so one member costs one render and one string instance per run.
     /// </summary>
     internal static string FormatMethodSignature(IMethodSymbol methodSymbol) => GenerateMethodSignature(methodSymbol);
 
-    private static string NormalizeSymbolName(string symbolName) => symbolName
+    /// <summary>An anonymous function (lambda, anonymous method) or a local function: named after the member that declares it.</summary>
+    internal static bool IsNestedFunction(IMethodSymbol method) => method.MethodKind is MethodKind.AnonymousFunction or MethodKind.LocalFunction;
+
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<INamedTypeSymbol, System.Collections.Concurrent.ConcurrentDictionary<string, IReadOnlyDictionary<(SyntaxTree Tree, Microsoft.CodeAnalysis.Text.TextSpan Span, bool Query), string>>> NestedFunctionNamesByType = new();
+
+    /// <summary>
+    ///     The name of an anonymous or local function, after the member that declares it, the way
+    ///     the compiler names the methods it generates for them: <c>&lt;Run&gt;lambda2</c> is the
+    ///     second anonymous function in the type's members named <c>Run</c> (every overload and
+    ///     partial part, in source order, nested ones included), <c>&lt;Run&gt;Helper</c> a local
+    ///     function (<c>&lt;Run&gt;Helper|2</c> for a second one of that name), and
+    ///     <c>&lt;Run&gt;query1</c> the lambdas the compiler makes of the first query expression's
+    ///     clauses (<c>from</c>, <c>where</c>, <c>select</c>, ...), one node per query. An
+    ///     anonymous function has no name and a local function one that is only unique in its
+    ///     scope, so their plain signatures merged every lambda of a type with the same shape into
+    ///     one call-graph node (<c>Ns.Type.():void</c>), and a local function into a same-named
+    ///     member. Ordinals come from syntax alone, so the name is the same in every run and worker.
+    /// </summary>
+    internal static string NestedFunctionName(IMethodSymbol function)
+    {
+        ISymbol? member = function.ContainingSymbol;
+        while (member is IMethodSymbol enclosing && IsNestedFunction(enclosing))
+        {
+            member = enclosing.ContainingSymbol;
+        }
+
+        // An auto-property initializer belongs to the property's backing field.
+        if (member is IFieldSymbol { AssociatedSymbol: IPropertySymbol property })
+        {
+            member = property;
+        }
+
+        var memberName = member?.MetadataName ?? string.Empty;
+        // A query clause's lambda is implicit: C# declares it by the clause's expression, Visual
+        // Basic only locates it. Either way it belongs to the nearest query expression around
+        // that expression - not to a query that is the expression (`select from c in ...`).
+        var isQuery = function is { IsImplicitlyDeclared: true, MethodKind: MethodKind.AnonymousFunction };
+        SyntaxNode? syntax;
+        if (isQuery)
+        {
+            var clause = function.Locations.FirstOrDefault(location => location.IsInSource) is { SourceTree: { } tree } location
+                ? tree.GetRoot().FindNode(location.SourceSpan, getInnermostNodeForTie: true)
+                : null;
+            syntax = (clause is not null && IsQueryExpression(clause) ? clause.Parent : clause)?.AncestorsAndSelf().FirstOrDefault(IsQueryExpression);
+        }
+        else
+        {
+            syntax = function.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax();
+        }
+
+        if (syntax is Microsoft.CodeAnalysis.VisualBasic.Syntax.LambdaHeaderSyntax { Parent: { } lambda })
+        {
+            syntax = lambda;
+        }
+
+        if (member?.ContainingType is { } type && syntax is not null
+            && NestedFunctionNamesByType.GetOrCreateValue(type).GetOrAdd(memberName, name => IndexNestedFunctions(type, name)).TryGetValue((syntax.SyntaxTree, syntax.Span, isQuery), out var nestedName))
+        {
+            return nestedName;
+        }
+
+        // Outside its member's declarations - not a shape the compiler produces - the position
+        // still tells it apart.
+        var position = function.Locations.FirstOrDefault()?.GetLineSpan().StartLinePosition ?? default;
+        var kind = function.MethodKind == MethodKind.LocalFunction ? function.MetadataName : "lambda";
+        return string.Create(CultureInfo.InvariantCulture, $"<{memberName}>{kind}@{position.Line + 1}_{position.Character + 1}");
+    }
+
+    /// <summary>The name of every anonymous and local function declared by the type's members of one name, keyed by syntax.</summary>
+    private static IReadOnlyDictionary<(SyntaxTree Tree, Microsoft.CodeAnalysis.Text.TextSpan Span, bool Query), string> IndexNestedFunctions(INamedTypeSymbol type, string memberName)
+    {
+        var declarations = type.GetMembers(memberName)
+            .SelectMany(member => member switch
+            {
+                IMethodSymbol { PartialImplementationPart: { } implementation } method => method.DeclaringSyntaxReferences.Concat(implementation.DeclaringSyntaxReferences),
+                IPropertySymbol { PartialImplementationPart: { } implementation } property => property.DeclaringSyntaxReferences.Concat(implementation.DeclaringSyntaxReferences),
+                _ => member.DeclaringSyntaxReferences
+            })
+            .Select(reference => reference.GetSyntax())
+            .Distinct()
+            // '/' and '\' sort differently against letters: one separator keeps the ordinals, and so
+            // the ids, the same on every OS.
+            .OrderBy(declaration => declaration.SyntaxTree.FilePath.Replace('\\', '/'), StringComparer.Ordinal)
+            .ThenBy(declaration => declaration.SpanStart);
+        var names = new Dictionary<(SyntaxTree, Microsoft.CodeAnalysis.Text.TextSpan, bool), string>();
+        var anonymousFunctions = 0;
+        var queries = 0;
+        var localFunctions = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var root in declarations.SelectMany(NestedFunctionScope))
+        {
+            foreach (var node in root.DescendantNodesAndSelf())
+            {
+                switch (node)
+                {
+                    case AnonymousFunctionExpressionSyntax or Microsoft.CodeAnalysis.VisualBasic.Syntax.LambdaExpressionSyntax:
+                        names[(node.SyntaxTree, node.Span, false)] = string.Create(CultureInfo.InvariantCulture, $"<{memberName}>lambda{++anonymousFunctions}");
+                        break;
+                    case var query when IsQueryExpression(query):
+                        names[(node.SyntaxTree, node.Span, true)] = string.Create(CultureInfo.InvariantCulture, $"<{memberName}>query{++queries}");
+                        break;
+                    case LocalFunctionStatementSyntax local:
+                        // Arity-free, like every method id (MetadataName carries no arity for methods).
+                        var localName = local.Identifier.ValueText;
+                        var occurrence = localFunctions[localName] = localFunctions.GetValueOrDefault(localName) + 1;
+                        names[(node.SyntaxTree, node.Span, false)] = occurrence == 1
+                            ? $"<{memberName}>{localName}"
+                            : string.Create(CultureInfo.InvariantCulture, $"<{memberName}>{localName}|{occurrence}");
+                        break;
+                }
+            }
+        }
+
+        return names;
+    }
+
+    private static bool IsQueryExpression(SyntaxNode node) =>
+        node is Microsoft.CodeAnalysis.CSharp.Syntax.QueryExpressionSyntax or Microsoft.CodeAnalysis.VisualBasic.Syntax.QueryExpressionSyntax;
+
+    /// <summary>
+    ///     The syntax a member's nested functions live in: its declaration, except top-level
+    ///     statements (<c>&lt;Main&gt;$</c>, declared by the whole file) and a primary constructor
+    ///     (declared by the whole type), whose own code is only their statements, parameters and
+    ///     base-type arguments. Visual Basic declares a member by its header statement and a
+    ///     field by its name, so the scope is the block or declarator around them.
+    /// </summary>
+    private static IEnumerable<SyntaxNode> NestedFunctionScope(SyntaxNode declaration) => declaration switch
+    {
+        CompilationUnitSyntax unit => unit.Members.OfType<GlobalStatementSyntax>(),
+        TypeDeclarationSyntax type => new SyntaxNode?[] { type.ParameterList, type.BaseList }.OfType<SyntaxNode>(),
+        Microsoft.CodeAnalysis.VisualBasic.Syntax.StatementSyntax { Parent: Microsoft.CodeAnalysis.VisualBasic.Syntax.MethodBlockBaseSyntax or Microsoft.CodeAnalysis.VisualBasic.Syntax.PropertyBlockSyntax or Microsoft.CodeAnalysis.VisualBasic.Syntax.EventBlockSyntax } header => [header.Parent!],
+        Microsoft.CodeAnalysis.VisualBasic.Syntax.ModifiedIdentifierSyntax { Parent: Microsoft.CodeAnalysis.VisualBasic.Syntax.VariableDeclaratorSyntax declarator } => [declarator],
+        _ => [declaration]
+    };
+
+    internal static string NormalizeSymbolName(string symbolName) => symbolName
         .Replace("global::", string.Empty, StringComparison.Ordinal)
         .Replace("Global.", string.Empty, StringComparison.Ordinal);
 
@@ -373,10 +512,44 @@ public static class Dosai
         }
         DebugLog.Count("assembly methods", methods.Count);
 
-        var (sourceMethods, usings, methodCalls, properties, fields, events, constructors, callGraph, sourceAssemblyMapping, sourceMode, compilations, sourceDiagnostics) = AnalyzeSourcesWithDebugLogging(path, methods);
-        DebugLog.Count("source methods", sourceMethods.Count);
-        DebugLog.Count("call graph (source) nodes", callGraph.Nodes.Count);
-        DebugLog.Count("call graph (source) edges", callGraph.Edges.Count);
+        // Source analysis and every consumer of its compilations (framework analysis, the
+        // security analyzer) run inside AnalyzeSourcesAndFrameworks, which returns only their
+        // results. The compilations pin every parsed tree - the largest object the pipeline
+        // holds - and none of the phases below reads them, so they must be unreachable before
+        // the IL call graph, merges, enrichment, reachability and serialization run (the memory
+        // wall of issue #65). Scoping them in a helper frame is what makes that true. Holding
+        // them in a local here and reassigning it did not: the security-analysis lambda
+        // captured the framework context into a closure object, and this method runs once, so
+        // it stays at Tier-0, where the JIT reports every IL local (the closure's included)
+        // live until the method returns - a heap snapshot at enrichment still held the
+        // compilation and every syntax tree.
+        var stage = AnalyzeSourcesAndFrameworks(path, methods, purlResolver, frameworkOptions);
+        if (CompilationReleaseProbe.Value is { } releaseProbe)
+        {
+            releaseProbe.RecordAfterRelease();
+        }
+
+        if (DebugLog.Enabled)
+        {
+            GC.Collect(generation: GC.MaxGeneration, mode: GCCollectionMode.Forced, blocking: true, compacting: false);
+            DebugLog.Log("released source compilations after framework analysis");
+        }
+
+        var sourceMethods = stage.SourceMethods;
+        var usings = stage.UsingDirectives;
+        var methodCalls = stage.MethodCalls;
+        var properties = stage.Properties;
+        var fields = stage.Fields;
+        var events = stage.Events;
+        var constructors = stage.Constructors;
+        var callGraph = stage.CallGraph;
+        var sourceAssemblyMapping = stage.SourceAssemblyMappings;
+        var sourceMode = stage.SourceMode;
+        var sourceDiagnostics = stage.Diagnostics;
+        var frameworkResult = stage.FrameworkResult;
+        var legacyEndpoints = stage.LegacyEndpoints;
+        var apiEndpoints = stage.ApiEndpoints;
+        var securityFindings = stage.SecurityFindings;
 
         List<MethodCalls> assemblyMethodCalls;
         CallGraph assemblyCallGraph;
@@ -390,29 +563,14 @@ public static class Dosai
         DebugLog.Count("assembly IL call sites normalized to source ids", assemblyMethodCalls.Count);
         methodCalls.AddRange(assemblyMethodCalls);
         MergeCallGraph(callGraph, assemblyCallGraph);
+        // Trust boundaries sweep the merged graph's public inbound services; it needs the
+        // framework result (already computed) and the merged graph (just built), in that order.
+        Frameworks.FrameworkRegistry.ApplyTrustBoundaries(frameworkResult, callGraph);
         DebugLog.Count("call graph (merged) nodes", callGraph.Nodes.Count);
         DebugLog.Count("call graph (merged) edges", callGraph.Edges.Count);
         var assemblyInformation = DebugLog.Measure("methods.assembly-information", () => GetAssemblyInformation(path));
         DebugLog.Count("assembly information entries", assemblyInformation.Count);
 
-        Frameworks.FrameworkAnalysisResult frameworkResult;
-        Frameworks.FrameworkContext frameworkContext;
-        using (DebugLog.Phase("methods.framework-analysis"))
-        {
-            frameworkContext = Frameworks.FrameworkContext.FromCompilations(path, compilations.CSharp, compilations.VisualBasic, purlResolver);
-            frameworkResult = Frameworks.FrameworkRegistry.Analyze(frameworkContext, frameworkOptions);
-            Frameworks.FrameworkRegistry.ApplyTrustBoundaries(frameworkResult, callGraph);
-        }
-        DebugLog.Count("framework api endpoints", frameworkResult.ApiEndpoints.Count);
-        DebugLog.Count("framework services", frameworkResult.Services.Count);
-        DebugLog.Count("framework ai components", frameworkResult.AiComponents.Count);
-        DebugLog.Count("framework entry points", frameworkResult.EntryPoints.Count);
-        // ApiEndpointAnalyzer now only covers what no provider owns (VB.NET); the framework providers
-        // own every C# endpoint. Entry points are therefore built from the analyzer's endpoints ALONE;
-        // feeding it the combined list produced a second, MethodId-less copy of every provider endpoint.
-        var legacyEndpoints = DebugLog.Measure("methods.legacy-api-endpoints", () => ApiEndpointAnalyzer.GetApiEndpoints(path));
-        DebugLog.Count("legacy analyzer api endpoints (VB remainder)", legacyEndpoints.Count);
-        var apiEndpoints = frameworkResult.ApiEndpoints.Concat(legacyEndpoints).ToList();
         methods.AddRange(sourceMethods);
         using (DebugLog.Phase("methods.enrichment"))
         {
@@ -446,7 +604,6 @@ public static class Dosai
         // next to the bucketing-path decision; only the derived reports are counted here.
         DebugLog.Count("recursion clusters", recursionClusters.Count);
         DebugLog.Count("dead code entries", deadCode.Count);
-        var securityFindings = DebugLog.Measure("methods.security-analysis", () => Frameworks.SecurityAnalyzer.Run(frameworkContext, frameworkResult, apiEndpoints));
 
         var sliceDiagnostics = frameworkResult.Diagnostics.Select(diagnostic => $"{diagnostic.FrameworkId}: {diagnostic.Message}").Concat(reachabilityDiagnostics).ToList();
         // Restore-output and unresolved-call diagnostics explain why package reachability may
@@ -458,7 +615,9 @@ public static class Dosai
         var unresolvedCallCount = methodCalls.Count(call => call.EvidenceKind == AnalysisEvidenceKind.SourceUnresolved);
         if (unresolvedCallCount > 0)
         {
-            sliceDiagnostics.Add($"Semantic binding failed for {unresolvedCallCount} call sites: target assemblies were missing or conflicted with other references. Restore or build the tree (--restore/--build) to raise reachability confidence.");
+            sliceDiagnostics.Add(FrameworkReferences.Current.References.Count == 0
+                ? string.Create(CultureInfo.InvariantCulture, $"Semantic binding failed for {unresolvedCallCount} call sites: Dosai resolved no framework metadata references (see the framework-reference diagnostic), so every framework call is unresolved regardless of the tree's restore state.")
+                : string.Create(CultureInfo.InvariantCulture, $"Semantic binding failed for {unresolvedCallCount} call sites: target assemblies were missing or conflicted with other references. Restore or build the tree (--restore/--build) to raise reachability confidence."));
         }
 
         // Conditional-compilation guards were evaluated against the detected target frameworks;
@@ -474,7 +633,18 @@ public static class Dosai
             if (detectedTargetFrameworks.Count > 1 && FrameworkPreprocessorDefines.TrySelectRepresentative(detectedTargetFrameworks, out var representative))
             {
                 metadata.GuardTargetFramework = representative;
-                sliceDiagnostics.Add($"Multiple target frameworks detected ({string.Join(", ", detectedTargetFrameworks)}); conditional-compilation guards were evaluated against '{representative}'. Arms exclusive to the other targets are not analyzed.");
+                // Each file's guards resolve against its nearest project's targets; the root-wide
+                // representative only covers files outside any project with a readable target.
+                var projectGuards = ProjectGuardTargets(path);
+                if (projectGuards.Count > 1)
+                {
+                    metadata.ProjectGuardTargetFrameworks = projectGuards;
+                    sliceDiagnostics.Add(string.Create(CultureInfo.InvariantCulture, $"Multiple target frameworks detected ({string.Join(", ", detectedTargetFrameworks)}); conditional-compilation guards were evaluated per project against each project's most modern target (Metadata.ProjectGuardTargetFrameworks, {projectGuards.Count} projects), and against '{representative}' for files outside a project with a readable target. Arms exclusive to a project's other targets are not analyzed."));
+                }
+                else
+                {
+                    sliceDiagnostics.Add($"Multiple target frameworks detected ({string.Join(", ", detectedTargetFrameworks)}); conditional-compilation guards were evaluated against '{representative}'. Arms exclusive to the other targets are not analyzed.");
+                }
             }
             else if (detectedTargetFrameworks.Count == 1)
             {
@@ -511,6 +681,141 @@ public static class Dosai
             Frameworks = frameworkResult.Frameworks,
             Diagnostics = sliceDiagnostics
         };
+    }
+
+    private static readonly AsyncLocal<ReleaseProbe?> CompilationReleaseProbe = new();
+
+    /// <summary>
+    ///     Test hook for the compilation-release contract: weakly observes the source
+    ///     compilations when they are built and, once source and framework analysis have
+    ///     returned, forces a full collection and records whether any of them survived. Applies
+    ///     to the current execution context and the analysis threads it starts.
+    /// </summary>
+    internal static IDisposable ObserveCompilationRelease(out ReleaseProbe probe)
+    {
+        var previous = CompilationReleaseProbe.Value;
+        var current = new ReleaseProbe();
+        probe = current;
+        CompilationReleaseProbe.Value = current;
+        return new ScopeRestore(() => CompilationReleaseProbe.Value = previous);
+    }
+
+    internal sealed class ReleaseProbe
+    {
+        private readonly List<WeakReference> _compilations = [];
+
+        /// <summary>Compilations observed; zero means source analysis built none.</summary>
+        public int Observed => _compilations.Count;
+
+        /// <summary>Compilations still reachable after the release point, or null before it ran.</summary>
+        public int? AliveAfterRelease { get; private set; }
+
+        internal void Observe(Frameworks.SourceCompilations compilations)
+        {
+            if (compilations.CSharp is not null) _compilations.Add(new WeakReference(compilations.CSharp));
+            if (compilations.VisualBasic is not null) _compilations.Add(new WeakReference(compilations.VisualBasic));
+        }
+
+        internal void RecordAfterRelease()
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+            AliveAfterRelease = _compilations.Count(reference => reference.IsAlive);
+        }
+    }
+
+    private sealed class ScopeRestore(Action restore) : IDisposable
+    {
+        public void Dispose() => restore();
+    }
+
+    /// <summary>
+    ///     The guard target each C# and F# project with a readable target framework resolved to,
+    ///     sorted by project path: the per-project decisions the parser made
+    ///     (<see cref="TargetFrameworkDetection.ForFile" />).
+    /// </summary>
+    private static List<ProjectGuardTarget> ProjectGuardTargets(string path)
+    {
+        var guards = new List<ProjectGuardTarget>();
+        foreach (var project in TargetFrameworkDetection.ProjectsUnder(path, ".csproj").Concat(TargetFrameworkDetection.ProjectsUnder(path, ".fsproj")))
+        {
+            if (project.ProjectFile is not null && FrameworkPreprocessorDefines.TrySelectRepresentative(project.TargetFrameworks, out var guard))
+            {
+                guards.Add(new ProjectGuardTarget
+                {
+                    Project = project.ProjectFile.Replace('\\', '/'),
+                    TargetFrameworks = [.. project.TargetFrameworks],
+                    GuardTargetFramework = guard
+                });
+            }
+        }
+
+        guards.Sort((x, y) => string.CompareOrdinal(x.Project, y.Project));
+        return guards;
+    }
+
+    /// <summary>
+    ///     Everything the methods slice needs from source analysis and its compilation consumers,
+    ///     without the compilations themselves.
+    /// </summary>
+    private sealed record SourceStage(
+        List<Method> SourceMethods,
+        List<Dependency> UsingDirectives,
+        List<MethodCalls> MethodCalls,
+        List<PropertyInfo> Properties,
+        List<FieldInfo> Fields,
+        List<EventInfo> Events,
+        List<ConstructorInfo> Constructors,
+        CallGraph CallGraph,
+        List<SourceAssemblyMapping> SourceAssemblyMappings,
+        bool SourceMode,
+        List<string> Diagnostics,
+        Frameworks.FrameworkAnalysisResult FrameworkResult,
+        List<ApiEndpoint> LegacyEndpoints,
+        List<ApiEndpoint> ApiEndpoints,
+        List<Frameworks.SecurityFinding> SecurityFindings);
+
+    /// <summary>
+    ///     Source analysis followed by the only phases that read its compilations: framework
+    ///     analysis and the security analyzer (neither reads the IL call graph, so running them
+    ///     before it loses nothing). The compilations and the framework context - with its
+    ///     per-file text cache - live only in this frame, so they are collectable as soon as it
+    ///     returns; see <see cref="BuildMethodsSlice" />. Never inlined, which would move them
+    ///     back into the caller's frame.
+    /// </summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static SourceStage AnalyzeSourcesAndFrameworks(string path, List<Method> assemblyMethods, PackageUrlResolver purlResolver, Frameworks.FrameworkAnalysisOptions? frameworkOptions)
+    {
+        var (sourceMethods, usings, methodCalls, properties, fields, events, constructors, callGraph, sourceAssemblyMapping, sourceMode, compilations, sourceDiagnostics) = AnalyzeSourcesWithDebugLogging(path, assemblyMethods);
+        CompilationReleaseProbe.Value?.Observe(compilations);
+        DebugLog.Count("source methods", sourceMethods.Count);
+        DebugLog.Count("call graph (source) nodes", callGraph.Nodes.Count);
+        DebugLog.Count("call graph (source) edges", callGraph.Edges.Count);
+
+        Frameworks.FrameworkAnalysisResult frameworkResult;
+        List<ApiEndpoint> legacyEndpoints;
+        List<ApiEndpoint> apiEndpoints;
+        List<Frameworks.SecurityFinding> securityFindings;
+        using (DebugLog.Phase("methods.framework-analysis"))
+        {
+            var frameworkContext = Frameworks.FrameworkContext.FromCompilations(path, compilations.CSharp, compilations.VisualBasic, purlResolver);
+            frameworkResult = Frameworks.FrameworkRegistry.Analyze(frameworkContext, frameworkOptions);
+            DebugLog.Count("framework api endpoints", frameworkResult.ApiEndpoints.Count);
+            DebugLog.Count("framework services", frameworkResult.Services.Count);
+            DebugLog.Count("framework ai components", frameworkResult.AiComponents.Count);
+            DebugLog.Count("framework entry points", frameworkResult.EntryPoints.Count);
+            // ApiEndpointAnalyzer now only covers what no provider owns (VB.NET); the framework providers
+            // own every C# endpoint. Entry points are therefore built from the analyzer's endpoints ALONE;
+            // feeding it the combined list produced a second, MethodId-less copy of every provider endpoint.
+            legacyEndpoints = DebugLog.Measure("methods.legacy-api-endpoints", () => ApiEndpointAnalyzer.GetApiEndpoints(path));
+            DebugLog.Count("legacy analyzer api endpoints (VB remainder)", legacyEndpoints.Count);
+            apiEndpoints = frameworkResult.ApiEndpoints.Concat(legacyEndpoints).ToList();
+            securityFindings = DebugLog.Measure("methods.security-analysis", () => Frameworks.SecurityAnalyzer.Run(frameworkContext, frameworkResult, apiEndpoints));
+        }
+
+        return new SourceStage(sourceMethods, usings, methodCalls, properties, fields, events, constructors, callGraph, sourceAssemblyMapping, sourceMode, sourceDiagnostics,
+            frameworkResult, legacyEndpoints, apiEndpoints, securityFindings);
     }
 
     /// <summary>
@@ -752,9 +1057,14 @@ public static class Dosai
 
     private static void MergeCallGraph(CallGraph target, CallGraph source)
     {
-        var nodesById = target.Nodes
-            .GroupBy(node => node.Id, StringComparer.Ordinal)
-            .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
+        // First-wins node identity, same as the GroupBy/ToDictionary it replaces, without
+        // allocating a grouping per node id.
+        var nodesById = new Dictionary<string, MethodNode>(target.Nodes.Count, StringComparer.Ordinal);
+        foreach (var node in target.Nodes)
+        {
+            nodesById.TryAdd(node.Id, node);
+        }
+
         foreach (var node in source.Nodes)
         {
             if (!nodesById.TryGetValue(node.Id, out var existingNode))
@@ -768,34 +1078,26 @@ public static class Dosai
             }
         }
 
-        var edgeKeys = target.Edges
-            .Select(BuildCallGraphEdgeKey)
-            .ToHashSet(StringComparer.Ordinal);
+        // Struct keys instead of one concatenated string per edge: the merge runs over every
+        // edge of both graphs, and at millions of edges the key strings alone were gigabytes.
+        var edgeKeys = new HashSet<GraphAssembly.EdgeSiteKey>(target.Edges.Count, GraphAssembly.EdgeSiteKeyComparer.Instance);
+        foreach (var edge in target.Edges)
+        {
+            edgeKeys.Add(GraphAssembly.EdgeSiteKey.FromEdge(edge));
+        }
+
         foreach (var edge in source.Edges)
         {
-            var key = BuildCallGraphEdgeKey(edge);
-            if (edgeKeys.Add(key))
+            if (edgeKeys.Add(GraphAssembly.EdgeSiteKey.FromEdge(edge)))
             {
                 target.Edges.Add(edge);
             }
         }
 
-        target.Nodes = target.Nodes.OrderBy(node => node.Id, StringComparer.Ordinal).ToList();
-        target.Edges = target.Edges
-            .OrderBy(edge => edge.SourceId, StringComparer.Ordinal)
-            .ThenBy(edge => edge.TargetId, StringComparer.Ordinal)
-            .ThenBy(edge => edge.CallLocation.FileName, StringComparer.Ordinal)
-            .ThenBy(edge => edge.CallLocation.LineNumber)
-            .ThenBy(edge => edge.CallLocation.ColumnNumber)
-            .Select((edge, index) =>
-            {
-                edge.Id = $"e{index + 1}";
-                return edge;
-            })
-            .ToList();
+        GraphAssembly.SortNodesInPlace(target.Nodes);
+        GraphAssembly.SortEdgesInPlace(target.Edges);
+        GraphAssembly.AssignEdgeIds(target.Edges, "e");
     }
-
-    private static string BuildCallGraphEdgeKey(MethodCallEdge edge) => $"{edge.SourceId}\u001f{edge.TargetId}\u001f{edge.CallLocation.FileName}\u001f{edge.CallLocation.LineNumber}\u001f{edge.CallLocation.ColumnNumber}\u001f{edge.CallType}\u001f{edge.EvidenceKind}";
 
     private static AnalysisEvidenceKind ResolveCallEvidenceKind(MethodCalls call)
     {
@@ -992,7 +1294,9 @@ public static class Dosai
             }
         }
 
-        assemblyCallGraph.Nodes = normalizedNodes.Values.OrderBy(node => node.Id, StringComparer.Ordinal).ToList();
+        var normalizedNodeList = normalizedNodes.Values.ToList();
+        GraphAssembly.SortNodesInPlace(normalizedNodeList);
+        assemblyCallGraph.Nodes = normalizedNodeList;
     }
 
     private static void EnrichMethodIdentities(List<Method> methods, CallGraph callGraph, bool sourceMode)
@@ -1182,12 +1486,22 @@ public static class Dosai
             : (new Version(0, 0), false);
     }
 
+    private static readonly Lazy<HashSet<string>> DotnetSharedRuntimeRoots = new(ListDotnetSharedRuntimeRoots, LazyThreadSafetyMode.ExecutionAndPublication);
+
+    /// <summary>
+    ///     The shared roots (<c>.../dotnet/shared</c>) of every installed .NET runtime, from
+    ///     <c>dotnet --list-runtimes</c>, run once per process.
+    /// </summary>
+    internal static IReadOnlyCollection<string> GetDotnetSharedRuntimeRoots() => DotnetSharedRuntimeRoots.Value;
+
+    private static HashSet<string> GetDotnetSharedRuntimePaths() => DotnetSharedRuntimeRoots.Value;
+
     /// <summary>
     /// Discovers the paths of all installed .NET shared runtimes (like Microsoft.NETCore.App
     /// and Microsoft.AspNetCore.App) by executing 'dotnet --list-runtimes'.
     /// </summary>
     /// <returns>A HashSet of directory paths containing the shared runtime assemblies.</returns>
-    private static HashSet<string> GetDotnetSharedRuntimePaths()
+    private static HashSet<string> ListDotnetSharedRuntimeRoots()
     {
         var runtimePaths = new HashSet<string>();
         try
@@ -1220,9 +1534,11 @@ public static class Dosai
         }
         catch (Exception ex)
         {
-            Console.ForegroundColor = ConsoleColor.Red;
-            Console.WriteLine($"Error: Could not execute 'dotnet --list-runtimes' to find shared frameworks. Please ensure the .NET SDK is installed and that 'dotnet' is in your system's PATH. Details: {ex.Message}");
-            Console.ResetColor();
+            // Not an error: a self-contained Dosai runs with no `dotnet` on PATH by design and
+            // references its bundled runtime (FrameworkReferences). This used to print a red
+            // "Error:" line to stdout on every such run, into the same stream a caller may be
+            // reading JSON from.
+            DebugLog.Log($"'dotnet --list-runtimes' unavailable, installed shared frameworks are not probed: {ex.Message}");
         }
         return runtimePaths;
     }
@@ -1706,6 +2022,66 @@ public static class Dosai
     ///     it, and the collectors merge in file order afterwards, keeping the aggregated output
     ///     byte-identical to a sequential run (issue #65).
     /// </summary>
+    /// <summary>
+    ///     Under --debug, the compilation's declaration errors (issue #69): the total, how many
+    ///     files carry one, and the full histogram by diagnostic id - a tree whose names mostly
+    ///     fail to resolve is otherwise indistinguishable from a healthy one. One
+    ///     compilation-wide pass after the symbol loop: a per-tree request completes the whole
+    ///     assembly under a location filter each time, which is quadratic in the file count.
+    ///     Only under --debug, because even the single pass is costly on a large unbuilt tree and
+    ///     --debug never changes the JSON. Roslyn's declaration completion can itself throw on
+    ///     hostile input (an InvalidCastException on the dotnet/runtime tree); that is logged,
+    ///     never fatal.
+    /// </summary>
+    private static void LogDeclarationErrors(Compilation compilation, bool hasTrees)
+    {
+        if (!hasTrees)
+        {
+            return;
+        }
+
+        var language = compilation.Language;
+        using var phase = DebugLog.Phase($"methods.declaration-diagnostics ({language})");
+        var errors = new Dictionary<string, int>(StringComparer.Ordinal);
+        var files = new HashSet<SyntaxTree>();
+        try
+        {
+            foreach (var diagnostic in compilation.GetDeclarationDiagnostics())
+            {
+                if (diagnostic.Severity == DiagnosticSeverity.Error)
+                {
+                    errors[diagnostic.Id] = errors.GetValueOrDefault(diagnostic.Id) + 1;
+                    if (diagnostic.Location.SourceTree is { } tree)
+                    {
+                        files.Add(tree);
+                    }
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException)
+        {
+            // Roslyn 5.9 throws InvalidCastException from
+            // SourceNamedTypeSymbol.GetCorrespondingBaseListLocation when top-level statements
+            // and a `partial class Program : ISomething` that leaves a member unimplemented meet
+            // in one compilation: the synthesized Program's declaration is a compilation unit.
+            var inner = ex is AggregateException aggregate ? aggregate.Flatten().InnerExceptions.FirstOrDefault() ?? ex : ex;
+            var frame = inner.StackTrace?.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault();
+            DebugLog.Log($"{language} declaration diagnostics failed inside the compiler, no histogram: {inner.GetType().Name}: {inner.Message} {frame}");
+            return;
+        }
+
+        DebugLog.Count($"{language} source declaration errors", errors.Values.Sum());
+        DebugLog.Count($"{language} source files with declaration errors", files.Count);
+        DebugLog.Count($"{language} compiled syntax trees", compilation.SyntaxTrees.Count());
+        if (errors.Count > 0)
+        {
+            DebugLog.Log($"{language} source declaration errors by id: " + string.Join(", ", errors
+                .OrderByDescending(entry => entry.Value)
+                .ThenBy(entry => entry.Key, StringComparer.Ordinal)
+                .Select(entry => string.Create(CultureInfo.InvariantCulture, $"{entry.Key} {entry.Value}"))));
+        }
+    }
+
     private sealed class SourceFileSymbols
     {
         public List<Method> Methods { get; } = [];
@@ -1723,12 +2099,12 @@ public static class Dosai
     private static Method CreateMethodFromSymbol(
         IMethodSymbol methodSymbol,
         SemanticModel model,
-        string sourceFilePath,
+        string relativePath,
         string fileName,
-        string basePath,
         int lineNumber,
         int columnNumber,
-        List<string> diagnostics)
+        List<string> diagnostics,
+        SourceRenderCache renderCache)
     {
         if (lineNumber == 0 || columnNumber == 0)
         {
@@ -1761,19 +2137,19 @@ public static class Dosai
             metadataToken = methodSymbol.MetadataToken;
         }
 
-        string sourceSignature = GenerateMethodSignature(methodSymbol);
-        string assemblySignature = methodSymbol.ToDisplayString();
+        string sourceSignature = renderCache.Signature(methodSymbol);
+        string assemblySignature = renderCache.Display(methodSymbol);
 
         var baseType = containingType?.BaseType?.Name ?? "Object";
-        var implementedInterfaces = containingType?.AllInterfaces.Select(i => i.Name).ToList() ?? [];
+        var implementedInterfaces = renderCache.InterfaceNames(containingType) ?? [];
 
         return new Method
         {
-            Path = Path.GetRelativePath(basePath, sourceFilePath),
+            Path = relativePath,
             FileName = fileName,
-            Assembly = assembly?.ToDisplayString() ?? "",
-            Module = module?.ToDisplayString() ?? "",
-            Namespace = containingNamespace?.ToDisplayString() ?? "",
+            Assembly = assembly is null ? "" : renderCache.Display(assembly),
+            Module = module is null ? "" : renderCache.Display(module),
+            Namespace = containingNamespace is null ? "" : renderCache.Display(containingNamespace),
             ClassName = GetNamedContainingTypeName(methodSymbol),
             Attributes = TitleCase(string.Join(", ", modifiers)),
             Name = methodSymbol.Name,
@@ -1826,34 +2202,15 @@ public static class Dosai
         var mergedDiagnostics = new List<string>();
         var dispatchIndexes = new Dictionary<Compilation, DispatchResolver.SourceIndex>();
         var metadataReferences = new Dictionary<string, PortableExecutableReference>(StringComparer.OrdinalIgnoreCase);
-#pragma warning disable IL3000
-        // Single-file bundles give the core assembly no file location and set no
-        // TRUSTED_PLATFORM_ASSEMBLIES entries; combining the app directory with an empty
-        // location used to make CreateFromFile open the directory itself and crash.
-        if (Path.IsPathRooted(typeof(object).Assembly.Location))
+        // Framework references: the host's trusted platform assemblies, a self-contained
+        // bundle's own runtime, or the newest installed shared framework (issue #67).
+        var frameworkReferences = FrameworkReferences.Current;
+        foreach (var (key, reference) in frameworkReferences.References)
         {
-            var mscorlib = MetadataReference.CreateFromFile(typeof(object).Assembly.Location);
-            metadataReferences[mscorlib.FilePath ?? "System.Private.CoreLib"] = mscorlib;
+            metadataReferences.TryAdd(key, reference);
         }
-#pragma warning restore IL3000
-        if (AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES") is string trustedPlatformAssemblies)
-        {
-            foreach (var referencePath in trustedPlatformAssemblies.Split(Path.PathSeparator).Where(File.Exists))
-            {
-                metadataReferences.TryAdd(referencePath, MetadataReference.CreateFromFile(referencePath));
-            }
-        }
-        // Single-file fallback: with no core location and no trusted-platform entries, seed
-        // framework references from the newest probeable shared framework so source analysis
-        // keeps a usable semantic model. Only one framework directory is used - mixing
-        // versions would give Roslyn duplicate assembly identities.
-        if (metadataReferences.Count == 0 && GetSharedFrameworkProbingPaths().FirstOrDefault(Directory.Exists) is { } frameworkDirectory)
-        {
-            foreach (var referencePath in SafeFileRead.EnumerateAllFilesSafe(frameworkDirectory, "*.dll"))
-            {
-                metadataReferences.TryAdd(referencePath, MetadataReference.CreateFromFile(referencePath));
-            }
-        }
+
+        DebugLog.Count($"framework metadata references ({frameworkReferences.Source})", frameworkReferences.References.Count);
         foreach (var externalAssembly in assembliesToInspect.Where(IsManagedAssembly))
         {
             metadataReferences.TryAdd(externalAssembly, MetadataReference.CreateFromFile(externalAssembly));
@@ -1872,17 +2229,37 @@ public static class Dosai
 
         var referenceList = metadataReferences.Values.ToList();
         DebugLog.Count("roslyn metadata references", referenceList.Count);
-        List<CSharpSyntaxTree> csharpTrees;
+        // Parsing dominates wall time on large trees and is embarrassingly parallel - one
+        // tree per file, no shared state - so the read+parse pair runs on the same worker
+        // team the symbol loop uses. Results land by index, so tree order (and therefore
+        // every downstream order) stays the file order a sequential parse produced.
+        var csharpSources = sourcesToInspect
+            .Where(source => Path.GetExtension(source).Equals(Constants.CSharpSourceExtension, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        var parsedCsharpTrees = new CSharpSyntaxTree?[csharpSources.Length];
+        var parsedClassifications = new ReferenceSources.Classification?[csharpSources.Length];
         using (DebugLog.Phase("methods.parse-csharp"))
         {
-            csharpTrees = sourcesToInspect
-                .Where(source => Path.GetExtension(source).Equals(Constants.CSharpSourceExtension, StringComparison.OrdinalIgnoreCase))
-                .Select(source => SafeFileRead.TryReadAllText(source, out var content)
-                    ? CSharpSourceParser.Parse(content, source)
-                    : null)
-                .OfType<CSharpSyntaxTree>()
-                .ToList();
+            DedicatedStack.ForEach("Dosai parse csharp", Math.Max(1, MaxSymbolAnalysisWorkers), csharpSources.Length, index =>
+            {
+                if (SafeFileRead.TryReadAllText(csharpSources[index], out var content))
+                {
+                    var tree = CSharpSourceParser.Parse(content, csharpSources[index], path);
+                    parsedCsharpTrees[index] = tree;
+                    parsedClassifications[index] = ReferenceSources.Classify(tree);
+                }
+            });
         }
+
+        // API-surface stubs compiled beside their implementation declare every member twice
+        // and make binding nondeterministic (issue #69); they stay out of the compilation.
+        var partition = ReferenceSources.Partition(
+            parsedCsharpTrees.OfType<CSharpSyntaxTree>().ToList(),
+            parsedClassifications.OfType<ReferenceSources.Classification>().ToList());
+        var csharpTrees = partition.Kept;
+        DebugLog.Count("reference-assembly sources skipped", partition.Skipped.Count);
+        DebugLog.Count("reference-assembly sources trimmed", partition.Trimmed.Count);
+        mergedDiagnostics.AddRange(ReferenceSources.Diagnostics(partition, TargetFrameworkDetection.ProjectContextRoot(Path.GetFullPath(path))));
         // Implicit-usings projects rely on global usings their compiler injects; without the
         // synthetic tree every BCL call in them fails to bind and vanishes from the graph.
         if (CSharpSourceParser.TryCreateImplicitUsingsTree(path) is { } implicitUsingsTree)
@@ -1895,23 +2272,29 @@ public static class Dosai
             references: referenceList,
             options: new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
         DebugLog.Count("csharp syntax trees", csharpTrees.Count);
-        List<VisualBasicSyntaxTree> vbTrees;
+        var vbSources = sourcesToInspect
+            .Where(source => Path.GetExtension(source).Equals(Constants.VBSourceExtension, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        var parsedVbTrees = new VisualBasicSyntaxTree?[vbSources.Length];
         using (DebugLog.Phase("methods.parse-visualbasic"))
         {
-            vbTrees = sourcesToInspect
-                .Where(source => Path.GetExtension(source).Equals(Constants.VBSourceExtension, StringComparison.OrdinalIgnoreCase))
-                .Select(source => SafeFileRead.TryReadAllText(source, out var content)
-                    ? (VisualBasicSyntaxTree)VisualBasicSyntaxTree.ParseText(content, path: source)
-                    : null)
-                .OfType<VisualBasicSyntaxTree>()
-                .ToList();
+            DedicatedStack.ForEach("Dosai parse visualbasic", Math.Max(1, MaxSymbolAnalysisWorkers), vbSources.Length,
+                index => parsedVbTrees[index] = SafeFileRead.TryReadAllText(vbSources[index], out var content)
+                    ? (VisualBasicSyntaxTree)VisualBasicSyntaxTree.ParseText(content, path: vbSources[index])
+                    : null);
         }
+
+        var vbTrees = parsedVbTrees.OfType<VisualBasicSyntaxTree>().ToList();
         var vbCompilation = VisualBasicCompilation.Create(
             "Dosai.SourceAnalysis.VisualBasic",
             syntaxTrees: vbTrees,
             references: referenceList,
             options: new VisualBasicCompilationOptions(Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary));
         DebugLog.Count("visualbasic syntax trees", vbTrees.Count);
+        if ((csharpTrees.Count > 0 || vbTrees.Count > 0) && frameworkReferences.Diagnostic is { } frameworkDiagnostic)
+        {
+            mergedDiagnostics.Add(frameworkDiagnostic);
+        }
 
         // Keyed lookups: a linear search per file was quadratic in the file count.
         var csharpTreesByPath = new Dictionary<string, CSharpSyntaxTree>(StringComparer.Ordinal);
@@ -1931,6 +2314,12 @@ public static class Dosai
         // instead of hiding in the first file's slice of the symbol-analysis clock.
         var workerCount = Math.Max(1, MaxSymbolAnalysisWorkers);
         DebugLog.Count("symbol analysis workers", Math.Min(workerCount, Math.Max(1, sourcesToInspect.Count)));
+        // Shared per-run memo for every string rendered from a symbol (signatures, display
+        // strings, interface-name lists). One render and one retained string instance per
+        // distinct symbol, no matter how many members or call sites mention it - the per-call
+        // renders it replaces were both the walker's biggest cost and a per-mention duplicate
+        // in every downstream MethodCalls/edge/node record (issue #65 memory scaling).
+        var renderCache = new SourceRenderCache();
         using (DebugLog.Phase("methods.dispatch-index"))
         {
             if (csharpTrees.Count > 0)
@@ -1962,6 +2351,9 @@ public static class Dosai
             var constructors = symbols.Constructors;
             var sourceDiagnostics = symbols.Diagnostics;
             var fileName = Path.GetFileName(sourceFilePath);
+            // Computed once per file: it was rendered per member and per call site, a pure
+            // function of (path, file) that left an identical string behind in every record.
+            var relativePath = Path.GetRelativePath(path, sourceFilePath);
             var extn = Path.GetExtension(sourceFilePath);
             SemanticModel? model;
             CompilationUnitSyntax? csRoot = null;
@@ -1995,6 +2387,7 @@ public static class Dosai
             {
                 sourceDiagnostics.Add(depthDiagnostic);
             }
+
 
             var csMethodDeclarations = csRoot?.DescendantNodes().OfType<MethodDeclarationSyntax>();
             var vbMethodDeclarations = vbRoot?.DescendantNodes().OfType<MethodStatementSyntax>();
@@ -2031,7 +2424,7 @@ public static class Dosai
                         // Get the containing type for inheritance information
                         var containingType = methodSymbol.ContainingType;
                         var baseType = containingType?.BaseType?.Name;
-                        var implementedInterfaces = containingType?.AllInterfaces.Select(i => i.Name).ToList();
+                        var implementedInterfaces = renderCache.InterfaceNames(containingType);
                         var metadataToken = 0;
                         if (SymbolEqualityComparer.Default.Equals(methodSymbol.ContainingAssembly, model.Compilation.Assembly))
                         {
@@ -2041,11 +2434,11 @@ public static class Dosai
                         List<string> genericParameters = methodSymbol.TypeParameters.Select(tp => tp.Name).ToList();
                         sourceMethods.Add(new Method
                         {
-                            Path = Path.GetRelativePath(path, sourceFilePath),
+                            Path = relativePath,
                             FileName = fileName,
-                            Assembly = methodSymbol.ContainingAssembly.ToDisplayString(),
-                            Module = methodSymbol.ContainingModule.ToDisplayString(),
-                            Namespace = methodSymbol.ContainingNamespace.ToDisplayString(),
+                            Assembly = renderCache.Display(methodSymbol.ContainingAssembly),
+                            Module = renderCache.Display(methodSymbol.ContainingModule),
+                            Namespace = renderCache.Display(methodSymbol.ContainingNamespace),
                             ClassName = GetNamedContainingTypeName(methodSymbol),
                             Attributes = TitleCase(string.Join(", ", modifiers)),
                             Name = methodSymbol.Name,
@@ -2063,7 +2456,7 @@ public static class Dosai
                             BaseType = baseType,
                             ImplementedInterfaces = implementedInterfaces,
                             MetadataToken = metadataToken,
-                            SourceSignature = GenerateMethodSignature(methodSymbol),
+                            SourceSignature = renderCache.Signature(methodSymbol),
                             IsGenericMethod = isGenericMethod,
                             GenericParameters = genericParameters,
                         });
@@ -2083,11 +2476,11 @@ public static class Dosai
                 var mainSpan = globalStatements[0].Statement.SyntaxTree.GetLineSpan(globalStatements[0].Statement.Span);
                 sourceMethods.Add(new Method
                 {
-                    Path = Path.GetRelativePath(path, sourceFilePath),
+                    Path = relativePath,
                     FileName = fileName,
-                    Assembly = topLevelMain.ContainingAssembly.ToDisplayString(),
-                    Module = topLevelMain.ContainingModule.ToDisplayString(),
-                    Namespace = topLevelMain.ContainingNamespace.ToDisplayString(),
+                    Assembly = renderCache.Display(topLevelMain.ContainingAssembly),
+                    Module = renderCache.Display(topLevelMain.ContainingModule),
+                    Namespace = renderCache.Display(topLevelMain.ContainingNamespace),
                     ClassName = topLevelMain.ContainingType.Name,
                     Attributes = "Static",
                     Name = topLevelMain.Name,
@@ -2104,7 +2497,7 @@ public static class Dosai
                     CustomAttributes = [],
                     BaseType = null,
                     ImplementedInterfaces = [],
-                    SourceSignature = GenerateMethodSignature(topLevelMain)
+                    SourceSignature = renderCache.Signature(topLevelMain)
                 });
             }
 
@@ -2124,7 +2517,7 @@ public static class Dosai
                         // Get inheritance information
                         var containingType = method.ContainingType;
                         var baseType = containingType?.BaseType?.Name;
-                        var implementedInterfaces = containingType?.AllInterfaces.Select(i => i.Name).ToList();
+                        var implementedInterfaces = renderCache.InterfaceNames(containingType);
                         var metadataToken = 0;
                         if (SymbolEqualityComparer.Default.Equals(method.ContainingAssembly, model.Compilation.Assembly))
                         {
@@ -2132,11 +2525,11 @@ public static class Dosai
                         }
                         sourceMethods.Add(new Method
                         {
-                            Path = Path.GetRelativePath(path, sourceFilePath),
+                            Path = relativePath,
                             FileName = fileName,
-                            Assembly = method.ContainingAssembly.ToDisplayString(),
-                            Module = method.ContainingModule.ToDisplayString(),
-                            Namespace = method.ContainingNamespace.ToDisplayString(),
+                            Assembly = renderCache.Display(method.ContainingAssembly),
+                            Module = renderCache.Display(method.ContainingModule),
+                            Namespace = renderCache.Display(method.ContainingNamespace),
                             ClassName = method.ContainingType.Name,
                             Attributes = TitleCase(string.Join(", ", modifiers)),
                             Name = method.Name,
@@ -2152,7 +2545,7 @@ public static class Dosai
                             BaseType = baseType,
                             ImplementedInterfaces = implementedInterfaces,
                             MetadataToken = metadataToken,
-                            SourceSignature = GenerateMethodSignature(method)
+                            SourceSignature = renderCache.Signature(method)
                         });
                     }
                 }
@@ -2174,7 +2567,7 @@ public static class Dosai
                         // Get inheritance information
                         var containingType = propertySymbol.ContainingType;
                         var baseType = containingType?.BaseType?.Name;
-                        var implementedInterfaces = containingType?.AllInterfaces.Select(i => i.Name).ToList();
+                        var implementedInterfaces = renderCache.InterfaceNames(containingType);
                         var metadataToken = 0;
                         if (SymbolEqualityComparer.Default.Equals(propertySymbol.ContainingAssembly, model.Compilation.Assembly))
                         {
@@ -2182,11 +2575,11 @@ public static class Dosai
                         }
                         properties.Add(new PropertyInfo
                         {
-                            Path = Path.GetRelativePath(path, sourceFilePath),
+                            Path = relativePath,
                             FileName = fileName,
-                            Assembly = propertySymbol.ContainingAssembly.ToDisplayString(),
-                            Module = propertySymbol.ContainingModule.ToDisplayString(),
-                            Namespace = propertySymbol.ContainingNamespace.ToDisplayString(),
+                            Assembly = renderCache.Display(propertySymbol.ContainingAssembly),
+                            Module = renderCache.Display(propertySymbol.ContainingModule),
+                            Namespace = renderCache.Display(propertySymbol.ContainingNamespace),
                             ClassName = GetNamedContainingTypeName(propertySymbol),
                             Attributes = TitleCase(string.Join(", ", modifiers)),
                             Name = propertySymbol.Name,
@@ -2204,12 +2597,12 @@ public static class Dosai
                         });
                         if (propertySymbol.GetMethod is not null)
                         {
-                            var getterMethod = CreateMethodFromSymbol(propertySymbol.GetMethod, model, sourceFilePath, fileName, path, lineNumber, columnNumber, sourceDiagnostics);
+                            var getterMethod = CreateMethodFromSymbol(propertySymbol.GetMethod, model, relativePath, fileName, lineNumber, columnNumber, sourceDiagnostics, renderCache);
                             sourceMethods.Add(getterMethod);    
                         }
                         if (propertySymbol.SetMethod is not null)
                         {
-                            var setterMethod = CreateMethodFromSymbol(propertySymbol.SetMethod, model, sourceFilePath, fileName, path, lineNumber, columnNumber, sourceDiagnostics);
+                            var setterMethod = CreateMethodFromSymbol(propertySymbol.SetMethod, model, relativePath, fileName, lineNumber, columnNumber, sourceDiagnostics, renderCache);
                             sourceMethods.Add(setterMethod);
                         }
                     }
@@ -2232,7 +2625,7 @@ public static class Dosai
                         // Get inheritance information
                         var containingType = propertySymbol.ContainingType;
                         var baseType = containingType?.BaseType?.Name;
-                        var implementedInterfaces = containingType?.AllInterfaces.Select(i => i.Name).ToList();
+                        var implementedInterfaces = renderCache.InterfaceNames(containingType);
                         var metadataToken = 0;
                         if (SymbolEqualityComparer.Default.Equals(propertySymbol.ContainingAssembly, model.Compilation.Assembly))
                         {
@@ -2240,11 +2633,11 @@ public static class Dosai
                         }
                         properties.Add(new PropertyInfo
                         {
-                            Path = Path.GetRelativePath(path, sourceFilePath),
+                            Path = relativePath,
                             FileName = fileName,
-                            Assembly = propertySymbol.ContainingAssembly.ToDisplayString(),
-                            Module = propertySymbol.ContainingModule.ToDisplayString(),
-                            Namespace = propertySymbol.ContainingNamespace.ToDisplayString(),
+                            Assembly = renderCache.Display(propertySymbol.ContainingAssembly),
+                            Module = renderCache.Display(propertySymbol.ContainingModule),
+                            Namespace = renderCache.Display(propertySymbol.ContainingNamespace),
                             ClassName = GetNamedContainingTypeName(propertySymbol),
                             Attributes = TitleCase(string.Join(", ", modifiers)),
                             Name = propertySymbol.Name,
@@ -2262,13 +2655,13 @@ public static class Dosai
                         });
                         if (propertySymbol.GetMethod is not null)
                         {
-                            var getterMethod = CreateMethodFromSymbol(propertySymbol.GetMethod, model, sourceFilePath, fileName, path, lineNumber, columnNumber, sourceDiagnostics);
+                            var getterMethod = CreateMethodFromSymbol(propertySymbol.GetMethod, model, relativePath, fileName, lineNumber, columnNumber, sourceDiagnostics, renderCache);
                             sourceMethods.Add(getterMethod);
                         }
 
                         if (propertySymbol.SetMethod is not null)
                         {
-                            var setterMethod = CreateMethodFromSymbol(propertySymbol.SetMethod, model, sourceFilePath, fileName, path, lineNumber, columnNumber, sourceDiagnostics);
+                            var setterMethod = CreateMethodFromSymbol(propertySymbol.SetMethod, model, relativePath, fileName, lineNumber, columnNumber, sourceDiagnostics, renderCache);
                             sourceMethods.Add(setterMethod);
                         }
                     }
@@ -2301,7 +2694,7 @@ public static class Dosai
                         var metadataToken = 0;
                         fields.Add(new FieldInfo
                         {
-                            Path = Path.GetRelativePath(path, sourceFilePath),
+                            Path = relativePath,
                             FileName = fileName,
                             Assembly = model.Compilation.Assembly.ToDisplayString(),
                             Module = model.Compilation.Assembly.Modules.FirstOrDefault()?.ToDisplayString(),
@@ -2362,7 +2755,7 @@ public static class Dosai
                             var metadataToken = 0;
                             fields.Add(new FieldInfo
                             {
-                                Path = Path.GetRelativePath(path, sourceFilePath),
+                                Path = relativePath,
                                 FileName = fileName,
                                 Assembly = model?.Compilation.Assembly.ToDisplayString(),
                                 Module = model?.Compilation.Assembly.Modules.FirstOrDefault()?.ToDisplayString(),
@@ -2410,7 +2803,7 @@ public static class Dosai
                         // Get inheritance information
                         var containingType = eventSymbol.ContainingType;
                         var baseType = containingType?.BaseType?.Name;
-                        var implementedInterfaces = containingType?.AllInterfaces.Select(i => i.Name).ToList();
+                        var implementedInterfaces = renderCache.InterfaceNames(containingType);
                         var metadataToken = 0;
                         if (SymbolEqualityComparer.Default.Equals(eventSymbol.ContainingAssembly, model?.Compilation.Assembly))
                         {
@@ -2418,11 +2811,11 @@ public static class Dosai
                         }
                         events.Add(new EventInfo
                         {
-                            Path = Path.GetRelativePath(path, sourceFilePath),
+                            Path = relativePath,
                             FileName = fileName,
-                            Assembly = eventSymbol.ContainingAssembly.ToDisplayString(),
-                            Module = eventSymbol.ContainingModule.ToDisplayString(),
-                            Namespace = eventSymbol.ContainingNamespace.ToDisplayString(),
+                            Assembly = renderCache.Display(eventSymbol.ContainingAssembly),
+                            Module = renderCache.Display(eventSymbol.ContainingModule),
+                            Namespace = renderCache.Display(eventSymbol.ContainingNamespace),
                             ClassName = GetNamedContainingTypeName(eventSymbol),
                             Attributes = TitleCase(string.Join(", ", modifiers)),
                             Name = eventSymbol.Name,
@@ -2451,31 +2844,36 @@ public static class Dosai
                     
                     foreach(var variable in variables)
                     {
-                        var variableSymbol = model.GetDeclaredSymbol(variable) as IFieldSymbol;
+                        // A field-like event's declarator declares the event itself: Roslyn hands
+                        // back an IEventSymbol there, never an IFieldSymbol. Casting to the field
+                        // symbol left it null for every such event, so each one reported the
+                        // compilation's name as its namespace, no interfaces and no token.
+                        var eventSymbol = model.GetDeclaredSymbol(variable) as IEventSymbol;
                         var codeSpan = variable.SyntaxTree.GetLineSpan(variable.Span);
                         var lineNumber = codeSpan.StartLinePosition.Line + 1;
                         var columnNumber = codeSpan.Span.Start.Character + 1;
                         // Get inheritance information
-                        var containingType = variableSymbol?.ContainingType;
+                        var containingType = eventSymbol?.ContainingType;
                         var baseType = containingType?.BaseType?.Name;
-                        var implementedInterfaces = containingType?.AllInterfaces.Select(i => i.Name).ToList();
+                        var implementedInterfaces = renderCache.InterfaceNames(containingType);
                         var metadataToken = 0;
-                        if (variableSymbol is not null && SymbolEqualityComparer.Default.Equals(variableSymbol.ContainingAssembly, model?.Compilation.Assembly))
+                        if (eventSymbol is not null && SymbolEqualityComparer.Default.Equals(eventSymbol.ContainingAssembly, model?.Compilation.Assembly))
                         {
-                            metadataToken = variableSymbol.MetadataToken;
+                            metadataToken = eventSymbol.MetadataToken;
                         }
+                        var eventType = eventSymbol?.Type ?? typeSymbol;
                         events.Add(new EventInfo
                         {
-                            Path = Path.GetRelativePath(path, sourceFilePath),
+                            Path = relativePath,
                             FileName = fileName,
-                            Assembly = variableSymbol?.ContainingAssembly.ToDisplayString() ?? model?.Compilation.Assembly.ToDisplayString(),
-                            Module = variableSymbol?.ContainingModule.ToDisplayString() ?? model?.Compilation.Assembly.Modules.FirstOrDefault()?.ToDisplayString(),
-                            Namespace = variableSymbol?.ContainingNamespace.ToDisplayString() ?? model?.Compilation.Assembly.Name,
-                            ClassName = variableSymbol is null ? GetContainingTypeName(eventFieldDeclaration) : GetNamedContainingTypeName(variableSymbol),
+                            Assembly = eventSymbol is not null ? renderCache.Display(eventSymbol.ContainingAssembly) : model?.Compilation.Assembly.ToDisplayString(),
+                            Module = eventSymbol is not null ? renderCache.Display(eventSymbol.ContainingModule) : model?.Compilation.Assembly.Modules.FirstOrDefault()?.ToDisplayString(),
+                            Namespace = eventSymbol is not null ? renderCache.Display(eventSymbol.ContainingNamespace) : model?.Compilation.Assembly.Name,
+                            ClassName = eventSymbol is null ? GetContainingTypeName(eventFieldDeclaration) : GetNamedContainingTypeName(eventSymbol),
                             Attributes = TitleCase(string.Join(", ", modifiers)),
                             Name = variable.Identifier.Text,
-                            Type = typeSymbol?.Name ?? type.ToString(),
-                            TypeFullName = typeSymbol?.ToDisplayString() ?? type.ToString(),
+                            Type = eventType?.Name ?? type.ToString(),
+                            TypeFullName = eventType?.ToDisplayString() ?? type.ToString(),
                             LineNumber = lineNumber,
                             ColumnNumber = columnNumber,
                             CustomAttributes = eventFieldDeclaration.AttributeLists.SelectMany(al => 
@@ -2513,7 +2911,7 @@ public static class Dosai
                         // Get inheritance information
                         var containingType = eventSymbol.ContainingType;
                         var baseType = containingType?.BaseType?.Name;
-                        var implementedInterfaces = containingType?.AllInterfaces.Select(i => i.Name).ToList();
+                        var implementedInterfaces = renderCache.InterfaceNames(containingType);
                         var metadataToken = 0;
                         if (SymbolEqualityComparer.Default.Equals(eventSymbol.ContainingAssembly, model?.Compilation.Assembly))
                         {
@@ -2521,11 +2919,11 @@ public static class Dosai
                         }
                         events.Add(new EventInfo
                         {
-                            Path = Path.GetRelativePath(path, sourceFilePath),
+                            Path = relativePath,
                             FileName = fileName,
-                            Assembly = eventSymbol.ContainingAssembly.ToDisplayString(),
-                            Module = eventSymbol.ContainingModule.ToDisplayString(),
-                            Namespace = eventSymbol.ContainingNamespace.ToDisplayString(),
+                            Assembly = renderCache.Display(eventSymbol.ContainingAssembly),
+                            Module = renderCache.Display(eventSymbol.ContainingModule),
+                            Namespace = renderCache.Display(eventSymbol.ContainingNamespace),
                             ClassName = GetNamedContainingTypeName(eventSymbol),
                             Attributes = TitleCase(string.Join(", ", modifiers)),
                             Name = eventSymbol.Name,
@@ -2558,7 +2956,7 @@ public static class Dosai
                         // Get inheritance information
                         var containingType = constructorSymbol.ContainingType;
                         var baseType = containingType?.BaseType?.Name;
-                        var implementedInterfaces = containingType?.AllInterfaces.Select(i => i.Name).ToList();
+                        var implementedInterfaces = renderCache.InterfaceNames(containingType);
                         if (SymbolEqualityComparer.Default.Equals(constructorSymbol.ContainingAssembly, model?.Compilation.Assembly))
                         {
                             metadataToken = constructorSymbol.MetadataToken;
@@ -2571,11 +2969,11 @@ public static class Dosai
                         }
                         constructors.Add(new ConstructorInfo
                         {
-                            Path = Path.GetRelativePath(path, sourceFilePath),
+                            Path = relativePath,
                             FileName = fileName,
-                            Assembly = constructorSymbol.ContainingAssembly.ToDisplayString(),
-                            Module = constructorSymbol.ContainingModule.ToDisplayString(),
-                            Namespace = constructorSymbol.ContainingNamespace.ToDisplayString(),
+                            Assembly = renderCache.Display(constructorSymbol.ContainingAssembly),
+                            Module = renderCache.Display(constructorSymbol.ContainingModule),
+                            Namespace = renderCache.Display(constructorSymbol.ContainingNamespace),
                             ClassName = containingType?.Name,
                             Attributes = TitleCase(string.Join(", ", modifiers)),
                             Name = containingType?.Name,
@@ -2620,7 +3018,7 @@ public static class Dosai
                             // Get inheritance information
                             var containingType = constructorSymbol.ContainingType;
                             var baseType = containingType?.BaseType?.Name;
-                            var implementedInterfaces = containingType?.AllInterfaces.Select(i => i.Name).ToList();
+                            var implementedInterfaces = renderCache.InterfaceNames(containingType);
                             var metadataToken = 0;
                             if (SymbolEqualityComparer.Default.Equals(constructorSymbol.ContainingAssembly, model?.Compilation.Assembly))
                             {
@@ -2628,11 +3026,11 @@ public static class Dosai
                             }
                             constructors.Add(new ConstructorInfo
                             {
-                                Path = Path.GetRelativePath(path, sourceFilePath),
+                                Path = relativePath,
                                 FileName = fileName,
-                                Assembly = constructorSymbol.ContainingAssembly.ToDisplayString(),
-                                Module = constructorSymbol.ContainingModule.ToDisplayString(),
-                                Namespace = constructorSymbol.ContainingNamespace.ToDisplayString(),
+                                Assembly = renderCache.Display(constructorSymbol.ContainingAssembly),
+                                Module = renderCache.Display(constructorSymbol.ContainingModule),
+                                Namespace = renderCache.Display(constructorSymbol.ContainingNamespace),
                                 ClassName = GetNamedContainingTypeName(constructorSymbol),
                                 Attributes = TitleCase(string.Join(", ", modifiers)),
                                 Name = constructorSymbol.ContainingType.Name,
@@ -2684,7 +3082,7 @@ public static class Dosai
 
                     allUsingDirectives.Add(new Dependency
                     {
-                        Path = Path.GetRelativePath(path, sourceFilePath),
+                        Path = relativePath,
                         FileName = fileName,
                         Assembly = assembly,
                         Module = module,
@@ -2726,7 +3124,7 @@ public static class Dosai
                     var directiveSpan = directive.GetLocation().GetLineSpan().StartLinePosition;
                     allUsingDirectives.Add(new Dependency
                     {
-                        Path = Path.GetRelativePath(path, sourceFilePath),
+                        Path = relativePath,
                         FileName = fileName,
                         Assembly = string.Empty,
                         Module = "FileBasedApp",
@@ -2768,7 +3166,7 @@ public static class Dosai
 
                     allUsingDirectives.Add(new Dependency
                     {
-                        Path = Path.GetRelativePath(path, sourceFilePath),
+                        Path = relativePath,
                         FileName = fileName,
                         Assembly = assembly,
                         Module = module,
@@ -2784,9 +3182,11 @@ public static class Dosai
             // method calls / object creation / property access / event assignment
             if (model is not null)
             {
-                var walker = new MethodCallOperationWalker(model, dispatchIndexes[model.Compilation], allMethodCalls, path, sourceFilePath, fileName);
+                var walker = new MethodCallOperationWalker(model, dispatchIndexes[model.Compilation], allMethodCalls, sourceFilePath, fileName, relativePath, renderCache);
                 var operationNodes = csRoot is not null
-                    ? csRoot.DescendantNodes().Where(node => node is Microsoft.CodeAnalysis.CSharp.Syntax.BlockSyntax or ArrowExpressionClauseSyntax or EqualsValueClauseSyntax or ConstructorInitializerSyntax or GlobalStatementSyntax)
+                    // A primary constructor's base-type arguments (`class D(int x) : B(x)`) are its
+                    // constructor initializer.
+                    ? csRoot.DescendantNodes().Where(node => node is Microsoft.CodeAnalysis.CSharp.Syntax.BlockSyntax or ArrowExpressionClauseSyntax or EqualsValueClauseSyntax or ConstructorInitializerSyntax or PrimaryConstructorBaseTypeSyntax or GlobalStatementSyntax)
                     : vbRoot?.DescendantNodes().Where(node => node is Microsoft.CodeAnalysis.VisualBasic.Syntax.StatementSyntax or Microsoft.CodeAnalysis.VisualBasic.Syntax.EqualsValueSyntax) ?? [];
                 foreach (var operationNode in operationNodes)
                 {
@@ -2839,6 +3239,13 @@ public static class Dosai
             firstAbandonedDispatch ??= fileResult.FirstAbandonedDispatch;
         }
 
+        // The collectors and the dispatch indexes have served their purpose; dropping the
+        // references here lets the per-file list backing arrays (a near-copy of every record
+        // collected) and the index's type buckets be collected while the graph is assembled
+        // instead of surviving next to it until the method returns.
+        fileSymbols = null;
+        dispatchIndexes.Clear();
+
         // Issue #64 containment: each counted call site keeps its direct edge but lost at least
         // one synthesized dispatch-candidate edge to a Roslyn failure. Counted per call site in
         // file order, so the number is the same for every worker count, and reported without
@@ -2849,9 +3256,16 @@ public static class Dosai
             mergedDiagnostics.Add($"Dispatch resolution failed at {abandonedDispatchSites} call site(s), first {firstAbandonedDispatch}; Roslyn threw while resolving an implementing member, so those virtual dispatch candidate edges are missing from the call graph (direct call edges are kept).");
         }
 
+        if (DebugLog.Enabled)
+        {
+            LogDeclarationErrors(csharpCompilation, csharpTrees.Count > 0);
+            LogDeclarationErrors(vbCompilation, vbTrees.Count > 0);
+        }
+
         // The per-file symbol-analysis phase ends with the merge; the frontends run on their own
         // clock because they cover F#, R, and C/C++ files the Roslyn loop never visits.
         symbolAnalysisPhase.Dispose();
+
 
         // Process non-Roslyn language frontends.
         List<Method> frontendMethods;
@@ -2902,44 +3316,51 @@ public static class Dosai
             }
         }
 
-        var methodNodes = methodNodeLookup.Values.OrderBy(n => n.Id, StringComparer.Ordinal).ToList();
-        var callEdges = mergedMethodCalls
-            .Where(call => !string.IsNullOrWhiteSpace(call.SourceId) && !string.IsNullOrWhiteSpace(call.TargetId))
-            .Select(call =>
+        var methodNodes = methodNodeLookup.Values.ToList();
+        GraphAssembly.SortNodesInPlace(methodNodes);
+        // Same-site collapse with the same first-wins semantics the GroupBy had (the first
+        // call in merged order defines the edge), but deduping the call BEFORE the edge is
+        // built: duplicate sites never allocate their edge object, and the key is a struct
+        // instead of a ~200-byte concatenated string per call site - at millions of sites
+        // that string churn was gigabytes of garbage allocated in exactly this tail (issue
+        // #65's heap climb after symbol analysis finished).
+        var seenCallSites = new HashSet<GraphAssembly.EdgeSiteKey>(mergedMethodCalls.Count, GraphAssembly.EdgeSiteKeyComparer.Instance);
+        var callEdges = new List<MethodCallEdge>(mergedMethodCalls.Count);
+        foreach (var call in mergedMethodCalls)
+        {
+            if (GraphAssembly.IsBlank(call.SourceId) || GraphAssembly.IsBlank(call.TargetId))
             {
-                var evidenceKind = ResolveCallEvidenceKind(call);
-                return new MethodCallEdge
-                {
-                    SourceId = call.SourceId!,
-                    TargetId = call.TargetId!,
-                    CallLocation = new CallLocation { FileName = call.FileName, LineNumber = call.LineNumber, ColumnNumber = call.ColumnNumber },
-                    Path = call.Path,
-                    FileName = call.FileName,
-                    IsInternal = call.IsInternal,
-                    CalledMethodName = call.CalledMethod,
-                    SourceName = call.CallerMethod,
-                    TargetName = call.CalledMethod,
-                    Arguments = call.Arguments ?? [],
-                    ArgumentExpressions = call.ArgumentExpressions ?? [],
-                    CallType = call.CallType,
-                    EvidenceKind = evidenceKind,
-                    DispatchConfidence = call.DispatchConfidence,
-                    Evidence = call.Evidence.Count > 0 ? call.Evidence : [CreateDefaultCallEvidence(call, evidenceKind)]
-                };
-            })
-            .GroupBy(edge => $"{edge.SourceId}\u001f{edge.TargetId}\u001f{edge.CallLocation.FileName}\u001f{edge.CallLocation.LineNumber}\u001f{edge.CallLocation.ColumnNumber}\u001f{edge.CallType}\u001f{edge.EvidenceKind}", StringComparer.Ordinal)
-            .Select(group => group.First())
-            .OrderBy(edge => edge.SourceId, StringComparer.Ordinal)
-            .ThenBy(edge => edge.TargetId, StringComparer.Ordinal)
-            .ThenBy(edge => edge.CallLocation.FileName, StringComparer.Ordinal)
-            .ThenBy(edge => edge.CallLocation.LineNumber)
-            .ThenBy(edge => edge.CallLocation.ColumnNumber)
-            .Select((edge, index) =>
+                continue;
+            }
+
+            var evidenceKind = ResolveCallEvidenceKind(call);
+            if (!seenCallSites.Add(GraphAssembly.EdgeSiteKey.FromCall(call, evidenceKind)))
             {
-                edge.Id = $"e{index + 1}";
-                return edge;
-            })
-            .ToList();
+                continue;
+            }
+
+            callEdges.Add(new MethodCallEdge
+            {
+                SourceId = call.SourceId!,
+                TargetId = call.TargetId!,
+                CallLocation = new CallLocation { FileName = call.FileName, LineNumber = call.LineNumber, ColumnNumber = call.ColumnNumber },
+                Path = call.Path,
+                FileName = call.FileName,
+                IsInternal = call.IsInternal,
+                CalledMethodName = call.CalledMethod,
+                SourceName = call.CallerMethod,
+                TargetName = call.CalledMethod,
+                Arguments = call.Arguments ?? [],
+                ArgumentExpressions = call.ArgumentExpressions ?? [],
+                CallType = call.CallType,
+                EvidenceKind = evidenceKind,
+                DispatchConfidence = call.DispatchConfidence,
+                Evidence = call.Evidence.Count > 0 ? call.Evidence : [CreateDefaultCallEvidence(call, evidenceKind)]
+            });
+        }
+
+        GraphAssembly.SortEdgesInPlace(callEdges);
+        GraphAssembly.AssignEdgeIds(callEdges, "e");
         var callGraph = new CallGraph
         {
             Edges = callEdges,
@@ -3245,7 +3666,7 @@ public static class Dosai
         return string.Empty;
     }
 
-    private sealed class MethodCallOperationWalker(SemanticModel model, DispatchResolver.SourceIndex dispatchIndex, List<MethodCalls> methodCalls, string basePath, string sourceFilePath, string fileName) : DataFlowAnalyzer.DepthBoundedOperationWalker
+    private sealed class MethodCallOperationWalker(SemanticModel model, DispatchResolver.SourceIndex dispatchIndex, List<MethodCalls> methodCalls, string sourceFilePath, string fileName, string relativePath, SourceRenderCache renderCache) : DataFlowAnalyzer.DepthBoundedOperationWalker
     {
         // Bound for hostile trees: a generated file full of broken call sites must not turn
         // into an unbounded unresolved-edge list; real unbuilt projects stay far below this.
@@ -3383,7 +3804,7 @@ public static class Dosai
             };
             methodCalls.Add(new MethodCalls
             {
-                Path = Path.GetRelativePath(basePath, sourceFilePath),
+                Path = relativePath,
                 FileName = fileName,
                 Namespace = namespaceGuess,
                 ClassName = className,
@@ -3393,10 +3814,10 @@ public static class Dosai
                 Arguments = argumentTexts,
                 ArgumentExpressions = argumentTexts,
                 CallType = isCreation ? CallType.ConstructorCall : CallType.MethodCall,
-                SourceId = GenerateMethodSignature(callerSymbol),
+                SourceId = renderCache.Signature(callerSymbol),
                 TargetId = $"Unresolved:{cleanName}",
-                CallerMethod = callerSymbol.Name,
-                CallerNamespace = callerSymbol.ContainingNamespace?.ToDisplayString() ?? string.Empty,
+                CallerMethod = renderCache.MemberName(callerSymbol),
+                CallerNamespace = renderCache.Display(callerSymbol.ContainingNamespace),
                 CallerClass = GetNamedContainingTypeName(callerSymbol),
                 IsInternal = false,
                 EvidenceKind = AnalysisEvidenceKind.SourceUnresolved,
@@ -3544,20 +3965,25 @@ public static class Dosai
 
         private void AddMethodCall(IOperation operation, IMethodSymbol? targetMethod, CallType callType, IEnumerable<IArgumentOperation> arguments)
         {
-            if (targetMethod is null || EnclosingSymbol(operation.Syntax.SpanStart) is not IMethodSymbol callerSymbol)
+            // A primary constructor's base call binds at the base type's name, where the
+            // enclosing symbol is the type; inside its argument list it is the constructor.
+            var callerPosition = operation.Syntax is PrimaryConstructorBaseTypeSyntax baseType
+                ? baseType.ArgumentList.OpenParenToken.Span.End
+                : operation.Syntax.SpanStart;
+            if (targetMethod is null || EnclosingSymbol(callerPosition) is not IMethodSymbol callerSymbol)
             {
                 return;
             }
 
             var location = operation.Syntax.GetLocation().GetLineSpan().StartLinePosition;
-            var sourceId = GenerateMethodSignature(callerSymbol);
-            var targetId = GenerateMethodSignature(targetMethod);
+            var sourceId = renderCache.Signature(callerSymbol);
+            var targetId = renderCache.Signature(targetMethod);
             if (string.IsNullOrWhiteSpace(sourceId) || string.IsNullOrWhiteSpace(targetId))
             {
                 return;
             }
 
-            var argumentList = arguments.Select(argument => NormalizeSymbolName(argument.Parameter?.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? argument.Value.Type?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty)).ToList();
+            var argumentList = arguments.Select(argument => renderCache.NormalizedFullyQualified(argument.Parameter?.Type ?? argument.Value.Type)).ToList();
             var argumentExpressions = arguments.Select(argument => SafeSyntaxText.Text(argument.Value.Syntax)).ToList();
             var targetLocations = targetMethod.Locations;
             var isInMetadata = targetLocations.Any(locationInfo => locationInfo.IsInMetadata);
@@ -3565,15 +3991,15 @@ public static class Dosai
             var isInternal = isInSource || SymbolEqualityComparer.Default.Equals(targetMethod.ContainingAssembly, model.Compilation.Assembly);
             var calledMethod = targetMethod.MethodKind == MethodKind.Constructor
                 ? targetMethod.ContainingType?.Name ?? targetMethod.Name
-                : NormalizeSymbolName(targetMethod.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat));
+                : IsNestedFunction(targetMethod) ? renderCache.MemberName(targetMethod) : renderCache.NormalizedErrorMessage(targetMethod);
 
             methodCalls.Add(new MethodCalls
             {
-                Path = Path.GetRelativePath(basePath, sourceFilePath),
+                Path = relativePath,
                 FileName = fileName,
-                Assembly = targetMethod.ContainingAssembly?.ToDisplayString() ?? string.Empty,
-                Module = targetMethod.ContainingModule?.ToDisplayString() ?? string.Empty,
-                Namespace = targetMethod.ContainingNamespace?.ToDisplayString() ?? string.Empty,
+                Assembly = renderCache.Display(targetMethod.ContainingAssembly),
+                Module = renderCache.Display(targetMethod.ContainingModule),
+                Namespace = renderCache.Display(targetMethod.ContainingNamespace),
                 ClassName = GetNamedContainingTypeName(targetMethod),
                 CalledMethod = calledMethod,
                 LineNumber = location.Line + 1,
@@ -3583,8 +4009,8 @@ public static class Dosai
                 CallType = callType,
                 SourceId = sourceId,
                 TargetId = targetId,
-                CallerMethod = callerSymbol.Name,
-                CallerNamespace = callerSymbol.ContainingNamespace?.ToDisplayString() ?? string.Empty,
+                CallerMethod = renderCache.MemberName(callerSymbol),
+                CallerNamespace = renderCache.Display(callerSymbol.ContainingNamespace),
                 CallerClass = GetNamedContainingTypeName(callerSymbol),
                 IsInternal = isInternal && !isInMetadata,
                 EvidenceKind = AnalysisEvidenceKind.SourceRoslynDirect,
@@ -3835,28 +4261,29 @@ public static class Dosai
                 return;
             }
 
-            var sourceId = GenerateMethodSignature(callerSymbol);
-            var targetId = GenerateMethodSignature(targetMethod);
+            var sourceId = renderCache.Signature(callerSymbol);
+            var targetId = renderCache.Signature(targetMethod);
             if (string.IsNullOrWhiteSpace(sourceId) || string.IsNullOrWhiteSpace(targetId) || sourceId == targetId)
             {
                 return;
             }
 
             var location = operation.Syntax.GetLocation().GetLineSpan().StartLinePosition;
-            var argumentList = arguments.Select(argument => NormalizeSymbolName(argument.Parameter?.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? argument.Value.Type?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty)).ToList();
+            var argumentList = arguments.Select(argument => renderCache.NormalizedFullyQualified(argument.Parameter?.Type ?? argument.Value.Type)).ToList();
             var targetLocations = targetMethod.Locations;
             var isInMetadata = targetLocations.Any(locationInfo => locationInfo.IsInMetadata);
             var isInSource = targetLocations.Any(locationInfo => locationInfo.IsInSource);
 
             methodCalls.Add(new MethodCalls
             {
-                Path = Path.GetRelativePath(basePath, sourceFilePath),
+                Path = relativePath,
                 FileName = fileName,
-                Assembly = targetMethod.ContainingAssembly?.ToDisplayString() ?? string.Empty,
-                Module = targetMethod.ContainingModule?.ToDisplayString() ?? string.Empty,
-                Namespace = targetMethod.ContainingNamespace?.ToDisplayString() ?? string.Empty,
+                Assembly = renderCache.Display(targetMethod.ContainingAssembly),
+                Module = renderCache.Display(targetMethod.ContainingModule),
+                Namespace = renderCache.Display(targetMethod.ContainingNamespace),
                 ClassName = GetNamedContainingTypeName(targetMethod),
-                CalledMethod = targetMethod.MethodKind == MethodKind.Constructor ? targetMethod.ContainingType?.Name ?? targetMethod.Name : NormalizeSymbolName(targetMethod.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat)),
+                CalledMethod = targetMethod.MethodKind == MethodKind.Constructor ? targetMethod.ContainingType?.Name ?? targetMethod.Name
+                    : IsNestedFunction(targetMethod) ? renderCache.MemberName(targetMethod) : renderCache.NormalizedErrorMessage(targetMethod),
                 LineNumber = location.Line + 1,
                 ColumnNumber = location.Character + 1,
                 Arguments = argumentList,
@@ -3864,7 +4291,7 @@ public static class Dosai
                 CallType = callType,
                 SourceId = sourceId,
                 TargetId = targetId,
-                CallerMethod = callerSymbol.Name,
+                CallerMethod = renderCache.MemberName(callerSymbol),
                 CallerNamespace = callerSymbol.ContainingNamespace?.ToDisplayString() ?? string.Empty,
                 CallerClass = GetNamedContainingTypeName(callerSymbol),
                 IsInternal = (isInSource || SymbolEqualityComparer.Default.Equals(targetMethod.ContainingAssembly, model.Compilation.Assembly)) && !isInMetadata,
@@ -3933,169 +4360,6 @@ public static class Dosai
             };
         }
 
-    }
-
-    private static void TrackCsMethodCall(InvocationExpressionSyntax methodCall, SemanticModel model, List<MethodCalls> allMethodCalls, string path, string sourceFilePath, string fileName)
-    {
-        var callArguments = methodCall.ArgumentList;
-        var callExpression = methodCall.Expression;
-        var location = methodCall.GetLocation().GetLineSpan().StartLinePosition;
-        var lineNumber = location.Line + 1;
-        var columnNumber = location.Character + 1;
-        var callArgsTypes = new List<string>();
-        var callArgExpressions = new List<string>();
-        foreach (var arg in callArguments.Arguments)
-        {
-            var argType = model.GetTypeInfo(arg.Expression).Type;
-            // Fallback to expression type if we can't get the type info
-            callArgsTypes.Add(argType is not null ? argType.ToDisplayString() : arg.Expression.GetType().Name);
-            callArgExpressions.Add(SafeSyntaxText.Text(arg.Expression));
-        }
-        var exprInfo = model.GetSymbolInfo(callExpression);
-        var calledMethod = string.Empty;
-        var isInMetadata = false;
-        var isInSource = false;
-        var assembly = string.Empty;
-        var module = string.Empty;
-        var namespaceString = string.Empty;
-        var className = string.Empty;
-        var callerMethod = string.Empty;
-        var callerNamespace = string.Empty;
-        var callerClass = string.Empty;
-        var callType = CallType.MethodCall;
-        
-        if (exprInfo.Symbol is not null)
-        {
-            switch (exprInfo.Symbol)
-            {
-                case IMethodSymbol { MethodKind: MethodKind.PropertyGet or MethodKind.PropertySet } propSymbol:
-                    callType = propSymbol.MethodKind == MethodKind.PropertyGet ? CallType.PropertyGet : CallType.PropertySet;
-                    calledMethod = propSymbol.AssociatedSymbol?.Name ?? propSymbol.Name;
-                    className = propSymbol.AssociatedSymbol?.ContainingType?.Name ?? propSymbol.ContainingType?.Name ?? "";
-                    namespaceString = propSymbol.AssociatedSymbol?.ContainingNamespace?.ToDisplayString() ??
-                                      propSymbol.ContainingNamespace?.ToDisplayString() ?? "";
-                    break;
-                
-                case IMethodSymbol { MethodKind: MethodKind.Constructor } ctorSymbol:
-                    callType = CallType.ConstructorCall;
-                    calledMethod = ctorSymbol.ContainingType?.Name ?? ctorSymbol.Name;
-                    className = ctorSymbol.ContainingType?.Name ?? "";
-                    namespaceString = ctorSymbol.ContainingNamespace?.ToDisplayString() ?? "";
-                    break;
-
-                case IMethodSymbol methodSymbol:
-                    calledMethod = methodSymbol.ToDisplayString();
-                    isInMetadata = methodSymbol.Locations.Any(l => l.IsInMetadata);
-                    isInSource = methodSymbol.Locations.Any(l => l.IsInSource);
-                    assembly = methodSymbol.ContainingAssembly?.ToDisplayString() ?? "";
-                    module = methodSymbol.ContainingModule?.ToDisplayString() ?? "";
-                    namespaceString = methodSymbol.ContainingNamespace?.ToDisplayString() ?? "";
-                    className = methodSymbol.ContainingType?.Name ?? "";
-                    break;
-
-                case IPropertySymbol propertySymbol:
-                    callType = CallType.PropertyGet;
-                    calledMethod = propertySymbol.Name;
-                    className = propertySymbol.ContainingType?.Name ?? "";
-                    namespaceString = propertySymbol.ContainingNamespace?.ToDisplayString() ?? "";
-                    break;
-            }
-        }
-
-        // Get caller context
-        if (model.GetEnclosingSymbol(methodCall.SpanStart) is IMethodSymbol callerSymbol)
-        {
-            callerMethod = callerSymbol.Name;
-            callerNamespace = callerSymbol.ContainingNamespace.ToDisplayString();
-            callerClass = callerSymbol.ContainingType.Name;
-        }
-
-        var isInternal = isInSource || !isInMetadata;
-        if (assembly == String.Empty && module == String.Empty && namespaceString == String.Empty && className == String.Empty && calledMethod == String.Empty)
-        {
-            return;
-        }
-        allMethodCalls.Add(new MethodCalls
-        {
-            Path = Path.GetRelativePath(path, sourceFilePath),
-            FileName = fileName,
-            Assembly = assembly,
-            Module = module,
-            Namespace = namespaceString,
-            ClassName = className,
-            CalledMethod = calledMethod,
-            LineNumber = lineNumber,
-            ColumnNumber = columnNumber,
-            Arguments = callArgsTypes,
-            ArgumentExpressions = callArgExpressions,
-            CallType = callType,
-            CallerMethod = callerMethod,
-            CallerNamespace = callerNamespace,
-            CallerClass = callerClass,
-            IsInternal = isInternal
-        });
-    }
-
-    private static void TrackVbMethodCall(Microsoft.CodeAnalysis.VisualBasic.Syntax.InvocationExpressionSyntax methodCall, SemanticModel model, List<MethodCalls> allMethodCalls, string path, string sourceFilePath, string fileName)
-    {
-        var callArguments = methodCall.ArgumentList;
-        var callExpression = methodCall.Expression;
-        var location = methodCall.GetLocation().GetLineSpan().StartLinePosition;
-        var lineNumber = location.Line + 1;
-        var columnNumber = location.Character + 1;
-        var fullName = SafeSyntaxText.Text(callExpression);
-        var callArgsTypes = callArguments?.Arguments.Select(a => SafeSyntaxText.Text(a)).ToList();
-        var exprInfo = model.GetSymbolInfo(callExpression);
-        var calledMethod = string.Empty;
-        var isInMetadata = false;
-        var isInSource = false;
-        var assembly = string.Empty;
-        var module = string.Empty;
-        var namespaceString = string.Empty;
-        var className = string.Empty;
-        var callerMethod = string.Empty;
-        var callerNamespace = string.Empty;
-        var callerClass = string.Empty;
-
-        if (exprInfo.Symbol is not null)
-        {
-            var methodSymbol = exprInfo.Symbol;
-            calledMethod = methodSymbol.ToDisplayString();
-            isInMetadata = methodSymbol.Locations.Any(loc => loc.IsInMetadata);
-            isInSource = methodSymbol.Locations.Any(loc => loc.IsInSource);
-            assembly = methodSymbol.ContainingAssembly.ToDisplayString();
-            module = methodSymbol.ContainingModule.ToDisplayString();
-            namespaceString = methodSymbol.ContainingNamespace.ToDisplayString();
-            className = methodSymbol.ContainingType.ToDisplayString();
-        }
-
-        // Get caller context
-        if (model.GetEnclosingSymbol(methodCall.SpanStart) is IMethodSymbol callerSymbol)
-        {
-            callerMethod = callerSymbol.Name;
-            callerNamespace = callerSymbol.ContainingNamespace.ToDisplayString();
-            callerClass = callerSymbol.ContainingType.Name;
-        }
-
-        var isInternal = isInSource || !isInMetadata;
-
-        allMethodCalls.Add(new MethodCalls
-        {
-            Path = Path.GetRelativePath(path, sourceFilePath),
-            FileName = fileName,
-            Assembly = assembly,
-            Module = module,
-            Namespace = namespaceString,
-            ClassName = className,
-            CalledMethod = calledMethod,
-            LineNumber = lineNumber,
-            ColumnNumber = columnNumber,
-            Arguments = callArgsTypes,
-            CallerMethod = callerMethod,
-            CallerNamespace = callerNamespace,
-            CallerClass = callerClass,
-            IsInternal = isInternal
-        });
     }
 
     /// <summary>

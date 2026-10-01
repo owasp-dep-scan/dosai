@@ -84,11 +84,51 @@ Id@Version` directive surfaces in `Dependencies[]` (namespace `nuget`, module `F
 the way `#r "nuget: ..."` does for F# scripts, because a file-based app declares its NuGet
 references nowhere else.
 
+Parsing runs on the same dedicated large-stack worker team as the per-file symbol loop
+(`DedicatedStack.ForEach`), one file per index, results stored by index: the tree order every
+downstream phase relies on stays the file order of a sequential parse. Each file's preprocessor
+symbols are those of its **nearest project** at or above it within the scan root
+(`TargetFrameworkDetection.ForFile`): the project's own target framework, else the nearest
+`Directory.Build.props`, else `Directory.Build.targets`, reduced to the most modern target it
+declares. One compilation holds every file, but parse options are per tree, so a net48 project
+beside a net8.0 one keeps its `#if NETFRAMEWORK` code while the net8.0 project keeps its
+`#if NET8_0` code. The walk is one non-recursive directory listing per directory, memoized, in
+place of the earlier one recursive enumeration per distinct source directory (which also got a
+project's subdirectories wrong). A file outside every project, or under one whose target is an
+MSBuild property reference (`$(NetCoreAppCurrent)`), uses the scan root's detection; a
+single-file scan reads its project context from the file's directory. The data-flow and crypto
+pipelines and the F# frontend (nearest `.fsproj`) resolve the same way.
+
+Before the compilation is created, reference-assembly source is partitioned out
+(`ReferenceSources`): GenAPI API-surface stubs - every member body `throw null`, empty, or
+returning `null`/`default`, or a file carrying the `aka.ms/api-review` header - lose their
+declarations of types some non-stub file of the tree also declares. dotnet/runtime keeps a
+library's API surface under `ref/` beside its implementation under `src/`; compiled together, the
+merged type declared every member twice, calls on those members bound ambiguously (CS0229), and
+Roslyn resolved the ambiguity differently between runs, so the call graph changed from run to run
+(issue #69). A stub that declares nothing else is dropped. One that also declares types nothing
+else does is trimmed: the redeclarations' tokens are blanked to spaces with line breaks, comments
+and directives kept, so the directive structure is untouched and the types left keep their line
+numbers (crypto's line fallback reads the same compiled text). A stub with no implementation
+beside it is kept whole. The same syntactic pass reports types still declared
+non-partially by more than one file (per-platform or per-target variants that no single build
+compiles together). Under `--debug` the compiler's declaration errors are logged as a histogram
+by id per run; that pass costs more than half again of the symbol loop, so it is not run
+otherwise.
+
 References are populated from:
 
-1. `typeof(object).Assembly.Location`
-2. `TRUSTED_PLATFORM_ASSEMBLIES`
-3. managed assemblies under the inspected tree
+1. framework references (`FrameworkReferences`, resolved once per process): the host's
+   `TRUSTED_PLATFORM_ASSEMBLIES` in the core library's directory for a framework-dependent Dosai
+   (a non-bundled host also lists Dosai's own dependencies, which no released build references);
+   for a self-contained single-file Dosai, which has no framework files on disk (issue #67), the
+   bundled runtime's own assemblies, loaded by the names the build embedded from its reference
+   pack plus the `System.Private.*` implementations those facades forward to, and referenced
+   through their in-memory metadata; otherwise the newest installed
+   `Microsoft.NETCore.App` shared framework of any version. With none, a `Diagnostics` entry
+   says so, and the unresolved-call diagnostic stops recommending a restore
+2. managed assemblies under the inspected tree
+3. package assemblies from NuGet restore output (`project.assets.json`)
 
 This improves cross-file symbol resolution compared with one-file compilations. It also lets the data-flow walker observe method calls, constructor calls, property references, field references, and invalid operations with better context.
 
@@ -129,17 +169,33 @@ Supported operation kinds include:
 
 Every block, initializer, constructor initializer and top-level statement (every statement in VB) is handed to the walker as a root. Nested roots already sit inside their parent's operation tree, so the walker visits each operation once per file; a call is recorded once, not once per enclosing block.
 
+Every string rendered from a symbol during source analysis - method signatures, containing
+assembly/module/namespace displays, argument-type displays, error-format method names,
+interface-name lists - goes through one per-run `SourceRenderCache`. A method's signature was
+previously rendered once per call site it contains, its containing-assembly display once per
+member of its type; the cache renders each distinct symbol once and returns the same string
+instance everywhere, so a graph holding millions of call records keeps one string per distinct
+member instead of one per mention. The cache is keyed by symbol **reference** through a
+`ConditionalWeakTable`: Roslyn's symbol hash code is not cached on the symbol (each hash walks
+the containing-symbol chain), so a hash-keyed table slowed the worker loop, and a strong table
+would pin every symbol - and through constructed generics, per-callsite instantiations - for
+the whole run; weak reference keys cost nothing to drop and still dedup everything, because
+one compilation hands out one instance per source and metadata symbol. The per-file relative
+path is likewise computed once per file, not per record.
+
 Deep nesting has two limits. All Roslyn operation work runs on a `DedicatedStack` thread (256 MB reserved on 64-bit), and walkers stop descending at a depth budget or when the stack runs low. The call-graph walker's budget follows the stack, so every call of a long fluent chain, head included, reaches the graph. The data-flow and crypto walkers render each visited call's source text and stop at 1,024 levels. Separately, the Roslyn operation factory builds a member's whole operation tree with unguarded recursion, so `OperationDepthGuard` keeps any member nesting deeper than the stack can carry (about 131,000 syntax levels on 64-bit) away from `GetOperation`. That member is skipped and its file is named in `Diagnostics`, instead of the process terminating with no output. Files shorter than the limit cannot exceed it and are never walked for the check.
 
 The graph builder guarantees that every edge endpoint exists as a node. External targets become external nodes when no source declaration exists. Repeated call sites of the same `(source, target, callType, evidence)` pair collapse into one counted edge (`CallSiteCount`) whose argument and evidence annotations are merged. Assembly call graph edge de-duplication includes evidence kind so direct IL, generated-state, delegate-target, and inferred candidate edges are not accidentally collapsed into one classification. Source and assembly call graphs are merged with dictionary-backed node lookups so duplicate node evidence can be combined without repeatedly scanning large node lists.
 
-Source and binary call graph extraction share a small CHA/RTA-style dispatch resolver. For source, it indexes concrete application types, interface implementations, overrides, and instantiated types observed from object creation operations. The source index is built once per Roslyn compilation (its object-creation scan in parallel per syntax tree), buckets concrete types by interface and base-type original definition, and memoizes each (target, receiver) lookup for the per-file walkers. Only virtual invocations get candidates - `base.M()` runs exactly the bound method - and a call site keeps at most 16, instantiated types first. Interface implementations resolve through `FindImplementationForInterfaceMember` with the member as the interface declares it (`ConstructedFrom`): handed a generic method constructed with a call's type arguments, Roslyn throws. For assemblies, it matches known methods against decoded type metadata, base types, implemented interfaces, and instantiated IL types. Inferred virtual and interface edges carry a dispatch confidence tier: `exact` when the static receiver type is sealed or a struct, `rta-candidate` when the implementing type is instantiated in the compilation, or `cha-candidate`.
+Source and binary call graph extraction share a small CHA/RTA-style dispatch resolver. For source, it indexes concrete application types, interface implementations, overrides, and instantiated types observed from object creations. Instantiation evidence is **symbol-exact**: the created type's symbol (and, for a constructed generic, its original definition) marks exactly that type instantiated, because every symbol below the scan resolves through the one compilation. The string aliases this replaced also matched any same-named type in another namespace, which promoted unrelated types to RTA rank (`My.Own.Task` marking `System.Threading.Tasks.Task` instantiated). The index is built once per Roslyn compilation (its object-creation scan runs per syntax tree on the worker team and reads the created type with `GetTypeInfo` rather than building an operation tree; that still binds the creation's enclosing statement - for a creation heading a fluent chain, the whole chain, which is super-linear to bind - so creations inside members `OperationDepthGuard` skips are skipped here too. `GetTypeInfo` also knows the created type when the constructor call fails to bind, where the operation form was an `IInvalidOperation`, so `new T(unresolvedArgument)` - routine in unrestored trees - counts as instantiating `T`), buckets concrete types by interface and base-type original definition, and memoizes each (target, receiver) lookup for the per-file walkers. Only virtual invocations get candidates - `base.M()` runs exactly the bound method - and a call site keeps at most 16, instantiated types first. Interface implementations resolve through `FindImplementationForInterfaceMember` with the member as the interface declares it (`ConstructedFrom`): handed a generic method constructed with a call's type arguments, Roslyn throws. For assemblies, it matches known methods against decoded type metadata, base types, implemented interfaces, and instantiated IL types. Inferred virtual and interface edges carry a dispatch confidence tier: `exact` when the static receiver type is sealed or a struct, `rta-candidate` when the implementing type is instantiated in the compilation, or `cha-candidate`.
 
 Instantiated-generic IL ids (`Method<args>`) never match a source id exactly because the instantiation rewrites parameter types too, so the merged graph normalizes them onto the source original-definition node keyed by an instantiation-free identity, keeping the original instantiated id in `MethodNode.GenericInstantiation`.
 
 Source-to-assembly mapping prefers exact stable signatures. If a fallback name match is needed, it only maps methods when parameter count, available parameter types, and available return type leave a single unambiguous assembly candidate. Mapped assembly name and module metadata come from the matched on-disk method, not the synthetic Roslyn compilation. This avoids corrupting mappings for overloads and keeps PURL enrichment tied to the compiled representation.
 
 Package reachability is built after method identities and call graph evidence are attached, so evidence kinds and confidence reflect source, IL, inferred, and external-summary observations on nodes as well as edges.
+
+Anonymous and local functions are call-graph nodes of their own: the enclosing member has a `DelegateInvoke` edge to each lambda it creates, and the lambda's calls come from the lambda. Their ids are named after the member that declares them (`Dosai.NestedFunctionName`): `Ns.Type.<Run>lambda2():void` for the second anonymous function in the type's members named `Run` (all overloads and partial parts, in source order), `Ns.Type.<Run>Helper():int` for a local function, `Ns.Type.<Run>query1(...)` for the implicit lambdas of a query expression's clauses (located by the clause, since Visual Basic gives them no declaring syntax). The ordinals come from syntax, indexed once per (type, member name), so the id is the same in every run and for every worker count; a lambda's own symbol name is empty, and without this every same-shaped lambda of a type was one node.
 
 The source walker also emits explicit inferred evidence for common callback and framework patterns. Delegate creation, event subscription, lambda callbacks, DI registrations such as `AddSingleton`, service resolution helpers such as `GetRequiredService`, and simple reflection forms such as `Activator.CreateInstance<T>()` or `typeof(T).GetMethod("Name")` are represented as `FrameworkModel` or `ReflectionHeuristic` edges rather than folded into direct Roslyn calls.
 
@@ -293,6 +349,48 @@ Severity defaults by sink category (injection primitives are `high`, exposure cl
 - `Low` for weaker evidence.
 
 Catastrophically-backtracking literal regexes (`new Regex("(a+)*$")`, `[GeneratedRegex("literal")]`) are additionally detected statically as ReDoS candidates (CWE-1333); `RegexOptions.NonBacktracking` and an explicit match timeout suppress the finding, and overlong patterns get a review-needed diagnostic instead of a silent skip. Security findings derived from framework metadata (endpoint security, MCP transport integrity, configuration security) use content-derived ids (kind, file, and line) so they stay stable across diffs.
+
+## Scaling and memory
+
+The phases below order how a `methods` run spends time and memory on very large trees
+(issue #65 measured `dotnet/runtime`-scale scans; the numbers there: parsing 1/6 of the run,
+the dispatch index and the per-file symbol loop most of the rest, and a long graph-assembly
+tail after symbol analysis had finished during which the heap kept climbing):
+
+- **Graph assembly allocates no key strings.** Call-site de-duplication and the canonical
+  edge/node orderings run through `GraphAssembly`: an `EdgeSiteKey` struct (source, target,
+  file, line, column, call-type tag, evidence-kind tag) replaces one concatenated
+  ~200-byte string per edge, and stable in-place sorts (an index sort with an
+  original-position tiebreak) replace `OrderBy` chains. At millions of edges the old key
+  strings alone were gigabytes of garbage allocated exactly in the tail, and duplicate call
+  sites used to allocate their edge object before the de-duplication discarded it - dedup now
+  happens on the call record before the edge exists. String legs compare by reference first
+  (ids rendered through the `SourceRenderCache` and per-file names are single instances) and
+  fall back to ordinal comparison, so keys built from non-pooled strings behave exactly like
+  the concatenated form.
+- **The compilations are released before the IL phase.** Framework analysis and the security
+  analyzer - the only compilation consumers - run immediately after source analysis, inside
+  one helper (`AnalyzeSourcesAndFrameworks`) that returns only their results; the syntax trees
+  (the largest object the pipeline ever holds) and the framework context's per-file text cache
+  are unreachable once it returns, before the assembly call graph, enrichment, reachability
+  and serialization, instead of surviving behind those phases. The helper frame is the
+  mechanism: a local in the once-run slice builder stays reported live until it returns (it
+  runs at Tier-0, and the security-analysis lambda captured the context into a closure), so
+  reassigning one did not free anything. `GetMethodsSlice_ReleasesSourceCompilationsBeforeTheIlPhase`
+  checks the compilations themselves through weak references. On the issue's
+  112k-file tree this is what moves the memory wall out of the run's way: the death happened
+  entering `assembly-call-graph` with tens of GB still pinned by trees.
+- **Per-file collectors and dispatch indexes are dropped as soon as they are merged**, so the
+  per-file list backing arrays - a near-copy of every record collected - do not sit next to
+  the merged graph until the method returns.
+- **Server GC.** Parse, the dispatch index and the symbol loop all run on a worker team; with
+  the previous workstation-GC default a single GC thread fell behind a dozen allocating
+  workers (visible as CPU collapsing to one core "while the GC was under pressure"). Server
+  GC keeps reclamation parallel to allocation. On .NET 9 and later it runs with dynamic heap
+  count adaptation (DATAS) by default, so small scans do not pay for one heap per core;
+  `DOTNET_gcServer=0` restores workstation GC for a host that needs it.
+- `DOSAI_DEBUG_GC=1` forces a full compacting collection before each `--debug` phase-end heap
+  read, so heap figures compare runs without GC-timing noise.
 
 ## Current limitations
 

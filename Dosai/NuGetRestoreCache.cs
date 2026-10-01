@@ -113,6 +113,7 @@ public static class NuGetRestoreCache
         var referencePaths = new List<string>();
         var referenceFileNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var assetsFiles = 0;
+        var declaredPackages = 0;
         try
         {
             foreach (var assetsFile in SafeFileRead.EnumerateAllFilesSafe(root, "project.assets.json"))
@@ -122,7 +123,7 @@ public static class NuGetRestoreCache
                     break;
                 }
                 assetsFiles++;
-                ReadAssetsFile(assetsFile, referencePaths, referenceFileNames);
+                declaredPackages += ReadAssetsFile(assetsFile, referencePaths, referenceFileNames);
             }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
@@ -135,14 +136,18 @@ public static class NuGetRestoreCache
         {
             diagnostics.Add($"Resolved {referencePaths.Count} package assemblies from NuGet restore output ({assetsFiles} project.assets.json).");
         }
-        else if (assetsFiles > 0)
+        else if (assetsFiles > 0 && declaredPackages > 0)
         {
+            // Only when packages are declared: a project with no package dependencies resolves
+            // none by definition, and telling its user to restore sends them after a problem
+            // that does not exist (issue #67).
             diagnostics.Add("Found project.assets.json but no package assemblies were resolved; the NuGet packages cache may be missing (run dotnet restore).");
         }
         return new RootResult(referencePaths, new NuGetRestoreSummary(assetsFiles, referencePaths.Count), diagnostics);
     }
 
-    private static void ReadAssetsFile(string assetsFile, List<string> referencePaths, HashSet<string> referenceFileNames)
+    /// <summary>Resolves one assets file's package assemblies; returns how many package libraries it declares.</summary>
+    private static int ReadAssetsFile(string assetsFile, List<string> referencePaths, HashSet<string> referenceFileNames)
     {
         JsonDocument document;
         try
@@ -151,19 +156,15 @@ public static class NuGetRestoreCache
         }
         catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
         {
-            return;
+            return 0;
         }
         using (document)
         {
-            var packageFolders = ReadPackageFolders(document.RootElement);
-            if (packageFolders.Count == 0)
-            {
-                return;
-            }
             var libraryPaths = ReadLibraryPaths(document.RootElement);
-            if (libraryPaths.Count == 0 || !document.RootElement.TryGetProperty("targets", out var targets) || targets.ValueKind != JsonValueKind.Object)
+            var packageFolders = ReadPackageFolders(document.RootElement);
+            if (packageFolders.Count == 0 || libraryPaths.Count == 0 || !document.RootElement.TryGetProperty("targets", out var targets) || targets.ValueKind != JsonValueKind.Object)
             {
-                return;
+                return libraryPaths.Count;
             }
 
             // Targets are visited highest-TFM-first so a multi-targeted project contributes the
@@ -215,6 +216,8 @@ public static class NuGetRestoreCache
                     }
                 }
             }
+
+            return libraryPaths.Count;
         }
     }
 
