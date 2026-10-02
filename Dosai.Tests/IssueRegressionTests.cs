@@ -847,5 +847,153 @@ public static class Shouting
         Assert.Equal("AA", edges[1].SourceId);
     }
 
+    [Fact]
+    public void CollapseDuplicateCallSites_CountsAMissingCallLocationApartFromAnEmptyOne()
+    {
+        // The old key rendered a missing location as "::" and an empty one as ":0:0", so the
+        // two are distinct call sites; only the null and empty file name render alike.
+        MethodCallEdge Edge(int id, CallLocation? location) => new()
+        {
+            Id = $"e{id}",
+            SourceId = "Ns.A.Run():void",
+            TargetId = "Ns.B.Save():void",
+            CallType = CallType.MethodCall,
+            EvidenceKind = AnalysisEvidenceKind.SourceRoslynDirect,
+            CallLocation = location!,
+        };
+
+        var graph = new CallGraph
+        {
+            Edges = [Edge(1, null), Edge(2, new CallLocation()), Edge(3, new CallLocation { FileName = string.Empty })]
+        };
+        var expected = CollapseReference(new CallGraph { Edges = [.. graph.Edges.Select(CloneEdge)] });
+
+        ReachabilityAnalyzer.CollapseDuplicateCallSites(graph);
+
+        AssertSameCollapse(expected, graph);
+        Assert.Equal(2, graph.Edges[0].CallSiteCount);
+    }
+
+    [Fact]
+    public void CompareCollapseEdges_StaysATotalOrderWhenIdsHoldTheSeparator()
+    {
+        // The concatenated key was ambiguous for ids holding U+001F itself: ("A\u001fB", "C")
+        // and ("A", "B\u001fC") built the same string and collapsed into one edge. Field-wise
+        // grouping keeps them apart, and the order is the field-wise order of each field
+        // followed by the separator - a consistent total order over every id.
+        var ids = new[] { "", "\u001f", "A", "A\u001f", "A\u001fB", "A\u001f\u001f", "A\r", "AB", "B", "B\u001fC", "C" };
+        MethodCallEdge Edge(string source, string target, CallType callType) => new()
+        {
+            SourceId = source,
+            TargetId = target,
+            CallType = callType,
+            EvidenceKind = AnalysisEvidenceKind.SourceRoslynDirect,
+            CallLocation = new CallLocation(),
+        };
+
+        static int Terminated(MethodCallEdge x, MethodCallEdge y)
+        {
+            var c = string.CompareOrdinal(x.SourceId + "\u001f", y.SourceId + "\u001f");
+            if (c != 0) return c;
+            c = string.CompareOrdinal(x.TargetId + "\u001f", y.TargetId + "\u001f");
+            if (c != 0) return c;
+            c = string.CompareOrdinal(x.CallType + "\u001f", y.CallType + "\u001f");
+            return c != 0 ? c : string.CompareOrdinal(x.EvidenceKind.ToString(), y.EvidenceKind.ToString());
+        }
+
+        var edges = (from source in ids
+                     from target in ids
+                     from callType in new[] { CallType.MethodCall, CallType.ConstructorCall }
+                     select Edge(source, target, callType)).ToList();
+        foreach (var x in edges)
+        {
+            foreach (var y in edges)
+            {
+                Assert.Equal(Math.Sign(Terminated(x, y)), Math.Sign(GraphAssembly.CompareCollapseEdges(x, y)));
+            }
+        }
+
+        var graph = new CallGraph { Edges = [Edge("A\u001fB", "C", CallType.MethodCall), Edge("A", "B\u001fC", CallType.MethodCall)] };
+        ReachabilityAnalyzer.CollapseDuplicateCallSites(graph);
+        Assert.Equal(["A", "A\u001fB"], graph.Edges.Select(edge => edge.SourceId));
+    }
+
+    private static MethodNode ReachabilityNode(string id, MethodIdentity? identity = null, params AnalysisEvidenceKind[] evidence) => new()
+    {
+        Id = id,
+        Name = id,
+        ClassName = "C",
+        Namespace = "Ns",
+        FileName = "/src/C.cs",
+        Identity = identity,
+        Evidence = [.. evidence.Select(kind => new AnalysisEvidence { Kind = kind })],
+    };
+
+    [Fact]
+    public void Compute_ToleratesANodeIdentityWithoutAnEvidenceList()
+    {
+        var graph = new CallGraph { Nodes = [ReachabilityNode("Ns.C.M():void", new MethodIdentity { Evidence = null! })] };
+
+        var (nodes, _, _) = ReachabilityAnalyzer.Compute(graph, [], []);
+
+        Assert.False(Assert.Single(nodes).KeepAlive);
+    }
+
+    [Fact]
+    public void Compute_IsIndependentOfTheCallersEdgeOrderAndLeavesItAlone()
+    {
+        // A random graph with duplicate pairs under several call types, self-loops, cycles and
+        // keep-alive evidence, collapsed the way the pipeline does it. Compute over the sorted
+        // list and over a shuffled copy must agree on every fact, and the shuffled list must
+        // come back in the order it went in: the run-length builds sort a copy, never the
+        // caller's list.
+        var rng = new Random(7070);
+        var ids = Enumerable.Range(0, 120).Select(i => $"Ns.T{i % 7}.M{i}():void").ToArray();
+        var kinds = new[] { AnalysisEvidenceKind.SourceRoslynDirect, AnalysisEvidenceKind.FrameworkModel, AnalysisEvidenceKind.ReflectionHeuristic };
+        var nodes = ids.Select((id, i) => i % 9 == 0
+            ? ReachabilityNode(id, new MethodIdentity { Evidence = [AnalysisEvidenceKind.ReflectionHeuristic] }, AnalysisEvidenceKind.FrameworkModel)
+            : ReachabilityNode(id)).ToList();
+        var edges = new List<MethodCallEdge>();
+        for (var i = 0; i < 220; i++)
+        {
+            var source = ids[rng.Next(ids.Length)];
+            var target = rng.Next(12) == 0 ? source : ids[rng.Next(ids.Length)];
+            edges.Add(new MethodCallEdge
+            {
+                Id = $"e{i}",
+                SourceId = source,
+                TargetId = target,
+                CallType = rng.Next(3) == 0 ? CallType.ConstructorCall : CallType.MethodCall,
+                EvidenceKind = kinds[rng.Next(kinds.Length)],
+                CallLocation = new CallLocation { FileName = "/src/C.cs", LineNumber = rng.Next(1, 50), ColumnNumber = 1 },
+                Evidence = rng.Next(4) == 0 ? [new AnalysisEvidence { Kind = kinds[rng.Next(kinds.Length)] }] : [],
+            });
+        }
+
+        var sortedGraph = new CallGraph { Nodes = nodes, Edges = edges };
+        ReachabilityAnalyzer.CollapseDuplicateCallSites(sortedGraph);
+        var shuffled = sortedGraph.Edges.OrderBy(_ => rng.Next()).ToList();
+        var shuffledOrder = shuffled.Select(edge => edge.Id).ToList();
+        var shuffledGraph = new CallGraph { Nodes = nodes, Edges = shuffled };
+        EntryPoint Entry(int index) => new() { Id = $"ep{index}", Kind = "Test", MethodId = ids[index] };
+
+        var fromSorted = ReachabilityAnalyzer.Compute(sortedGraph, [Entry(1), Entry(5)], []);
+        var fromShuffled = ReachabilityAnalyzer.Compute(shuffledGraph, [Entry(1), Entry(5)], []);
+
+        Assert.Equal(shuffledOrder, shuffledGraph.Edges.Select(edge => edge.Id));
+        Assert.Equal(JsonSerializer.Serialize(fromSorted.Nodes), JsonSerializer.Serialize(fromShuffled.Nodes));
+        Assert.Equal(JsonSerializer.Serialize(fromSorted.Clusters), JsonSerializer.Serialize(fromShuffled.Clusters));
+        Assert.Contains(fromSorted.Clusters, cluster => cluster.Id.StartsWith("scc-self-", StringComparison.Ordinal));
+        Assert.Contains(fromSorted.Nodes, fact => fact.KeepAlive);
+
+        // Fan-in/out against the hash-set definition the run-length counts replaced.
+        var nonSelf = sortedGraph.Edges.Where(edge => edge.SourceId != edge.TargetId).ToList();
+        foreach (var fact in fromSorted.Nodes)
+        {
+            Assert.Equal(nonSelf.Where(edge => edge.TargetId == fact.NodeId).Select(edge => edge.SourceId).Distinct().Count(), fact.FanIn);
+            Assert.Equal(nonSelf.Where(edge => edge.SourceId == fact.NodeId).Select(edge => edge.TargetId).Distinct().Count(), fact.FanOut);
+        }
+    }
+
     #endregion
 }

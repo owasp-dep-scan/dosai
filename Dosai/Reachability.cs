@@ -151,12 +151,11 @@ public static class ReachabilityAnalyzer
     /// </summary>
     public static (List<NodeReachability> Nodes, List<RecursionCluster> Clusters, bool BudgetExhausted) Compute(CallGraph callGraph, IEnumerable<EntryPoint> entryPoints, List<string> diagnostics)
     {
-        var edges = callGraph.Edges;
-        // The collapsed edge list is sorted by (source, target, call type, evidence kind); the
-        // run-length adjacency and fan-in builds below rely on that. Guard it so a caller with an
-        // unsorted graph still gets exact results (the pipeline's list is always already sorted,
-        // so the guard is a single O(n) pass in practice).
-        EnsureSortedByCollapseKey(edges);
+        // The run-length adjacency and fan-in builds below need the collapse order (source,
+        // target, call type, evidence kind). The pipeline hands over the collapsed list already
+        // in that order, which costs one linear check; any other caller gets a sorted copy, so
+        // the facts never depend on its edge order and its list is never reordered.
+        var edges = SortedByCollapseKey(callGraph.Edges);
         var forward = BuildForwardAdjacency(edges);
         var fanIn = CountDistinctCallers(edges);
         var facts = callGraph.Nodes.ToDictionary(node => node.Id, node => new NodeReachability { NodeId = node.Id }, StringComparer.Ordinal);
@@ -237,7 +236,7 @@ public static class ReachabilityAnalyzer
             }
         }
 
-        var (components, componentOfNode, clusters) = ComputeComponents(callGraph, forward, facts);
+        var (components, componentOfNode, clusters) = ComputeComponents(callGraph.Nodes, edges, forward, facts);
         if (DebugLog.Enabled)
         {
             DebugLog.Count("reachability nodes", facts.Count);
@@ -245,7 +244,7 @@ public static class ReachabilityAnalyzer
             DebugLog.Count("entry points walked", walkedEntryPoints);
         }
         ComputeReachableBuckets(facts, forward, components, componentOfNode, callGraph.Nodes, diagnostics);
-        MarkKeepAlive(callGraph, facts);
+        MarkKeepAlive(callGraph.Nodes, edges, facts);
         return (facts.Values.OrderBy(fact => fact.NodeId, StringComparer.Ordinal).ToList(), clusters, entryBudgetReported);
     }
 
@@ -256,112 +255,93 @@ public static class ReachabilityAnalyzer
     ///     `[McpServerTool]`-style framework callbacks are invoked without a call site Dosai can
     ///     attribute to an entry point. One linear pass over edges and nodes.
     /// </summary>
-    private static void MarkKeepAlive(CallGraph callGraph, Dictionary<string, NodeReachability> facts)
+    private static void MarkKeepAlive(List<MethodNode> nodes, List<MethodCallEdge> edges, Dictionary<string, NodeReachability> facts)
     {
-        void KeepAlive(string nodeId, string reason)
+        // Report the evidence kind that actually kept the node alive. The edge's own
+        // EvidenceKind is frequently an ordinary call kind while a reflection/framework kind
+        // sits in its Evidence list, so naming EvidenceKind unconditionally attributed the
+        // decision to the wrong evidence.
+        foreach (var edge in edges)
         {
-            // Only unreachable nodes need keeping alive; a reachable node already has its answer.
-            if (!facts.TryGetValue(nodeId, out var fact) || fact.Reachable)
+            var kinds = new KeepAliveKinds();
+            kinds.See(edge.EvidenceKind);
+            foreach (var evidence in edge.Evidence)
+            {
+                kinds.See(evidence.Kind);
+            }
+
+            kinds.KeepAlive(facts, edge.TargetId);
+        }
+
+        foreach (var node in nodes)
+        {
+            var kinds = new KeepAliveKinds();
+            foreach (var evidence in node.Evidence)
+            {
+                kinds.See(evidence.Kind);
+            }
+
+            if (node.Identity?.Evidence is { } identityKinds)
+            {
+                foreach (var kind in identityKinds)
+                {
+                    kinds.See(kind);
+                }
+            }
+
+            kinds.KeepAlive(facts, node.Id);
+        }
+    }
+
+    /// <summary>
+    ///     The distinct keep-alive evidence kinds of one edge or node, in first-occurrence order
+    ///     (declared kind first, then the evidence list). Exactly two kinds qualify, so two slots
+    ///     replace the per-edge <c>Prepend</c>/<c>Where</c>/<c>Distinct</c> chain.
+    /// </summary>
+    private struct KeepAliveKinds
+    {
+        private AnalysisEvidenceKind? _first;
+        private AnalysisEvidenceKind? _second;
+
+        public void See(AnalysisEvidenceKind kind)
+        {
+            if (kind is not (AnalysisEvidenceKind.ReflectionHeuristic or AnalysisEvidenceKind.FrameworkModel))
+            {
+                return;
+            }
+
+            if (_first is null)
+            {
+                _first = kind;
+            }
+            else if (_second is null && kind != _first)
+            {
+                _second = kind;
+            }
+        }
+
+        /// <summary>Only unreachable nodes need keeping alive; a reachable node already has its answer.</summary>
+        public readonly void KeepAlive(Dictionary<string, NodeReachability> facts, string nodeId)
+        {
+            if (_first is not { } first || !facts.TryGetValue(nodeId, out var fact) || fact.Reachable)
             {
                 return;
             }
 
             fact.KeepAlive = true;
+            AddReason(fact, first);
+            if (_second is { } second)
+            {
+                AddReason(fact, second);
+            }
+        }
+
+        private static void AddReason(NodeReachability fact, AnalysisEvidenceKind kind)
+        {
+            var reason = GraphAssembly.EvidenceKindName(kind);
             if (!fact.KeepAliveReasons.Contains(reason, StringComparer.Ordinal))
             {
                 fact.KeepAliveReasons.Add(reason);
-            }
-        }
-
-        // The keep-alive kinds are exactly two; reasons must land in first-occurrence order of
-        // the kinds (declared kind first, then evidence kinds in list order), which is the order
-        // the previous LINQ shape produced and KeepAliveReasons preserves.
-        const string reflectionReason = "ReflectionHeuristic";
-        const string frameworkReason = "FrameworkModel";
-
-        static string ReasonFor(AnalysisEvidenceKind kind) =>
-            kind == AnalysisEvidenceKind.ReflectionHeuristic ? reflectionReason : frameworkReason;
-
-        foreach (var edge in callGraph.Edges)
-        {
-            AnalysisEvidenceKind? firstSeen = null;
-            AnalysisEvidenceKind? secondSeen = null;
-            void See(AnalysisEvidenceKind kind)
-            {
-                if (kind is not (AnalysisEvidenceKind.ReflectionHeuristic or AnalysisEvidenceKind.FrameworkModel))
-                {
-                    return;
-                }
-
-                if (firstSeen is null)
-                {
-                    firstSeen = kind;
-                }
-                else if (secondSeen is null && kind != firstSeen)
-                {
-                    secondSeen = kind;
-                }
-            }
-
-            See(edge.EvidenceKind);
-            foreach (var evidence in edge.Evidence)
-            {
-                See(evidence.Kind);
-            }
-
-            if (firstSeen is { } first)
-            {
-                KeepAlive(edge.TargetId, ReasonFor(first));
-            }
-
-            if (secondSeen is { } second)
-            {
-                KeepAlive(edge.TargetId, ReasonFor(second));
-            }
-        }
-
-        foreach (var node in callGraph.Nodes)
-        {
-            AnalysisEvidenceKind? firstSeen = null;
-            AnalysisEvidenceKind? secondSeen = null;
-            void See(AnalysisEvidenceKind kind)
-            {
-                if (kind is not (AnalysisEvidenceKind.ReflectionHeuristic or AnalysisEvidenceKind.FrameworkModel))
-                {
-                    return;
-                }
-
-                if (firstSeen is null)
-                {
-                    firstSeen = kind;
-                }
-                else if (secondSeen is null && kind != firstSeen)
-                {
-                    secondSeen = kind;
-                }
-            }
-
-            foreach (var evidence in node.Evidence)
-            {
-                See(evidence.Kind);
-            }
-
-            if (node.Identity is { Evidence: var identityKinds })
-            {
-                foreach (var kind in identityKinds)
-                {
-                    See(kind);
-                }
-            }
-
-            if (firstSeen is { } first)
-            {
-                KeepAlive(node.Id, ReasonFor(first));
-            }
-
-            if (secondSeen is { } second)
-            {
-                KeepAlive(node.Id, ReasonFor(second));
             }
         }
     }
@@ -463,9 +443,10 @@ public static class ReachabilityAnalyzer
     ///     This used to group through one concatenated key string per edge, materialized and
     ///     retained by <c>GroupBy</c>/<c>OrderBy</c> for the whole step - on a 15.4 M-edge tree
     ///     that is ~7 GB of keys alone and the allocation that ran the scan out of memory
-    ///     (issue #70). It now sorts in place under <see cref="GraphAssembly.CompareCollapseEdges" />,
+    ///     (issue #70). It now groups through <see cref="GroupByCollapseKey" /> (int arrays, no
+    ///     keys held) and orders the groups under <see cref="GraphAssembly.CompareCollapseEdges" />,
     ///     which reproduces the concatenated key's order field by field (separator semantics
-    ///     included, see there), and walks the equal runs.
+    ///     included, see there).
     /// </remarks>
     public static void CollapseDuplicateCallSites(CallGraph callGraph)
     {
@@ -476,65 +457,18 @@ public static class ReachabilityAnalyzer
             return;
         }
 
-        // Group by identity through a struct-key dictionary (issue #70: this used to group on a
-        // concatenated key string per edge, retained by GroupBy/OrderBy for the whole step -
-        // gigabytes on multi-million-edge trees, and the allocation that ran a 15.4 M-edge scan
-        // out of memory). String hash codes are cached on the shared id instances, so hashing is
-        // cheap; sorting the distinct group keys costs a fraction of sorting every edge.
-        var groupOfEdge = new int[edges.Count];
-        var groupSizes = new List<int>();
-        var groups = new Dictionary<GraphAssembly.CollapseKey, int>(edges.Count / 2);
-        for (var i = 0; i < edges.Count; i++)
-        {
-            var key = GraphAssembly.CollapseKey.From(edges[i]);
-            if (!groups.TryGetValue(key, out var group))
-            {
-                group = groupSizes.Count;
-                groups.Add(key, group);
-                groupSizes.Add(0);
-            }
-
-            groupOfEdge[i] = group;
-            groupSizes[group]++;
-        }
-
-        // Distinct keys in first-encounter order plus their group ordinals; sorting key/ordinal
-        // pairs orders the groups the way the old concatenated-key OrderBy did.
-        var keyCount = groupSizes.Count;
-        var keys = new GraphAssembly.CollapseKey[keyCount];
-        foreach (var (key, group) in groups)
-        {
-            keys[group] = key;
-        }
-
-        var ordinals = new int[keyCount];
-        for (var i = 0; i < keyCount; i++)
-        {
-            ordinals[i] = i;
-        }
-
-        Array.Sort(keys, ordinals, Comparer<GraphAssembly.CollapseKey>.Create(GraphAssembly.CompareCollapseKeys));
-
-        // Counting-sort placement: each group's edges, in original encounter order, land in one
-        // contiguous slice of `placement`.
-        var offsets = new int[keyCount + 1];
-        for (var g = 0; g < keyCount; g++)
-        {
-            offsets[g + 1] = offsets[g] + groupSizes[g];
-        }
-
-        var cursor = (int[])offsets.Clone();
-        var placement = new int[edges.Count];
-        for (var i = 0; i < edges.Count; i++)
-        {
-            placement[cursor[groupOfEdge[i]]++] = i;
-        }
+        // Only these three int arrays (4 bytes per edge plus 8 per group) stay live through the
+        // merge loop below; the hash table, per-edge group ids and sort keys die in the helpers.
+        var (placement, offsets, order) = GroupByCollapseKey(edges);
+        var keyCount = order.Length;
 
         var collapsed = new List<MethodCallEdge>(keyCount);
         // Per-group scratch, reused across groups. Tuples instead of the old "file:line:col"
         // strings: distinct counts agree, because the trailing number segments of the rendered
-        // form cannot contain the ':' two different tuples would need to collide on.
-        var sitesSeen = new HashSet<(string FileName, int LineNumber, int ColumnNumber)>();
+        // form cannot contain the ':' two different tuples would need to collide on. A missing
+        // location rendered as "::" and an empty one as ":0:0", hence the flag (not nullable
+        // numbers: ValueTuple hashing boxes nullable items, ~190 MB per 4 M edges).
+        var sitesSeen = new HashSet<(string FileName, int LineNumber, int ColumnNumber, bool Missing)>();
         var argumentsSeen = new HashSet<string>(StringComparer.Ordinal);
         var argumentsList = new List<string>();
         var expressionsSeen = new HashSet<string>(StringComparer.Ordinal);
@@ -544,7 +478,7 @@ public static class ReachabilityAnalyzer
 
         for (var position = 0; position < keyCount; position++)
         {
-            var group = ordinals[position];
+            var group = order[position];
             var start = offsets[group];
             var stop = offsets[group + 1];
 
@@ -573,7 +507,9 @@ public static class ReachabilityAnalyzer
             for (var s = start; s < stop; s++)
             {
                 var edge = edges[placement[s]];
-                sitesSeen.Add((edge.CallLocation?.FileName ?? string.Empty, edge.CallLocation?.LineNumber ?? 0, edge.CallLocation?.ColumnNumber ?? 0));
+                sitesSeen.Add(edge.CallLocation is { } site
+                    ? (site.FileName ?? string.Empty, site.LineNumber, site.ColumnNumber, false)
+                    : (string.Empty, 0, 0, true));
                 if (edge.Arguments is not null)
                 {
                     foreach (var argument in edge.Arguments)
@@ -630,15 +566,126 @@ public static class ReachabilityAnalyzer
             collapsed.Add(keeper);
         }
 
-        collapsed.TrimExcess();
         callGraph.Edges = collapsed;
+    }
+
+    /// <summary>
+    ///     Groups edges by <see cref="GraphAssembly.CollapseKey" /> and returns the counting-sort
+    ///     layout the merge walks: <c>placement[offsets[g]..offsets[g + 1]]</c> lists group
+    ///     <c>g</c>'s edge indexes in encounter order, and <c>order</c> lists the groups in
+    ///     collapse-key order. Each stage is its own frame on purpose: the hash table, the
+    ///     per-edge group ids and the sort keys are garbage before the merge allocates a single
+    ///     keeper list (a once-run method keeps every local live until it returns).
+    /// </summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (int[] Placement, int[] Offsets, int[] Order) GroupByCollapseKey(List<MethodCallEdge> edges)
+    {
+        var placement = PlaceByCollapseGroup(edges, out var offsets);
+        return (placement, offsets, OrderCollapseGroups(edges, placement, offsets));
+    }
+
+    /// <summary>Counting-sort placement of the edges by dense group id, encounter order kept within a group.</summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static int[] PlaceByCollapseGroup(List<MethodCallEdge> edges, out int[] offsets)
+    {
+        var groupOfEdge = AssignCollapseGroups(edges, out var groupCount);
+        offsets = new int[groupCount + 1];
+        foreach (var group in groupOfEdge)
+        {
+            offsets[group + 1]++;
+        }
+
+        for (var group = 0; group < groupCount; group++)
+        {
+            offsets[group + 1] += offsets[group];
+        }
+
+        var cursor = offsets[..groupCount];
+        var placement = new int[groupOfEdge.Length];
+        for (var index = 0; index < groupOfEdge.Length; index++)
+        {
+            placement[cursor[groupOfEdge[index]]++] = index;
+        }
+
+        return placement;
+    }
+
+    /// <summary>
+    ///     Group ids in collapse-key order. A group's first edge carries its key; the keys are
+    ///     distinct across groups, so the unstable sort is deterministic. The keys are copied
+    ///     into one contiguous array for the sort, so comparisons do not chase each group's edge.
+    /// </summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static int[] OrderCollapseGroups(List<MethodCallEdge> edges, int[] placement, int[] offsets)
+    {
+        var groupCount = offsets.Length - 1;
+        var keys = new GraphAssembly.CollapseKey[groupCount];
+        var order = new int[groupCount];
+        for (var group = 0; group < groupCount; group++)
+        {
+            keys[group] = GraphAssembly.CollapseKey.From(edges[placement[offsets[group]]]);
+            order[group] = group;
+        }
+
+        Array.Sort(keys, order, GraphAssembly.CollapseKeyOrder);
+        return order;
+    }
+
+    /// <summary>
+    ///     Dense group id per edge, numbered in first-encounter order, through an open-addressing
+    ///     table: each slot packs a group's key hash with its id, and only a hash match reads the
+    ///     group's first edge to compare keys - nothing key-sized is stored. About 24 bytes per
+    ///     edge at the peak, where a <c>Dictionary</c> keyed by the struct costs 44 per entry
+    ///     (entry plus bucket) and briefly holds both tables on every resize.
+    /// </summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static int[] AssignCollapseGroups(List<MethodCallEdge> edges, out int groupCount)
+    {
+        var count = edges.Count;
+        var groupOfEdge = new int[count];
+        var firstEdge = new int[count];
+        // Load factor at most 2/3 even when every edge is its own group. A slot is
+        // (hash << 32) | (group id + 1); zero means empty.
+        var slots = new long[(int)System.Numerics.BitOperations.RoundUpToPowerOf2((uint)Math.Clamp(count + (count >> 1), 16, 1 << 30))];
+        var mask = slots.Length - 1;
+        var groups = 0;
+        for (var index = 0; index < count; index++)
+        {
+            var key = GraphAssembly.CollapseKey.From(edges[index]);
+            var hash = key.GetHashCode();
+            var slot = hash & mask;
+            while (true)
+            {
+                var entry = slots[slot];
+                if (entry == 0)
+                {
+                    slots[slot] = ((long)hash << 32) | (uint)(groups + 1);
+                    firstEdge[groups] = index;
+                    groupOfEdge[index] = groups++;
+                    break;
+                }
+
+                var group = (int)(uint)entry - 1;
+                if ((int)(entry >> 32) == hash && key.Equals(GraphAssembly.CollapseKey.From(edges[firstEdge[group]])))
+                {
+                    groupOfEdge[index] = group;
+                    break;
+                }
+
+                slot = (slot + 1) & mask;
+            }
+        }
+
+        groupCount = groups;
+        return groupOfEdge;
     }
 
     /// <summary>
     ///     Forward adjacency from the (source, target)-sorted collapsed edge list, built by
     ///     run-length: no per-node hash sets and no copy step. Consecutive equal targets (the
     ///     same pair surviving under different call types) dedupe by adjacency; self-loops stay
-    ///     out, as before - component analysis owns them.
+    ///     out, as before - component analysis owns them - and a source with nothing but
+    ///     self-loops gets no entry. Each list is allocated at its exact size.
     /// </summary>
     private static Dictionary<string, List<string>> BuildForwardAdjacency(List<MethodCallEdge> edges)
     {
@@ -647,20 +694,36 @@ public static class ReachabilityAnalyzer
         while (index < edges.Count)
         {
             var source = edges[index].SourceId;
-            var targets = new List<string>();
-            while (index < edges.Count && string.Equals(edges[index].SourceId, source, StringComparison.Ordinal))
+            var end = index;
+            var distinct = 0;
+            string? previous = null;
+            for (; end < edges.Count && string.Equals(edges[end].SourceId, source, StringComparison.Ordinal); end++)
             {
-                var target = edges[index].TargetId;
-                if (!string.Equals(target, source, StringComparison.Ordinal)
-                    && (targets.Count == 0 || !string.Equals(targets[^1], target, StringComparison.Ordinal)))
+                var target = edges[end].TargetId;
+                if (!string.Equals(target, source, StringComparison.Ordinal) && !string.Equals(target, previous, StringComparison.Ordinal))
                 {
-                    targets.Add(target);
+                    distinct++;
+                    previous = target;
                 }
-
-                index++;
             }
 
-            adjacency.Add(source, targets);
+            if (distinct > 0)
+            {
+                var targets = new List<string>(distinct);
+                for (; index < end; index++)
+                {
+                    var target = edges[index].TargetId;
+                    if (!string.Equals(target, source, StringComparison.Ordinal)
+                        && (targets.Count == 0 || !string.Equals(targets[^1], target, StringComparison.Ordinal)))
+                    {
+                        targets.Add(target);
+                    }
+                }
+
+                adjacency.Add(source, targets);
+            }
+
+            index = end;
         }
 
         return adjacency;
@@ -697,17 +760,23 @@ public static class ReachabilityAnalyzer
         return fanIn;
     }
 
-    /// <summary>Sorts the edge list by collapse key only when it is not already in that order.</summary>
-    private static void EnsureSortedByCollapseKey(List<MethodCallEdge> edges)
+    /// <summary>
+    ///     The edge list itself when it is already in collapse-key order (one linear check),
+    ///     otherwise a stably sorted copy; the caller's list is never reordered.
+    /// </summary>
+    private static List<MethodCallEdge> SortedByCollapseKey(List<MethodCallEdge> edges)
     {
         for (var index = 1; index < edges.Count; index++)
         {
             if (GraphAssembly.CompareCollapseEdges(edges[index - 1], edges[index]) > 0)
             {
-                GraphAssembly.StableSortInPlace(edges, GraphAssembly.CompareCollapseEdges);
-                return;
+                var sorted = new List<MethodCallEdge>(edges);
+                GraphAssembly.StableSortInPlace(sorted, GraphAssembly.CompareCollapseEdges);
+                return sorted;
             }
         }
+
+        return edges;
     }
 
     /// <summary>
@@ -716,7 +785,7 @@ public static class ReachabilityAnalyzer
     ///     and the recursion clusters. Components come back in Tarjan discovery order, reverse
     ///     topological order of the condensation, so every component's successors precede it.
     /// </summary>
-    private static (List<List<string>> Components, Dictionary<string, int> ComponentOfNode, List<RecursionCluster> Clusters) ComputeComponents(CallGraph callGraph, Dictionary<string, List<string>> forward, Dictionary<string, NodeReachability> facts)
+    private static (List<List<string>> Components, Dictionary<string, int> ComponentOfNode, List<RecursionCluster> Clusters) ComputeComponents(List<MethodNode> nodes, List<MethodCallEdge> edges, Dictionary<string, List<string>> forward, Dictionary<string, NodeReachability> facts)
     {
         var index = 0;
         var indices = new Dictionary<string, int>(StringComparer.Ordinal);
@@ -726,7 +795,7 @@ public static class ReachabilityAnalyzer
         var components = new List<List<string>>();
         var componentOfNode = new Dictionary<string, int>(StringComparer.Ordinal);
 
-        foreach (var node in callGraph.Nodes)
+        foreach (var node in nodes)
         {
             if (!indices.ContainsKey(node.Id))
             {
@@ -763,12 +832,11 @@ public static class ReachabilityAnalyzer
         // Self-loops (A→A) are recursive cycles too; BuildForwardAdjacency excluded them from
         // `forward`. Each gets a unique negative SccId so grouping never merges unrelated
         // self-recursive methods (non-negative ids belong to multi-node components, -1 to plain
-        // singletons). The edge list is sorted by source, so one source's self-loops are
-        // contiguous - a scan, not a GroupBy over every edge.
+        // singletons). One scan in edge order, the order the GroupBy it replaced produced.
+        // A repeated self-loop (other call type or evidence kind) finds its node already marked.
         var nextSelfLoopId = -2;
-        for (var selfLoopIndex = 0; selfLoopIndex < callGraph.Edges.Count; selfLoopIndex++)
+        foreach (var edge in edges)
         {
-            var edge = callGraph.Edges[selfLoopIndex];
             if (!string.Equals(edge.SourceId, edge.TargetId, StringComparison.Ordinal))
             {
                 continue;
@@ -780,13 +848,6 @@ public static class ReachabilityAnalyzer
                 fact.InRecursiveCycle = true;
                 fact.SccId = nextSelfLoopId--;
                 clusters.Add(new RecursionCluster { Id = $"scc-self-{selfId}", Size = 1, MemberIds = [selfId] });
-            }
-
-            while (selfLoopIndex + 1 < callGraph.Edges.Count
-                   && string.Equals(callGraph.Edges[selfLoopIndex + 1].SourceId, selfId, StringComparison.Ordinal)
-                   && string.Equals(callGraph.Edges[selfLoopIndex + 1].TargetId, selfId, StringComparison.Ordinal))
-            {
-                selfLoopIndex++;
             }
         }
 

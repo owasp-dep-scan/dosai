@@ -105,15 +105,17 @@ dotnet test ./Dosai.sln
   chains. Dedupe the call record before building the edge. String legs of the key compare by
   reference first, so route edge endpoint ids through the render cache (single instance per
   distinct member) rather than fresh strings. Same-pair collapsing
-  (`ReachabilityAnalyzer.CollapseDuplicateCallSites`) groups through a `CollapseKey` struct
-  dictionary and sorts only the distinct keys; the collapsed list comes out sorted by
-  (source, target, call type, evidence kind) in exactly the old concatenated-key order
-  (`GraphAssembly.CompareCollapseKeys` - the separator emulation matters: a strict-prefix
-  continuation below U+001F sorts before the whole shorter field, and rendered ids do contain
-  CR/LF/tab). `ReachabilityAnalyzer.Compute` builds its forward adjacency and FanIn counts by
-  run-length over that sorted list and guards the precondition
-  (`EnsureSortedByCollapseKey`), so anything that reorders `CallGraph.Edges` between collapse
-  and reachability silently degrades both - keep the sort or re-sort through the guard.
+  (`ReachabilityAnalyzer.CollapseDuplicateCallSites`) groups through an open-addressing table
+  of group ids keyed by `CollapseKey` (no key stored per edge) and sorts only the distinct
+  keys; the collapsed list comes out sorted by (source, target, call type, evidence kind) in
+  exactly the old concatenated-key order (`GraphAssembly.CompareCollapseKeys` - the separator
+  emulation matters: a strict-prefix continuation below U+001F sorts before the whole shorter
+  field, and rendered ids do contain CR/LF/tab). Each grouping stage runs in its own
+  `NoInlining` frame so only the placement arrays survive into the merge loop. Keep `ValueTuple`
+  scratch keys free of nullable items: tuple hashing boxes them. `ReachabilityAnalyzer.Compute`
+  builds its forward adjacency and FanIn counts by run-length over that order; an edge list in
+  any other order is sorted as a copy (`SortedByCollapseKey`), never in place, so the facts do
+  not depend on the caller's edge order.
 - Never reuse a per-group scratch `HashSet`/`List` across millions of groups without a cap:
   `Clear()` is O(capacity), so one group with a thousand call sites taxes every later group
   with that capacity (issue #70's second hotspot). Drop and re-grow scratch above ~64 entries.

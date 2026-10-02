@@ -50,8 +50,8 @@ internal static class GraphAssembly
     /// </summary>
     internal readonly struct EdgeSiteKey
     {
-        internal readonly string _sourceId;
-        internal readonly string _targetId;
+        private readonly string _sourceId;
+        private readonly string _targetId;
         private readonly string? _fileName;
         private readonly int _lineNumber;
         private readonly int _columnNumber;
@@ -175,7 +175,8 @@ internal static class GraphAssembly
     ///     Group identity of a collapsed edge: who called whom, with which call type and evidence
     ///     kind. A struct so grouping and ordering work without materializing the concatenated
     ///     key string the collapse step used to allocate per edge (issue #70: ~447 bytes x 4.1 M
-    ///     edges on a large tree, ~7 GB on a 15.4 M-edge one).
+    ///     edges on a large tree, ~7 GB on a 15.4 M-edge one). A missing id reads as empty, as it
+    ///     rendered into that key, so equality, hashing and ordering agree on it.
     /// </summary>
     internal readonly struct CollapseKey : IEquatable<CollapseKey>
     {
@@ -192,7 +193,8 @@ internal static class GraphAssembly
             _evidenceKind = evidenceKind;
         }
 
-        public static CollapseKey From(MethodCallEdge edge) => new(edge.SourceId, edge.TargetId, edge.CallType, edge.EvidenceKind);
+        public static CollapseKey From(MethodCallEdge edge) =>
+            new(edge.SourceId ?? string.Empty, edge.TargetId ?? string.Empty, edge.CallType, edge.EvidenceKind);
 
         public bool Equals(CollapseKey other) =>
             _callType == other._callType
@@ -221,12 +223,15 @@ internal static class GraphAssembly
     /// </summary>
     internal static int CompareCollapseEdges(MethodCallEdge x, MethodCallEdge y) => CompareCollapseKeys(CollapseKey.From(x), CollapseKey.From(y));
 
+    /// <summary><see cref="CompareCollapseKeys" /> as a reusable comparer for array sorts.</summary>
+    internal static readonly IComparer<CollapseKey> CollapseKeyOrder = Comparer<CollapseKey>.Create(CompareCollapseKeys);
+
     /// <summary><see cref="CompareCollapseEdges" /> over the group-identity struct.</summary>
     internal static int CompareCollapseKeys(CollapseKey x, CollapseKey y)
     {
-        var c = CompareSeparated(x._sourceId ?? string.Empty, y._sourceId ?? string.Empty);
+        var c = CompareSeparated(x._sourceId, y._sourceId);
         if (c != 0) return c;
-        c = CompareSeparated(x._targetId ?? string.Empty, y._targetId ?? string.Empty);
+        c = CompareSeparated(x._targetId, y._targetId);
         if (c != 0) return c;
         c = CompareSeparated(CallTypeName(x._callType), CallTypeName(y._callType));
         if (c != 0) return c;
