@@ -140,8 +140,9 @@ public static class ReachabilityAnalyzer
     /// <summary>
     ///     Computes the reachability section for a methods slice: per-node entry points, depths,
     ///     buckets, fan-in/out, SCC ids, and recursion clusters. Reuses the merged (already
-    ///     deduplicated) edge list; builds forward and reverse indexes once; one bounded BFS per
-    ///     resolvable entry point, never per node.
+    ///     deduplicated and sorted) edge list; builds the forward index and the distinct-caller
+    ///     counts by run-length over it; one bounded BFS per resolvable entry point, never per
+    ///     node.
     ///     <para>
     ///         <c>BudgetExhausted</c> reports whether any BFS hit <see cref="MaxVisitedPerEntryPoint"/>.
     ///         Callers that treat "not visited" as "unreachable" (the dead-code report) must consult
@@ -150,8 +151,14 @@ public static class ReachabilityAnalyzer
     /// </summary>
     public static (List<NodeReachability> Nodes, List<RecursionCluster> Clusters, bool BudgetExhausted) Compute(CallGraph callGraph, IEnumerable<EntryPoint> entryPoints, List<string> diagnostics)
     {
-        var forward = BuildAdjacency(callGraph.Edges, forward: true);
-        var reverse = BuildAdjacency(callGraph.Edges, forward: false);
+        var edges = callGraph.Edges;
+        // The collapsed edge list is sorted by (source, target, call type, evidence kind); the
+        // run-length adjacency and fan-in builds below rely on that. Guard it so a caller with an
+        // unsorted graph still gets exact results (the pipeline's list is always already sorted,
+        // so the guard is a single O(n) pass in practice).
+        EnsureSortedByCollapseKey(edges);
+        var forward = BuildForwardAdjacency(edges);
+        var fanIn = CountDistinctCallers(edges);
         var facts = callGraph.Nodes.ToDictionary(node => node.Id, node => new NodeReachability { NodeId = node.Id }, StringComparer.Ordinal);
 
         foreach (var (nodeId, targets) in forward)
@@ -162,11 +169,11 @@ public static class ReachabilityAnalyzer
             }
         }
 
-        foreach (var (nodeId, callers) in reverse)
+        foreach (var (nodeId, callers) in fanIn)
         {
             if (facts.TryGetValue(nodeId, out var fact))
             {
-                fact.FanIn = callers.Count;
+                fact.FanIn = callers;
             }
         }
 
@@ -218,9 +225,13 @@ public static class ReachabilityAnalyzer
                 fact.DepthFromEntryPoint = fact.DepthFromEntryPoint is { } existing ? Math.Min(existing, depth) : depth;
                 if (forward.TryGetValue(current, out var targets))
                 {
-                    foreach (var target in targets.Where(target => !visited.Contains(target)))
+                    for (var i = 0; i < targets.Count; i++)
                     {
-                        queue.Enqueue((target, depth + 1));
+                        var target = targets[i];
+                        if (!visited.Contains(target))
+                        {
+                            queue.Enqueue((target, depth + 1));
+                        }
                     }
                 }
             }
@@ -262,35 +273,97 @@ public static class ReachabilityAnalyzer
             }
         }
 
+        // The keep-alive kinds are exactly two; reasons must land in first-occurrence order of
+        // the kinds (declared kind first, then evidence kinds in list order), which is the order
+        // the previous LINQ shape produced and KeepAliveReasons preserves.
+        const string reflectionReason = "ReflectionHeuristic";
+        const string frameworkReason = "FrameworkModel";
+
+        static string ReasonFor(AnalysisEvidenceKind kind) =>
+            kind == AnalysisEvidenceKind.ReflectionHeuristic ? reflectionReason : frameworkReason;
+
         foreach (var edge in callGraph.Edges)
         {
-            // Report the evidence kind that actually kept the node alive. The edge's own
-            // EvidenceKind is frequently an ordinary call kind while a reflection/framework kind
-            // sits in its Evidence list, so naming EvidenceKind unconditionally attributed the
-            // decision to the wrong evidence.
-            foreach (var kind in KeepAliveEvidenceKinds(edge.EvidenceKind, edge.Evidence.Select(evidence => evidence.Kind)))
+            AnalysisEvidenceKind? firstSeen = null;
+            AnalysisEvidenceKind? secondSeen = null;
+            void See(AnalysisEvidenceKind kind)
             {
-                KeepAlive(edge.TargetId, kind.ToString());
+                if (kind is not (AnalysisEvidenceKind.ReflectionHeuristic or AnalysisEvidenceKind.FrameworkModel))
+                {
+                    return;
+                }
+
+                if (firstSeen is null)
+                {
+                    firstSeen = kind;
+                }
+                else if (secondSeen is null && kind != firstSeen)
+                {
+                    secondSeen = kind;
+                }
+            }
+
+            See(edge.EvidenceKind);
+            foreach (var evidence in edge.Evidence)
+            {
+                See(evidence.Kind);
+            }
+
+            if (firstSeen is { } first)
+            {
+                KeepAlive(edge.TargetId, ReasonFor(first));
+            }
+
+            if (secondSeen is { } second)
+            {
+                KeepAlive(edge.TargetId, ReasonFor(second));
             }
         }
 
         foreach (var node in callGraph.Nodes)
         {
-            foreach (var kind in KeepAliveEvidenceKinds(null, node.Evidence.Select(evidence => evidence.Kind).Concat(node.Identity?.Evidence ?? [])))
+            AnalysisEvidenceKind? firstSeen = null;
+            AnalysisEvidenceKind? secondSeen = null;
+            void See(AnalysisEvidenceKind kind)
             {
-                KeepAlive(node.Id, kind.ToString());
+                if (kind is not (AnalysisEvidenceKind.ReflectionHeuristic or AnalysisEvidenceKind.FrameworkModel))
+                {
+                    return;
+                }
+
+                if (firstSeen is null)
+                {
+                    firstSeen = kind;
+                }
+                else if (secondSeen is null && kind != firstSeen)
+                {
+                    secondSeen = kind;
+                }
+            }
+
+            foreach (var evidence in node.Evidence)
+            {
+                See(evidence.Kind);
+            }
+
+            if (node.Identity is { Evidence: var identityKinds })
+            {
+                foreach (var kind in identityKinds)
+                {
+                    See(kind);
+                }
+            }
+
+            if (firstSeen is { } first)
+            {
+                KeepAlive(node.Id, ReasonFor(first));
+            }
+
+            if (secondSeen is { } second)
+            {
+                KeepAlive(node.Id, ReasonFor(second));
             }
         }
-    }
-
-    private static bool IsKeepAliveEvidence(AnalysisEvidenceKind kind) =>
-        kind is AnalysisEvidenceKind.ReflectionHeuristic or AnalysisEvidenceKind.FrameworkModel;
-
-    /// <summary>The distinct keep-alive evidence kinds among a declared kind and an evidence list.</summary>
-    private static IEnumerable<AnalysisEvidenceKind> KeepAliveEvidenceKinds(AnalysisEvidenceKind? declaredKind, IEnumerable<AnalysisEvidenceKind> evidenceKinds)
-    {
-        var kinds = declaredKind is { } kind ? evidenceKinds.Prepend(kind) : evidenceKinds;
-        return kinds.Where(IsKeepAliveEvidence).Distinct();
     }
 
     /// <summary>
@@ -561,28 +634,80 @@ public static class ReachabilityAnalyzer
         callGraph.Edges = collapsed;
     }
 
-    private static Dictionary<string, List<string>> BuildAdjacency(List<MethodCallEdge> edges, bool forward)
+    /// <summary>
+    ///     Forward adjacency from the (source, target)-sorted collapsed edge list, built by
+    ///     run-length: no per-node hash sets and no copy step. Consecutive equal targets (the
+    ///     same pair surviving under different call types) dedupe by adjacency; self-loops stay
+    ///     out, as before - component analysis owns them.
+    /// </summary>
+    private static Dictionary<string, List<string>> BuildForwardAdjacency(List<MethodCallEdge> edges)
     {
-        var adjacency = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
-        foreach (var edge in edges)
+        var adjacency = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        var index = 0;
+        while (index < edges.Count)
         {
-            var from = forward ? edge.SourceId : edge.TargetId;
-            var to = forward ? edge.TargetId : edge.SourceId;
-            if (string.Equals(from, to, StringComparison.Ordinal))
+            var source = edges[index].SourceId;
+            var targets = new List<string>();
+            while (index < edges.Count && string.Equals(edges[index].SourceId, source, StringComparison.Ordinal))
             {
-                continue; // self-loops are handled by component analysis
+                var target = edges[index].TargetId;
+                if (!string.Equals(target, source, StringComparison.Ordinal)
+                    && (targets.Count == 0 || !string.Equals(targets[^1], target, StringComparison.Ordinal)))
+                {
+                    targets.Add(target);
+                }
+
+                index++;
             }
 
-            if (!adjacency.TryGetValue(from, out var targets))
-            {
-                targets = [];
-                adjacency[from] = targets;
-            }
-
-            targets.Add(to);
+            adjacency.Add(source, targets);
         }
 
-        return adjacency.ToDictionary(pair => pair.Key, pair => pair.Value.ToList(), StringComparer.Ordinal);
+        return adjacency;
+    }
+
+    /// <summary>
+    ///     Distinct-caller counts per node from the (source, target)-sorted edge list: one count
+    ///     per run of an equal pair, a single int-valued dictionary instead of the full reverse
+    ///     adjacency graph this used to build (and copy) only to read <c>.Count</c> off it.
+    /// </summary>
+    private static Dictionary<string, int> CountDistinctCallers(List<MethodCallEdge> edges)
+    {
+        var fanIn = new Dictionary<string, int>(StringComparer.Ordinal);
+        var index = 0;
+        while (index < edges.Count)
+        {
+            var edge = edges[index];
+            var source = edge.SourceId;
+            var target = edge.TargetId;
+            do
+            {
+                index++;
+            }
+            while (index < edges.Count
+                   && string.Equals(edges[index].SourceId, source, StringComparison.Ordinal)
+                   && string.Equals(edges[index].TargetId, target, StringComparison.Ordinal));
+
+            if (!string.Equals(source, target, StringComparison.Ordinal))
+            {
+                fanIn[target] = fanIn.TryGetValue(target, out var callers) ? callers + 1 : 1;
+            }
+        }
+
+        return fanIn;
+    }
+
+    /// <summary>Sorts the edge list by collapse key only when it is not already in that order.</summary>
+    private static void EnsureSortedByCollapseKey(List<MethodCallEdge> edges)
+    {
+        for (var index = 1; index < edges.Count; index++)
+        {
+            if (GraphAssembly.CompareCollapseEdges(edges[index - 1], edges[index]) > 0)
+            {
+                GraphAssembly.StableSortInPlace(edges, GraphAssembly.CompareCollapseEdges);
+                return;
+            }
+        }
     }
 
     /// <summary>
@@ -635,20 +760,34 @@ public static class ReachabilityAnalyzer
             });
         }
 
-        // Self-loops (A→A) are recursive cycles too; BuildAdjacency excluded them from `forward`.
-        // Each gets a unique negative SccId so grouping never merges unrelated self-recursive
-        // methods (non-negative ids belong to multi-node components, -1 to plain singletons).
+        // Self-loops (A→A) are recursive cycles too; BuildForwardAdjacency excluded them from
+        // `forward`. Each gets a unique negative SccId so grouping never merges unrelated
+        // self-recursive methods (non-negative ids belong to multi-node components, -1 to plain
+        // singletons). The edge list is sorted by source, so one source's self-loops are
+        // contiguous - a scan, not a GroupBy over every edge.
         var nextSelfLoopId = -2;
-        foreach (var edge in callGraph.Edges.Where(edge => string.Equals(edge.SourceId, edge.TargetId, StringComparison.Ordinal)).GroupBy(edge => edge.SourceId, StringComparer.Ordinal))
+        for (var selfLoopIndex = 0; selfLoopIndex < callGraph.Edges.Count; selfLoopIndex++)
         {
-            if (!facts.TryGetValue(edge.Key, out var fact) || fact.InRecursiveCycle)
+            var edge = callGraph.Edges[selfLoopIndex];
+            if (!string.Equals(edge.SourceId, edge.TargetId, StringComparison.Ordinal))
             {
                 continue;
             }
 
-            fact.InRecursiveCycle = true;
-            fact.SccId = nextSelfLoopId--;
-            clusters.Add(new RecursionCluster { Id = $"scc-self-{edge.Key}", Size = 1, MemberIds = [edge.Key] });
+            var selfId = edge.SourceId;
+            if (facts.TryGetValue(selfId, out var fact) && !fact.InRecursiveCycle)
+            {
+                fact.InRecursiveCycle = true;
+                fact.SccId = nextSelfLoopId--;
+                clusters.Add(new RecursionCluster { Id = $"scc-self-{selfId}", Size = 1, MemberIds = [selfId] });
+            }
+
+            while (selfLoopIndex + 1 < callGraph.Edges.Count
+                   && string.Equals(callGraph.Edges[selfLoopIndex + 1].SourceId, selfId, StringComparison.Ordinal)
+                   && string.Equals(callGraph.Edges[selfLoopIndex + 1].TargetId, selfId, StringComparison.Ordinal))
+            {
+                selfLoopIndex++;
+            }
         }
 
         return (components, componentOfNode, clusters);
@@ -749,13 +888,10 @@ public static class ReachabilityAnalyzer
             nodeIndexById[nodes[index].Id] = index;
         }
 
-        // Condensation edges, deduplicated.
-        var componentSuccessors = new List<HashSet<int>>(components.Count);
-        for (var componentIndex = 0; componentIndex < components.Count; componentIndex++)
-        {
-            componentSuccessors.Add([]);
-        }
-
+        // Condensation edges, deduplicated. Sets are created lazily: most components have no
+        // cross-component successors, and one empty HashSet per component is real memory on
+        // large graphs.
+        var componentSuccessors = new HashSet<int>?[components.Count];
         foreach (var (source, targets) in forward)
         {
             if (!componentOfNode.TryGetValue(source, out var sourceComponent))
@@ -767,7 +903,7 @@ public static class ReachabilityAnalyzer
             {
                 if (componentOfNode.TryGetValue(target, out var targetComponent) && sourceComponent != targetComponent)
                 {
-                    componentSuccessors[sourceComponent].Add(targetComponent);
+                    (componentSuccessors[sourceComponent] ??= []).Add(targetComponent);
                 }
             }
         }
@@ -791,11 +927,15 @@ public static class ReachabilityAnalyzer
                 }
             }
 
-            foreach (var successor in componentSuccessors[componentIndex])
+            var successors = componentSuccessors[componentIndex];
+            if (successors is not null)
             {
-                if (componentSets[successor] is { } successorSet)
+                foreach (var successor in successors)
                 {
-                    set.Or(successorSet);
+                    if (componentSets[successor] is { } successorSet)
+                    {
+                        set.Or(successorSet);
+                    }
                 }
             }
 
@@ -857,9 +997,13 @@ public static class ReachabilityAnalyzer
                 budget--;
                 if (forward.TryGetValue(current, out var targets))
                 {
-                    foreach (var target in targets.Where(target => !visited.Contains(target)))
+                    for (var index = 0; index < targets.Count; index++)
                     {
-                        queue.Enqueue(target);
+                        var target = targets[index];
+                        if (!visited.Contains(target))
+                        {
+                            queue.Enqueue(target);
+                        }
                     }
                 }
             }
