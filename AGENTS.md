@@ -104,7 +104,19 @@ dotnet test ./Dosai.sln
   instead of a concatenated key string per edge, stable in-place sorts instead of `OrderBy`
   chains. Dedupe the call record before building the edge. String legs of the key compare by
   reference first, so route edge endpoint ids through the render cache (single instance per
-  distinct member) rather than fresh strings.
+  distinct member) rather than fresh strings. Same-pair collapsing
+  (`ReachabilityAnalyzer.CollapseDuplicateCallSites`) groups through a `CollapseKey` struct
+  dictionary and sorts only the distinct keys; the collapsed list comes out sorted by
+  (source, target, call type, evidence kind) in exactly the old concatenated-key order
+  (`GraphAssembly.CompareCollapseKeys` - the separator emulation matters: a strict-prefix
+  continuation below U+001F sorts before the whole shorter field, and rendered ids do contain
+  CR/LF/tab). `ReachabilityAnalyzer.Compute` builds its forward adjacency and FanIn counts by
+  run-length over that sorted list and guards the precondition
+  (`EnsureSortedByCollapseKey`), so anything that reorders `CallGraph.Edges` between collapse
+  and reachability silently degrades both - keep the sort or re-sort through the guard.
+- Never reuse a per-group scratch `HashSet`/`List` across millions of groups without a cap:
+  `Clear()` is O(capacity), so one group with a thousand call sites taxes every later group
+  with that capacity (issue #70's second hotspot). Drop and re-grow scratch above ~64 entries.
 - Phase order in `BuildMethodsSlice` is a memory contract: framework analysis and the security
   analyzer run immediately after source analysis (they are the only compilation consumers),
   then the compilations are dropped before the assembly IL call graph, enrichment,
