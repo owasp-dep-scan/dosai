@@ -386,34 +386,178 @@ public static class ReachabilityAnalyzer
     ///     merge into the keeper; downstream consumers (exploit chains) operate on method ids,
     ///     not per-site locations, so nothing they need is lost.
     /// </summary>
+    /// <remarks>
+    ///     This used to group through one concatenated key string per edge, materialized and
+    ///     retained by <c>GroupBy</c>/<c>OrderBy</c> for the whole step - on a 15.4 M-edge tree
+    ///     that is ~7 GB of keys alone and the allocation that ran the scan out of memory
+    ///     (issue #70). It now sorts in place under <see cref="GraphAssembly.CompareCollapseEdges" />,
+    ///     which reproduces the concatenated key's order field by field (separator semantics
+    ///     included, see there), and walks the equal runs.
+    /// </remarks>
     public static void CollapseDuplicateCallSites(CallGraph callGraph)
     {
-        var collapsed = new List<MethodCallEdge>();
-        foreach (var group in callGraph.Edges
-                     .GroupBy(edge => $"{edge.SourceId}\u001f{edge.TargetId}\u001f{edge.CallType}\u001f{edge.EvidenceKind}", StringComparer.Ordinal)
-                     .OrderBy(group => group.Key, StringComparer.Ordinal))
+        var edges = callGraph.Edges;
+        if (edges.Count == 0)
         {
-            var edges = group.ToList();
-            var keeper = edges
-                .OrderBy(edge => edge.CallLocation?.FileName ?? string.Empty, StringComparer.Ordinal)
-                .ThenBy(edge => edge.CallLocation?.LineNumber ?? 0)
-                .ThenBy(edge => edge.CallLocation?.ColumnNumber ?? 0)
-                .First();
-            keeper.CallSiteCount = edges
-                .Select(edge => $"{edge.CallLocation?.FileName}:{edge.CallLocation?.LineNumber}:{edge.CallLocation?.ColumnNumber}")
-                .Distinct(StringComparer.Ordinal)
-                .Count();
+            callGraph.Edges = [];
+            return;
+        }
 
-            // Merge the annotations of the dropped duplicates (argument expressions, evidence)
-            // so collapsing never discards how the call was made, only where it was repeated.
-            keeper.Arguments = edges.SelectMany(edge => edge.Arguments ?? []).Distinct(StringComparer.Ordinal).ToList();
-            keeper.ArgumentExpressions = edges.SelectMany(edge => edge.ArgumentExpressions ?? []).Distinct(StringComparer.Ordinal).ToList();
-            keeper.Evidence = edges.SelectMany(edge => edge.Evidence)
-                .DistinctBy(evidence => (evidence.Kind, evidence.Source, evidence.Description, evidence.FileName, evidence.LineNumber, evidence.ColumnNumber))
-                .ToList();
+        // Group by identity through a struct-key dictionary (issue #70: this used to group on a
+        // concatenated key string per edge, retained by GroupBy/OrderBy for the whole step -
+        // gigabytes on multi-million-edge trees, and the allocation that ran a 15.4 M-edge scan
+        // out of memory). String hash codes are cached on the shared id instances, so hashing is
+        // cheap; sorting the distinct group keys costs a fraction of sorting every edge.
+        var groupOfEdge = new int[edges.Count];
+        var groupSizes = new List<int>();
+        var groups = new Dictionary<GraphAssembly.CollapseKey, int>(edges.Count / 2);
+        for (var i = 0; i < edges.Count; i++)
+        {
+            var key = GraphAssembly.CollapseKey.From(edges[i]);
+            if (!groups.TryGetValue(key, out var group))
+            {
+                group = groupSizes.Count;
+                groups.Add(key, group);
+                groupSizes.Add(0);
+            }
+
+            groupOfEdge[i] = group;
+            groupSizes[group]++;
+        }
+
+        // Distinct keys in first-encounter order plus their group ordinals; sorting key/ordinal
+        // pairs orders the groups the way the old concatenated-key OrderBy did.
+        var keyCount = groupSizes.Count;
+        var keys = new GraphAssembly.CollapseKey[keyCount];
+        foreach (var (key, group) in groups)
+        {
+            keys[group] = key;
+        }
+
+        var ordinals = new int[keyCount];
+        for (var i = 0; i < keyCount; i++)
+        {
+            ordinals[i] = i;
+        }
+
+        Array.Sort(keys, ordinals, Comparer<GraphAssembly.CollapseKey>.Create(GraphAssembly.CompareCollapseKeys));
+
+        // Counting-sort placement: each group's edges, in original encounter order, land in one
+        // contiguous slice of `placement`.
+        var offsets = new int[keyCount + 1];
+        for (var g = 0; g < keyCount; g++)
+        {
+            offsets[g + 1] = offsets[g] + groupSizes[g];
+        }
+
+        var cursor = (int[])offsets.Clone();
+        var placement = new int[edges.Count];
+        for (var i = 0; i < edges.Count; i++)
+        {
+            placement[cursor[groupOfEdge[i]]++] = i;
+        }
+
+        var collapsed = new List<MethodCallEdge>(keyCount);
+        // Per-group scratch, reused across groups. Tuples instead of the old "file:line:col"
+        // strings: distinct counts agree, because the trailing number segments of the rendered
+        // form cannot contain the ':' two different tuples would need to collide on.
+        var sitesSeen = new HashSet<(string FileName, int LineNumber, int ColumnNumber)>();
+        var argumentsSeen = new HashSet<string>(StringComparer.Ordinal);
+        var argumentsList = new List<string>();
+        var expressionsSeen = new HashSet<string>(StringComparer.Ordinal);
+        var expressionsList = new List<string>();
+        var evidenceSeen = new HashSet<(AnalysisEvidenceKind Kind, string? Source, string? Description, string? FileName, int LineNumber, int ColumnNumber)>();
+        var mergedEvidence = new List<AnalysisEvidence>();
+
+        for (var position = 0; position < keyCount; position++)
+        {
+            var group = ordinals[position];
+            var start = offsets[group];
+            var stop = offsets[group + 1];
+
+            // Keeper: first in encounter order (placement preserved it) minimal by file, line,
+            // column - exactly the OrderBy(...).First() the LINQ form picked.
+            var keeper = edges[placement[start]];
+            for (var s = start + 1; s < stop; s++)
+            {
+                var edge = edges[placement[s]];
+                var c = string.CompareOrdinal(keeper.CallLocation?.FileName ?? string.Empty, edge.CallLocation?.FileName ?? string.Empty);
+                if (c < 0)
+                {
+                    continue;
+                }
+
+                if (c > 0
+                    || (edge.CallLocation?.LineNumber ?? 0) < (keeper.CallLocation?.LineNumber ?? 0)
+                    || ((edge.CallLocation?.LineNumber ?? 0) == (keeper.CallLocation?.LineNumber ?? 0)
+                        && (edge.CallLocation?.ColumnNumber ?? 0) < (keeper.CallLocation?.ColumnNumber ?? 0)))
+                {
+                    keeper = edge;
+                }
+            }
+
+            // Scratch was reset at the end of the previous group (or is fresh on the first).
+            for (var s = start; s < stop; s++)
+            {
+                var edge = edges[placement[s]];
+                sitesSeen.Add((edge.CallLocation?.FileName ?? string.Empty, edge.CallLocation?.LineNumber ?? 0, edge.CallLocation?.ColumnNumber ?? 0));
+                if (edge.Arguments is not null)
+                {
+                    foreach (var argument in edge.Arguments)
+                    {
+                        if (argumentsSeen.Add(argument))
+                        {
+                            argumentsList.Add(argument);
+                        }
+                    }
+                }
+
+                if (edge.ArgumentExpressions is not null)
+                {
+                    foreach (var expression in edge.ArgumentExpressions)
+                    {
+                        if (expressionsSeen.Add(expression))
+                        {
+                            expressionsList.Add(expression);
+                        }
+                    }
+                }
+
+                // First occurrence per (kind, source, description, location) wins, DistinctBy's
+                // order; read before the keeper's own lists are replaced below.
+                foreach (var evidence in edge.Evidence)
+                {
+                    if (evidenceSeen.Add((evidence.Kind, evidence.Source, evidence.Description, evidence.FileName, evidence.LineNumber, evidence.ColumnNumber)))
+                    {
+                        mergedEvidence.Add(evidence);
+                    }
+                }
+            }
+
+            keeper.CallSiteCount = sitesSeen.Count;
+            // Always assigned (empty, never null), as before: the LINQ form reassigned these for
+            // every group, singleton groups included, and deduplicated within a single edge too.
+            keeper.Arguments = [.. argumentsList];
+            keeper.ArgumentExpressions = [.. expressionsList];
+            keeper.Evidence = [.. mergedEvidence];
+
+            // Scratch reset. Clear() is O(capacity), and one group of a thousand call sites
+            // (real graphs have them) would make every later group pay for that capacity - a
+            // flat tax across millions of mostly-singleton groups. Oversized scratch is dropped
+            // and re-grown instead; small ones clear in O(count).
+            const int reusedScratchLimit = 64;
+            if (sitesSeen.Count > reusedScratchLimit) sitesSeen = []; else sitesSeen.Clear();
+            if (evidenceSeen.Count > reusedScratchLimit) evidenceSeen = []; else evidenceSeen.Clear();
+            if (argumentsSeen.Count > reusedScratchLimit) argumentsSeen = []; else argumentsSeen.Clear();
+            if (expressionsSeen.Count > reusedScratchLimit) expressionsSeen = []; else expressionsSeen.Clear();
+            argumentsList.Clear();
+            expressionsList.Clear();
+            mergedEvidence.Clear();
+
             collapsed.Add(keeper);
         }
 
+        collapsed.TrimExcess();
         callGraph.Edges = collapsed;
     }
 

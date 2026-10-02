@@ -629,4 +629,223 @@ public static class Shouting
     }
 
     #endregion
+
+    #region Issue #70 - per-edge key strings in CollapseDuplicateCallSites
+
+    /// <summary>
+    ///     The old grouping key, kept verbatim as the reference the allocation-free comparison
+    ///     must reproduce: same groups, same order, including the separator's ordering trap for
+    ///     ids that contain characters below U+001F.
+    /// </summary>
+    private static string CollapseKeyReference(MethodCallEdge edge) =>
+        $"{edge.SourceId}\u001f{edge.TargetId}\u001f{edge.CallType}\u001f{edge.EvidenceKind}";
+
+    private static List<MethodCallEdge> CollapseReference(CallGraph callGraph)
+    {
+        var collapsed = new List<MethodCallEdge>();
+        foreach (var group in callGraph.Edges
+                     .GroupBy(CollapseKeyReference, StringComparer.Ordinal)
+                     .OrderBy(group => group.Key, StringComparer.Ordinal))
+        {
+            var edges = group.ToList();
+            var keeper = edges
+                .OrderBy(edge => edge.CallLocation?.FileName ?? string.Empty, StringComparer.Ordinal)
+                .ThenBy(edge => edge.CallLocation?.LineNumber ?? 0)
+                .ThenBy(edge => edge.CallLocation?.ColumnNumber ?? 0)
+                .First();
+            keeper.CallSiteCount = edges
+                .Select(edge => $"{edge.CallLocation?.FileName}:{edge.CallLocation?.LineNumber}:{edge.CallLocation?.ColumnNumber}")
+                .Distinct(StringComparer.Ordinal)
+                .Count();
+            keeper.Arguments = edges.SelectMany(edge => edge.Arguments ?? []).Distinct(StringComparer.Ordinal).ToList();
+            keeper.ArgumentExpressions = edges.SelectMany(edge => edge.ArgumentExpressions ?? []).Distinct(StringComparer.Ordinal).ToList();
+            keeper.Evidence = edges.SelectMany(edge => edge.Evidence)
+                .DistinctBy(evidence => (evidence.Kind, evidence.Source, evidence.Description, evidence.FileName, evidence.LineNumber, evidence.ColumnNumber))
+                .ToList();
+            collapsed.Add(keeper);
+        }
+
+        return collapsed;
+    }
+
+    private static void AssertSameCollapse(List<MethodCallEdge> expected, CallGraph actual)
+    {
+        Assert.Equal(expected.Count, actual.Edges.Count);
+        for (var i = 0; i < expected.Count; i++)
+        {
+            var want = expected[i];
+            var got = actual.Edges[i];
+            // The same input edge must survive as the keeper: same original id, location, fields.
+            Assert.Equal(want.Id, got.Id);
+            Assert.Equal(want.SourceId, got.SourceId);
+            Assert.Equal(want.TargetId, got.TargetId);
+            Assert.Equal(want.CallType, got.CallType);
+            Assert.Equal(want.EvidenceKind, got.EvidenceKind);
+            Assert.Equal(want.CallSiteCount, got.CallSiteCount);
+            Assert.Equal(want.CallLocation?.FileName, got.CallLocation?.FileName);
+            Assert.Equal(want.CallLocation?.LineNumber, got.CallLocation?.LineNumber);
+            Assert.Equal(want.CallLocation?.ColumnNumber, got.CallLocation?.ColumnNumber);
+            Assert.Equal(want.Arguments, got.Arguments);
+            Assert.Equal(want.ArgumentExpressions, got.ArgumentExpressions);
+            Assert.Equal(want.Evidence.Count, got.Evidence.Count);
+            for (var e = 0; e < want.Evidence.Count; e++)
+            {
+                Assert.Same(want.Evidence[e], got.Evidence[e]);
+            }
+        }
+    }
+
+    private static MethodCallEdge CloneEdge(MethodCallEdge edge) => new()
+    {
+        Id = edge.Id,
+        SourceId = edge.SourceId,
+        TargetId = edge.TargetId,
+        CallType = edge.CallType,
+        EvidenceKind = edge.EvidenceKind,
+        CallLocation = edge.CallLocation,
+        Arguments = edge.Arguments,
+        ArgumentExpressions = edge.ArgumentExpressions,
+        Evidence = [.. edge.Evidence],
+    };
+
+    [Fact]
+    public void CollapseDuplicateCallSites_MatchesTheConcatenatedKeyReference()
+    {
+        MethodCallEdge Edge(string src, string tgt, CallType type, AnalysisEvidenceKind kind, string file, int line, int col, int id,
+            string[]? arguments = null, string[]? expressions = null, (AnalysisEvidenceKind Kind, string Description, string Confidence, int Line)[]? evidence = null)
+        => new()
+        {
+            Id = $"e{id}",
+            SourceId = src,
+            TargetId = tgt,
+            CallType = type,
+            EvidenceKind = kind,
+            CallLocation = new CallLocation { FileName = file, LineNumber = line, ColumnNumber = col },
+            Arguments = arguments is null ? null : [.. arguments],
+            ArgumentExpressions = expressions is null ? null : [.. expressions],
+            Evidence = evidence?.Select(e => new AnalysisEvidence
+            {
+                Kind = e.Kind,
+                Source = "test",
+                Description = e.Description,
+                Confidence = e.Confidence,
+                FileName = file,
+                LineNumber = e.Line,
+            }).ToList() ?? [],
+        };
+
+        var graph = new CallGraph
+        {
+            Edges =
+            [
+                // Same pair, three sites, two distinct: count 2, keeper minimal by (file, line, col).
+                Edge("Ns.A.Run():void", "Ns.B.Save(string):void", CallType.MethodCall, AnalysisEvidenceKind.SourceRoslynDirect, "/src/B.cs", 10, 3, 1, ["b", "a"], ["x"]),
+                Edge("Ns.A.Run():void", "Ns.B.Save(string):void", CallType.MethodCall, AnalysisEvidenceKind.SourceRoslynDirect, "/src/A.cs", 90, 9, 2, ["a", "c"], ["y", "x"]),
+                Edge("Ns.A.Run():void", "Ns.B.Save(string):void", CallType.MethodCall, AnalysisEvidenceKind.SourceRoslynDirect, "/src/A.cs", 90, 9, 3),
+                // Same pair, other call type: a separate fact that stays a separate edge.
+                Edge("Ns.A.Run():void", "Ns.B.Save(string):void", CallType.ConstructorCall, AnalysisEvidenceKind.SourceRoslynDirect, "/src/A.cs", 1, 1, 4, arguments: ["z"]),
+                // Tie on (file, line, col): the first in encounter order is the keeper.
+                Edge("Ns.C.X():void", "Ns.D.Y():void", CallType.MethodCall, AnalysisEvidenceKind.AssemblyIlDirect, "/src/T.cs", 5, 5, 5, ["first"]),
+                Edge("Ns.C.X():void", "Ns.D.Y():void", CallType.MethodCall, AnalysisEvidenceKind.AssemblyIlDirect, "/src/T.cs", 5, 5, 6, ["second"]),
+                // Duplicates inside one edge's own lists are deduped even in a singleton group,
+                // and the lists are empty (never null) after collapsing.
+                Edge("Ns.E.One():void", "Ns.F.Two():void", CallType.PropertyGet, AnalysisEvidenceKind.SourceUnresolved, "/src/U.cs", 2, 8, 7,
+                    ["dup", "dup"], ["e1", "e2", "e1"],
+                    [(AnalysisEvidenceKind.SourceUnresolved, "unresolved call", "Low", 1), (AnalysisEvidenceKind.SourceUnresolved, "unresolved call", "High", 1)]),
+                // Evidence merging: the same tuple from two edges keeps the first occurrence.
+                Edge("Ns.G.M():void", "Ns.H.N():void", CallType.MethodCall, AnalysisEvidenceKind.SourceRoslynVirtualCandidate, "/src/V.cs", 3, 1, 8,
+                    evidence: [(AnalysisEvidenceKind.SourceRoslynVirtualCandidate, "candidate", "Medium", 3)]),
+                Edge("Ns.G.M():void", "Ns.H.N():void", CallType.MethodCall, AnalysisEvidenceKind.SourceRoslynVirtualCandidate, "/src/W.cs", 4, 1, 9,
+                    evidence: [(AnalysisEvidenceKind.SourceRoslynVirtualCandidate, "candidate", "High", 3), (AnalysisEvidenceKind.SourceRoslynVirtualCandidate, "other", "Low", 4)]),
+                // Null argument lists and a null call location keep the old defensive shape.
+                Edge("Ns.I.J():void", "Ns.J.K():void", CallType.MethodCall, AnalysisEvidenceKind.ExternalSummary, "/src/Z.cs", 7, 2, 10),
+                Edge("Ns.I.J():void", "Ns.J.K():void", CallType.MethodCall, AnalysisEvidenceKind.ExternalSummary, "/src/Z.cs", 7, 2, 11),
+            ]
+        };
+        graph.Edges[10].CallLocation = null!;
+
+        var expected = CollapseReference(new CallGraph { Edges = [.. graph.Edges.Select(CloneEdge)] });
+
+        ReachabilityAnalyzer.CollapseDuplicateCallSites(graph);
+
+        AssertSameCollapse(expected, graph);
+    }
+
+    [Fact]
+    public void CompareCollapseEdges_ReproducesConcatenatedKeyOrderOnControlCharIds()
+    {
+        // Ids that make field-by-field comparison diverge from the concatenated key: strict
+        // prefixes continuing with CR/LF/tab (below U+001F, they sort before the separator and
+        // so before the whole shorter id) and with ordinary characters (above it). Rendered ids
+        // really do contain CR/LF/tab; none contains U+001F itself, and it is exactly that
+        // absence that makes the field-wise comparison reproduce the concatenation.
+        var ids = new[]
+        {
+            "", "A", "A\r", "A\n", "A\t", "A0", "AA", "B", "B\nC", "B0",
+            "Ns.Space<T>.Run(\u0000int):void", "Ns.Space<T>.Run(\u0000int):void\r", "x", "xy",
+            "xy\n", "xy\u001ez", "Ns.X.M(string):void", "Ns.X.M(string\u000b):void",
+        };
+        var edges = new List<MethodCallEdge>();
+        var n = 0;
+        foreach (var source in ids)
+        {
+            foreach (var target in ids)
+            {
+                foreach (var callType in new[] { CallType.Unknown, CallType.MethodCall, CallType.ConstructorCall })
+                {
+                    edges.Add(new MethodCallEdge
+                    {
+                        Id = $"e{++n}",
+                        SourceId = source,
+                        TargetId = target,
+                        CallType = callType,
+                        EvidenceKind = n % 2 == 0 ? AnalysisEvidenceKind.SourceRoslynDirect : AnalysisEvidenceKind.SourceUnresolved,
+                        CallLocation = new CallLocation(),
+                    });
+                }
+            }
+        }
+
+        // Shuffle deterministically so the sort under test actually reorders.
+        var rng = new Random(70);
+        var shuffled = edges.OrderBy(_ => rng.Next()).ToList();
+
+        var expected = CollapseReference(new CallGraph { Edges = [.. shuffled.Select(CloneEdge)] });
+        var actual = new CallGraph { Edges = [.. shuffled.Select(CloneEdge)] };
+        ReachabilityAnalyzer.CollapseDuplicateCallSites(actual);
+
+        // Group keys in output order: identical sequences mean identical grouping and ordering.
+        Assert.Equal(
+            expected.Select(CollapseKeyReference),
+            actual.Edges.Select(CollapseKeyReference));
+    }
+
+    [Fact]
+    public void CompareCollapseEdges_SortsPrefixContinuationsBelowSeparatorBeforeThePrefix()
+    {
+        MethodCallEdge Edge(string source) => new()
+        {
+            SourceId = source,
+            TargetId = "T",
+            CallType = CallType.MethodCall,
+            EvidenceKind = AnalysisEvidenceKind.SourceRoslynDirect,
+            CallLocation = new CallLocation(),
+        };
+
+        // "A\r..." continues below the separator: the concatenated key sorts it BEFORE "A",
+        // where a plain field-wise comparison would put it after.
+        var edges = new List<MethodCallEdge> { Edge("A"), Edge("A\rX") };
+        GraphAssembly.StableSortInPlace(edges, GraphAssembly.CompareCollapseEdges);
+        Assert.Equal("A\rX", edges[0].SourceId);
+        Assert.Equal("A", edges[1].SourceId);
+
+        // Ordinary continuation ("AA" continues with 'A' > U+001F): the prefix sorts first,
+        // as both comparisons agree.
+        edges = [Edge("A"), Edge("AA")];
+        GraphAssembly.StableSortInPlace(edges, GraphAssembly.CompareCollapseEdges);
+        Assert.Equal("A", edges[0].SourceId);
+        Assert.Equal("AA", edges[1].SourceId);
+    }
+
+    #endregion
 }
