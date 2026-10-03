@@ -1,4 +1,3 @@
-using System.Collections;
 using System.Globalization;
 using System.Text.RegularExpressions;
 
@@ -132,17 +131,27 @@ public static class ReachabilityAnalyzer
     /// <summary>Total visited-cell budget for the degraded (non-condensed) reachable-count path; large graphs degrade to bucket 0 + a diagnostic.</summary>
     public const long MaxReachableCountBudget = 20_000_000;
 
-    /// <summary>Memory cap for the exact condensed bitsets; beyond it the budgeted fallback runs instead.</summary>
+    /// <summary>
+    ///     Size cap of the exact condensed bucketing, measured as the per-component node bitsets it
+    ///     used to allocate (components x nodes bits); beyond it the budgeted fallback runs instead.
+    /// </summary>
     public const long MaxBucketBitsetBytes = 256L * 1024 * 1024;
 
     public const int MaxClusterMembers = 32;
 
+    /// <summary>The walk budgets and the bucketing path cap, as one value so tests can shrink them.</summary>
+    internal readonly record struct Limits(int VisitedPerEntryPoint, long ReachableCountBudget, long BucketBitsetBytes)
+    {
+        public static Limits Default => new(MaxVisitedPerEntryPoint, MaxReachableCountBudget, MaxBucketBitsetBytes);
+    }
+
     /// <summary>
     ///     Computes the reachability section for a methods slice: per-node entry points, depths,
     ///     buckets, fan-in/out, SCC ids, and recursion clusters. Reuses the merged (already
-    ///     deduplicated and sorted) edge list; builds the forward index and the distinct-caller
-    ///     counts by run-length over it; one bounded BFS per resolvable entry point, never per
-    ///     node.
+    ///     deduplicated and sorted) edge list; every walk runs over a dense int graph
+    ///     (<see cref="ReachabilityGraph" />), never over id strings. One bounded BFS per resolvable
+    ///     entry point, never per node, on the worker team; the walks fold into the facts in
+    ///     entry-point order, so the result does not depend on the worker count.
     ///     <para>
     ///         <c>BudgetExhausted</c> reports whether any BFS hit <see cref="MaxVisitedPerEntryPoint"/>.
     ///         Callers that treat "not visited" as "unreachable" (the dead-code report) must consult
@@ -150,102 +159,381 @@ public static class ReachabilityAnalyzer
     ///     </para>
     /// </summary>
     public static (List<NodeReachability> Nodes, List<RecursionCluster> Clusters, bool BudgetExhausted) Compute(CallGraph callGraph, IEnumerable<EntryPoint> entryPoints, List<string> diagnostics)
+        => Compute(callGraph, entryPoints, diagnostics, Limits.Default);
+
+    internal static (List<NodeReachability> Nodes, List<RecursionCluster> Clusters, bool BudgetExhausted) Compute(CallGraph callGraph, IEnumerable<EntryPoint> entryPoints, List<string> diagnostics, Limits limits)
     {
-        // The run-length adjacency and fan-in builds below need the collapse order (source,
-        // target, call type, evidence kind). The pipeline hands over the collapsed list already
-        // in that order, which costs one linear check; any other caller gets a sorted copy, so
-        // the facts never depend on its edge order and its list is never reordered.
+        // The run-length graph build below needs the collapse order (source, target, call type,
+        // evidence kind). The pipeline hands over the collapsed list already in that order,
+        // which costs one linear check; any other caller gets a sorted copy, so the facts never
+        // depend on its edge order and its list is never reordered.
         var edges = SortedByCollapseKey(callGraph.Edges);
-        var forward = BuildForwardAdjacency(edges);
-        var fanIn = CountDistinctCallers(edges);
-        var facts = callGraph.Nodes.ToDictionary(node => node.Id, node => new NodeReachability { NodeId = node.Id }, StringComparer.Ordinal);
-
-        foreach (var (nodeId, targets) in forward)
+        var graph = ReachabilityGraph.Build(callGraph.Nodes, edges);
+        var facts = new NodeReachability[graph.NodeCount];
+        for (var node = 0; node < facts.Length; node++)
         {
-            if (facts.TryGetValue(nodeId, out var fact))
-            {
-                fact.FanOut = targets.Count;
-            }
+            facts[node] = new NodeReachability { NodeId = graph.Ids[node], FanOut = graph.RowLength[node], FanIn = graph.FanIn[node] };
         }
 
-        foreach (var (nodeId, callers) in fanIn)
+        var (budgetExhausted, walkedEntryPoints) = WalkEntryPoints(graph, entryPoints, facts, diagnostics, limits.VisitedPerEntryPoint);
+        var components = ComputeComponents(graph, facts, out var clusters);
+        if (DebugLog.Enabled)
         {
-            if (facts.TryGetValue(nodeId, out var fact))
-            {
-                fact.FanIn = callers;
-            }
+            DebugLog.Count("reachability nodes", facts.Length);
+            DebugLog.Count("reachability components", components.Count);
+            DebugLog.Count("entry points walked", walkedEntryPoints);
         }
 
-        // One bounded forward BFS per entry point; every visited node records the entry point
-        // id and keeps the minimum depth. Entry points without a resolvable MethodId contribute
-        // nothing here (they are still listed in EntryPoints). The budget diagnostic is emitted
-        // once for the whole run, not once per entry point.
-        var entryBudgetReported = false;
-        var walkedEntryPoints = 0;
-        foreach (var entryPoint in entryPoints)
+        var nodesById = graph.NodesInIdOrder();
+        ComputeReachableBuckets(graph, components, nodesById, facts, diagnostics, limits);
+        MarkKeepAlive(callGraph.Nodes, edges, graph, facts);
+        var ordered = new List<NodeReachability>(facts.Length);
+        foreach (var node in nodesById)
         {
-            if (string.IsNullOrWhiteSpace(entryPoint.MethodId) || !facts.ContainsKey(entryPoint.MethodId))
+            ordered.Add(facts[node]);
+        }
+
+        return (ordered, clusters, budgetExhausted);
+    }
+
+    /// <summary>
+    ///     The collapsed call graph over dense int vertices: the nodes first, in node order (vertex
+    ///     <c>i</c> is <c>nodes[i]</c>), then every edge endpoint that is not a node. The forward
+    ///     adjacency is one row per vertex in the sorted edge order, self-loops left out (component
+    ///     analysis owns them) and repeated targets merged - the target order the string-keyed
+    ///     lists had, which keeps Tarjan's discovery order and so every component id.
+    /// </summary>
+    private sealed class ReachabilityGraph
+    {
+        public required int NodeCount { get; init; }
+        public required string[] Ids { get; init; }
+        public required Dictionary<string, int> VertexOf { get; init; }
+        public required int[] RowStart { get; init; }
+        public required int[] RowLength { get; init; }
+        public required int[] Adjacency { get; init; }
+
+        /// <summary>Distinct callers per vertex (self excluded).</summary>
+        public required int[] FanIn { get; init; }
+
+        /// <summary>Target vertex of each edge of the sorted list.</summary>
+        public required int[] EdgeTarget { get; init; }
+
+        /// <summary>Vertices with a self-loop edge, in edge order.</summary>
+        public required List<int> SelfLoops { get; init; }
+
+        public int VertexCount => Ids.Length;
+
+        public ReadOnlySpan<int> Targets(int vertex) => Adjacency.AsSpan(RowStart[vertex], RowLength[vertex]);
+
+        public bool TryGetNode(string id, out int node) => VertexOf.TryGetValue(id, out node) && node < NodeCount;
+
+        /// <summary>Node vertices ordered by id (ordinal): the output order and the budgeted walk's.</summary>
+        public int[] NodesInIdOrder()
+        {
+            var keys = Ids[..NodeCount];
+            var nodes = new int[NodeCount];
+            for (var node = 0; node < nodes.Length; node++)
             {
-                continue;
+                nodes[node] = node;
             }
 
-            walkedEntryPoints++;
-            var visited = new HashSet<string>(StringComparer.Ordinal);
-            var queue = new Queue<(string NodeId, int Depth)>();
-            queue.Enqueue((entryPoint.MethodId, 0));
-            while (queue.Count > 0)
+            // Node ids are distinct (Build rejects a duplicate), so the unstable sort is exact.
+            Array.Sort(keys, nodes, StringComparer.Ordinal);
+            return nodes;
+        }
+
+        /// <summary>
+        ///     One pass over the collapse-ordered edges: an edge source's edges are contiguous and
+        ///     sorted by target, so a source's row and its targets' caller counts come from
+        ///     comparing each target with the previous one.
+        /// </summary>
+        public static ReachabilityGraph Build(List<MethodNode> nodes, List<MethodCallEdge> edges)
+        {
+            var vertexOf = new Dictionary<string, int>(nodes.Count, StringComparer.Ordinal);
+            var ids = new List<string>(nodes.Count);
+            foreach (var node in nodes)
             {
-                var (current, depth) = queue.Dequeue();
-                if (visited.Count >= MaxVisitedPerEntryPoint)
+                // A duplicate node id throws here, as the id-keyed facts dictionary did.
+                vertexOf.Add(node.Id, ids.Count);
+                ids.Add(node.Id);
+            }
+
+            var edgeTarget = new int[edges.Count];
+            var runSource = new List<int>();
+            var runEnd = new List<int>();
+            var index = 0;
+            while (index < edges.Count)
+            {
+                var sourceId = edges[index].SourceId;
+                runSource.Add(VertexFor(sourceId));
+                string? previousId = null;
+                var previous = -1;
+                for (; index < edges.Count && string.Equals(edges[index].SourceId, sourceId, StringComparison.Ordinal); index++)
                 {
-                    if (!entryBudgetReported)
+                    var targetId = edges[index].TargetId;
+                    if (!string.Equals(targetId, previousId, StringComparison.Ordinal))
                     {
-                        entryBudgetReported = true;
-                        diagnostics.Add($"Reachability budget of {MaxVisitedPerEntryPoint} nodes exhausted while walking from entry point {entryPoint.Id}; deeper reachability facts for this run are incomplete.");
+                        previousId = targetId;
+                        previous = VertexFor(targetId);
                     }
 
-                    break;
+                    edgeTarget[index] = previous;
                 }
 
-                if (!visited.Add(current) || !facts.TryGetValue(current, out var fact))
-                {
-                    continue;
-                }
+                runEnd.Add(index);
+            }
 
-                // Exact reachability flag, set for every visited node, unlike the bounded
-                // entry-point list above.
-                fact.Reachable = true;
-
-                if (fact.ReachableEntryPoints.Count < 16 && !fact.ReachableEntryPoints.Contains(entryPoint.Id))
+            var vertexCount = ids.Count;
+            var rowStart = new int[vertexCount];
+            var rowLength = new int[vertexCount];
+            var fanIn = new int[vertexCount];
+            var adjacency = new List<int>(edges.Count);
+            var selfLoops = new List<int>();
+            var runStart = 0;
+            for (var run = 0; run < runSource.Count; run++)
+            {
+                var source = runSource[run];
+                rowStart[source] = adjacency.Count;
+                var previous = -1;
+                var selfLoop = false;
+                for (var edge = runStart; edge < runEnd[run]; edge++)
                 {
-                    fact.ReachableEntryPoints.Add(entryPoint.Id);
-                }
-
-                fact.DepthFromEntryPoint = fact.DepthFromEntryPoint is { } existing ? Math.Min(existing, depth) : depth;
-                if (forward.TryGetValue(current, out var targets))
-                {
-                    for (var i = 0; i < targets.Count; i++)
+                    var target = edgeTarget[edge];
+                    if (target == source)
                     {
-                        var target = targets[i];
-                        if (!visited.Contains(target))
+                        selfLoop = true;
+                    }
+                    else if (target != previous)
+                    {
+                        adjacency.Add(target);
+                        fanIn[target]++;
+                        previous = target;
+                    }
+                }
+
+                rowLength[source] = adjacency.Count - rowStart[source];
+                if (selfLoop)
+                {
+                    selfLoops.Add(source);
+                }
+
+                runStart = runEnd[run];
+            }
+
+            return new ReachabilityGraph
+            {
+                NodeCount = nodes.Count,
+                Ids = [.. ids],
+                VertexOf = vertexOf,
+                RowStart = rowStart,
+                RowLength = rowLength,
+                Adjacency = [.. adjacency],
+                FanIn = fanIn,
+                EdgeTarget = edgeTarget,
+                SelfLoops = selfLoops
+            };
+
+            int VertexFor(string id)
+            {
+                if (!vertexOf.TryGetValue(id, out var vertex))
+                {
+                    vertex = ids.Count;
+                    vertexOf.Add(id, vertex);
+                    ids.Add(id);
+                }
+
+                return vertex;
+            }
+        }
+    }
+
+    /// <summary>
+    ///     A worker's BFS state, sized to the graph once and reused for every walk: one stamp per
+    ///     vertex (an epoch marks it discovered, the epoch plus one visited, so nothing is cleared
+    ///     between walks) and the FIFO of discovered vertices.
+    /// </summary>
+    private sealed class WalkScratch(int vertexCount)
+    {
+        public readonly int[] Stamp = new int[vertexCount];
+        public readonly int[] Queue = new int[vertexCount];
+        private int _epoch = -1;
+
+        /// <summary>Starts a walk: returns its discovered stamp; its visited stamp is one more.</summary>
+        public int NextWalk() => _epoch += 2;
+    }
+
+    /// <summary>The node vertices one entry point's walk visited, grouped by depth (BFS order).</summary>
+    private sealed class EntryWalk
+    {
+        public int Index;
+        public bool Exhausted;
+        public int Count;
+        public int[] Nodes = new int[256];
+
+        /// <summary>LevelEnds[d] is the end of depth d's nodes in <see cref="Nodes" />.</summary>
+        public readonly List<int> LevelEnds = [];
+
+        public void Add(int node, int depth)
+        {
+            while (LevelEnds.Count <= depth)
+            {
+                LevelEnds.Add(Count);
+            }
+
+            if (Count == Nodes.Length)
+            {
+                Array.Resize(ref Nodes, Count * 2);
+            }
+
+            Nodes[Count++] = node;
+            LevelEnds[depth] = Count;
+        }
+    }
+
+    /// <summary>
+    ///     One bounded forward BFS per entry point; every visited node records the entry point id
+    ///     (first 16 distinct ids, in entry-point order) and keeps the minimum depth. Entry points
+    ///     without a resolvable MethodId contribute nothing here (they are still listed in
+    ///     EntryPoints). The budget diagnostic is emitted once for the whole run, naming the first
+    ///     entry point, in order, whose walk exhausted it.
+    /// </summary>
+    private static (bool BudgetExhausted, int Walked) WalkEntryPoints(ReachabilityGraph graph, IEnumerable<EntryPoint> entryPoints, NodeReachability[] facts, List<string> diagnostics, int visitedPerEntryPoint)
+    {
+        var walks = new List<(EntryPoint EntryPoint, int Start)>();
+        foreach (var entryPoint in entryPoints)
+        {
+            if (!string.IsNullOrWhiteSpace(entryPoint.MethodId) && graph.TryGetNode(entryPoint.MethodId, out var start))
+            {
+                walks.Add((entryPoint, start));
+            }
+        }
+
+        var bestDepth = new int[graph.NodeCount];
+        Array.Fill(bestDepth, int.MaxValue);
+        var reported = false;
+        var scratchPool = new System.Collections.Concurrent.ConcurrentBag<WalkScratch>();
+        var walkPool = new System.Collections.Concurrent.ConcurrentBag<EntryWalk>();
+        // The walks are independent and read only the graph; a tiny graph is not worth a team.
+        var workers = (long)walks.Count * graph.VertexCount < 1_000_000 ? 1 : Math.Max(1, Dosai.MaxSymbolAnalysisWorkers);
+        DedicatedStack.ForEachInOrder("Dosai reachability walk", workers, walks.Count, index =>
+        {
+            var scratch = scratchPool.TryTake(out var pooledScratch) ? pooledScratch : new WalkScratch(graph.VertexCount);
+            var walk = walkPool.TryTake(out var pooledWalk) ? pooledWalk : new EntryWalk();
+            walk.Index = index;
+            walk.Count = 0;
+            walk.LevelEnds.Clear();
+            walk.Exhausted = WalkFrom(graph, scratch, walks[index].Start, walk, visitedPerEntryPoint);
+            scratchPool.Add(scratch);
+            return walk;
+        }, walk =>
+        {
+            var entryPoint = walks[walk.Index].EntryPoint;
+            if (walk.Exhausted && !reported)
+            {
+                reported = true;
+                diagnostics.Add($"Reachability budget of {visitedPerEntryPoint} nodes exhausted while walking from entry point {entryPoint.Id}; deeper reachability facts for this run are incomplete.");
+            }
+
+            var levelStart = 0;
+            for (var depth = 0; depth < walk.LevelEnds.Count; depth++)
+            {
+                var levelEnd = walk.LevelEnds[depth];
+                for (var position = levelStart; position < levelEnd; position++)
+                {
+                    var node = walk.Nodes[position];
+                    if (depth < bestDepth[node])
+                    {
+                        bestDepth[node] = depth;
+                    }
+
+                    var reachedBy = facts[node].ReachableEntryPoints;
+                    if (reachedBy.Count < 16 && !reachedBy.Contains(entryPoint.Id))
+                    {
+                        reachedBy.Add(entryPoint.Id);
+                    }
+                }
+
+                levelStart = levelEnd;
+            }
+
+            walkPool.Add(walk);
+        });
+
+        for (var node = 0; node < facts.Length; node++)
+        {
+            if (bestDepth[node] != int.MaxValue)
+            {
+                // Exact reachability flag, set for every visited node, unlike the bounded
+                // entry-point list.
+                facts[node].Reachable = true;
+                facts[node].DepthFromEntryPoint = bestDepth[node];
+            }
+        }
+
+        return (reported, walks.Count);
+    }
+
+    /// <summary>
+    ///     The BFS of one entry point, stopped at <see cref="MaxVisitedPerEntryPoint" /> visited
+    ///     vertices (non-node edge endpoints count, and are not expanded). Returns whether the
+    ///     budget cut the walk short.
+    ///     <para>
+    ///         Each vertex is queued once. The walk this replaced queued a vertex again for every
+    ///         caller that saw it unvisited and skipped the repeats on dequeue, and it declared the
+    ///         budget exhausted when anything at all, repeats included, was still queued after the
+    ///         last allowed visit. That is the same as "something was queued after the vertex just
+    ///         visited", which is what the attempt counters below answer without holding the
+    ///         repeats.
+    ///     </para>
+    /// </summary>
+    private static bool WalkFrom(ReachabilityGraph graph, WalkScratch scratch, int start, EntryWalk walk, int visitedPerEntryPoint)
+    {
+        var stamp = scratch.Stamp;
+        var queue = scratch.Queue;
+        var discovered = scratch.NextWalk();
+        var visited = discovered + 1;
+        stamp[start] = discovered;
+        queue[0] = start;
+        int head = 0, tail = 1, levelEnd = 1, depth = 0, visitedCount = 0;
+        // Every enqueue the old walk made, repeats included, and the count when the last
+        // distinct vertex was queued.
+        int attempts = 1, lastQueuedAt = 1;
+        while (head < tail)
+        {
+            if (head == levelEnd)
+            {
+                depth++;
+                levelEnd = tail;
+            }
+
+            var current = queue[head++];
+            stamp[current] = visited;
+            visitedCount++;
+            if (current < graph.NodeCount)
+            {
+                walk.Add(current, depth);
+                foreach (var target in graph.Targets(current))
+                {
+                    if (stamp[target] != visited)
+                    {
+                        attempts++;
+                        if (stamp[target] != discovered)
                         {
-                            queue.Enqueue((target, depth + 1));
+                            stamp[target] = discovered;
+                            queue[tail++] = target;
+                            lastQueuedAt = attempts;
                         }
                     }
                 }
             }
+
+            if (visitedCount >= visitedPerEntryPoint)
+            {
+                return head < tail || attempts > lastQueuedAt;
+            }
         }
 
-        var (components, componentOfNode, clusters) = ComputeComponents(callGraph.Nodes, edges, forward, facts);
-        if (DebugLog.Enabled)
-        {
-            DebugLog.Count("reachability nodes", facts.Count);
-            DebugLog.Count("reachability components", components.Count);
-            DebugLog.Count("entry points walked", walkedEntryPoints);
-        }
-        ComputeReachableBuckets(facts, forward, components, componentOfNode, callGraph.Nodes, diagnostics);
-        MarkKeepAlive(callGraph.Nodes, edges, facts);
-        return (facts.Values.OrderBy(fact => fact.NodeId, StringComparer.Ordinal).ToList(), clusters, entryBudgetReported);
+        return false;
     }
 
     /// <summary>
@@ -255,14 +543,15 @@ public static class ReachabilityAnalyzer
     ///     `[McpServerTool]`-style framework callbacks are invoked without a call site Dosai can
     ///     attribute to an entry point. One linear pass over edges and nodes.
     /// </summary>
-    private static void MarkKeepAlive(List<MethodNode> nodes, List<MethodCallEdge> edges, Dictionary<string, NodeReachability> facts)
+    private static void MarkKeepAlive(List<MethodNode> nodes, List<MethodCallEdge> edges, ReachabilityGraph graph, NodeReachability[] facts)
     {
         // Report the evidence kind that actually kept the node alive. The edge's own
         // EvidenceKind is frequently an ordinary call kind while a reflection/framework kind
         // sits in its Evidence list, so naming EvidenceKind unconditionally attributed the
         // decision to the wrong evidence.
-        foreach (var edge in edges)
+        for (var index = 0; index < edges.Count; index++)
         {
+            var edge = edges[index];
             var kinds = new KeepAliveKinds();
             kinds.See(edge.EvidenceKind);
             foreach (var evidence in edge.Evidence)
@@ -270,18 +559,18 @@ public static class ReachabilityAnalyzer
                 kinds.See(evidence.Kind);
             }
 
-            kinds.KeepAlive(facts, edge.TargetId);
+            kinds.KeepAlive(facts, graph.EdgeTarget[index]);
         }
 
-        foreach (var node in nodes)
+        for (var node = 0; node < nodes.Count; node++)
         {
             var kinds = new KeepAliveKinds();
-            foreach (var evidence in node.Evidence)
+            foreach (var evidence in nodes[node].Evidence)
             {
                 kinds.See(evidence.Kind);
             }
 
-            if (node.Identity?.Evidence is { } identityKinds)
+            if (nodes[node].Identity?.Evidence is { } identityKinds)
             {
                 foreach (var kind in identityKinds)
                 {
@@ -289,7 +578,7 @@ public static class ReachabilityAnalyzer
                 }
             }
 
-            kinds.KeepAlive(facts, node.Id);
+            kinds.KeepAlive(facts, node);
         }
     }
 
@@ -320,10 +609,13 @@ public static class ReachabilityAnalyzer
             }
         }
 
-        /// <summary>Only unreachable nodes need keeping alive; a reachable node already has its answer.</summary>
-        public readonly void KeepAlive(Dictionary<string, NodeReachability> facts, string nodeId)
+        /// <summary>
+        ///     Only unreachable nodes need keeping alive; a reachable node already has its answer.
+        ///     A vertex past the facts is an edge endpoint that is not a node.
+        /// </summary>
+        public readonly void KeepAlive(NodeReachability[] facts, int vertex)
         {
-            if (_first is not { } first || !facts.TryGetValue(nodeId, out var fact) || fact.Reachable)
+            if (_first is not { } first || vertex >= facts.Length || facts[vertex] is not { Reachable: false } fact)
             {
                 return;
             }
@@ -681,86 +973,6 @@ public static class ReachabilityAnalyzer
     }
 
     /// <summary>
-    ///     Forward adjacency from the (source, target)-sorted collapsed edge list, built by
-    ///     run-length: no per-node hash sets and no copy step. Consecutive equal targets (the
-    ///     same pair surviving under different call types) dedupe by adjacency; self-loops stay
-    ///     out, as before - component analysis owns them - and a source with nothing but
-    ///     self-loops gets no entry. Each list is allocated at its exact size.
-    /// </summary>
-    private static Dictionary<string, List<string>> BuildForwardAdjacency(List<MethodCallEdge> edges)
-    {
-        var adjacency = new Dictionary<string, List<string>>(StringComparer.Ordinal);
-        var index = 0;
-        while (index < edges.Count)
-        {
-            var source = edges[index].SourceId;
-            var end = index;
-            var distinct = 0;
-            string? previous = null;
-            for (; end < edges.Count && string.Equals(edges[end].SourceId, source, StringComparison.Ordinal); end++)
-            {
-                var target = edges[end].TargetId;
-                if (!string.Equals(target, source, StringComparison.Ordinal) && !string.Equals(target, previous, StringComparison.Ordinal))
-                {
-                    distinct++;
-                    previous = target;
-                }
-            }
-
-            if (distinct > 0)
-            {
-                var targets = new List<string>(distinct);
-                for (; index < end; index++)
-                {
-                    var target = edges[index].TargetId;
-                    if (!string.Equals(target, source, StringComparison.Ordinal)
-                        && (targets.Count == 0 || !string.Equals(targets[^1], target, StringComparison.Ordinal)))
-                    {
-                        targets.Add(target);
-                    }
-                }
-
-                adjacency.Add(source, targets);
-            }
-
-            index = end;
-        }
-
-        return adjacency;
-    }
-
-    /// <summary>
-    ///     Distinct-caller counts per node from the (source, target)-sorted edge list: one count
-    ///     per run of an equal pair, a single int-valued dictionary instead of the full reverse
-    ///     adjacency graph this used to build (and copy) only to read <c>.Count</c> off it.
-    /// </summary>
-    private static Dictionary<string, int> CountDistinctCallers(List<MethodCallEdge> edges)
-    {
-        var fanIn = new Dictionary<string, int>(StringComparer.Ordinal);
-        var index = 0;
-        while (index < edges.Count)
-        {
-            var edge = edges[index];
-            var source = edge.SourceId;
-            var target = edge.TargetId;
-            do
-            {
-                index++;
-            }
-            while (index < edges.Count
-                   && string.Equals(edges[index].SourceId, source, StringComparison.Ordinal)
-                   && string.Equals(edges[index].TargetId, target, StringComparison.Ordinal));
-
-            if (!string.Equals(source, target, StringComparison.Ordinal))
-            {
-                fanIn[target] = fanIn.TryGetValue(target, out var callers) ? callers + 1 : 1;
-            }
-        }
-
-        return fanIn;
-    }
-
-    /// <summary>
     ///     The edge list itself when it is already in collapse-key order (one linear check),
     ///     otherwise a stably sorted copy; the caller's list is never reordered.
     /// </summary>
@@ -780,157 +992,182 @@ public static class ReachabilityAnalyzer
     }
 
     /// <summary>
-    ///     Iterative Tarjan over the merged graph. Returns every component (including
-    ///     singletons, which the size bucketing needs for the condensation), the node→component map,
-    ///     and the recursion clusters. Components come back in Tarjan discovery order, reverse
-    ///     topological order of the condensation, so every component's successors precede it.
+    ///     Strongly connected components of the int graph: component of each vertex, members
+    ///     grouped per component (<c>Members[Start[c]..Start[c + 1]]</c>), components in Tarjan
+    ///     discovery order.
     /// </summary>
-    private static (List<List<string>> Components, Dictionary<string, int> ComponentOfNode, List<RecursionCluster> Clusters) ComputeComponents(List<MethodNode> nodes, List<MethodCallEdge> edges, Dictionary<string, List<string>> forward, Dictionary<string, NodeReachability> facts)
+    private sealed class Components
     {
-        var index = 0;
-        var indices = new Dictionary<string, int>(StringComparer.Ordinal);
-        var lowLinks = new Dictionary<string, int>(StringComparer.Ordinal);
-        var onStack = new HashSet<string>(StringComparer.Ordinal);
-        var callStack = new Stack<string>();
-        var components = new List<List<string>>();
-        var componentOfNode = new Dictionary<string, int>(StringComparer.Ordinal);
+        public required int[] Of { get; init; }
+        public required int[] Members { get; init; }
+        public required int[] Start { get; init; }
 
-        foreach (var node in nodes)
-        {
-            if (!indices.ContainsKey(node.Id))
-            {
-                StrongConnect(node.Id);
-            }
-        }
+        public int Count => Start.Length - 1;
 
-        var clusters = new List<RecursionCluster>();
-        for (var componentIndex = 0; componentIndex < components.Count; componentIndex++)
+        public ReadOnlySpan<int> MembersOf(int component) => Members.AsSpan(Start[component], Start[component + 1] - Start[component]);
+    }
+
+    /// <summary>
+    ///     Iterative Tarjan over the merged graph, rooted at each node in node order and following
+    ///     each vertex's row in order (so component ids match the string-keyed walk this replaced).
+    ///     Returns every component - singletons and the non-node endpoints the walk reaches
+    ///     included, which the size bucketing needs - and the recursion clusters. Components come
+    ///     back in Tarjan discovery order, reverse topological order of the condensation, so every
+    ///     component's successors precede it.
+    /// </summary>
+    private static Components ComputeComponents(ReachabilityGraph graph, NodeReachability[] facts, out List<RecursionCluster> clusters)
+    {
+        var vertexCount = graph.VertexCount;
+        var order = new int[vertexCount];
+        Array.Fill(order, -1);
+        var lowLink = new int[vertexCount];
+        var onStack = new bool[vertexCount];
+        var stack = new int[vertexCount];
+        var stackSize = 0;
+        var workVertex = new int[vertexCount];
+        var workChild = new int[vertexCount];
+        var componentOf = new int[vertexCount];
+        Array.Fill(componentOf, -1);
+        var members = new int[vertexCount];
+        var memberCount = 0;
+        var componentStart = new List<int>();
+        var nextOrder = 0;
+
+        for (var root = 0; root < graph.NodeCount; root++)
         {
-            var component = components[componentIndex];
-            if (component.Count <= 1)
+            if (order[root] >= 0)
             {
                 continue;
             }
 
-            foreach (var memberId in component)
+            Discover(root);
+            workVertex[0] = root;
+            workChild[0] = 0;
+            var workSize = 1;
+            while (workSize > 0)
             {
-                if (facts.TryGetValue(memberId, out var fact))
+                var current = workVertex[workSize - 1];
+                var child = workChild[workSize - 1];
+                if (child < graph.RowLength[current])
                 {
-                    fact.SccId = componentIndex;
-                    fact.InRecursiveCycle = true;
-                }
-            }
-
-            clusters.Add(new RecursionCluster
-            {
-                Id = $"scc{componentIndex}",
-                Size = component.Count,
-                MemberIds = component.OrderBy(id => id, StringComparer.Ordinal).Take(MaxClusterMembers).ToList()
-            });
-        }
-
-        // Self-loops (A→A) are recursive cycles too; BuildForwardAdjacency excluded them from
-        // `forward`. Each gets a unique negative SccId so grouping never merges unrelated
-        // self-recursive methods (non-negative ids belong to multi-node components, -1 to plain
-        // singletons). One scan in edge order, the order the GroupBy it replaced produced.
-        // A repeated self-loop (other call type or evidence kind) finds its node already marked.
-        var nextSelfLoopId = -2;
-        foreach (var edge in edges)
-        {
-            if (!string.Equals(edge.SourceId, edge.TargetId, StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            var selfId = edge.SourceId;
-            if (facts.TryGetValue(selfId, out var fact) && !fact.InRecursiveCycle)
-            {
-                fact.InRecursiveCycle = true;
-                fact.SccId = nextSelfLoopId--;
-                clusters.Add(new RecursionCluster { Id = $"scc-self-{selfId}", Size = 1, MemberIds = [selfId] });
-            }
-        }
-
-        return (components, componentOfNode, clusters);
-
-        void StrongConnect(string start)
-        {
-            var work = new Stack<(string Node, int ChildIndex)>();
-            work.Push((start, 0));
-            indices[start] = lowLinks[start] = index++;
-            callStack.Push(start);
-            onStack.Add(start);
-
-            while (work.Count > 0)
-            {
-                var (current, childIndex) = work.Peek();
-                var neighbors = forward.GetValueOrDefault(current) ?? [];
-                if (childIndex < neighbors.Count)
-                {
-                    work.Pop();
-                    work.Push((current, childIndex + 1));
-                    var next = neighbors[childIndex];
-                    if (!indices.ContainsKey(next))
+                    workChild[workSize - 1] = child + 1;
+                    var next = graph.Adjacency[graph.RowStart[current] + child];
+                    if (order[next] < 0)
                     {
-                        indices[next] = lowLinks[next] = index++;
-                        callStack.Push(next);
-                        onStack.Add(next);
-                        work.Push((next, 0));
+                        Discover(next);
+                        workVertex[workSize] = next;
+                        workChild[workSize] = 0;
+                        workSize++;
                     }
-                    else if (onStack.Contains(next))
+                    else if (onStack[next])
                     {
-                        lowLinks[current] = Math.Min(lowLinks[current], indices[next]);
+                        lowLink[current] = Math.Min(lowLink[current], order[next]);
                     }
                 }
                 else
                 {
-                    work.Pop();
-                    if (lowLinks[current] == indices[current])
+                    workSize--;
+                    if (lowLink[current] == order[current])
                     {
-                        var component = new List<string>();
-                        string member;
+                        var component = componentStart.Count;
+                        componentStart.Add(memberCount);
+                        int member;
                         do
                         {
-                            member = callStack.Pop();
-                            onStack.Remove(member);
-                            component.Add(member);
-                            componentOfNode[member] = components.Count;
+                            member = stack[--stackSize];
+                            onStack[member] = false;
+                            members[memberCount++] = member;
+                            componentOf[member] = component;
                         } while (member != current);
-
-                        components.Add(component);
                     }
 
-                    if (work.Count > 0)
+                    if (workSize > 0)
                     {
-                        var (parent, _) = work.Peek();
-                        lowLinks[parent] = Math.Min(lowLinks[parent], lowLinks[current]);
+                        var parent = workVertex[workSize - 1];
+                        lowLink[parent] = Math.Min(lowLink[parent], lowLink[current]);
                     }
                 }
             }
         }
+
+        componentStart.Add(memberCount);
+        var components = new Components { Of = componentOf, Members = members, Start = [.. componentStart] };
+
+        clusters = [];
+        for (var component = 0; component < components.Count; component++)
+        {
+            var componentMembers = components.MembersOf(component);
+            if (componentMembers.Length <= 1)
+            {
+                continue;
+            }
+
+            var memberIds = new string[componentMembers.Length];
+            for (var index = 0; index < componentMembers.Length; index++)
+            {
+                var member = componentMembers[index];
+                memberIds[index] = graph.Ids[member];
+                if (member < facts.Length)
+                {
+                    facts[member].SccId = component;
+                    facts[member].InRecursiveCycle = true;
+                }
+            }
+
+            Array.Sort(memberIds, StringComparer.Ordinal);
+            clusters.Add(new RecursionCluster
+            {
+                Id = string.Create(CultureInfo.InvariantCulture, $"scc{component}"),
+                Size = componentMembers.Length,
+                MemberIds = [.. memberIds.AsSpan(0, Math.Min(memberIds.Length, MaxClusterMembers))]
+            });
+        }
+
+        // Self-loops (A→A) are recursive cycles too; the rows leave them out. Each gets a unique
+        // negative SccId so grouping never merges unrelated self-recursive methods (non-negative
+        // ids belong to multi-node components, -1 to plain singletons), in edge order. A node
+        // already in a multi-node component keeps that component.
+        var nextSelfLoopId = -2;
+        foreach (var vertex in graph.SelfLoops)
+        {
+            if (vertex < facts.Length && !facts[vertex].InRecursiveCycle)
+            {
+                var selfId = graph.Ids[vertex];
+                facts[vertex].InRecursiveCycle = true;
+                facts[vertex].SccId = nextSelfLoopId--;
+                clusters.Add(new RecursionCluster { Id = $"scc-self-{selfId}", Size = 1, MemberIds = [selfId] });
+            }
+        }
+
+        return components;
+
+        void Discover(int vertex)
+        {
+            order[vertex] = lowLink[vertex] = nextOrder++;
+            stack[stackSize++] = vertex;
+            onStack[vertex] = true;
+        }
     }
 
     /// <summary>
-    ///     Bucketed forward-reachable sizes computed on the SCC condensation in reverse
-    ///     topological order (Tarjan discovery order, every component's successors already have
-    ///     their set). <c>set(C) = members(C) | ⋃ set(successor components)</c>, so the work is
-    ///     O(components × N/8 bytes) bitset merging, near-linear in practice, instead of a full
-    ///     BFS per node. Graphs too large for the bitset memory cap fall back to the budgeted
-    ///     per-node walk with an explicit diagnostic.
+    ///     Bucketed forward-reachable node counts. Below the size where the old per-component
+    ///     bitsets (components x nodes bits) fit <see cref="MaxBucketBitsetBytes" />, the counts are
+    ///     exact; above it, the budgeted per-node walk answers, with its diagnostics - the same
+    ///     split and the same results as before, at a fraction of the cost (see the two paths).
     /// </summary>
-    private static void ComputeReachableBuckets(Dictionary<string, NodeReachability> facts, Dictionary<string, List<string>> forward, List<List<string>> components, Dictionary<string, int> componentOfNode, List<MethodNode> nodes, List<string> diagnostics)
+    private static void ComputeReachableBuckets(ReachabilityGraph graph, Components components, int[] nodesById, NodeReachability[] facts, List<string> diagnostics, Limits limits)
     {
         var bucketWatch = DebugLog.Enabled ? System.Diagnostics.Stopwatch.StartNew() : null;
-        var nodeCount = nodes.Count;
+        var nodeCount = graph.NodeCount;
         var bitsetBytes = (long)components.Count * ((nodeCount + 63) / 64 * 8);
-        if (bitsetBytes > MaxBucketBitsetBytes)
+        if (bitsetBytes > limits.BucketBitsetBytes)
         {
             if (DebugLog.Enabled)
             {
-                DebugLog.Log($"reachability bucketing path: budgeted walk ({components.Count} components x {nodeCount} nodes would need {DebugLog.FormatBytes(bitsetBytes)} of bitsets, above the {DebugLog.FormatBytes(MaxBucketBitsetBytes)} cap)");
+                DebugLog.Log($"reachability bucketing path: budgeted walk ({components.Count} components x {nodeCount} nodes would need {DebugLog.FormatBytes(bitsetBytes)} of bitsets, above the {DebugLog.FormatBytes(limits.BucketBitsetBytes)} cap)");
             }
             diagnostics.Add($"Reachable-node bucketing degraded to the budgeted walk ({components.Count} components × {nodeCount} nodes exceed the bitset cap).");
-            ComputeReachableBucketsBudgeted(facts, forward, diagnostics);
+            ComputeReachableBucketsBudgeted(graph, nodesById, facts, diagnostics, limits.ReachableCountBudget);
             if (bucketWatch is not null)
             {
                 DebugLog.Log(string.Create(CultureInfo.InvariantCulture, $"reachability bucketing (budgeted walk) completed in {bucketWatch.Elapsed.TotalSeconds:F3}s"));
@@ -940,93 +1177,157 @@ public static class ReachabilityAnalyzer
 
         if (DebugLog.Enabled)
         {
-            DebugLog.Log($"reachability bucketing path: condensed bitsets ({components.Count} components x {nodeCount} nodes, {DebugLog.FormatBytes(bitsetBytes)} of bitsets)");
+            DebugLog.Log($"reachability bucketing path: condensed counts ({components.Count} components x {nodeCount} nodes)");
         }
 
-        var nodeIndexById = new Dictionary<string, int>(nodeCount, StringComparer.Ordinal);
-        for (var index = 0; index < nodeCount; index++)
-        {
-            nodeIndexById[nodes[index].Id] = index;
-        }
-
-        // Condensation edges, deduplicated. Sets are created lazily: most components have no
-        // cross-component successors, and one empty HashSet per component is real memory on
-        // large graphs.
-        var componentSuccessors = new HashSet<int>?[components.Count];
-        foreach (var (source, targets) in forward)
-        {
-            if (!componentOfNode.TryGetValue(source, out var sourceComponent))
-            {
-                continue;
-            }
-
-            foreach (var target in targets)
-            {
-                if (componentOfNode.TryGetValue(target, out var targetComponent) && sourceComponent != targetComponent)
-                {
-                    (componentSuccessors[sourceComponent] ??= []).Add(targetComponent);
-                }
-            }
-        }
-
-        var componentSets = new List<BitArray?>(components.Count);
-        for (var componentIndex = 0; componentIndex < components.Count; componentIndex++)
-        {
-            componentSets.Add(null);
-        }
-
-        // Tarjan discovery order is reverse topological: successors are processed first, so a
-        // component's bitset is the union of its members and its successors' finished sets.
-        for (var componentIndex = 0; componentIndex < components.Count; componentIndex++)
-        {
-            var set = new BitArray(nodeCount);
-            foreach (var memberId in components[componentIndex])
-            {
-                if (nodeIndexById.TryGetValue(memberId, out var memberNodeIndex))
-                {
-                    set[memberNodeIndex] = true;
-                }
-            }
-
-            var successors = componentSuccessors[componentIndex];
-            if (successors is not null)
-            {
-                foreach (var successor in successors)
-                {
-                    if (componentSets[successor] is { } successorSet)
-                    {
-                        set.Or(successorSet);
-                    }
-                }
-            }
-
-            componentSets[componentIndex] = set;
-        }
-
-        foreach (var (nodeId, fact) in facts)
-        {
-            if (componentOfNode.TryGetValue(nodeId, out var componentIndex) && componentSets[componentIndex] is { } set)
-            {
-                fact.ReachableNodeBucket = BucketFor(CountBits(set));
-            }
-        }
-
+        ComputeReachableBucketsCondensed(graph, components, facts);
         if (bucketWatch is not null)
         {
-            DebugLog.Log(string.Create(CultureInfo.InvariantCulture, $"reachability bucketing (condensed bitsets) completed in {bucketWatch.Elapsed.TotalSeconds:F3}s"));
+            DebugLog.Log(string.Create(CultureInfo.InvariantCulture, $"reachability bucketing (condensed counts) completed in {bucketWatch.Elapsed.TotalSeconds:F3}s"));
         }
     }
 
     /// <summary>
-    ///     Budgeted per-node fallback for graphs above the bitset cap; degrades to bucket 0 with a
-    ///     diagnostic. The degraded flag is raised inside the walk that exhausts the budget, including
-    ///     the walk of the final node, so a truncated count is never reported as a confident bucket.
+    ///     Exact buckets on the SCC condensation, in Tarjan discovery order (every component's
+    ///     successors are done before it). A bucket only distinguishes counts up to 1,000, so each
+    ///     component keeps the components it reaches - excluding itself and those without nodes -
+    ///     only while their node count stays at or below that cap; past it the component is
+    ///     saturated (bucket 10000), and so is everything that reaches it. A component's list is
+    ///     dropped once its last predecessor has read it. This replaces one bitset of every node per
+    ///     component and its unions: the count is the same, components are disjoint, so the
+    ///     reachable node count is the sum of the reachable components' node counts.
     /// </summary>
-    private static void ComputeReachableBucketsBudgeted(Dictionary<string, NodeReachability> facts, Dictionary<string, List<string>> forward, List<string> diagnostics)
+    private static void ComputeReachableBucketsCondensed(ReachabilityGraph graph, Components components, NodeReachability[] facts)
     {
-        var budget = MaxReachableCountBudget;
+        const int cap = 1000;
+        var count = components.Count;
+        var weight = new int[count];
+        for (var node = 0; node < graph.NodeCount; node++)
+        {
+            weight[components.Of[node]]++;
+        }
+
+        // Distinct predecessor components still to read each component's list.
+        var seenFrom = new int[count];
+        Array.Fill(seenFrom, -1);
+        var readers = new int[count];
+        for (var component = 0; component < count; component++)
+        {
+            foreach (var member in components.MembersOf(component))
+            {
+                foreach (var target in graph.Targets(member))
+                {
+                    var successor = components.Of[target];
+                    if (successor != component && seenFrom[successor] != component)
+                    {
+                        seenFrom[successor] = component;
+                        readers[successor]++;
+                    }
+                }
+            }
+        }
+
+        Array.Fill(seenFrom, -1);
+        var counted = new int[count];
+        Array.Fill(counted, -1);
+        var reach = new int[count][];
+        var saturated = new bool[count];
+        var buffer = new int[cap + 1];
+        for (var component = 0; component < count; component++)
+        {
+            var total = weight[component];
+            var size = 0;
+            var full = total > cap;
+            counted[component] = component;
+            foreach (var member in components.MembersOf(component))
+            {
+                foreach (var target in graph.Targets(member))
+                {
+                    var successor = components.Of[target];
+                    if (successor == component || seenFrom[successor] == component)
+                    {
+                        continue;
+                    }
+
+                    seenFrom[successor] = component;
+                    if (!full)
+                    {
+                        full = saturated[successor] || !Count(successor) || !CountAll(reach[successor]);
+                    }
+
+                    if (--readers[successor] == 0)
+                    {
+                        reach[successor] = null!;
+                    }
+                }
+            }
+
+            if (full)
+            {
+                saturated[component] = true;
+            }
+            else
+            {
+                reach[component] = size == 0 ? [] : buffer[..size];
+            }
+
+            var bucket = full ? BucketFor(cap + 1) : BucketFor(total);
+            foreach (var member in components.MembersOf(component))
+            {
+                if (member < facts.Length)
+                {
+                    facts[member].ReachableNodeBucket = bucket;
+                }
+            }
+
+            continue;
+
+            // Adds one reachable component; false once the count passes the cap.
+            bool Count(int reached)
+            {
+                if (counted[reached] == component || weight[reached] == 0)
+                {
+                    return true;
+                }
+
+                counted[reached] = component;
+                total += weight[reached];
+                buffer[size++] = reached;
+                return total <= cap;
+            }
+
+            bool CountAll(int[] reached)
+            {
+                foreach (var other in reached)
+                {
+                    if (!Count(other))
+                    {
+                        return false;
+                    }
+                }
+
+                return true;
+            }
+        }
+    }
+
+    /// <summary>
+    ///     The budgeted per-node walk for graphs past the bitset cap, in node id order, against one
+    ///     shared budget of <see cref="MaxReachableCountBudget" /> visited vertices: a node whose
+    ///     walk the budget cuts short reports bucket 0 ("unknown") rather than an undercount that
+    ///     would read as a confident fact, including the walk of the final node, and nodes after
+    ///     the budget ran out keep 0. Visited vertices include non-node endpoints, which are
+    ///     expanded too. Each vertex is queued once; see <see cref="WalkFrom" /> for why that keeps
+    ///     the old cut-off decisions.
+    /// </summary>
+    private static void ComputeReachableBucketsBudgeted(ReachabilityGraph graph, int[] nodesById, NodeReachability[] facts, List<string> diagnostics, long reachableCountBudget)
+    {
+        var budget = reachableCountBudget;
         var degraded = false;
-        foreach (var nodeId in facts.Keys.OrderBy(id => id, StringComparer.Ordinal).ToList())
+        var scratch = new WalkScratch(graph.VertexCount);
+        var stamp = scratch.Stamp;
+        var queue = scratch.Queue;
+        foreach (var node in nodesById)
         {
             if (budget <= 0)
             {
@@ -1034,49 +1335,46 @@ public static class ReachabilityAnalyzer
                 break;
             }
 
-            var visited = new HashSet<string>(StringComparer.Ordinal);
-            var queue = new Queue<string>([nodeId]);
+            var discovered = scratch.NextWalk();
+            var visited = discovered + 1;
+            stamp[node] = discovered;
+            queue[0] = node;
+            int head = 0, tail = 1, attempts = 1, lastQueuedAt = 1;
             var truncated = false;
-            while (queue.Count > 0)
+            while (head < tail)
             {
-                if (budget <= 0)
-                {
-                    // This node's own walk was cut short, so its count is an undercount. Recording
-                    // the flag here (not at the top of the next iteration) is what makes an
-                    // exhausted budget on the *final* node reportable instead of silently wrong.
-                    truncated = true;
-                    degraded = true;
-                    break;
-                }
-
-                var current = queue.Dequeue();
-                if (!visited.Add(current))
-                {
-                    continue;
-                }
-
+                var current = queue[head++];
+                stamp[current] = visited;
                 budget--;
-                if (forward.TryGetValue(current, out var targets))
+                foreach (var target in graph.Targets(current))
                 {
-                    for (var index = 0; index < targets.Count; index++)
+                    if (stamp[target] != visited)
                     {
-                        var target = targets[index];
-                        if (!visited.Contains(target))
+                        attempts++;
+                        if (stamp[target] != discovered)
                         {
-                            queue.Enqueue(target);
+                            stamp[target] = discovered;
+                            queue[tail++] = target;
+                            lastQueuedAt = attempts;
                         }
                     }
                 }
+
+                if (budget <= 0)
+                {
+                    // Anything still queued would have been cut off: this walk is an undercount.
+                    truncated = head < tail || attempts > lastQueuedAt;
+                    degraded |= truncated;
+                    break;
+                }
             }
 
-            // A truncated walk reports bucket 0 ("unknown") rather than an undercounted bucket that
-            // would read as a confident fact.
-            facts[nodeId].ReachableNodeBucket = truncated ? 0 : BucketFor(visited.Count);
+            facts[node].ReachableNodeBucket = truncated ? 0 : BucketFor(head);
         }
 
         if (degraded)
         {
-            diagnostics.Add($"Reachable-node-count budget of {MaxReachableCountBudget} exhausted; remaining nodes report bucket 0. Use fan-out and entry-point reachability for ranking instead.");
+            diagnostics.Add($"Reachable-node-count budget of {reachableCountBudget} exhausted; remaining nodes report bucket 0. Use fan-out and entry-point reachability for ranking instead.");
         }
     }
 
@@ -1088,29 +1386,4 @@ public static class ReachabilityAnalyzer
         <= 1000 => 1000,
         _ => 10000
     };
-
-    private static int CountBits(BitArray bits)
-    {
-        var words = new int[(bits.Count + 31) / 32];
-        bits.CopyTo(words, 0);
-        var count = 0;
-        foreach (var word in words)
-        {
-            count += PopCount((uint)word);
-        }
-
-        return count;
-    }
-
-    private static int PopCount(uint value)
-    {
-        var count = 0;
-        while (value != 0)
-        {
-            value &= value - 1;
-            count++;
-        }
-
-        return count;
-    }
 }
