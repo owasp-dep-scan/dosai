@@ -113,9 +113,17 @@ dotnet test ./Dosai.sln
   field, and rendered ids do contain CR/LF/tab). Each grouping stage runs in its own
   `NoInlining` frame so only the placement arrays survive into the merge loop. Keep `ValueTuple`
   scratch keys free of nullable items: tuple hashing boxes them. `ReachabilityAnalyzer.Compute`
-  builds its forward adjacency and FanIn counts by run-length over that order; an edge list in
-  any other order is sorted as a copy (`SortedByCollapseKey`), never in place, so the facts do
-  not depend on the caller's edge order.
+  maps ids to dense ints once (`ReachabilityGraph`: nodes first, in node order, then edge
+  endpoints that are not nodes) and builds its forward rows and FanIn counts by run-length over
+  that order; an edge list in any other order is sorted as a copy (`SortedByCollapseKey`), never
+  in place, so the facts do not depend on the caller's edge order. Every walk (entry points,
+  Tarjan, the budgeted bucket walk) runs on int arrays with per-walk stamps - never on id-keyed
+  hash sets or dictionaries. Entry-point walks run on the worker team and fold into the facts
+  in entry-point order. Their results, budget cut-offs included, must stay exactly the
+  string-keyed walks' (`ReferenceReachability` in the tests is that implementation;
+  `Compute_MatchesTheStringKeyedWalksOnRandomGraphsAndBudgets` drives it with tiny budgets):
+  each vertex is queued once, and attempt counters stand in for the repeats the old queue held
+  when deciding whether a walk was cut short.
 - Never reuse a per-group scratch `HashSet`/`List` across millions of groups without a cap:
   `Clear()` is O(capacity), so one group with a thousand call sites taxes every later group
   with that capacity (issue #70's second hotspot). Drop and re-grow scratch above ~64 entries.
