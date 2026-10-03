@@ -1632,10 +1632,18 @@ public static class Dosai
         var assemblyMethods = new List<Method>();
         var processedAssemblyIdentities = new HashSet<string>();
         var sharedFrameworkDirs = GetSharedFrameworkProbingPaths();
-        foreach (var assemblyFilePath in assembliesToInspect)
+        // The first open of a file is where a cold machine waits: real-time antivirus scans a
+        // file on its first access (Windows Defender: ~60 ms per DLL), which left this phase at a
+        // fifth of one core in the issue #65 run. The managed-assembly check is
+        // that first open and a pure function of the file, so it runs on the worker team up
+        // front; the scans overlap, and the loop below reads warm files in its usual order.
+        var isManaged = new bool[assembliesToInspect.Count];
+        DedicatedStack.ForEach("Dosai assembly probe", Math.Max(1, MaxSymbolAnalysisWorkers), isManaged.Length, index => isManaged[index] = IsManagedAssembly(assembliesToInspect[index]));
+        for (var assemblyIndex = 0; assemblyIndex < assembliesToInspect.Count; assemblyIndex++)
         {
+            var assemblyFilePath = assembliesToInspect[assemblyIndex];
             var fileName = Path.GetFileName(assemblyFilePath);
-            if (!IsManagedAssembly(assemblyFilePath))
+            if (!isManaged[assemblyIndex])
             {
                 Console.WriteLine($"Info: Skipping native library or non-assembly file: {assemblyFilePath}");
                 continue;
