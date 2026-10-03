@@ -904,8 +904,9 @@ public static class ReachabilityAnalyzer
 
     /// <summary>
     ///     Group ids in collapse-key order. A group's first edge carries its key; the keys are
-    ///     distinct across groups, so the unstable sort is deterministic. The keys are copied
-    ///     into one contiguous array for the sort, so comparisons do not chase each group's edge.
+    ///     distinct across groups, so the order is fully determined. The keys are copied into one
+    ///     contiguous array, so comparisons do not chase each group's edge, and the group ids are
+    ///     sorted over it on the worker team.
     /// </summary>
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private static int[] OrderCollapseGroups(List<MethodCallEdge> edges, int[] placement, int[] offsets)
@@ -919,21 +920,33 @@ public static class ReachabilityAnalyzer
             order[group] = group;
         }
 
-        Array.Sort(keys, order, GraphAssembly.CollapseKeyOrder);
+        ParallelSort.StableSort(order, (x, y) => GraphAssembly.CompareCollapseKeys(keys[x], keys[y]));
         return order;
     }
 
     /// <summary>
     ///     Dense group id per edge, numbered in first-encounter order, through an open-addressing
     ///     table: each slot packs a group's key hash with its id, and only a hash match reads the
-    ///     group's first edge to compare keys - nothing key-sized is stored. About 24 bytes per
-    ///     edge at the peak, where a <c>Dictionary</c> keyed by the struct costs 44 per entry
-    ///     (entry plus bucket) and briefly holds both tables on every resize.
+    ///     group's first edge to compare keys - nothing key-sized is stored. The key hashes (two id
+    ///     strings each) are computed up front on the worker team. About 28 bytes per edge at the
+    ///     peak, where a <c>Dictionary</c> keyed by the struct costs 44 per entry (entry plus
+    ///     bucket) and briefly holds both tables on every resize.
     /// </summary>
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private static int[] AssignCollapseGroups(List<MethodCallEdge> edges, out int groupCount)
     {
         var count = edges.Count;
+        var hashes = new int[count];
+        const int hashChunk = 16384;
+        DedicatedStack.ForEach("Dosai collapse hashes", Math.Max(1, Dosai.MaxSymbolAnalysisWorkers), (count + hashChunk - 1) / hashChunk, chunk =>
+        {
+            var end = Math.Min(count, (chunk + 1) * hashChunk);
+            for (var index = chunk * hashChunk; index < end; index++)
+            {
+                hashes[index] = GraphAssembly.CollapseKey.From(edges[index]).GetHashCode();
+            }
+        });
+
         var groupOfEdge = new int[count];
         var firstEdge = new int[count];
         // Load factor at most 2/3 even when every edge is its own group. A slot is
@@ -944,7 +957,7 @@ public static class ReachabilityAnalyzer
         for (var index = 0; index < count; index++)
         {
             var key = GraphAssembly.CollapseKey.From(edges[index]);
-            var hash = key.GetHashCode();
+            var hash = hashes[index];
             var slot = hash & mask;
             while (true)
             {

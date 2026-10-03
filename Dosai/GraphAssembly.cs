@@ -220,31 +220,15 @@ internal static class GraphAssembly
     internal static void SortEdgesInPlace(List<MethodCallEdge> edges) => StableSortInPlace(edges, CompareEdges);
 
     /// <summary>
-    ///     Stable in-place index sort under an arbitrary edge comparison: the original-position
-    ///     tiebreak makes it equivalent to the LINQ <c>OrderBy</c> chain it replaces, without
-    ///     per-element key materialization.
+    ///     Stable in-place sort under an arbitrary edge comparison, on the worker team
+    ///     (<see cref="ParallelSort" />): equivalent to the LINQ <c>OrderBy</c> chain it replaces,
+    ///     without per-element key materialization, and the same order for every worker count.
     /// </summary>
     internal static void StableSortInPlace(List<MethodCallEdge> edges, Comparison<MethodCallEdge> compare)
     {
-        var order = new int[edges.Count];
-        for (var i = 0; i < order.Length; i++)
-        {
-            order[i] = i;
-        }
-
-        Array.Sort(order, (i, j) =>
-        {
-            var c = compare(edges[i], edges[j]);
-            return c != 0 ? c : i.CompareTo(j);
-        });
-        var sorted = new MethodCallEdge[edges.Count];
-        for (var i = 0; i < order.Length; i++)
-        {
-            sorted[i] = edges[order[i]];
-        }
-
-        edges.Clear();
-        edges.AddRange(sorted);
+        var items = edges.ToArray();
+        ParallelSort.StableSort(items, compare);
+        items.AsSpan().CopyTo(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(edges));
     }
 
     /// <summary>The separator the collapsed-edge grouping used to build as one string per edge.</summary>
@@ -301,9 +285,6 @@ internal static class GraphAssembly
     ///     <see cref="CompareSeparated" /> encodes exactly that.
     /// </summary>
     internal static int CompareCollapseEdges(MethodCallEdge x, MethodCallEdge y) => CompareCollapseKeys(CollapseKey.From(x), CollapseKey.From(y));
-
-    /// <summary><see cref="CompareCollapseKeys" /> as a reusable comparer for array sorts.</summary>
-    internal static readonly IComparer<CollapseKey> CollapseKeyOrder = Comparer<CollapseKey>.Create(CompareCollapseKeys);
 
     /// <summary><see cref="CompareCollapseEdges" /> over the group-identity struct.</summary>
     internal static int CompareCollapseKeys(CollapseKey x, CollapseKey y)
