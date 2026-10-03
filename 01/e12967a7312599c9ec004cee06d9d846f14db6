@@ -1,0 +1,27 @@
+docs/supply-chain-purl.md
+  s_cc3ac20205c0f7::t_706d8dc28c6310 73,75-80
+Dosai.Tests/PackageVersionScopeTests.cs
+  s_cc3ac20205c0f7::t_34794fb7e04a92 87-113
+AGENTS.md
+  s_cc3ac20205c0f7::t_706d8dc28c6310 164-166
+Dosai/PackageUrlResolver.cs
+  s_cc3ac20205c0f7::t_ed7d9b4ae01013 66-67,70,107-108,110,113-117,119-120,122-123,126,417,422-429,431,434,440-441,443,446,449-450,452-453,455,458-469,472-477,484-487,489-491,493-494,823-830
+Dosai.Tests/IssueRegressionTests.cs
+  s_cc3ac20205c0f7::t_ce0d4164004a45 662,664-671,702,706,708-710,712,715,720,722,725,727-731,734-736,745,756-757
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "01e12967a7312599c9ec004cee06d9d846f14db6",
+  "prompts": {},
+  "sessions": {
+    "s_cc3ac20205c0f7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d8a8c3fa-9c04-4188-8d5e-e28b5f0838c1",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
