@@ -970,6 +970,11 @@ public static class Dosai
         return relevantExtensions.Contains(extension);
     }
 
+    /// <summary>
+    ///     Package URLs for every method, call, member, node and edge. Each item's purl depends only
+    ///     on that item and the resolver's read-only tables, so the lists are resolved in chunks on
+    ///     the worker team; millions of independent lookups were one thread's work.
+    /// </summary>
     private static void EnrichPackageUrls(
         PackageUrlResolver resolver,
         List<Method> methods,
@@ -983,17 +988,9 @@ public static class Dosai
         List<AssemblyInformation> assemblyInformation,
         List<SourceAssemblyMapping> sourceAssemblyMappings)
     {
-        foreach (var method in methods)
-        {
-            method.Purl = resolver.Resolve(method.Assembly, method.Module, method.SourceSignature ?? method.AssemblySignature, method.Namespace, method.ClassName);
-        }
-
-        foreach (var dependency in dependencies)
-        {
-            dependency.Purl = resolver.Resolve(dependency.Assembly, dependency.Module, dependency.Name, dependency.Namespace, null);
-        }
-
-        foreach (var call in methodCalls)
+        ForEachItem(methods, method => method.Purl = resolver.Resolve(method.Assembly, method.Module, method.SourceSignature ?? method.AssemblySignature, method.Namespace, method.ClassName));
+        ForEachItem(dependencies, dependency => dependency.Purl = resolver.Resolve(dependency.Assembly, dependency.Module, dependency.Name, dependency.Namespace, null));
+        ForEachItem(methodCalls, call =>
         {
             call.Purl = resolver.Resolve(call.Assembly, call.Module, call.TargetId ?? call.CalledMethod, call.Namespace, call.ClassName);
             // Unresolved call sites carry no assembly identity, so the first Resolve pass sees
@@ -1003,35 +1000,13 @@ public static class Dosai
             {
                 call.Purl = resolver.Resolve(namespaceName: call.Namespace);
             }
-        }
-
-        foreach (var property in properties)
-        {
-            property.Purl = resolver.Resolve(property.Assembly, property.Module, property.TypeFullName, property.Namespace, property.ClassName);
-        }
-
-        foreach (var field in fields)
-        {
-            field.Purl = resolver.Resolve(field.Assembly, field.Module, field.TypeFullName, field.Namespace, field.ClassName);
-        }
-
-        foreach (var @event in events)
-        {
-            @event.Purl = resolver.Resolve(@event.Assembly, @event.Module, @event.TypeFullName, @event.Namespace, @event.ClassName);
-        }
-
-        foreach (var constructor in constructors)
-        {
-            constructor.Purl = resolver.Resolve(constructor.Assembly, constructor.Module, constructor.Name, constructor.Namespace, constructor.ClassName);
-        }
-
-        foreach (var assembly in assemblyInformation)
-        {
-            assembly.Purl = resolver.Resolve(assembly.Name, assembly.Name, assembly.Name, assembly.Name, assembly.Name);
-        }
-
-        var nodePurls = new Dictionary<string, string?>(StringComparer.Ordinal);
-        foreach (var node in callGraph.Nodes)
+        });
+        ForEachItem(properties, property => property.Purl = resolver.Resolve(property.Assembly, property.Module, property.TypeFullName, property.Namespace, property.ClassName));
+        ForEachItem(fields, field => field.Purl = resolver.Resolve(field.Assembly, field.Module, field.TypeFullName, field.Namespace, field.ClassName));
+        ForEachItem(events, @event => @event.Purl = resolver.Resolve(@event.Assembly, @event.Module, @event.TypeFullName, @event.Namespace, @event.ClassName));
+        ForEachItem(constructors, constructor => constructor.Purl = resolver.Resolve(constructor.Assembly, constructor.Module, constructor.Name, constructor.Namespace, constructor.ClassName));
+        ForEachItem(assemblyInformation, assembly => assembly.Purl = resolver.Resolve(assembly.Name, assembly.Name, assembly.Name, assembly.Name, assembly.Name));
+        ForEachItem(callGraph.Nodes, node =>
         {
             node.Purl = resolver.Resolve(node.Assembly, node.Module, node.Id, node.Namespace, node.ClassName);
             // Unresolved-target nodes carry no assembly identity; the namespace recovered from
@@ -1040,18 +1015,33 @@ public static class Dosai
             {
                 node.Purl = resolver.Resolve(namespaceName: node.Namespace);
             }
+        });
+
+        // In node order, so a repeated id keeps its last node's purl, as before.
+        var nodePurls = new Dictionary<string, string?>(callGraph.Nodes.Count, StringComparer.Ordinal);
+        foreach (var node in callGraph.Nodes)
+        {
             nodePurls[node.Id] = node.Purl;
         }
 
-        foreach (var edge in callGraph.Edges)
+        ForEachItem(callGraph.Edges, edge =>
         {
             edge.SourcePurl = nodePurls.GetValueOrDefault(edge.SourceId);
             edge.TargetPurl = nodePurls.GetValueOrDefault(edge.TargetId) ?? resolver.Resolve(null, null, edge.TargetId, null, edge.TargetName);
-        }
+        });
+        ForEachItem(sourceAssemblyMappings, mapping => mapping.Purl = resolver.Resolve(mapping.AssemblyName, mapping.ModuleName, mapping.AssemblyId ?? mapping.SourceId, mapping.Namespace, mapping.ClassName));
 
-        foreach (var mapping in sourceAssemblyMappings)
+        static void ForEachItem<T>(List<T> items, Action<T> enrich)
         {
-            mapping.Purl = resolver.Resolve(mapping.AssemblyName, mapping.ModuleName, mapping.AssemblyId ?? mapping.SourceId, mapping.Namespace, mapping.ClassName);
+            const int chunk = 4096;
+            DedicatedStack.ForEach("Dosai package urls", Math.Max(1, MaxSymbolAnalysisWorkers), (items.Count + chunk - 1) / chunk, index =>
+            {
+                var end = Math.Min(items.Count, (index + 1) * chunk);
+                for (var item = index * chunk; item < end; item++)
+                {
+                    enrich(items[item]);
+                }
+            });
         }
     }
 

@@ -157,8 +157,10 @@ dotnet test ./Dosai.sln
   text (`TextContainsAny`). Never cache syntax nodes across trees: a node list pins the Roslyn
   red trees the walks let the collector reclaim (2.4 GB on dotnet/runtime).
 - `PackageUrlResolver.Resolve` runs for every method, call, node and edge: keep it free of
-  per-call splits, concatenations and scans over every known package (it probes the qualified
-  name's dotted prefixes against the package tables instead).
+  per-call splits, concatenations, substrings, regexes and scans over every known package (it
+  probes the qualified name's dotted prefixes against the package tables through span lookups,
+  and skips prefixes longer than any registered name). Enrichment resolves the lists on the
+  worker team, so `Resolve` must also stay read-only: no memo tables filled while resolving.
 - Phase order in `BuildMethodsSlice` is a memory contract: framework analysis and the security
   analyzer run immediately after source analysis (they are the only compilation consumers),
   then the compilations are dropped before the assembly IL call graph, enrichment,
