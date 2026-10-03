@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
@@ -42,8 +43,20 @@ public sealed partial class PackageUrlResolver
         .Select((entry, order) => (entry.Prefix, Order: order, Purl: $"pkg:nuget/{EscapePurl(entry.PackageName)}"))
         .ToDictionary(entry => entry.Prefix, entry => (entry.Order, entry.Purl), StringComparer.OrdinalIgnoreCase);
 
+    /// <summary><see cref="SystemPackagePurls" /> probed by span; no prefix longer than its longest key can match.</summary>
+    private static readonly Dictionary<string, (int Order, string Purl)>.AlternateLookup<ReadOnlySpan<char>> SystemPackagesBySpan = SystemPackagePurls.GetAlternateLookup<ReadOnlySpan<char>>();
+
+    private static readonly int LongestSystemPrefix = SystemPackagePurls.Keys.Max(key => key.Length);
+
     private readonly Dictionary<string, string> _assemblyToPurl = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _packageToPurl = new(StringComparer.OrdinalIgnoreCase);
+
+    // The tables probed by span, so a probe never cuts a substring; and the longest package name
+    // registered, past which no dotted prefix can match one.
+    private readonly Dictionary<string, string>.AlternateLookup<ReadOnlySpan<char>> _assembliesBySpan;
+    private readonly Dictionary<string, string>.AlternateLookup<ReadOnlySpan<char>> _packagesBySpan;
+    private int _longestPackageName;
+
     private readonly Dictionary<string, (string Version, string Source)> _packageVersions = new(StringComparer.OrdinalIgnoreCase);
     // Version conflicts collected during the read and aggregated once per package, a
     // multi-project/multi-TFM solution would otherwise emit thousands of duplicate lines.
@@ -51,6 +64,8 @@ public sealed partial class PackageUrlResolver
 
     private PackageUrlResolver()
     {
+        _assembliesBySpan = _assemblyToPurl.GetAlternateLookup<ReadOnlySpan<char>>();
+        _packagesBySpan = _packageToPurl.GetAlternateLookup<ReadOnlySpan<char>>();
     }
 
     /// <summary>Per-source resolution facts (which lock/config file produced each purl) for downstream trust decisions.</summary>
@@ -157,6 +172,7 @@ public sealed partial class PackageUrlResolver
             return purl;
         }
 
+
         var qualifiedName = !string.IsNullOrWhiteSpace(symbol) ? symbol : !string.IsNullOrWhiteSpace(typeName) ? typeName : namespaceName;
         if (!string.IsNullOrWhiteSpace(qualifiedName))
         {
@@ -166,8 +182,8 @@ public sealed partial class PackageUrlResolver
             // prefix when the qualified name equals it or continues it with a dot.
             for (var end = qualifiedName.Length; end > 0; end = qualifiedName.LastIndexOf('.', end - 1))
             {
-                var prefix = end == qualifiedName.Length ? qualifiedName : qualifiedName[..end];
-                if (prefix.Contains('.', StringComparison.Ordinal) && _packageToPurl.TryGetValue(prefix, out var packagePurl))
+                var prefix = qualifiedName.AsSpan(0, end);
+                if (end <= _longestPackageName && prefix.Contains('.') && _packagesBySpan.TryGetValue(prefix, out var packagePurl))
                 {
                     return packagePurl;
                 }
@@ -182,32 +198,37 @@ public sealed partial class PackageUrlResolver
         return null;
     }
 
-    private bool TryResolveCandidate(string? candidate, out string? purl)
+    /// <summary>
+    ///     Candidates are spans into the caller's strings and probe the tables through their span
+    ///     lookups: <see cref="Resolve" /> runs for every method, call, node and edge, and a
+    ///     substring per probe was most of its allocation. An empty span is no candidate.
+    /// </summary>
+    private bool TryResolveCandidate(ReadOnlySpan<char> candidate, out string? purl)
     {
         purl = null;
-        return candidate is not null && (_assemblyToPurl.TryGetValue(candidate, out purl) || _packageToPurl.TryGetValue(candidate, out purl));
+        return !candidate.IsEmpty && (_assembliesBySpan.TryGetValue(candidate, out purl) || _packagesBySpan.TryGetValue(candidate, out purl));
     }
 
-    /// <summary>An assembly or module name without its display-name tail and file extension.</summary>
-    private static string? AssemblyCandidate(string? candidate)
+    /// <summary>An assembly or module name without its display-name tail and file extension; empty when none is left.</summary>
+    private static ReadOnlySpan<char> AssemblyCandidate(string? candidate)
     {
         if (string.IsNullOrWhiteSpace(candidate))
         {
-            return null;
+            return [];
         }
 
         var comma = candidate.IndexOf(',', StringComparison.Ordinal);
-        var cleaned = Path.GetFileNameWithoutExtension((comma >= 0 ? candidate[..comma] : candidate).Trim());
-        return string.IsNullOrWhiteSpace(cleaned) ? null : cleaned;
+        var cleaned = Path.GetFileNameWithoutExtension((comma >= 0 ? candidate.AsSpan(0, comma) : candidate).Trim());
+        return cleaned.IsWhiteSpace() ? [] : cleaned;
     }
 
-    /// <summary>The first non-empty dot-separated segment of a normalized symbol.</summary>
-    private static string? SymbolCandidate(string? candidate, out string? normalized)
+    /// <summary>The first non-empty dot-separated segment of a normalized symbol; empty when there is none.</summary>
+    private static ReadOnlySpan<char> SymbolCandidate(string? candidate, out string? normalized)
     {
         normalized = null;
         if (string.IsNullOrWhiteSpace(candidate))
         {
-            return null;
+            return [];
         }
 
         normalized = NormalizeSymbol(candidate);
@@ -219,12 +240,12 @@ public sealed partial class PackageUrlResolver
 
         if (start == normalized.Length)
         {
-            return null;
+            return [];
         }
 
         var end = normalized.IndexOf('.', start);
-        var first = end < 0 ? normalized[start..] : normalized[start..end];
-        return string.IsNullOrWhiteSpace(first) ? null : first;
+        var first = end < 0 ? normalized.AsSpan(start) : normalized.AsSpan(start, end - start);
+        return first.IsWhiteSpace() ? [] : first;
     }
 
     /// <summary>The first <see cref="SystemPackagePrefixes" /> entry the name equals or continues with a dot.</summary>
@@ -234,7 +255,7 @@ public sealed partial class PackageUrlResolver
         purl = string.Empty;
         for (var end = qualifiedName.Length; end > 0; end = qualifiedName.LastIndexOf('.', end - 1))
         {
-            if (SystemPackagePurls.TryGetValue(end == qualifiedName.Length ? qualifiedName : qualifiedName[..end], out var entry) && entry.Order < best)
+            if (end <= LongestSystemPrefix && SystemPackagesBySpan.TryGetValue(qualifiedName.AsSpan(0, end), out var entry) && entry.Order < best)
             {
                 best = entry.Order;
                 purl = entry.Purl;
@@ -553,6 +574,7 @@ public sealed partial class PackageUrlResolver
 
         ResolutionFacts.Add(new PackageResolutionFact(packageName, version, purl, source, confidence));
         _packageToPurl.TryAdd(packageName, purl);
+        _longestPackageName = Math.Max(_longestPackageName, packageName.Length);
         var lastSegment = packageName.Split('.').LastOrDefault();
         if (!string.IsNullOrWhiteSpace(lastSegment))
         {
@@ -560,14 +582,45 @@ public sealed partial class PackageUrlResolver
         }
     }
 
-    private static string NormalizeSymbol(string value) => GenericArityRegex().Replace(value.Replace("global::", string.Empty, StringComparison.Ordinal).Replace("Global.", string.Empty, StringComparison.Ordinal), string.Empty);
+    /// <summary>
+    ///     The symbol without <c>global::</c>/<c>Global.</c> qualifiers and generic arity markers
+    ///     (a backtick and the ASCII digits after it, as the <c>`[0-9]+</c> pattern this replaces
+    ///     matched them). The input itself when there is nothing to strip, which is most symbols:
+    ///     the regex pass cost more than the lookups it prepares.
+    /// </summary>
+    private static string NormalizeSymbol(string value)
+    {
+        var stripped = value.Replace("global::", string.Empty, StringComparison.Ordinal).Replace("Global.", string.Empty, StringComparison.Ordinal);
+        var tick = stripped.IndexOf('`', StringComparison.Ordinal);
+        if (tick < 0)
+        {
+            return stripped;
+        }
+
+        var builder = new StringBuilder(stripped.Length);
+        builder.Append(stripped, 0, tick);
+        for (var index = tick; index < stripped.Length;)
+        {
+            if (stripped[index] == '`' && index + 1 < stripped.Length && char.IsAsciiDigit(stripped[index + 1]))
+            {
+                index += 2;
+                while (index < stripped.Length && char.IsAsciiDigit(stripped[index]))
+                {
+                    index++;
+                }
+
+                continue;
+            }
+
+            builder.Append(stripped[index++]);
+        }
+
+        return builder.ToString();
+    }
 
     private static string BuildNuGetPurl(string name, string version) => $"pkg:nuget/{EscapePurl(name)}@{EscapePurl(version)}";
 
     private static string EscapePurl(string value) => Uri.EscapeDataString(value).Replace("%2E", ".", StringComparison.Ordinal).Replace("%2D", "-", StringComparison.Ordinal).Replace("%5F", "_", StringComparison.Ordinal);
-
-    [GeneratedRegex("`[0-9]+")]
-    private static partial Regex GenericArityRegex();
 
     [GeneratedRegex(@"^\s+(?<name>[A-Za-z0-9_.\-]+)\s+\((?<version>[^)\s]+)")]
     private static partial Regex PaketPackageLineRegex();

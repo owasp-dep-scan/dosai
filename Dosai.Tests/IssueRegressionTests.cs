@@ -746,6 +746,9 @@ public static class Shouting
             "Microsoft.Extensions.Logging.LoggerFactory..ctor()", "Microsoft.Extensions.LoggingX.Y", "..Leading.Dots.Name", "Trailing.", ".", " .x", "A. B",
             "System.IO.FileStream.Read(byte[],int,int):int", "System.IO.Files.Enumerate()", "system.threading.tasks.Task.Run()", "System", "SystemX.Y",
             "System.Security.Cryptography.X509Certificates.X509Store..ctor()", "Polly.Policy.Handle()", "My.App.Service.Run()",
+            // Generic arity markers: digits after a backtick go, a bare or trailing backtick stays.
+            "Newtonsoft.Json`12`3.Linq.JToken.Parse()", "Serilog`.Sinks.X", "Serilog.Sinks`", "Polly``1.Policy", "Polly`a1.Policy", "`1Serilog.Sinks.Console.X",
+            "System.Collections.Generic.List`1[[System.String]].Add()", "Serilog.Sinks.Console`10",
         ];
         string?[] namespaces = [null, "Serilog.Sinks", "System.Text.Json", "My.App"];
         string?[] typeNames = [null, "ConsoleSink", "Newtonsoft.Json.JsonConvert", "..x"];
