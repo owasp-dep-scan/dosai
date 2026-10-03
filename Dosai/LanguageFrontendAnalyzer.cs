@@ -49,27 +49,48 @@ public static partial class LanguageFrontendAnalyzer
 
     public static bool IsRNativeParserAvailable => ResolveExecutable("Rscript") is not null;
 
+    /// <remarks>
+    ///     Each file is analyzed on its own (its declarations, calls and dependencies depend only on
+    ///     the file and the shared, thread-safe framework detection), so the files run on the worker
+    ///     team and their results are appended in file order: the lists are the sequential loop's
+    ///     for every worker count. A tree like dotnet/runtime has tens of thousands of C/C++ files.
+    /// </remarks>
     public static (List<Method> Methods, List<Dependency> Dependencies, List<MethodCalls> MethodCalls) GetMethods(string path, bool includeFSharp = true)
     {
-        var methods = new List<Method>();
-        var dependencies = new List<Dependency>();
-        var methodCalls = new List<MethodCalls>();
-        foreach (var file in GetFiles(path))
+        var files = GetFiles(path).ToList();
+        var results = new (List<Method> Methods, List<Dependency> Dependencies, List<MethodCalls> Calls)[files.Count];
+        DedicatedStack.ForEach("Dosai language frontends", Math.Max(1, Dosai.MaxSymbolAnalysisWorkers), files.Count, index =>
         {
+            var file = files[index];
+            var result = (Methods: new List<Method>(), Dependencies: new List<Dependency>(), Calls: new List<MethodCalls>());
             var extension = Path.GetExtension(file).ToLowerInvariant();
             if (extension is ".fs" or ".fsi" or ".fsx")
             {
-                if (!includeFSharp) continue;
-                AnalyzeFSharp(path, file, methods, dependencies, methodCalls);
+                if (includeFSharp)
+                {
+                    AnalyzeFSharp(path, file, result.Methods, result.Dependencies, result.Calls);
+                }
             }
             else if (extension is ".r" or ".rmd" or ".qmd")
             {
-                AnalyzeR(path, file, methods, dependencies, methodCalls);
+                AnalyzeR(path, file, result.Methods, result.Dependencies, result.Calls);
             }
             else if (extension is ".cpp" or ".cc" or ".cxx" or ".c" or ".h" or ".hpp" or ".hh")
             {
-                AnalyzeCpp(path, file, methods, dependencies, methodCalls);
+                AnalyzeCpp(path, file, result.Methods, result.Dependencies, result.Calls);
             }
+
+            results[index] = result;
+        });
+
+        var methods = new List<Method>(results.Sum(result => result.Methods.Count));
+        var dependencies = new List<Dependency>(results.Sum(result => result.Dependencies.Count));
+        var methodCalls = new List<MethodCalls>(results.Sum(result => result.Calls.Count));
+        foreach (var result in results)
+        {
+            methods.AddRange(result.Methods);
+            dependencies.AddRange(result.Dependencies);
+            methodCalls.AddRange(result.Calls);
         }
 
         return (methods, dependencies, methodCalls);
@@ -875,14 +896,12 @@ write.table(pd, file = "", sep = "\t", row.names = FALSE, col.names = TRUE, quot
             .Where(file => extensions.Contains(Path.GetExtension(file)));
     }
 
-    private static bool IsKeyword(string word)
+    private static readonly HashSet<string> Keywords = new(StringComparer.OrdinalIgnoreCase)
     {
-        var keywords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        {
-            "if", "then", "else", "elif", "for", "while", "do", "match", "with", "try", "catch", "finally", "let", "rec", "and", "fun", "function", "in", "open", "module", "type", "namespace", "return", "static", "new", "NULL", "nullptr", "sizeof", "switch", "case", "library", "require"
-        };
-        return keywords.Contains(word);
-    }
+        "if", "then", "else", "elif", "for", "while", "do", "match", "with", "try", "catch", "finally", "let", "rec", "and", "fun", "function", "in", "open", "module", "type", "namespace", "return", "static", "new", "NULL", "nullptr", "sizeof", "switch", "case", "library", "require"
+    };
+
+    private static bool IsKeyword(string word) => Keywords.Contains(word);
 
     // F# declaration keywords that head real source lines (`inherit`, `override`, `abstract`,
     // `member`) read like calls to the line scanner but never name one. Kept separate from the
