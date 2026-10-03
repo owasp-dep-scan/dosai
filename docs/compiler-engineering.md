@@ -362,8 +362,9 @@ tail after symbol analysis had finished during which the heap kept climbing):
 - **Graph assembly allocates no key strings.** Call-site de-duplication and the canonical
   edge/node orderings run through `GraphAssembly`: an `EdgeSiteKey` struct (source, target,
   file, line, column, call-type tag, evidence-kind tag) replaces one concatenated
-  ~200-byte string per edge, and stable in-place sorts (an index sort with an
-  original-position tiebreak) replace `OrderBy` chains. At millions of edges the old key
+  ~200-byte string per edge, and stable in-place sorts (runs sorted on the worker team, then
+  merged along merge paths with the left run first on ties, so the order is the sequential
+  stable sort's) replace `OrderBy` chains. At millions of edges the old key
   strings alone were gigabytes of garbage allocated exactly in the tail, and duplicate call
   sites used to allocate their edge object before the de-duplication discarded it - dedup now
   happens on the call record before the edge exists. String legs compare by reference first
@@ -390,9 +391,21 @@ tail after symbol analysis had finished during which the heap kept climbing):
   workers (visible as CPU collapsing to one core "while the GC was under pressure"). Server
   GC keeps reclamation parallel to allocation. On .NET 9 and later it runs with dynamic heap
   count adaptation (DATAS) by default, so small scans do not pay for one heap per core;
-  `DOTNET_gcServer=0` restores workstation GC for a host that needs it.
+  `DOTNET_gcServer=0` restores workstation GC for a host that needs it. The peak working set
+  is set during symbol analysis, where a large share of the heap is garbage the server GC has
+  not yet collected; a host short on memory can trade time for it with
+  `DOTNET_GCConserveMemory=7` (on `dotnet/runtime`: 20.8 GB peak to 17.0 GB, about 7% more
+  time; lower levels made no difference there).
 - `DOSAI_DEBUG_GC=1` forces a full compacting collection before each `--debug` phase-end heap
   read, so heap figures compare runs without GC-timing noise.
+- **No phase after source analysis runs a per-item loop on one thread.** Package-URL
+  enrichment resolves its lists in chunks on the worker team (the resolver only reads its
+  tables and probes them by span), the F#, R and C/C++ frontends analyze files on the team
+  and append results in file order, and the framework providers no longer walk every syntax
+  tree per node kind: declarations come from a walk that skips statements and expressions,
+  and invocation loops skip trees whose invocations carry none of the names they act on. On
+  `dotnet/runtime` these took enrichment from 4.8 s to 0.9 s, the frontends from 7.3 s to
+  2.6 s and framework analysis from 44 s to 11 s, with byte-identical output.
 - **The output is serialized on the worker team.** One serializer call over the whole slice
   ran on one core for the entire phase. `ParallelJsonWriter` writes the slice's top levels from
   the serializer's own contract and hands each large list to the workers in chunks, appending
