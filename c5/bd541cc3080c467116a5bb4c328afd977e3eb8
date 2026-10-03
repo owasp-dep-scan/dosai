@@ -1,0 +1,52 @@
+AGENTS.md
+  s_cc3ac20205c0f7::t_19f972197a22e8 167-173
+  s_cc3ac20205c0f7::t_706d8dc28c6310 164-166
+Dosai.Tests/IssueRegressionTests.cs
+  s_cc3ac20205c0f7::t_27db3dabab281a 696-699
+  s_cc3ac20205c0f7::t_ce0d4164004a45 662,664-671,702,706,708-710,712,715,720,722,725,727-731,734-736,745,756-757
+Dosai/Dosai.cs
+  s_cc3ac20205c0f7::t_62b7ccf5021eaf 613-616,980-982,997-998,1001,1007,1010-1013,1015-1016,1018-1019,1022,1025-1026,1029-1033,1035-1041
+Dosai/DataFlow.cs
+  s_cc3ac20205c0f7::t_62b7ccf5021eaf 3676
+Dosai.Tests/PackageVersionScopeTests.cs
+  s_cc3ac20205c0f7::t_0f26ed10d7b779 1-47,50,53-62,65-72,74-78,82-86,132-159,164-167,170-172
+  s_cc3ac20205c0f7::t_04833f6f599dfd 73
+  s_cc3ac20205c0f7::t_fb93139c8f3343 63-64
+  s_cc3ac20205c0f7::t_b02c8060c6bc26 48-49,51-52,79-81
+  s_cc3ac20205c0f7::t_b0ad20469e5f1e 114-131
+  s_cc3ac20205c0f7::t_34794fb7e04a92 87-113
+  s_cc3ac20205c0f7::t_3addab5a063acd 160-163,168-169
+docs/LESSON9.md
+  s_cc3ac20205c0f7::t_19f972197a22e8 32,122
+Dosai/PackageUrlResolver.cs
+  s_cc3ac20205c0f7::t_8f5ef27712a3c6 1,9-14,56-65,68-69,71-106,109,111-112,124-125,127-143,149,152,155-160,170-180,208,213-251,253-258,260,262-339,343-367,374-375,381,401-405,411-412,414,416,523-535,553,570-571,591-596,614,631-632,656,673,722-723,744,755,779,799,814,833-834,839,841-843
+  s_cc3ac20205c0f7::t_62b7ccf5021eaf 340-342
+  s_cc3ac20205c0f7::t_88daa3198e73a3 789-791,793-797
+  s_cc3ac20205c0f7::t_ed7d9b4ae01013 66-67,70,107-108,110,113-117,119-120,122-123,126,417,422-429,431,434,440-441,443,446,449-450,452-453,455,458-469,472-477,484-487,489-491,493-494,823-830
+docs/supply-chain-purl.md
+  s_cc3ac20205c0f7::t_19f972197a22e8 25-29,32,34,37-50,68,217,223-224
+  s_cc3ac20205c0f7::t_8ba86ce34a3081 35-36
+  s_cc3ac20205c0f7::t_706d8dc28c6310 73,75-80
+docs/compiler-engineering.md
+  s_cc3ac20205c0f7::t_19f972197a22e8 334
+Dosai/DataFlowAssembly.cs
+  s_cc3ac20205c0f7::t_62b7ccf5021eaf 2020
+docs/THREAT_MODEL.md
+  s_cc3ac20205c0f7::t_19f972197a22e8 51
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "c5bd541cc3080c467116a5bb4c328afd977e3eb8",
+  "prompts": {},
+  "sessions": {
+    "s_cc3ac20205c0f7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d8a8c3fa-9c04-4188-8d5e-e28b5f0838c1",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
