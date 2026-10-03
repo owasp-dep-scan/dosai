@@ -102,7 +102,9 @@ dotnet test ./Dosai.sln
   node name from `IMethodSymbol.Name` directly - use `SourceRenderCache.MemberName`.
 - Graph de-duplication and ordering go through `GraphAssembly`: an `EdgeSiteKey` struct
   instead of a concatenated key string per edge, stable in-place sorts instead of `OrderBy`
-  chains. Dedupe the call record before building the edge. String legs of the key compare by
+  chains (`ParallelSort.StableSort`: runs sorted on the worker team and merged along merge
+  paths, left run first on ties, so the order is the sequential stable sort's for every
+  worker count). Dedupe the call record before building the edge. String legs of the key compare by
   reference first, so route edge endpoint ids through the render cache (single instance per
   distinct member) rather than fresh strings. Same-pair collapsing
   (`ReachabilityAnalyzer.CollapseDuplicateCallSites`) groups through an open-addressing table

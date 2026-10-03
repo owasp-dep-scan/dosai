@@ -184,10 +184,6 @@ public static class FrameworkRegistry
     /// </summary>
     public static void ApplyTrustBoundaries(FrameworkAnalysisResult result, CallGraph callGraph)
     {
-        var outgoingBySource = callGraph.Edges
-            .GroupBy(edge => edge.SourceId, StringComparer.Ordinal)
-            .ToDictionary(group => group.Key, group => group.Select(edge => edge.TargetId).ToList(), StringComparer.Ordinal);
-
         foreach (var outbound in result.Services.Where(service => service.Direction == ServiceDirections.Outbound))
         {
             // An outbound service with no known endpoint is not evidence of an external call, it is
@@ -211,6 +207,15 @@ public static class FrameworkRegistry
         if (outboundMethodIds.Count == 0)
         {
             return;
+        }
+
+        // Targets per source in edge order (the sweep's visit order), built only when there is
+        // something to sweep for: the merged graph runs to millions of edges.
+        var outgoingBySource = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        foreach (var edge in callGraph.Edges)
+        {
+            ref var targets = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(outgoingBySource, edge.SourceId, out _);
+            (targets ??= []).Add(edge.TargetId);
         }
 
         foreach (var inbound in result.Services.Where(service => service.Direction == ServiceDirections.Inbound && service.TrustZone == TrustZones.Public))
