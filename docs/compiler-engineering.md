@@ -393,6 +393,11 @@ tail after symbol analysis had finished during which the heap kept climbing):
   `DOTNET_gcServer=0` restores workstation GC for a host that needs it.
 - `DOSAI_DEBUG_GC=1` forces a full compacting collection before each `--debug` phase-end heap
   read, so heap figures compare runs without GC-timing noise.
+- **The output is serialized on the worker team.** One serializer call over the whole slice
+  ran on one core for the entire phase. `ParallelJsonWriter` writes the slice's top levels from
+  the serializer's own contract and hands each large list to the workers in chunks, appending
+  the chunks in order straight to the file; the bytes are identical to the single call's, and
+  memory stays at a few chunks per worker.
 
 ## Current limitations
 

@@ -139,6 +139,14 @@ dotnet test ./Dosai.sln
   arrays). Resolve members through `AssemblyScan.Resolve` (memoized per token, so call sites
   share one id string) and source locations through the per-assembly source map (binary search,
   one path and file-name string per document) - never per instruction.
+- The methods and data-flow outputs are written by `ParallelJsonWriter`, byte-identical to
+  `JsonSerializer.Serialize(stream, value, options)`: the root object and its object-valued
+  properties are written from the serializer's contract, and every large `List<T>` is cut into
+  chunks that the worker team serializes (one serializer call per chunk) and that are appended
+  in list order. Anything the writer cannot reproduce exactly (custom converters, conditional
+  ignores, indented options) falls back to the serializer, so new result properties need no
+  writer change; `ParallelJsonWriter_IsByteIdenticalToTheSerializerForEveryWorkerCount` guards
+  the equivalence. Stream other large outputs too - never build a whole document as a string.
 - `PackageUrlResolver.Resolve` runs for every method, call, node and edge: keep it free of
   per-call splits, concatenations and scans over every known package (it probes the qualified
   name's dotted prefixes against the package tables instead).
