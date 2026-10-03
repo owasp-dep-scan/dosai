@@ -104,6 +104,85 @@ internal static class GraphAssembly
         private static int Hash(string? s) => s?.GetHashCode(StringComparison.Ordinal) ?? 0;
     }
 
+    /// <summary>
+    ///     A set of call-site keys for graphs with millions of sites. Keys live in fixed-size
+    ///     chunks below the large-object threshold and are never moved; the index is an
+    ///     open-addressing table of (hash, position) pairs. Growing it copies plain longs, where a
+    ///     <c>HashSet&lt;EdgeSiteKey&gt;</c> copies its whole entry array (five references per key,
+    ///     each copy through the write barrier) on the large-object heap at every doubling - on a
+    ///     10 M-site assembly graph those resizes and the full collections they triggered were a
+    ///     third of the phase. The caller supplies the key's hash so it is computed once, where the
+    ///     key is built.
+    /// </summary>
+    internal sealed class EdgeSiteIndex
+    {
+        private const int ChunkBits = 10;
+        private const int ChunkSize = 1 << ChunkBits;
+        private readonly List<EdgeSiteKey[]> _chunks = [];
+        private long[] _slots = new long[64];
+        private int _count;
+
+        public int Count => _count;
+
+        /// <summary>Adds <paramref name="key" /> (whose hash is <paramref name="hash" />); false when it is already present.</summary>
+        public bool Add(in EdgeSiteKey key, int hash)
+        {
+            if ((_count + 1) * 2L > _slots.Length)
+            {
+                Grow();
+            }
+
+            var mask = _slots.Length - 1;
+            for (var slot = hash & mask; ; slot = (slot + 1) & mask)
+            {
+                var entry = _slots[slot];
+                if (entry == 0)
+                {
+                    if ((_count & (ChunkSize - 1)) == 0)
+                    {
+                        _chunks.Add(new EdgeSiteKey[ChunkSize]);
+                    }
+
+                    _chunks[_count >> ChunkBits][_count & (ChunkSize - 1)] = key;
+                    _slots[slot] = ((long)hash << 32) | (uint)++_count;
+                    return true;
+                }
+
+                if ((int)(entry >> 32) == hash)
+                {
+                    var position = (int)(uint)entry - 1;
+                    if (_chunks[position >> ChunkBits][position & (ChunkSize - 1)].Equals(key))
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        private void Grow()
+        {
+            var slots = new long[_slots.Length * 2];
+            var mask = slots.Length - 1;
+            foreach (var entry in _slots)
+            {
+                if (entry == 0)
+                {
+                    continue;
+                }
+
+                var slot = (int)(entry >> 32) & mask;
+                while (slots[slot] != 0)
+                {
+                    slot = (slot + 1) & mask;
+                }
+
+                slots[slot] = entry;
+            }
+
+            _slots = slots;
+        }
+    }
+
     internal sealed class EdgeSiteKeyComparer : IEqualityComparer<EdgeSiteKey>
     {
         public static readonly EdgeSiteKeyComparer Instance = new();

@@ -396,27 +396,49 @@ internal static class DispatchResolver
 
     internal sealed class AssemblyIndex
     {
-        private readonly IReadOnlyList<Method> _methods;
+        // Methods by name, each list in the input order: a lookup visits only the methods that
+        // can match, where it used to scan the assembly's every method per virtual call site.
+        private readonly Dictionary<string, List<Method>> _methodsByName;
         private readonly HashSet<string> _instantiatedTypes;
 
-        private AssemblyIndex(IReadOnlyList<Method> methods, HashSet<string> instantiatedTypes)
+        private AssemblyIndex(Dictionary<string, List<Method>> methodsByName, HashSet<string> instantiatedTypes)
         {
-            _methods = methods;
+            _methodsByName = methodsByName;
             _instantiatedTypes = instantiatedTypes;
         }
 
-        public static AssemblyIndex Create(IEnumerable<Method> methods, IEnumerable<string> instantiatedTypes) =>
-            new(methods.Where(method => !string.IsNullOrWhiteSpace(method.AssemblySignature)).ToList(), NormalizeTypeSet(instantiatedTypes));
-
-        public IEnumerable<Method> FindDispatchCandidates(string targetName, string targetContainingType, int targetParameterCount)
+        public static AssemblyIndex Create(IEnumerable<Method> methods, IEnumerable<string> instantiatedTypes)
         {
-            var targetSimpleType = SimpleName(targetContainingType);
-            foreach (var method in _methods)
+            var methodsByName = new Dictionary<string, List<Method>>(StringComparer.Ordinal);
+            foreach (var method in methods)
             {
-                if (string.IsNullOrWhiteSpace(method.AssemblySignature) || !string.Equals(method.Name, targetName, StringComparison.Ordinal))
+                if (string.IsNullOrWhiteSpace(method.AssemblySignature) || method.Name is null)
                 {
                     continue;
                 }
+
+                if (!methodsByName.TryGetValue(method.Name, out var named))
+                {
+                    named = [];
+                    methodsByName.Add(method.Name, named);
+                }
+
+                named.Add(method);
+            }
+
+            return new AssemblyIndex(methodsByName, NormalizeTypeSet(instantiatedTypes));
+        }
+
+        public IEnumerable<Method> FindDispatchCandidates(string targetName, string targetContainingType, int targetParameterCount)
+        {
+            if (targetName is null || !_methodsByName.TryGetValue(targetName, out var named))
+            {
+                yield break;
+            }
+
+            var targetSimpleType = SimpleName(targetContainingType);
+            foreach (var method in named)
+            {
 
                 if (targetParameterCount >= 0 && method.Parameters is not null && method.Parameters.Count != targetParameterCount)
                 {

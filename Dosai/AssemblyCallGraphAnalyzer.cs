@@ -25,183 +25,24 @@ internal static class AssemblyCallGraphAnalyzer
     public static (List<MethodCalls> Calls, CallGraph Graph) Analyze(string path, IReadOnlyList<Method> knownMethods)
     {
         var assemblyPaths = GetAssemblyFiles(path);
-        var methodLookup = knownMethods
-            .Where(method => method.MetadataToken != 0 && !string.IsNullOrWhiteSpace(method.AssemblySignature))
-            .GroupBy(method => (Path.GetFullPath(method.Path ?? string.Empty), method.MetadataToken))
-            .ToDictionary(group => group.Key, group => group.First());
+        var context = new AnalysisContext(path, knownMethods);
         var calls = new List<MethodCalls>();
         var nodes = new Dictionary<string, MethodNode>(StringComparer.Ordinal);
         var edges = new List<MethodCallEdge>();
-        var edgeKeys = new HashSet<GraphAssembly.EdgeSiteKey>(GraphAssembly.EdgeSiteKeyComparer.Instance);
+        var edgeKeys = new GraphAssembly.EdgeSiteIndex();
 
         foreach (var method in knownMethods.Where(method => !string.IsNullOrWhiteSpace(method.AssemblySignature)))
         {
             AddNode(nodes, method.AssemblySignature!, method.Name ?? method.AssemblySignature!, method.ClassName, method.Namespace, method.FileName, method.Assembly, method.Module, method.Name == ".ctor" ? "Constructor" : "Method", method.LineNumber, method.ColumnNumber, isExternal: false, AnalysisEvidenceKind.AssemblyReflection);
         }
 
-        foreach (var assemblyPath in assemblyPaths.Where(IsManagedAssembly))
-        {
-            try
-            {
-                using var stream = new FileStream(assemblyPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-                using var peReader = new PEReader(stream);
-                if (!peReader.HasMetadata) continue;
-                var reader = peReader.GetMetadataReader();
-                var sourceMap = LoadPortablePdbSourceMap(assemblyPath);
-                var assemblyFullPath = Path.GetFullPath(assemblyPath);
-                var stateMachineMethods = BuildStateMachineMethodMap(reader, assemblyPath, sourceMap);
-                var instantiatedTypes = CollectInstantiatedTypes(peReader, reader, assemblyPath, sourceMap);
-                var dispatchIndex = DispatchResolver.AssemblyIndex.Create(knownMethods.Where(method => string.Equals(Path.GetFullPath(method.Path ?? string.Empty), assemblyFullPath, StringComparison.OrdinalIgnoreCase)), instantiatedTypes);
-                foreach (var methodHandle in reader.MethodDefinitions)
-                {
-                    var methodDefinition = reader.GetMethodDefinition(methodHandle);
-                    if (methodDefinition.RelativeVirtualAddress == 0) continue;
-                    var methodToken = MetadataTokens.GetToken(methodHandle);
-                    var isGeneratedStateMachine = stateMachineMethods.TryGetValue(methodToken, out var stateMachineOwner);
-                    var sourceMethod = isGeneratedStateMachine && stateMachineOwner is not null
-                        ? stateMachineOwner.ToMethod(assemblyPath)
-                        : methodLookup.TryGetValue((assemblyFullPath, methodToken), out var knownMethod)
-                        ? knownMethod
-                        : CreateFallbackMethod(reader, methodHandle, methodDefinition, assemblyPath, sourceMap);
-                    var sourceId = sourceMethod.AssemblySignature ?? BuildMethodSymbol(reader, methodHandle, methodDefinition, assemblyPath).Symbol;
-                    AddNode(nodes, sourceId, sourceMethod.Name ?? sourceId, sourceMethod.ClassName, sourceMethod.Namespace, sourceMethod.FileName, sourceMethod.Assembly, sourceMethod.Module, sourceMethod.Name == ".ctor" ? "Constructor" : "Method", sourceMethod.LineNumber, sourceMethod.ColumnNumber, isExternal: false, isGeneratedStateMachine ? AnalysisEvidenceKind.AssemblyIlGeneratedState : AnalysisEvidenceKind.AssemblyIlDirect);
-                    var body = peReader.GetMethodBody(methodDefinition.RelativeVirtualAddress);
-                    var delegateState = new AssemblyDelegateState();
-                    foreach (var instruction in DecodeInstructions(body.GetILReader()))
-                    {
-                        var location = sourceMap.Resolve(methodToken, instruction.Offset, assemblyPath);
-                        foreach (var resolvedDelegate in TrackDelegateInstruction(reader, instruction, delegateState, assemblyPath, sourceMap, assemblyFullPath, methodLookup))
-                        {
-                            AddResolvedDelegateEdge(calls, nodes, edges, edgeKeys, sourceMethod, sourceId, resolvedDelegate, location, path);
-                        }
-
-                        if (instruction.OpCode != OpCodes.Call && instruction.OpCode != OpCodes.Callvirt && instruction.OpCode != OpCodes.Newobj && instruction.OpCode != OpCodes.Ldftn && instruction.OpCode != OpCodes.Ldvirtftn)
-                        {
-                            continue;
-                        }
-
-                        if (instruction.Operand is not int token || ResolveMember(reader, token, assemblyPath, sourceMap) is not { } target)
-                        {
-                            continue;
-                        }
-
-                        var callType = instruction.OpCode == OpCodes.Newobj
-                            ? CallType.ConstructorCall
-                            : instruction.OpCode == OpCodes.Ldftn || instruction.OpCode == OpCodes.Ldvirtftn
-                                ? CallType.DelegateInvoke
-                                : CallType.MethodCall;
-                        var evidenceKind = isGeneratedStateMachine ? AnalysisEvidenceKind.AssemblyIlGeneratedState : callType == CallType.DelegateInvoke ? AnalysisEvidenceKind.AssemblyIlDelegateTarget : AnalysisEvidenceKind.AssemblyIlDirect;
-                        var targetId = ResolveInternalTargetId(assemblyFullPath, target.MetadataToken, target.Symbol, methodLookup);
-                        AddNode(nodes, targetId, target.Name, target.ClassName, target.Namespace, GetTargetFileName(target), target.AssemblyName, GetTargetModuleName(target), callType == CallType.ConstructorCall ? "Constructor" : "Method", target.LineNumber, target.ColumnNumber, isExternal: !target.IsInternal);
-                        var evidenceDescription = isGeneratedStateMachine
-                            ? "Call edge discovered from generated async/iterator state-machine IL and collapsed to the user method."
-                            : "Call edge discovered from assembly IL method body.";
-                        var call = new MethodCalls
-                        {
-                            Path = location.FilePath,
-                            FileName = Path.GetFileName(location.FilePath),
-                            Assembly = target.AssemblyName,
-                            Module = GetTargetModuleName(target),
-                            Namespace = target.Namespace,
-                            ClassName = target.ClassName,
-                            CalledMethod = target.Name,
-                            LineNumber = location.LineNumber,
-                            ColumnNumber = location.ColumnNumber,
-                            Arguments = Enumerable.Repeat("?", Math.Max(0, target.ParameterCount)).ToList(),
-                            ArgumentExpressions = Enumerable.Repeat("?", Math.Max(0, target.ParameterCount)).ToList(),
-                            CallType = callType,
-                            SourceId = sourceId,
-                            TargetId = targetId,
-                            CallerMethod = sourceMethod.Name,
-                            CallerNamespace = sourceMethod.Namespace,
-                            CallerClass = sourceMethod.ClassName,
-                            IsInternal = target.IsInternal,
-                            EvidenceKind = evidenceKind,
-                            Evidence = [CreateEvidence(evidenceKind, location, evidenceDescription)]
-                        };
-                        calls.Add(call);
-                        var edgeKey = GraphAssembly.EdgeSiteKey.Tagged(sourceId, targetId, location.FilePath, location.LineNumber, location.ColumnNumber, GraphAssembly.CallTypeName(callType), GraphAssembly.EvidenceKindName(evidenceKind));
-                        if (edgeKeys.Add(edgeKey))
-                        {
-                            edges.Add(new MethodCallEdge
-                            {
-                                SourceId = sourceId,
-                                TargetId = targetId,
-                                CallLocation = new CallLocation { FileName = Path.GetFileName(location.FilePath), LineNumber = location.LineNumber, ColumnNumber = location.ColumnNumber },
-                                Path = SafeRelativeSourcePath(path, location.FilePath),
-                                FileName = Path.GetFileName(location.FilePath),
-                                IsInternal = target.IsInternal,
-                                CalledMethodName = target.Name,
-                                SourceName = sourceMethod.Name,
-                                TargetName = target.Name,
-                                Arguments = call.Arguments,
-                                ArgumentExpressions = call.ArgumentExpressions,
-                                CallType = callType,
-                                EvidenceKind = evidenceKind,
-                                Evidence = [CreateEvidence(evidenceKind, location, evidenceDescription)]
-                            });
-                        }
-
-                        if (instruction.OpCode == OpCodes.Callvirt)
-                        {
-                            foreach (var candidate in dispatchIndex.FindDispatchCandidates(target.Name, target.ClassName, target.ParameterCount))
-                            {
-                                var candidateId = candidate.AssemblySignature!;
-                                AddNode(nodes, candidateId, candidate.Name ?? candidateId, candidate.ClassName, candidate.Namespace, candidate.FileName, candidate.Assembly, candidate.Module, "Method", candidate.LineNumber, candidate.ColumnNumber, isExternal: false);
-                                var candidateKey = GraphAssembly.EdgeSiteKey.Tagged(sourceId, candidateId, location.FilePath, location.LineNumber, location.ColumnNumber, GraphAssembly.CallTypeName(CallType.MethodCall), "VirtualCandidate");
-                                if (edgeKeys.Add(candidateKey))
-                                {
-                                    calls.Add(new MethodCalls
-                                    {
-                                        Path = SafeRelativeSourcePath(path, location.FilePath),
-                                        FileName = Path.GetFileName(location.FilePath),
-                                        Assembly = candidate.Assembly,
-                                        Module = candidate.Module,
-                                        Namespace = candidate.Namespace,
-                                        ClassName = candidate.ClassName,
-                                        CalledMethod = candidate.Name,
-                                        LineNumber = location.LineNumber,
-                                        ColumnNumber = location.ColumnNumber,
-                                        Arguments = call.Arguments,
-                                        ArgumentExpressions = ["virtual-candidate"],
-                                        CallType = CallType.MethodCall,
-                                        SourceId = sourceId,
-                                        TargetId = candidateId,
-                                        CallerMethod = sourceMethod.Name,
-                                        CallerNamespace = sourceMethod.Namespace,
-                                        CallerClass = sourceMethod.ClassName,
-                                        IsInternal = true,
-                                        EvidenceKind = AnalysisEvidenceKind.AssemblyIlVirtualCandidate,
-                                        Evidence = [CreateEvidence(AnalysisEvidenceKind.AssemblyIlVirtualCandidate, location, "Virtual candidate inferred by shared assembly CHA/RTA resolver.")]
-                                    });
-                                    edges.Add(new MethodCallEdge
-                                    {
-                                        SourceId = sourceId,
-                                        TargetId = candidateId,
-                                        CallLocation = new CallLocation { FileName = Path.GetFileName(location.FilePath), LineNumber = location.LineNumber, ColumnNumber = location.ColumnNumber },
-                                        Path = SafeRelativeSourcePath(path, location.FilePath),
-                                        FileName = Path.GetFileName(location.FilePath),
-                                        IsInternal = true,
-                                        CalledMethodName = candidate.Name,
-                                        SourceName = sourceMethod.Name,
-                                        TargetName = candidate.Name,
-                                        Arguments = call.Arguments,
-                                        ArgumentExpressions = ["virtual-candidate"],
-                                        CallType = CallType.MethodCall,
-                                        EvidenceKind = AnalysisEvidenceKind.AssemblyIlVirtualCandidate,
-                                        Evidence = [CreateEvidence(AnalysisEvidenceKind.AssemblyIlVirtualCandidate, location, "Virtual candidate inferred by shared assembly CHA/RTA resolver.")]
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            catch
-            {
-                // Methods already best-effort skips unloadable assemblies; keep call graph extraction equally non-fatal.
-            }
-        }
+        // Each assembly decodes on the worker team into its own fragment (issue #65: this loop
+        // ran on one core for two thirds of a 1662-assembly scan). Fragments merge in assembly
+        // order, so nodes, call records, edges and the cross-assembly call-site de-duplication
+        // come out exactly as the sequential loop produced them, for every worker count.
+        DedicatedStack.ForEachInOrder("Dosai assembly call graph", Math.Max(1, Dosai.MaxSymbolAnalysisWorkers), assemblyPaths.Count,
+            index => AnalyzeAssembly(assemblyPaths[index], context),
+            fragment => fragment.MergeInto(calls, nodes, edges, edgeKeys));
 
         GraphAssembly.SortEdgesInPlace(edges);
         GraphAssembly.AssignEdgeIds(edges, "ae");
@@ -210,44 +51,242 @@ internal static class AssemblyCallGraphAnalyzer
         return (calls, new CallGraph { Nodes = orderedNodes, Edges = edges });
     }
 
-    private static IEnumerable<AssemblyResolvedDelegateCall> TrackDelegateInstruction(MetadataReader reader, AssemblyCallInstruction instruction, AssemblyDelegateState state, string assemblyPath, AssemblyCallSourceMap sourceMap, string assemblyFullPath, IReadOnlyDictionary<(string Path, int Token), Method> methodLookup)
+    /// <summary>
+    ///     One assembly's share of the call graph. Runs on a worker: it touches only its own
+    ///     fragment and per-assembly caches, and reads the shared context. A failure keeps what
+    ///     the assembly produced before it, as the sequential loop did.
+    /// </summary>
+    private static AssemblyFragment AnalyzeAssembly(string assemblyPath, AnalysisContext context)
+    {
+        var fragment = new AssemblyFragment();
+        if (!IsManagedAssembly(assemblyPath))
+        {
+            return fragment;
+        }
+
+        try
+        {
+            using var stream = new FileStream(assemblyPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var peReader = new PEReader(stream);
+            if (!peReader.HasMetadata) return fragment;
+            var reader = peReader.GetMetadataReader();
+            var sourceMap = LoadPortablePdbSourceMap(assemblyPath);
+            var scan = new AssemblyScan(reader, assemblyPath, Path.GetFullPath(assemblyPath), sourceMap, context);
+            var stateMachineMethods = BuildStateMachineMethodMap(reader, assemblyPath, sourceMap);
+            var instantiatedTypes = CollectInstantiatedTypes(peReader, scan);
+            var dispatchIndex = DispatchResolver.AssemblyIndex.Create(context.MethodsOf(scan.AssemblyFullPath), instantiatedTypes);
+            foreach (var methodHandle in reader.MethodDefinitions)
+            {
+                AnalyzeMethodBody(peReader, scan, fragment, dispatchIndex, stateMachineMethods, methodHandle);
+            }
+        }
+        catch
+        {
+            // Methods already best-effort skips unloadable assemblies; keep call graph extraction equally non-fatal.
+        }
+
+        fragment.CompleteAnalysis();
+        return fragment;
+    }
+
+    private static void AnalyzeMethodBody(PEReader peReader, AssemblyScan scan, AssemblyFragment fragment, DispatchResolver.AssemblyIndex dispatchIndex, Dictionary<int, AssemblyStateMachineOwner> stateMachineMethods, MethodDefinitionHandle methodHandle)
+    {
+        var reader = scan.Reader;
+        var assemblyPath = scan.AssemblyPath;
+        var methodDefinition = reader.GetMethodDefinition(methodHandle);
+        if (methodDefinition.RelativeVirtualAddress == 0) return;
+        var methodToken = MetadataTokens.GetToken(methodHandle);
+        var isGeneratedStateMachine = stateMachineMethods.TryGetValue(methodToken, out var stateMachineOwner);
+        var sourceMethod = isGeneratedStateMachine && stateMachineOwner is not null
+            ? stateMachineOwner.ToMethod(assemblyPath)
+            : scan.Context.MethodLookup.TryGetValue((scan.AssemblyFullPath, methodToken), out var knownMethod)
+            ? knownMethod
+            : CreateFallbackMethod(reader, methodHandle, methodDefinition, assemblyPath, scan.SourceMap);
+        var sourceId = sourceMethod.AssemblySignature ?? BuildMethodSymbol(reader, methodHandle, methodDefinition, assemblyPath).Symbol;
+        AddNode(fragment.Nodes, sourceId, sourceMethod.Name ?? sourceId, sourceMethod.ClassName, sourceMethod.Namespace, sourceMethod.FileName, sourceMethod.Assembly, sourceMethod.Module, sourceMethod.Name == ".ctor" ? "Constructor" : "Method", sourceMethod.LineNumber, sourceMethod.ColumnNumber, isExternal: false, isGeneratedStateMachine ? AnalysisEvidenceKind.AssemblyIlGeneratedState : AnalysisEvidenceKind.AssemblyIlDirect);
+        var body = peReader.GetMethodBody(methodDefinition.RelativeVirtualAddress);
+        var delegateState = new AssemblyDelegateState();
+        foreach (var instruction in DecodeInstructions(body.GetILReader()))
+        {
+            // Only instructions that produce a call record need a source location.
+            AssemblyCallSourceLocation? location = null;
+            if (TrackDelegateInstruction(scan, instruction, delegateState) is { } resolvedDelegate)
+            {
+                location = scan.SourceMap.Resolve(methodToken, instruction.Offset, assemblyPath);
+                AddResolvedDelegateEdge(scan, fragment, sourceMethod, sourceId, resolvedDelegate, location);
+            }
+
+            if (instruction.OpCode != OpCodes.Call && instruction.OpCode != OpCodes.Callvirt && instruction.OpCode != OpCodes.Newobj && instruction.OpCode != OpCodes.Ldftn && instruction.OpCode != OpCodes.Ldvirtftn)
+            {
+                continue;
+            }
+
+            if (instruction.Operand is not int token || scan.Resolve(token) is not { } resolved)
+            {
+                continue;
+            }
+
+            location ??= scan.SourceMap.Resolve(methodToken, instruction.Offset, assemblyPath);
+            var target = resolved.Member;
+            var callType = instruction.OpCode == OpCodes.Newobj
+                ? CallType.ConstructorCall
+                : instruction.OpCode == OpCodes.Ldftn || instruction.OpCode == OpCodes.Ldvirtftn
+                    ? CallType.DelegateInvoke
+                    : CallType.MethodCall;
+            var evidenceKind = isGeneratedStateMachine ? AnalysisEvidenceKind.AssemblyIlGeneratedState : callType == CallType.DelegateInvoke ? AnalysisEvidenceKind.AssemblyIlDelegateTarget : AnalysisEvidenceKind.AssemblyIlDirect;
+            var targetId = resolved.TargetId;
+            AddNode(fragment.Nodes, targetId, target.Name, target.ClassName, target.Namespace, resolved.TargetFileName, target.AssemblyName, resolved.TargetFileName, callType == CallType.ConstructorCall ? "Constructor" : "Method", target.LineNumber, target.ColumnNumber, isExternal: !target.IsInternal);
+            var evidenceDescription = isGeneratedStateMachine
+                ? "Call edge discovered from generated async/iterator state-machine IL and collapsed to the user method."
+                : "Call edge discovered from assembly IL method body.";
+            var call = new MethodCalls
+            {
+                Path = location.FilePath,
+                FileName = location.FileName,
+                Assembly = target.AssemblyName,
+                Module = resolved.TargetFileName,
+                Namespace = target.Namespace,
+                ClassName = target.ClassName,
+                CalledMethod = target.Name,
+                LineNumber = location.LineNumber,
+                ColumnNumber = location.ColumnNumber,
+                Arguments = Enumerable.Repeat("?", Math.Max(0, target.ParameterCount)).ToList(),
+                ArgumentExpressions = Enumerable.Repeat("?", Math.Max(0, target.ParameterCount)).ToList(),
+                CallType = callType,
+                SourceId = sourceId,
+                TargetId = targetId,
+                CallerMethod = sourceMethod.Name,
+                CallerNamespace = sourceMethod.Namespace,
+                CallerClass = sourceMethod.ClassName,
+                IsInternal = target.IsInternal,
+                EvidenceKind = evidenceKind,
+                Evidence = [CreateEvidence(evidenceKind, location, evidenceDescription)]
+            };
+            var edgeKey = GraphAssembly.EdgeSiteKey.Tagged(sourceId, targetId, location.FilePath, location.LineNumber, location.ColumnNumber, GraphAssembly.CallTypeName(callType), GraphAssembly.EvidenceKindName(evidenceKind));
+            var edgeHash = edgeKey.GetHashCode();
+            MethodCallEdge? edge = null;
+            if (fragment.Keys.Add(edgeKey, edgeHash))
+            {
+                edge = new MethodCallEdge
+                {
+                    SourceId = sourceId,
+                    TargetId = targetId,
+                    CallLocation = new CallLocation { FileName = location.FileName, LineNumber = location.LineNumber, ColumnNumber = location.ColumnNumber },
+                    Path = scan.RelativeSourcePath(location.FilePath),
+                    FileName = location.FileName,
+                    IsInternal = target.IsInternal,
+                    CalledMethodName = target.Name,
+                    SourceName = sourceMethod.Name,
+                    TargetName = target.Name,
+                    Arguments = call.Arguments,
+                    ArgumentExpressions = call.ArgumentExpressions,
+                    CallType = callType,
+                    EvidenceKind = evidenceKind,
+                    Evidence = [CreateEvidence(evidenceKind, location, evidenceDescription)]
+                };
+            }
+
+            fragment.Emit(call, edge, edgeKey, edgeHash, callNeedsNewSite: false);
+
+            if (instruction.OpCode == OpCodes.Callvirt)
+            {
+                foreach (var candidate in dispatchIndex.FindDispatchCandidates(target.Name, target.ClassName, target.ParameterCount))
+                {
+                    var candidateId = candidate.AssemblySignature!;
+                    AddNode(fragment.Nodes, candidateId, candidate.Name ?? candidateId, candidate.ClassName, candidate.Namespace, candidate.FileName, candidate.Assembly, candidate.Module, "Method", candidate.LineNumber, candidate.ColumnNumber, isExternal: false);
+                    var candidateKey = GraphAssembly.EdgeSiteKey.Tagged(sourceId, candidateId, location.FilePath, location.LineNumber, location.ColumnNumber, GraphAssembly.CallTypeName(CallType.MethodCall), "VirtualCandidate");
+                    var candidateHash = candidateKey.GetHashCode();
+                    if (!fragment.Keys.Add(candidateKey, candidateHash))
+                    {
+                        continue;
+                    }
+
+                    var relativePath = scan.RelativeSourcePath(location.FilePath);
+                    fragment.Emit(new MethodCalls
+                    {
+                        Path = relativePath,
+                        FileName = location.FileName,
+                        Assembly = candidate.Assembly,
+                        Module = candidate.Module,
+                        Namespace = candidate.Namespace,
+                        ClassName = candidate.ClassName,
+                        CalledMethod = candidate.Name,
+                        LineNumber = location.LineNumber,
+                        ColumnNumber = location.ColumnNumber,
+                        Arguments = call.Arguments,
+                        ArgumentExpressions = ["virtual-candidate"],
+                        CallType = CallType.MethodCall,
+                        SourceId = sourceId,
+                        TargetId = candidateId,
+                        CallerMethod = sourceMethod.Name,
+                        CallerNamespace = sourceMethod.Namespace,
+                        CallerClass = sourceMethod.ClassName,
+                        IsInternal = true,
+                        EvidenceKind = AnalysisEvidenceKind.AssemblyIlVirtualCandidate,
+                        Evidence = [CreateEvidence(AnalysisEvidenceKind.AssemblyIlVirtualCandidate, location, "Virtual candidate inferred by shared assembly CHA/RTA resolver.")]
+                    }, new MethodCallEdge
+                    {
+                        SourceId = sourceId,
+                        TargetId = candidateId,
+                        CallLocation = new CallLocation { FileName = location.FileName, LineNumber = location.LineNumber, ColumnNumber = location.ColumnNumber },
+                        Path = relativePath,
+                        FileName = location.FileName,
+                        IsInternal = true,
+                        CalledMethodName = candidate.Name,
+                        SourceName = sourceMethod.Name,
+                        TargetName = candidate.Name,
+                        Arguments = call.Arguments,
+                        ArgumentExpressions = ["virtual-candidate"],
+                        CallType = CallType.MethodCall,
+                        EvidenceKind = AnalysisEvidenceKind.AssemblyIlVirtualCandidate,
+                        Evidence = [CreateEvidence(AnalysisEvidenceKind.AssemblyIlVirtualCandidate, location, "Virtual candidate inferred by shared assembly CHA/RTA resolver.")]
+                    }, candidateKey, candidateHash, callNeedsNewSite: true);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    ///     Steps the delegate-tracking stack over one instruction and returns the delegate call it
+    ///     resolves, if any (an instruction resolves at most one).
+    /// </summary>
+    private static AssemblyResolvedDelegateCall? TrackDelegateInstruction(AssemblyScan scan, AssemblyCallInstruction instruction, AssemblyDelegateState state)
     {
         var opCode = instruction.OpCode;
-        if ((opCode == OpCodes.Ldftn || opCode == OpCodes.Ldvirtftn) && instruction.Operand is int methodToken && ResolveMember(reader, methodToken, assemblyPath, sourceMap) is { } target)
+        if ((opCode == OpCodes.Ldftn || opCode == OpCodes.Ldvirtftn) && instruction.Operand is int methodToken && scan.Resolve(methodToken) is { } target)
         {
-            var targetId = ResolveInternalTargetId(assemblyFullPath, target.MetadataToken, target.Symbol, methodLookup);
-            state.Stack.Add(new AssemblyDelegateTarget(target, targetId));
-            yield break;
+            state.Stack.Add(new AssemblyDelegateTarget(target.Member, target.TargetId));
+            return null;
         }
 
         if (TryGetLdlocIndex(opCode, instruction.Operand, out var ldlocIndex))
         {
             state.Stack.Add(state.Locals.GetValueOrDefault(ldlocIndex));
-            yield break;
+            return null;
         }
 
         if (TryGetStlocIndex(opCode, instruction.Operand, out var stlocIndex))
         {
             state.Locals[stlocIndex] = state.Pop();
-            yield break;
+            return null;
         }
 
-        if ((opCode == OpCodes.Ldfld || opCode == OpCodes.Ldsfld) && instruction.Operand is int loadFieldToken && ResolveMember(reader, loadFieldToken, assemblyPath, sourceMap) is { } loadField)
+        if ((opCode == OpCodes.Ldfld || opCode == OpCodes.Ldsfld) && instruction.Operand is int loadFieldToken && scan.Resolve(loadFieldToken)?.Member is { } loadField)
         {
             if (opCode == OpCodes.Ldfld) _ = state.Pop();
             state.Stack.Add(state.Fields.GetValueOrDefault(loadField.Symbol));
-            yield break;
+            return null;
         }
 
-        if ((opCode == OpCodes.Stfld || opCode == OpCodes.Stsfld) && instruction.Operand is int storeFieldToken && ResolveMember(reader, storeFieldToken, assemblyPath, sourceMap) is { } storeField)
+        if ((opCode == OpCodes.Stfld || opCode == OpCodes.Stsfld) && instruction.Operand is int storeFieldToken && scan.Resolve(storeFieldToken)?.Member is { } storeField)
         {
             var value = state.Pop();
             if (opCode == OpCodes.Stfld) _ = state.Pop();
             state.Fields[storeField.Symbol] = value;
-            yield break;
+            return null;
         }
 
-        if ((opCode == OpCodes.Call || opCode == OpCodes.Callvirt || opCode == OpCodes.Newobj) && instruction.Operand is int callToken && ResolveMember(reader, callToken, assemblyPath, sourceMap) is { } member)
+        if ((opCode == OpCodes.Call || opCode == OpCodes.Callvirt || opCode == OpCodes.Newobj) && instruction.Operand is int callToken && scan.Resolve(callToken)?.Member is { } member)
         {
             var arguments = new List<AssemblyDelegateTarget?>();
             for (var i = 0; i < member.ParameterCount; i++) arguments.Add(state.Pop());
@@ -258,51 +297,54 @@ internal static class AssemblyCallGraphAnalyzer
             {
                 var delegateTarget = IsDelegateConstructor(member) ? arguments.FirstOrDefault(argument => argument is not null) : null;
                 state.Stack.Add(delegateTarget);
-                yield break;
+                return null;
             }
 
+            AssemblyResolvedDelegateCall? resolved = null;
             if (member.Name == "Invoke" && receiver is not null)
             {
-                yield return new AssemblyResolvedDelegateCall(receiver, CallType.DelegateInvoke, "delegate-invoke", "Delegate.Invoke resolved to target method through IL delegate tracking.");
+                resolved = new AssemblyResolvedDelegateCall(receiver, CallType.DelegateInvoke, "delegate-invoke", "Delegate.Invoke resolved to target method through IL delegate tracking.");
             }
             else if ((member.Name.StartsWith("add_", StringComparison.Ordinal) || member.Name.StartsWith("remove_", StringComparison.Ordinal)) && arguments.FirstOrDefault(argument => argument is not null) is { } eventTarget)
             {
-                yield return new AssemblyResolvedDelegateCall(eventTarget, member.Name.StartsWith("add_", StringComparison.Ordinal) ? CallType.EventSubscribe : CallType.EventUnsubscribe, "event-callback-target", "Event accessor callback target resolved through IL delegate tracking.");
+                resolved = new AssemblyResolvedDelegateCall(eventTarget, member.Name.StartsWith("add_", StringComparison.Ordinal) ? CallType.EventSubscribe : CallType.EventUnsubscribe, "event-callback-target", "Event accessor callback target resolved through IL delegate tracking.");
             }
 
             if (!member.ReturnsVoid)
             {
                 state.Stack.Add(null);
             }
-            yield break;
+            return resolved;
         }
 
         if (opCode == OpCodes.Dup)
         {
             state.Stack.Add(state.Stack.Count > 0 ? state.Stack[^1] : null);
-            yield break;
+            return null;
         }
 
         if (opCode == OpCodes.Pop)
         {
             _ = state.Pop();
-            yield break;
+            return null;
         }
 
         ApplyDefaultDelegateStackBehaviour(opCode, state);
+        return null;
     }
 
-    private static void AddResolvedDelegateEdge(List<MethodCalls> calls, Dictionary<string, MethodNode> nodes, List<MethodCallEdge> edges, HashSet<GraphAssembly.EdgeSiteKey> edgeKeys, Method sourceMethod, string sourceId, AssemblyResolvedDelegateCall resolved, AssemblyCallSourceLocation location, string inspectedPath)
+    private static void AddResolvedDelegateEdge(AssemblyScan scan, AssemblyFragment fragment, Method sourceMethod, string sourceId, AssemblyResolvedDelegateCall resolved, AssemblyCallSourceLocation location)
     {
         var target = resolved.Target.Member;
         var targetId = resolved.Target.TargetId;
-        AddNode(nodes, targetId, target.Name, target.ClassName, target.Namespace, GetTargetFileName(target), target.AssemblyName, GetTargetModuleName(target), "Method", target.LineNumber, target.ColumnNumber, isExternal: !target.IsInternal, AnalysisEvidenceKind.AssemblyIlDelegateTarget);
+        var targetFileName = GetTargetFileName(target);
+        AddNode(fragment.Nodes, targetId, target.Name, target.ClassName, target.Namespace, targetFileName, target.AssemblyName, targetFileName, "Method", target.LineNumber, target.ColumnNumber, isExternal: !target.IsInternal, AnalysisEvidenceKind.AssemblyIlDelegateTarget);
         var call = new MethodCalls
         {
             Path = location.FilePath,
-            FileName = Path.GetFileName(location.FilePath),
+            FileName = location.FileName,
             Assembly = target.AssemblyName,
-            Module = GetTargetModuleName(target),
+            Module = targetFileName,
             Namespace = target.Namespace,
             ClassName = target.ClassName,
             CalledMethod = target.Name,
@@ -320,17 +362,18 @@ internal static class AssemblyCallGraphAnalyzer
             EvidenceKind = AnalysisEvidenceKind.AssemblyIlDelegateTarget,
             Evidence = [CreateEvidence(AnalysisEvidenceKind.AssemblyIlDelegateTarget, location, resolved.Description)]
         };
-        calls.Add(call);
         var edgeKey = GraphAssembly.EdgeSiteKey.Tagged(sourceId, targetId, location.FilePath, location.LineNumber, location.ColumnNumber, GraphAssembly.CallTypeName(resolved.CallType), "ResolvedDelegate");
-        if (edgeKeys.Add(edgeKey))
+        var edgeHash = edgeKey.GetHashCode();
+        MethodCallEdge? edge = null;
+        if (fragment.Keys.Add(edgeKey, edgeHash))
         {
-            edges.Add(new MethodCallEdge
+            edge = new MethodCallEdge
             {
                 SourceId = sourceId,
                 TargetId = targetId,
-                CallLocation = new CallLocation { FileName = Path.GetFileName(location.FilePath), LineNumber = location.LineNumber, ColumnNumber = location.ColumnNumber },
-                Path = SafeRelativeSourcePath(inspectedPath, location.FilePath),
-                FileName = Path.GetFileName(location.FilePath),
+                CallLocation = new CallLocation { FileName = location.FileName, LineNumber = location.LineNumber, ColumnNumber = location.ColumnNumber },
+                Path = scan.RelativeSourcePath(location.FilePath),
+                FileName = location.FileName,
                 IsInternal = target.IsInternal,
                 CalledMethodName = target.Name,
                 SourceName = sourceMethod.Name,
@@ -340,8 +383,10 @@ internal static class AssemblyCallGraphAnalyzer
                 CallType = resolved.CallType,
                 EvidenceKind = AnalysisEvidenceKind.AssemblyIlDelegateTarget,
                 Evidence = [CreateEvidence(AnalysisEvidenceKind.AssemblyIlDelegateTarget, location, resolved.Description)]
-            });
+            };
         }
+
+        fragment.Emit(call, edge, edgeKey, edgeHash, callNeedsNewSite: false);
     }
 
     private static string GetTargetFileName(AssemblyCallMember target) =>
@@ -403,15 +448,28 @@ internal static class AssemblyCallGraphAnalyzer
             ? method.AssemblySignature!
             : fallbackSymbol;
 
-    private static string? SafeRelativeSourcePath(string inspectedPath, string sourcePath)
+    /// <summary>The root call-site paths are made relative to: the inspected directory, or a file's directory.</summary>
+    private static string? RelativePathRoot(string inspectedPath)
     {
-        if (string.IsNullOrWhiteSpace(sourcePath) || !Path.IsPathFullyQualified(sourcePath)) return null;
         var root = Directory.Exists(inspectedPath) ? inspectedPath : Path.GetDirectoryName(inspectedPath);
         if (string.IsNullOrWhiteSpace(root)) return null;
+        try
+        {
+            return Path.GetFullPath(root);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return null;
+        }
+    }
+
+    private static string? SafeRelativeSourcePath(string? fullRoot, string sourcePath)
+    {
+        if (string.IsNullOrWhiteSpace(sourcePath) || !Path.IsPathFullyQualified(sourcePath) || fullRoot is null) return null;
 
         try
         {
-            var relative = Path.GetRelativePath(Path.GetFullPath(root), Path.GetFullPath(sourcePath));
+            var relative = Path.GetRelativePath(fullRoot, Path.GetFullPath(sourcePath));
             if (string.IsNullOrWhiteSpace(relative) || Path.IsPathFullyQualified(relative) || relative == ".." || relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal) || relative.StartsWith($"..{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal)) return null;
             return relative;
         }
@@ -426,7 +484,7 @@ internal static class AssemblyCallGraphAnalyzer
         Kind = kind,
         Source = GetEvidenceSource(kind),
         Description = description,
-        FileName = Path.GetFileName(location.FilePath),
+        FileName = location.FileName,
         LineNumber = location.LineNumber,
         ColumnNumber = location.ColumnNumber
     };
@@ -559,8 +617,9 @@ internal static class AssemblyCallGraphAnalyzer
         return normalized;
     }
 
-    private static HashSet<string> CollectInstantiatedTypes(PEReader peReader, MetadataReader reader, string assemblyPath, AssemblyCallSourceMap sourceMap)
+    private static HashSet<string> CollectInstantiatedTypes(PEReader peReader, AssemblyScan scan)
     {
+        var reader = scan.Reader;
         var instantiatedTypes = new HashSet<string>(StringComparer.Ordinal);
         foreach (var methodHandle in reader.MethodDefinitions)
         {
@@ -570,7 +629,7 @@ internal static class AssemblyCallGraphAnalyzer
             {
                 foreach (var instruction in DecodeInstructions(peReader.GetMethodBody(method.RelativeVirtualAddress).GetILReader()))
                 {
-                    if (instruction.OpCode == OpCodes.Newobj && instruction.Operand is int token && ResolveMember(reader, token, assemblyPath, sourceMap) is { } member)
+                    if (instruction.OpCode == OpCodes.Newobj && instruction.Operand is int token && scan.Resolve(token)?.Member is { } member)
                     {
                         instantiatedTypes.Add(member.ClassName);
                     }
@@ -591,7 +650,7 @@ internal static class AssemblyCallGraphAnalyzer
         return new Method
         {
             Path = location.FilePath,
-            FileName = Path.GetFileName(location.FilePath),
+            FileName = location.FileName,
             Assembly = Path.GetFileNameWithoutExtension(assemblyPath),
             Module = Path.GetFileName(assemblyPath),
             Namespace = symbol.Namespace,
@@ -610,22 +669,18 @@ internal static class AssemblyCallGraphAnalyzer
     private static void AddNode(Dictionary<string, MethodNode> nodes, string id, string name, string? className, string? namespaceName, string? fileName, string? assembly, string? module, string kind, int lineNumber, int columnNumber, bool isExternal, AnalysisEvidenceKind? evidenceKindOverride = null)
     {
         var evidenceKind = evidenceKindOverride ?? (isExternal ? AnalysisEvidenceKind.ExternalSummary : AnalysisEvidenceKind.AssemblyIlDirect);
-        var evidence = new AnalysisEvidence
-        {
-            Kind = evidenceKind,
-            Source = GetEvidenceSource(evidenceKind),
-            Description = evidenceKind == AnalysisEvidenceKind.AssemblyIlGeneratedState
-                ? "Application call graph node collapsed from generated async/iterator state-machine IL."
-                : evidenceKind == AnalysisEvidenceKind.AssemblyReflection
-                    ? "Application call graph node discovered from assembly metadata."
-                    : isExternal ? "External call graph node referenced from assembly IL." : "Application call graph node discovered from assembly IL.",
-            FileName = fileName,
-            LineNumber = lineNumber,
-            ColumnNumber = columnNumber
-        };
+        var source = GetEvidenceSource(evidenceKind);
         if (nodes.TryGetValue(id, out var existingNode))
         {
-            MergeNode(existingNode, className, namespaceName, fileName, assembly, module, lineNumber, columnNumber, isExternal, evidenceKind, evidence);
+            // Most call sites re-reference a known node with evidence it already carries; the
+            // evidence record is only built when it is new.
+            MergeNodeFields(existingNode, className, namespaceName, fileName, assembly, module, lineNumber, columnNumber, isExternal);
+            if (!HasNodeEvidence(existingNode, evidenceKind, source, fileName, lineNumber, columnNumber))
+            {
+                existingNode.Evidence.Add(CreateNodeEvidence(evidenceKind, source, isExternal, fileName, lineNumber, columnNumber));
+            }
+
+            MergeNodeIdentity(existingNode, assembly, module, namespaceName, className, evidenceKind);
             return;
         }
 
@@ -644,11 +699,38 @@ internal static class AssemblyCallGraphAnalyzer
             ColumnNumber = columnNumber,
             IsExternal = isExternal,
             Identity = MethodIdentityFactory.FromParts(id, null, id, id, assembly, module, namespaceName, className, name, 0, null, evidenceKind),
-            Evidence = [evidence]
+            Evidence = [CreateNodeEvidence(evidenceKind, source, isExternal, fileName, lineNumber, columnNumber)]
         });
     }
 
-    private static void MergeNode(MethodNode target, string? className, string? namespaceName, string? fileName, string? assembly, string? module, int lineNumber, int columnNumber, bool isExternal, AnalysisEvidenceKind evidenceKind, AnalysisEvidence evidence)
+    private static AnalysisEvidence CreateNodeEvidence(AnalysisEvidenceKind evidenceKind, string source, bool isExternal, string? fileName, int lineNumber, int columnNumber) => new()
+    {
+        Kind = evidenceKind,
+        Source = source,
+        Description = evidenceKind == AnalysisEvidenceKind.AssemblyIlGeneratedState
+            ? "Application call graph node collapsed from generated async/iterator state-machine IL."
+            : evidenceKind == AnalysisEvidenceKind.AssemblyReflection
+                ? "Application call graph node discovered from assembly metadata."
+                : isExternal ? "External call graph node referenced from assembly IL." : "Application call graph node discovered from assembly IL.",
+        FileName = fileName,
+        LineNumber = lineNumber,
+        ColumnNumber = columnNumber
+    };
+
+    private static bool HasNodeEvidence(MethodNode node, AnalysisEvidenceKind kind, string? source, string? fileName, int lineNumber, int columnNumber)
+    {
+        foreach (var item in node.Evidence)
+        {
+            if (item.Kind == kind && item.Source == source && item.FileName == fileName && item.LineNumber == lineNumber && item.ColumnNumber == columnNumber)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static void MergeNodeFields(MethodNode target, string? className, string? namespaceName, string? fileName, string? assembly, string? module, int lineNumber, int columnNumber, bool isExternal)
     {
         if (string.IsNullOrWhiteSpace(target.ClassName) && !string.IsNullOrWhiteSpace(className)) target.ClassName = className;
         if (string.IsNullOrWhiteSpace(target.Namespace) && !string.IsNullOrWhiteSpace(namespaceName)) target.Namespace = namespaceName;
@@ -658,18 +740,41 @@ internal static class AssemblyCallGraphAnalyzer
         if (target.LineNumber <= 0 && lineNumber > 0) target.LineNumber = lineNumber;
         if (target.ColumnNumber <= 0 && columnNumber > 0) target.ColumnNumber = columnNumber;
         target.IsExternal &= isExternal;
+    }
 
-        if (!target.Evidence.Any(item => item.Kind == evidence.Kind && item.Source == evidence.Source && item.FileName == evidence.FileName && item.LineNumber == evidence.LineNumber && item.ColumnNumber == evidence.ColumnNumber))
-        {
-            target.Evidence.Add(evidence);
-        }
-
+    private static void MergeNodeIdentity(MethodNode target, string? assembly, string? module, string? namespaceName, string? className, AnalysisEvidenceKind evidenceKind)
+    {
         target.Identity ??= MethodIdentityFactory.FromParts(target.Id, null, target.Id, target.Id, assembly, module, namespaceName, className, target.Name, 0, target.Purl, evidenceKind);
         if (!target.Identity.Evidence.Contains(evidenceKind)) target.Identity.Evidence.Add(evidenceKind);
         target.Identity.AssemblyName ??= assembly;
         target.Identity.ModuleName ??= module;
         target.Identity.Namespace ??= namespaceName;
         target.Identity.ClassName ??= className;
+    }
+
+    /// <summary>
+    ///     Folds a node one assembly built on its own into the graph's node of the same id. A
+    ///     fragment node is the in-order replay of that assembly's <see cref="AddNode" /> calls
+    ///     for the id, and every merge rule keeps the first non-empty value, ANDs IsExternal or
+    ///     appends what is not yet present, so merging the replay result equals replaying the
+    ///     calls one by one into the graph node.
+    /// </summary>
+    private static void MergeFragmentNode(MethodNode target, MethodNode fragmentNode)
+    {
+        MergeNodeFields(target, fragmentNode.ClassName, fragmentNode.Namespace, fragmentNode.FileName, fragmentNode.Assembly, fragmentNode.Module, fragmentNode.LineNumber, fragmentNode.ColumnNumber, fragmentNode.IsExternal);
+        foreach (var evidence in fragmentNode.Evidence)
+        {
+            if (!HasNodeEvidence(target, evidence.Kind, evidence.Source, evidence.FileName, evidence.LineNumber, evidence.ColumnNumber))
+            {
+                target.Evidence.Add(evidence);
+            }
+        }
+
+        var identity = fragmentNode.Identity!;
+        foreach (var evidenceKind in identity.Evidence)
+        {
+            MergeNodeIdentity(target, identity.AssemblyName, identity.ModuleName, identity.Namespace, identity.ClassName, evidenceKind);
+        }
     }
 
     private static AssemblyCallMember? ResolveMember(MetadataReader reader, int metadataToken, string assemblyPath, AssemblyCallSourceMap sourceMap)
@@ -988,31 +1093,42 @@ internal static class AssemblyCallGraphAnalyzer
     private static AssemblyCallSourceMap LoadPortablePdbSourceMap(string assemblyPath)
     {
         var pdbPath = Path.ChangeExtension(assemblyPath, ".pdb");
-        if (!File.Exists(pdbPath)) return AssemblyCallSourceMap.Empty;
+        if (!File.Exists(pdbPath)) return new AssemblyCallSourceMap([], assemblyPath);
         try
         {
             using var pdbStream = new FileStream(pdbPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
             using var provider = MetadataReaderProvider.FromPortablePdbStream(pdbStream);
             var reader = provider.GetMetadataReader();
-            var locations = new Dictionary<int, List<AssemblyCallSequencePoint>>();
+            var locations = new Dictionary<int, AssemblyCallSequencePoint[]>();
+            // One path string and one file-name string per document: every call record and edge
+            // of the assembly shares them instead of holding its own copies.
+            var documents = new Dictionary<DocumentHandle, (string Path, string FileName)>();
+            var points = new List<AssemblyCallSequencePoint>();
             foreach (var methodDebugHandle in reader.MethodDebugInformation)
             {
                 var rowNumber = MetadataTokens.GetRowNumber(methodDebugHandle);
                 var methodDebugInfo = reader.GetMethodDebugInformation(methodDebugHandle);
-                var points = new List<AssemblyCallSequencePoint>();
+                points.Clear();
                 foreach (var sequencePoint in methodDebugInfo.GetSequencePoints())
                 {
                     if (sequencePoint.IsHidden || sequencePoint.Document.IsNil) continue;
-                    var document = reader.GetDocument(sequencePoint.Document);
-                    points.Add(new AssemblyCallSequencePoint(sequencePoint.Offset, reader.GetString(document.Name), sequencePoint.StartLine, sequencePoint.StartColumn));
+                    if (!documents.TryGetValue(sequencePoint.Document, out var document))
+                    {
+                        var documentPath = reader.GetString(reader.GetDocument(sequencePoint.Document).Name);
+                        document = (documentPath, Path.GetFileName(documentPath));
+                        documents.Add(sequencePoint.Document, document);
+                    }
+
+                    var location = new AssemblyCallSourceLocation(document.Path, Math.Max(1, sequencePoint.StartLine), Math.Max(1, sequencePoint.StartColumn)) { FileName = document.FileName };
+                    points.Add(new AssemblyCallSequencePoint(sequencePoint.Offset, location));
                 }
-                if (points.Count > 0) locations[MetadataTokens.GetToken(MetadataTokens.MethodDefinitionHandle(rowNumber))] = points.OrderBy(point => point.Offset).ToList();
+                if (points.Count > 0) locations[MetadataTokens.GetToken(MetadataTokens.MethodDefinitionHandle(rowNumber))] = [.. points.OrderBy(point => point.Offset)];
             }
-            return new AssemblyCallSourceMap(locations);
+            return new AssemblyCallSourceMap(locations, assemblyPath);
         }
         catch
         {
-            return AssemblyCallSourceMap.Empty;
+            return new AssemblyCallSourceMap([], assemblyPath);
         }
     }
 
@@ -1075,16 +1191,206 @@ internal static class AssemblyCallGraphAnalyzer
             Evidence = [new AnalysisEvidence { Kind = AnalysisEvidenceKind.AssemblyIlGeneratedState, Source = "assembly-il", Description = "User method associated with generated async/iterator state-machine IL.", FileName = Path.GetFileName(assemblyPath), LineNumber = LineNumber, ColumnNumber = ColumnNumber }]
         };
     }
-    private sealed record AssemblyCallSequencePoint(int Offset, string FilePath, int LineNumber, int ColumnNumber);
-    private sealed record AssemblyCallSourceLocation(string FilePath, int LineNumber, int ColumnNumber);
-    private sealed class AssemblyCallSourceMap(Dictionary<int, List<AssemblyCallSequencePoint>> locationsByToken)
+    private sealed record AssemblyCallSequencePoint(int Offset, AssemblyCallSourceLocation Location);
+
+    private sealed record AssemblyCallSourceLocation(string FilePath, int LineNumber, int ColumnNumber)
     {
-        public static AssemblyCallSourceMap Empty { get; } = new([]);
-        public AssemblyCallSourceLocation Resolve(int methodToken, int ilOffset, string assemblyPath)
+        /// <summary>The file name of <see cref="FilePath" />; built once per document and shared.</summary>
+        public required string FileName { get; init; }
+    }
+
+    /// <summary>
+    ///     IL offset to source location for one assembly. Each method's sequence points are sorted
+    ///     by offset once; a lookup is a binary search for the last point at or before the offset
+    ///     (the first of several sharing that offset), returning the point's shared location.
+    ///     Offsets before the first point, and methods without debug information, fall back to the
+    ///     assembly path with the IL offset as the line.
+    /// </summary>
+    private sealed class AssemblyCallSourceMap(Dictionary<int, AssemblyCallSequencePoint[]> pointsByToken, string assemblyPath)
+    {
+        private readonly string _assemblyFileName = Path.GetFileName(assemblyPath);
+
+        public AssemblyCallSourceLocation Resolve(int methodToken, int ilOffset, string inspectedAssemblyPath)
         {
-            if (!locationsByToken.TryGetValue(methodToken, out var locations)) return new AssemblyCallSourceLocation(assemblyPath, Math.Max(1, ilOffset), 1);
-            var point = locations.Where(candidate => candidate.Offset <= ilOffset).OrderByDescending(candidate => candidate.Offset).FirstOrDefault();
-            return point is null ? new AssemblyCallSourceLocation(assemblyPath, Math.Max(1, ilOffset), 1) : new AssemblyCallSourceLocation(point.FilePath, Math.Max(1, point.LineNumber), Math.Max(1, point.ColumnNumber));
+            if (pointsByToken.TryGetValue(methodToken, out var points))
+            {
+                var low = 0;
+                var high = points.Length - 1;
+                var found = -1;
+                while (low <= high)
+                {
+                    var middle = low + ((high - low) >> 1);
+                    if (points[middle].Offset <= ilOffset)
+                    {
+                        found = middle;
+                        low = middle + 1;
+                    }
+                    else
+                    {
+                        high = middle - 1;
+                    }
+                }
+
+                if (found >= 0)
+                {
+                    while (found > 0 && points[found - 1].Offset == points[found].Offset) found--;
+                    return points[found].Location;
+                }
+            }
+
+            var fileName = string.Equals(inspectedAssemblyPath, assemblyPath, StringComparison.Ordinal) ? _assemblyFileName : Path.GetFileName(inspectedAssemblyPath);
+            return new AssemblyCallSourceLocation(inspectedAssemblyPath, Math.Max(1, ilOffset), 1) { FileName = fileName };
         }
+    }
+
+    /// <summary>A member token resolved once per assembly, with the graph id and module name every call site of it shares.</summary>
+    private sealed record ResolvedMember(AssemblyCallMember Member, string TargetId, string TargetFileName);
+
+    /// <summary>Read-only state shared by every assembly worker.</summary>
+    private sealed class AnalysisContext
+    {
+        private readonly Dictionary<string, List<Method>> _methodsByAssembly = new(StringComparer.OrdinalIgnoreCase);
+
+        public AnalysisContext(string inspectedPath, IReadOnlyList<Method> knownMethods)
+        {
+            RelativeRoot = RelativePathRoot(inspectedPath);
+            var methodLookup = new Dictionary<(string Path, int Token), Method>();
+            // One full-path resolution per known method (issue #65: the dispatch index used to
+            // re-resolve every known method's path once per assembly). Grouping keeps the known
+            // methods' order, which is the order the per-assembly filter produced. A path that
+            // does not resolve belongs to no assembly; it used to fail every assembly's analysis.
+            foreach (var method in knownMethods)
+            {
+                string fullPath;
+                try
+                {
+                    fullPath = Path.GetFullPath(method.Path ?? string.Empty);
+                }
+                catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+                {
+                    continue;
+                }
+
+                if (!_methodsByAssembly.TryGetValue(fullPath, out var methods))
+                {
+                    methods = [];
+                    _methodsByAssembly.Add(fullPath, methods);
+                }
+
+                methods.Add(method);
+                if (method.MetadataToken != 0 && !string.IsNullOrWhiteSpace(method.AssemblySignature))
+                {
+                    methodLookup.TryAdd((fullPath, method.MetadataToken), method);
+                }
+            }
+
+            MethodLookup = methodLookup;
+        }
+
+        public string? RelativeRoot { get; }
+
+        public IReadOnlyDictionary<(string Path, int Token), Method> MethodLookup { get; }
+
+        public IReadOnlyList<Method> MethodsOf(string assemblyFullPath) => _methodsByAssembly.TryGetValue(assemblyFullPath, out var methods) ? methods : [];
+    }
+
+    /// <summary>Per-assembly metadata access with memoized member resolution and relative paths; owned by one worker.</summary>
+    private sealed class AssemblyScan(MetadataReader reader, string assemblyPath, string assemblyFullPath, AssemblyCallSourceMap sourceMap, AnalysisContext context)
+    {
+        private readonly Dictionary<int, ResolvedMember?> _members = [];
+        private readonly Dictionary<string, string?> _relativePaths = new(StringComparer.Ordinal);
+
+        public MetadataReader Reader => reader;
+        public string AssemblyPath => assemblyPath;
+        public string AssemblyFullPath => assemblyFullPath;
+        public AssemblyCallSourceMap SourceMap => sourceMap;
+        public AnalysisContext Context => context;
+
+        /// <summary>
+        ///     The member a token names, resolved once: every call site of a member shares one
+        ///     symbol string, target id and module name instead of rebuilding them. A token that
+        ///     fails to resolve throws every time, as before, and is not cached.
+        /// </summary>
+        public ResolvedMember? Resolve(int token)
+        {
+            if (_members.TryGetValue(token, out var cached))
+            {
+                return cached;
+            }
+
+            var resolved = ResolveMember(reader, token, assemblyPath, sourceMap) is { } member
+                ? new ResolvedMember(member, ResolveInternalTargetId(assemblyFullPath, member.MetadataToken, member.Symbol, context.MethodLookup), GetTargetFileName(member))
+                : null;
+            _members.Add(token, resolved);
+            return resolved;
+        }
+
+        public string? RelativeSourcePath(string sourcePath)
+        {
+            if (!_relativePaths.TryGetValue(sourcePath, out var relative))
+            {
+                relative = SafeRelativeSourcePath(context.RelativeRoot, sourcePath);
+                _relativePaths.Add(sourcePath, relative);
+            }
+
+            return relative;
+        }
+    }
+
+    /// <summary>
+    ///     What one assembly contributes, in the order the sequential loop produced it: its nodes
+    ///     (each the replay of the assembly's node additions for that id), and its call records
+    ///     and edges with their call-site keys. Duplicate sites within the assembly are dropped
+    ///     while it is analyzed; duplicates of earlier assemblies are dropped at the in-order merge.
+    /// </summary>
+    private sealed class AssemblyFragment
+    {
+        private readonly List<Emission> _emissions = [];
+
+        public Dictionary<string, MethodNode> Nodes { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>The assembly's own call-site keys; released once the assembly is analyzed.</summary>
+        public GraphAssembly.EdgeSiteIndex Keys { get; private set; } = new();
+
+        /// <summary>
+        ///     A call record with its edge (null when the assembly already emitted that site). A
+        ///     record that only exists for a new site (a dispatch candidate) also drops with a
+        ///     site an earlier assembly emitted.
+        /// </summary>
+        public void Emit(MethodCalls call, MethodCallEdge? edge, GraphAssembly.EdgeSiteKey key, int hash, bool callNeedsNewSite) =>
+            _emissions.Add(new Emission(call, edge, key, hash, callNeedsNewSite));
+
+        public void CompleteAnalysis() => Keys = null!;
+
+        public void MergeInto(List<MethodCalls> calls, Dictionary<string, MethodNode> nodes, List<MethodCallEdge> edges, GraphAssembly.EdgeSiteIndex edgeKeys)
+        {
+            foreach (var (id, node) in Nodes)
+            {
+                if (nodes.TryGetValue(id, out var existing))
+                {
+                    MergeFragmentNode(existing, node);
+                }
+                else
+                {
+                    nodes.Add(id, node);
+                }
+            }
+
+            foreach (var emission in _emissions)
+            {
+                var newSite = emission.Edge is not null && edgeKeys.Add(emission.Key, emission.Hash);
+                if (newSite || !emission.CallNeedsNewSite)
+                {
+                    calls.Add(emission.Call);
+                }
+
+                if (newSite)
+                {
+                    edges.Add(emission.Edge!);
+                }
+            }
+        }
+
+        private readonly record struct Emission(MethodCalls Call, MethodCallEdge? Edge, GraphAssembly.EdgeSiteKey Key, int Hash, bool CallNeedsNewSite);
     }
 }
