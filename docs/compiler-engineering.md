@@ -331,7 +331,7 @@ Resolution uses:
 3. package name
 4. namespace/type/symbol prefix matching
 
-Version conflicts across sources are recorded as diagnostics, and `ResolutionFacts` exposes which source file produced each purl (name, version, purl, source, confidence). PURLs are best-effort and never fail analysis.
+Every record resolves in its own project (the project its file belongs to), so projects that restore different versions of a package each keep theirs; version splits across projects and disagreements between one project's sources are reported in the output's `Diagnostics`, and `ResolutionFacts` exposes which source and project produced each purl (name, version, purl, source, confidence, project). PURLs are best-effort and never fail analysis.
 
 ## Weakness candidate model
 

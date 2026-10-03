@@ -690,8 +690,10 @@ public static class Shouting
         var resolver = PackageUrlResolver.Create(tempDirectory.Path);
 
         var flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
-        var assemblyToPurl = (Dictionary<string, string>)typeof(PackageUrlResolver).GetField("_assemblyToPurl", flags)!.GetValue(resolver)!;
-        var packageToPurl = (Dictionary<string, string>)typeof(PackageUrlResolver).GetField("_packageToPurl", flags)!.GetValue(resolver)!;
+        // No project file in this tree, so every record resolves against the tree-wide tables.
+        var tree = typeof(PackageUrlResolver).GetField("_tree", flags)!.GetValue(resolver)!;
+        var assemblyToPurl = (Dictionary<string, string>)tree.GetType().GetField("_assemblyToPurl", flags)!.GetValue(tree)!;
+        var packageToPurl = (Dictionary<string, string>)tree.GetType().GetField("_packageToPurl", flags)!.GetValue(tree)!;
         var systemPrefixes = ((string Prefix, string PackageName)[])typeof(PackageUrlResolver).GetField("SystemPackagePrefixes", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.GetValue(null)!;
         Assert.Contains("Serilog.Sinks.Console", packageToPurl.Keys);
         var namespacePrefixes = packageToPurl.Keys.Where(name => name.Contains('.', StringComparison.Ordinal)).OrderByDescending(name => name.Length).Select(name => (Prefix: name, Purl: packageToPurl[name])).ToList();
