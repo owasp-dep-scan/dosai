@@ -1,5 +1,6 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.VisualBasic;
 
 namespace Depscan.Frameworks;
@@ -211,6 +212,83 @@ public sealed class FrameworkContext
     /// <summary>Every C# syntax tree in the compilation.</summary>
     public IEnumerable<CSharpSyntaxTree> CSharpTrees => CSharp?.SyntaxTrees.OfType<CSharpSyntaxTree>() ?? [];
 
+    // Providers each walked every tree of the compilation for their node kinds - a dozen full
+    // walks of the source, one thread, most of the framework phase on a large tree. The two
+    // helpers below give the same nodes in the same order without those walks, and without
+    // holding any node: a cache of nodes would pin the red trees the walks let the collector
+    // reclaim (2.4 GB on dotnet/runtime).
+
+    /// <summary>
+    ///     Type, method or using declarations of a tree, in document order: exactly what
+    ///     <c>tree.GetRoot().DescendantNodes().OfType&lt;T&gt;()</c> yields. None of them occurs
+    ///     inside a statement or an expression (a local function is a statement, a lambda an
+    ///     expression), so the walk skips those - method bodies, initializers and arguments, most
+    ///     of a tree.
+    /// </summary>
+    public static IEnumerable<T> Declarations<T>(SyntaxTree tree) where T : CSharpSyntaxNode
+    {
+        System.Diagnostics.Debug.Assert(typeof(T).IsAssignableTo(typeof(BaseTypeDeclarationSyntax)) || typeof(T).IsAssignableTo(typeof(BaseMethodDeclarationSyntax)) || typeof(T) == typeof(UsingDirectiveSyntax));
+        return tree.GetRoot().DescendantNodes(static node => node is not (StatementSyntax or ExpressionSyntax)).OfType<T>();
+    }
+
+    /// <summary>
+    ///     The tree's invocations, exactly as <c>tree.GetRoot().DescendantNodes().OfType&lt;InvocationExpressionSyntax&gt;()</c>
+    ///     yields them, when one of them has a <see cref="ProviderHelpers.InvocationName" /> that
+    ///     passes <paramref name="mayMatch" />; none otherwise. For a loop that acts only on
+    ///     invocations whose name passes <paramref name="mayMatch" /> (or a narrower test), skipping
+    ///     a tree without such a name skips nothing but the walk.
+    /// </summary>
+    public IEnumerable<InvocationExpressionSyntax> InvocationsNamed(SyntaxTree tree, Func<string, bool> mayMatch)
+        => Invokes(tree, mayMatch) ? tree.GetRoot().DescendantNodes().OfType<InvocationExpressionSyntax>() : [];
+
+    /// <summary>Whether any invocation in the tree has a <see cref="ProviderHelpers.InvocationName" /> passing <paramref name="mayMatch" />.</summary>
+    public bool Invokes(SyntaxTree tree, Func<string, bool> mayMatch)
+    {
+        _invocationNames ??= IndexInvocationNames();
+        if (!_invocationNames.TryGetValue(tree, out var names))
+        {
+            // Not a tree of this compilation: no index, so it may.
+            return true;
+        }
+
+        foreach (var name in names)
+        {
+            if (mayMatch(name))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>The distinct invocation names of every C# tree, gathered once, one tree per worker.</summary>
+    private Dictionary<SyntaxTree, string[]> IndexInvocationNames()
+    {
+        var trees = CSharp?.SyntaxTrees.ToArray() ?? [];
+        var names = new string[trees.Length][];
+        DedicatedStack.ForEach("Dosai framework invocation names", Math.Max(1, Dosai.MaxSymbolAnalysisWorkers), trees.Length, index =>
+        {
+            var distinct = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var invocation in trees[index].GetRoot().DescendantNodes().OfType<InvocationExpressionSyntax>())
+            {
+                distinct.Add(ProviderHelpers.InvocationName(invocation));
+            }
+
+            names[index] = [.. distinct];
+        });
+
+        var byTree = new Dictionary<SyntaxTree, string[]>(trees.Length, ReferenceEqualityComparer.Instance);
+        for (var index = 0; index < trees.Length; index++)
+        {
+            byTree[trees[index]] = names[index];
+        }
+
+        return byTree;
+    }
+
+    private Dictionary<SyntaxTree, string[]>? _invocationNames;
+
     /// <summary>All namespaces imported via using/imports directives across the compilation (lower-cased).</summary>
     public IReadOnlySet<string> ImportedNamespaces
     {
@@ -221,7 +299,7 @@ public sealed class FrameworkContext
                 var set = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var tree in CSharp?.SyntaxTrees ?? [])
                 {
-                    foreach (var usingDirective in ((CSharpSyntaxTree)tree).GetCompilationUnitRoot().DescendantNodes().OfType<Microsoft.CodeAnalysis.CSharp.Syntax.UsingDirectiveSyntax>())
+                    foreach (var usingDirective in Declarations<UsingDirectiveSyntax>(tree))
                     {
                         var name = usingDirective.Name?.ToString();
                         if (!string.IsNullOrWhiteSpace(name)) set.Add(name);

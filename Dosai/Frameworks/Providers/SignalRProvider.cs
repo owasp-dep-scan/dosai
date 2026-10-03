@@ -38,7 +38,7 @@ public sealed class SignalRProvider : IFrameworkProvider
                 var rawUrls = ProviderHelpers.ExtractRawUrls(fileText);
 
                 // ---- Server-side hubs ----
-                foreach (var typeDeclaration in root.DescendantNodes().OfType<TypeDeclarationSyntax>())
+                foreach (var typeDeclaration in FrameworkContext.Declarations<TypeDeclarationSyntax>(tree))
                 {
                     var symbol = model.GetDeclaredSymbol(typeDeclaration);
                     if (symbol is null && typeDeclaration is not ClassDeclarationSyntax)
@@ -269,7 +269,7 @@ public sealed class SignalRProvider : IFrameworkProvider
                 }
 
                 // ---- Client-side: HubConnectionBuilder().WithUrl("...") ----
-                foreach (var invocation in root.DescendantNodes().OfType<InvocationExpressionSyntax>())
+                foreach (var invocation in ctx.InvocationsNamed(tree, static name => name == "WithUrl"))
                 {
                     var name = ProviderHelpers.InvocationName(invocation);
                     if (!name.Equals("WithUrl", StringComparison.Ordinal))

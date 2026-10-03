@@ -25,11 +25,10 @@ public sealed class OrleansProvider : IFrameworkProvider
         foreach (var tree in ctx.CSharpTrees)
         {
             var model = ctx.CSharp!.GetSemanticModel(tree);
-            var root = tree.GetCompilationUnitRoot();
             var rawUrls = ctx.RawUrlsFor(tree);
 
             // ---- Server-side grains ----
-            foreach (var typeDeclaration in root.DescendantNodes().OfType<TypeDeclarationSyntax>())
+            foreach (var typeDeclaration in FrameworkContext.Declarations<TypeDeclarationSyntax>(tree))
             {
                 var symbol = model.GetDeclaredSymbol(typeDeclaration);
                 var confidence = ConfidenceTiers.Semantic;
@@ -216,7 +215,7 @@ public sealed class OrleansProvider : IFrameworkProvider
             }
 
             // ---- Client-side: IGrainFactory.GetGrain<T>(...) ----
-            foreach (var invocation in root.DescendantNodes().OfType<InvocationExpressionSyntax>())
+            foreach (var invocation in ctx.InvocationsNamed(tree, static name => name is "GetGrain" or "GetGrainById"))
             {
                 var name = ProviderHelpers.InvocationName(invocation);
                 if (name is not ("GetGrain" or "GetGrainById"))
@@ -270,7 +269,7 @@ public sealed class OrleansProvider : IFrameworkProvider
             }
 
             // ---- Host registration: UseOrleans / AddApplicationParts ----
-            foreach (var invocation in root.DescendantNodes().OfType<InvocationExpressionSyntax>())
+            foreach (var invocation in ctx.InvocationsNamed(tree, static name => name is "UseOrleans" or "AddApplicationParts" or "AddApplicationPart"))
             {
                 var name = ProviderHelpers.InvocationName(invocation);
                 if (name is not ("UseOrleans" or "AddApplicationParts" or "AddApplicationPart"))

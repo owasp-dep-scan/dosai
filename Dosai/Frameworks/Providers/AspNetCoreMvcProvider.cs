@@ -37,10 +37,9 @@ public sealed class AspNetCoreMvcProvider : IFrameworkProvider
         foreach (var tree in ctx.CSharpTrees)
         {
             var model = ctx.CSharp!.GetSemanticModel(tree);
-            var root = tree.GetCompilationUnitRoot();
             var rawUrls = ctx.RawUrlsFor(tree);
 
-            foreach (var typeDeclaration in root.DescendantNodes().OfType<TypeDeclarationSyntax>())
+            foreach (var typeDeclaration in FrameworkContext.Declarations<TypeDeclarationSyntax>(tree))
             {
                 if (IsControllerCandidate(typeDeclaration, model, out var confidence, out var apiController))
                 {
@@ -50,7 +49,7 @@ public sealed class AspNetCoreMvcProvider : IFrameworkProvider
                 }
             }
 
-            foreach (var invocation in root.DescendantNodes().OfType<InvocationExpressionSyntax>())
+            foreach (var invocation in ctx.InvocationsNamed(tree, static name => name is "MapControllerRoute" or "MapRoute" or "MapDefaultControllerRoute"))
             {
                 var name = ProviderHelpers.InvocationName(invocation);
                 if (name.Equals("MapControllerRoute", StringComparison.Ordinal) || name.Equals("MapRoute", StringComparison.Ordinal))

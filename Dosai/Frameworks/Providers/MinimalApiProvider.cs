@@ -66,7 +66,9 @@ public sealed class MinimalApiProvider : IFrameworkProvider
         {
             var prefixes = PrefixesFor(tree.FilePath);
             var root = tree.GetCompilationUnitRoot();
-            foreach (var declaration in root.DescendantNodes().OfType<VariableDeclaratorSyntax>())
+            // A prefix only ever comes from a MapGroup call in this file, directly or through a
+            // variable this loop recorded from one: a file without one has nothing to record.
+            foreach (var declaration in ctx.Invokes(tree, static name => name == "MapGroup") ? root.DescendantNodes().OfType<VariableDeclaratorSyntax>() : [])
             {
                 if (declaration.Initializer?.Value is not InvocationExpressionSyntax invocation)
                 {
@@ -89,10 +91,9 @@ public sealed class MinimalApiProvider : IFrameworkProvider
         // Pass 2: Map* endpoint registrations.
         foreach (var tree in ctx.CSharpTrees)
         {
-            var root = tree.GetCompilationUnitRoot();
             var rawUrls = ctx.RawUrlsFor(tree);
             var groupPrefixes = PrefixesFor(tree.FilePath);
-            foreach (var invocation in root.DescendantNodes().OfType<InvocationExpressionSyntax>())
+            foreach (var invocation in ctx.InvocationsNamed(tree, static name => MountKinds.ContainsKey(name) || MapVerbs.ContainsKey(name) || name is "MapMethods" or "MapFallback" or "MapHealthChecks"))
             {
                 var name = ProviderHelpers.InvocationName(invocation);
                 if (MountKinds.TryGetValue(name, out var mountKind))
