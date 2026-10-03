@@ -162,7 +162,13 @@ dotnet test ./Dosai.sln
   per-call splits, concatenations, substrings, regexes and scans over every known package (it
   probes the qualified name's dotted prefixes against the package tables through span lookups,
   and skips prefixes longer than any registered name). Enrichment resolves the lists on the
-  worker team, so `Resolve` must also stay read-only: no memo tables filled while resolving.
+  worker team, so `Resolve` must also stay read-only: no memo tables filled while resolving
+  (the per-location project memo is a concurrent cache of a pure function). Pass every record's
+  file as `location`: each project has its own package tables and a record resolves in its own
+  project first, so two projects on two versions of a package each keep theirs (issue #72).
+  Call-graph nodes are shared across projects and resolve tree-wide; edges resolve both
+  endpoints at their call site. Sources are read in path order so the tree-wide answer never
+  depends on the file system, and `VersionDiagnostics` belong in every report's `Diagnostics`.
 - Phase order in `BuildMethodsSlice` is a memory contract: framework analysis and the security
   analyzer run immediately after source analysis (they are the only compilation consumers),
   then the compilations are dropped before the assembly IL call graph, enrichment,

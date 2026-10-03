@@ -3673,7 +3673,7 @@ public static partial class DataFlowAnalyzer
                 Symbol = symbol,
                 Type = typeName,
                 Purl = matchedPatterns.Select(pattern => pattern.Purl).FirstOrDefault(purl => !string.IsNullOrWhiteSpace(purl)) ??
-                       purlResolver.Resolve(method?.ContainingAssembly?.ToDisplayString(), method?.ContainingModule?.ToDisplayString(), symbol, method?.ContainingNamespace?.ToDisplayString(), typeName),
+                       purlResolver.Resolve(method?.ContainingAssembly?.ToDisplayString(), method?.ContainingModule?.ToDisplayString(), symbol, method?.ContainingNamespace?.ToDisplayString(), typeName, sourceFilePath),
                 Code = TrimCode(code ?? syntax.ToString()),
                 Path = Path.GetRelativePath(basePath, sourceFilePath),
                 FileName = Path.GetFileName(sourceFilePath),
