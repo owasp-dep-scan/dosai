@@ -119,6 +119,18 @@ dotnet test ./Dosai.sln
 - Never reuse a per-group scratch `HashSet`/`List` across millions of groups without a cap:
   `Clear()` is O(capacity), so one group with a thousand call sites taxes every later group
   with that capacity (issue #70's second hotspot). Drop and re-grow scratch above ~64 entries.
+- The assembly IL call graph (`AssemblyCallGraphAnalyzer.Analyze`) decodes each assembly on the
+  worker team (`DedicatedStack.ForEachInOrder`, same worker knob as symbol analysis) into an
+  `AssemblyFragment`, and fragments merge in assembly order. The per-assembly body may touch only
+  its fragment and its `AssemblyScan` caches; everything shared (`AnalysisContext`: known methods
+  by assembly path, the token lookup) is read-only. A fragment node is the in-order replay of
+  that assembly's `AddNode` calls, and `MergeFragmentNode` folds it in with the same
+  first-value-wins/AND/append rules, so any new node field needs a merge rule that keeps that
+  equivalence. Call-site keys dedupe inside the assembly while it is analyzed and across
+  assemblies at the merge (`GraphAssembly.EdgeSiteIndex`, chunked keys, no giant reference
+  arrays). Resolve members through `AssemblyScan.Resolve` (memoized per token, so call sites
+  share one id string) and source locations through the per-assembly source map (binary search,
+  one path and file-name string per document) - never per instruction.
 - Phase order in `BuildMethodsSlice` is a memory contract: framework analysis and the security
   analyzer run immediately after source analysis (they are the only compilation consumers),
   then the compilations are dropped before the assembly IL call graph, enrichment,

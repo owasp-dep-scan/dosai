@@ -85,6 +85,78 @@ internal static class DedicatedStack
     }
 
     /// <summary>
+    ///     <see cref="ForEach" /> for a producer whose results must be consumed in index order:
+    ///     each worker produces item <c>i</c> on its own, and the consumer then runs under one
+    ///     lock for every finished item at the head of the order, so it sees items exactly as a
+    ///     sequential loop would hand them over. Producers run at most a window of items ahead of
+    ///     the consumer, which bounds the results waiting in memory when one item is slow. A
+    ///     failure stops the workers waiting on the window and is rethrown like
+    ///     <see cref="ForEach" />'s.
+    /// </summary>
+    internal static void ForEachInOrder<T>(string threadName, int workerCount, int itemCount, Func<int, T> produce, Action<T> consume) where T : class
+    {
+        var window = Math.Max(1, workerCount) * 2;
+        var results = new T?[Math.Max(0, itemCount)];
+        var gate = new object();
+        var next = 0;
+        var failed = false;
+        ForEach(threadName, workerCount, itemCount, index =>
+        {
+            lock (gate)
+            {
+                while (!failed && index >= next + window)
+                {
+                    Monitor.Wait(gate);
+                }
+
+                if (failed)
+                {
+                    return;
+                }
+            }
+
+            T result;
+            try
+            {
+                result = produce(index);
+            }
+            catch
+            {
+                lock (gate)
+                {
+                    failed = true;
+                    Monitor.PulseAll(gate);
+                }
+
+                throw;
+            }
+
+            lock (gate)
+            {
+                results[index] = result;
+                try
+                {
+                    while (!failed && next < results.Length && results[next] is { } ready)
+                    {
+                        results[next] = null;
+                        next++;
+                        consume(ready);
+                    }
+                }
+                catch
+                {
+                    failed = true;
+                    throw;
+                }
+                finally
+                {
+                    Monitor.PulseAll(gate);
+                }
+            }
+        });
+    }
+
+    /// <summary>
     ///     Run <paramref name="body" /> for every index in <c>[0, itemCount)</c> on up to
     ///     <paramref name="workerCount" /> threads, each with <see cref="AnalysisStackSize" /> of
     ///     stack, and return when all of them have finished (issue #65: the per-file symbol

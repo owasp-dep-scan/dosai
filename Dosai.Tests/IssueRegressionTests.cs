@@ -630,6 +630,36 @@ public static class Shouting
 
     #endregion
 
+    #region Issue #65 - the assembly IL call graph on the worker team
+
+    [Fact]
+    public void AssemblyCallGraph_IsByteIdenticalForEveryWorkerCount()
+    {
+        // Assemblies decode on the worker team and merge in assembly order. Real assemblies with
+        // portable PDBs (delegates, async state machines, virtual dispatch); Dosai.dll sits in two
+        // directories, so call sites repeat across assemblies and nodes merge across fragments.
+        using var tempDirectory = new TemporaryDirectory();
+        foreach (var (directory, files) in new[] { ("a", new[] { "Dosai.dll", DosaiTestDataCSharpDLL, DosaiTestDataVBDLL }), ("b", new[] { "Dosai.dll" }) })
+        {
+            var target = Directory.CreateDirectory(Path.Combine(tempDirectory.Path, directory)).FullName;
+            foreach (var file in files)
+            {
+                File.Copy(file, Path.Combine(target, file));
+                File.Copy(Path.ChangeExtension(file, ".pdb"), Path.Combine(target, Path.ChangeExtension(file, ".pdb")));
+            }
+        }
+
+        var sequential = WithSymbolAnalysisWorkers(1, () => Depscan.Dosai.GetMethods(tempDirectory.Path));
+        var parallel = WithSymbolAnalysisWorkers(5, () => Depscan.Dosai.GetMethods(tempDirectory.Path));
+
+        Assert.Contains("\"EvidenceKind\":\"AssemblyIlVirtualCandidate\"", sequential, StringComparison.Ordinal);
+        Assert.Contains("\"EvidenceKind\":\"AssemblyIlDelegateTarget\"", sequential, StringComparison.Ordinal);
+        Assert.Contains("\"EvidenceKind\":\"AssemblyIlGeneratedState\"", sequential, StringComparison.Ordinal);
+        Assert.Equal(NormalizeGeneratedAt(sequential), NormalizeGeneratedAt(parallel));
+    }
+
+    #endregion
+
     #region Issue #70 - per-edge key strings in CollapseDuplicateCallSites
 
     /// <summary>
