@@ -880,7 +880,7 @@ public static class Dosai
     {
         using var phase = DebugLog.Phase("methods.serialization");
         using var stream = new FileStream(outputFile, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize: 65536);
-        JsonSerializer.Serialize(stream, slice, Options);
+        ParallelJsonWriter.Serialize(stream, slice, Options);
         if (DebugLog.Enabled)
         {
             DebugLog.Log($"methods output: wrote {DebugLog.FormatBytes(stream.Length)} to '{outputFile}'");

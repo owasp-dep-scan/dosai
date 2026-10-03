@@ -445,7 +445,12 @@ public class CommandLine
             }
 
             var context = TransparencyBuilder.BuildAgentContext(result, path);
-            File.WriteAllText(outputFile, JsonSerializer.Serialize(context, JsonOptions()));
+            // Streamed: a large tree's context is not worth one contiguous string.
+            using (var stream = new FileStream(outputFile, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize: 65536))
+            {
+                JsonSerializer.Serialize(stream, context, JsonOptions());
+            }
+
             LogWrittenBytes("agent-context export", outputFile);
             return 0;
         }));

@@ -255,7 +255,7 @@ public static partial class DataFlowAnalyzer
         var result = Analyze(path, patternsPath, patternPacks, suppressionsPath, buildPreparation);
         using var serializationPhase = DebugLog.Phase("dataflows.serialization");
         using var stream = new FileStream(outputFile, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize: 65536);
-        JsonSerializer.Serialize(stream, result, JsonOptions);
+        ParallelJsonWriter.Serialize(stream, result, JsonOptions);
         if (DebugLog.Enabled)
         {
             DebugLog.Log($"dataflows output: wrote {DebugLog.FormatBytes(stream.Length)} to '{outputFile}'");
