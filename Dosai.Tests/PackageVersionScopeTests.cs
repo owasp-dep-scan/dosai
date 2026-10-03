@@ -84,6 +84,33 @@ public partial class DosaiTests
         Assert.Contains(resolver.ResolutionFacts, fact => fact is { Name: "Moq", Version: "4.20.72", Project: "src/ProjC" });
     }
 
+    [Fact]
+    public void PackageUrlResolver_HasNoLastSegmentTruncationOrFirstSegmentAliases()
+    {
+        // Each of these named an unrelated package: a package's last segment taken as its name
+        // (System.Console code as Serilog.Sinks.Console, Azure SDK code as a SqlClient
+        // extension), an assembly display name cut at its last dot (Castle.Core as Castle), a
+        // first namespace segment matched before the package the symbol really belongs to, and
+        // the restore placeholder `_._` registered as an assembly.
+        using var tempDirectory = new TemporaryDirectory();
+        var root = tempDirectory.Path;
+        WriteRestoredProject(root, "App", packages: [("Serilog", "3.1.1"), ("Serilog.Sinks.Console", "5.0.1"), ("Microsoft.Data.SqlClient.Extensions.Azure", "1.0.0"), ("Castle", "1.0.0"), ("Castle.Core", "5.1.1")]);
+        var assets = Path.Combine(root, "App", "obj", "project.assets.json");
+        File.WriteAllText(assets, File.ReadAllText(assets).Replace("lib/net8.0/Castle.dll", "lib/net8.0/_._", StringComparison.Ordinal));
+
+        var resolver = PackageUrlResolver.Create(root);
+
+        Assert.Equal("pkg:nuget/System.Console", resolver.Resolve(symbol: "System.Console.WriteLine(string):void", location: "App/Program.cs"));
+        Assert.Null(resolver.Resolve(symbol: "Console.Out.Flush()", location: "App/Program.cs"));
+        Assert.Null(resolver.Resolve(symbol: "Azure.Storage.Blobs.BlobClient.Upload()", namespaceName: "Azure.Storage.Blobs", location: "App/Program.cs"));
+        Assert.Equal("pkg:nuget/Serilog.Sinks.Console@5.0.1", resolver.Resolve(symbol: "Serilog.Sinks.Console.ConsoleSink.Emit()", location: "App/Program.cs"));
+        Assert.Equal("pkg:nuget/Serilog@3.1.1", resolver.Resolve(symbol: "Serilog.Log.Information(string):void", location: "App/Program.cs"));
+        Assert.Equal("pkg:nuget/Castle.Core@5.1.1", resolver.Resolve(assembly: "Castle.Core, Version=5.1.1.0, Culture=neutral", location: "App/Program.cs"));
+        Assert.Equal("pkg:nuget/Castle.Core@5.1.1", resolver.Resolve(module: "Castle.Core.dll", location: "App/Program.cs"));
+        Assert.Null(resolver.Resolve(module: "_._", location: "App/Program.cs"));
+        Assert.Null(resolver.Resolve(module: "_", location: "App/Program.cs"));
+    }
+
     [Theory]
     [InlineData("$(MoqVersion)")]
     [InlineData("[4.0,5.0)")]

@@ -63,11 +63,11 @@ public sealed partial class PackageUrlResolver
         private readonly Dictionary<string, string> _assemblyToPurl = new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, string> _packageToPurl = new(StringComparer.OrdinalIgnoreCase);
 
-        // The tables probed by span, so a probe never cuts a substring; and the longest package
-        // name registered, past which no dotted prefix can match one.
+        // The tables probed by span, so a probe never cuts a substring; and the longest name
+        // registered, past which no dotted prefix can match one.
         private readonly Dictionary<string, string>.AlternateLookup<ReadOnlySpan<char>> _assembliesBySpan;
         private readonly Dictionary<string, string>.AlternateLookup<ReadOnlySpan<char>> _packagesBySpan;
-        private int _longestPackageName;
+        private int _longestName;
 
         public PackageTables(string? label)
         {
@@ -104,23 +104,26 @@ public sealed partial class PackageUrlResolver
                 PackageVersions.TryAdd(packageName, (version, source));
             }
 
+            // Only the package's own name: its last segment (`Console` of Serilog.Sinks.Console,
+            // `Azure` of Microsoft.Data.SqlClient.Extensions.Azure) names other code entirely.
             _packageToPurl.TryAdd(packageName, purl);
-            _longestPackageName = Math.Max(_longestPackageName, packageName.Length);
-            var lastSegment = packageName.Split('.').LastOrDefault();
-            if (!string.IsNullOrWhiteSpace(lastSegment))
-            {
-                _packageToPurl.TryAdd(lastSegment, purl);
-            }
+            _longestName = Math.Max(_longestName, packageName.Length);
         }
 
-        public void AddAssembly(string assemblyName, string purl) => _assemblyToPurl.TryAdd(assemblyName, purl);
+        public void AddAssembly(string assemblyName, string purl)
+        {
+            _assemblyToPurl.TryAdd(assemblyName, purl);
+            _longestName = Math.Max(_longestName, assemblyName.Length);
+        }
 
-        public bool TryGetCandidate(ReadOnlySpan<char> candidate, out string? purl) => _assembliesBySpan.TryGetValue(candidate, out purl) || _packagesBySpan.TryGetValue(candidate, out purl);
+        /// <summary>An assembly or module name: an assembly the package ships, else a package of that name.</summary>
+        public bool TryGetAssembly(ReadOnlySpan<char> name, out string? purl) => _assembliesBySpan.TryGetValue(name, out purl) || _packagesBySpan.TryGetValue(name, out purl);
 
-        public bool TryGetPackage(ReadOnlySpan<char> name, out string? purl)
+        /// <summary>A qualified-name prefix: a package of that name, else an assembly a package ships under it.</summary>
+        public bool TryGetPrefix(ReadOnlySpan<char> name, out string? purl)
         {
             purl = null;
-            return name.Length <= _longestPackageName && _packagesBySpan.TryGetValue(name, out purl);
+            return name.Length <= _longestName && (_packagesBySpan.TryGetValue(name, out purl) || _assembliesBySpan.TryGetValue(name, out purl));
         }
     }
 
@@ -411,53 +414,66 @@ public sealed partial class PackageUrlResolver
     public string? Resolve(string? assembly = null, string? module = null, string? symbol = null, string? namespaceName = null, string? typeName = null, string? location = null)
     {
         var project = TablesForLocation(location);
-        string? normalizedSymbol = null;
-        if (TryResolveCandidate(project, AssemblyCandidate(assembly), out var purl)
-            || TryResolveCandidate(project, AssemblyCandidate(module), out purl)
-            || TryResolveCandidate(project, SymbolCandidate(symbol, out normalizedSymbol), out purl)
-            || TryResolveCandidate(project, SymbolCandidate(typeName, out _), out purl))
+        if (TryResolveAssembly(project, AssemblyCandidate(assembly), out var purl) || TryResolveAssembly(project, AssemblyCandidate(module), out purl))
         {
             return purl;
         }
 
-
-        var qualifiedName = !string.IsNullOrWhiteSpace(symbol) ? symbol : !string.IsNullOrWhiteSpace(typeName) ? typeName : namespaceName;
-        if (!string.IsNullOrWhiteSpace(qualifiedName))
+        // A qualified name - the symbol, else the type name, else the namespace - belongs to the
+        // longest package (or packaged assembly) name it equals or continues with a dot:
+        // Serilog.Sinks.Console.ConsoleSink is Serilog.Sinks.Console's even when Serilog is
+        // known too. Nothing shorter than a whole name segment matches.
+        string? firstQualifiedName = null;
+        if (TryResolveQualified(project, symbol, ref firstQualifiedName, out purl)
+            || TryResolveQualified(project, typeName, ref firstQualifiedName, out purl)
+            || TryResolveQualified(project, namespaceName, ref firstQualifiedName, out purl))
         {
-            qualifiedName = ReferenceEquals(qualifiedName, symbol) && normalizedSymbol is not null ? normalizedSymbol : NormalizeSymbol(qualifiedName);
-            // The longest matching package prefix wins (the prefixes are ordered by length, and
-            // two names of one length cannot both prefix the same name); a package name is a
-            // prefix when the qualified name equals it or continues it with a dot.
-            for (var end = qualifiedName.Length; end > 0; end = qualifiedName.LastIndexOf('.', end - 1))
-            {
-                var prefix = qualifiedName.AsSpan(0, end);
-                if (prefix.Contains('.') && (project is not null && project.TryGetPackage(prefix, out var packagePurl) || _tree.TryGetPackage(prefix, out packagePurl)))
-                {
-                    return packagePurl;
-                }
-            }
-
-            if (TryResolveSystemPurl(qualifiedName, out var systemPurl))
-            {
-                return systemPurl;
-            }
+            return purl;
         }
 
-        return null;
+        return firstQualifiedName is not null && TryResolveSystemPurl(firstQualifiedName, out var systemPurl) ? systemPurl : null;
     }
 
     /// <summary>
     ///     Candidates are spans into the caller's strings and probe the tables through their span
     ///     lookups: <see cref="Resolve" /> runs for every method, call, node and edge, and a
-    ///     substring per probe was most of its allocation. An empty span is no candidate.
+    ///     substring per probe was most of its allocation. An empty span is no candidate. The
+    ///     record's project answers first, then the whole tree.
     /// </summary>
-    private bool TryResolveCandidate(PackageTables? project, ReadOnlySpan<char> candidate, out string? purl)
+    private bool TryResolveAssembly(PackageTables? project, ReadOnlySpan<char> candidate, out string? purl)
     {
         purl = null;
-        return !candidate.IsEmpty && (project is not null && project.TryGetCandidate(candidate, out purl) || _tree.TryGetCandidate(candidate, out purl));
+        return !candidate.IsEmpty && (project is not null && project.TryGetAssembly(candidate, out purl) || _tree.TryGetAssembly(candidate, out purl));
     }
 
-    /// <summary>An assembly or module name without its display-name tail and file extension; empty when none is left.</summary>
+    /// <summary>The longest package or packaged-assembly name <paramref name="name" /> equals or continues with a dot.</summary>
+    private bool TryResolveQualified(PackageTables? project, string? name, ref string? firstNormalized, out string? purl)
+    {
+        purl = null;
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return false;
+        }
+
+        var normalized = NormalizeSymbol(name);
+        firstNormalized ??= normalized;
+        for (var end = normalized.Length; end > 0; end = normalized.LastIndexOf('.', end - 1))
+        {
+            var prefix = normalized.AsSpan(0, end);
+            if (project is not null && project.TryGetPrefix(prefix, out purl) || _tree.TryGetPrefix(prefix, out purl))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    ///     An assembly display name (<c>Castle.Core, Version=5.1.1.0, ...</c>) or file name
+    ///     (<c>Castle.Core.dll</c>) as the simple assembly name; empty when none is left. Only an
+    ///     assembly file extension is dropped: the last segment of a dotted name is part of it.
+    /// </summary>
     private static ReadOnlySpan<char> AssemblyCandidate(string? candidate)
     {
         if (string.IsNullOrWhiteSpace(candidate))
@@ -466,35 +482,16 @@ public sealed partial class PackageUrlResolver
         }
 
         var comma = candidate.IndexOf(',', StringComparison.Ordinal);
-        var cleaned = Path.GetFileNameWithoutExtension((comma >= 0 ? candidate.AsSpan(0, comma) : candidate).Trim());
-        return cleaned.IsWhiteSpace() ? [] : cleaned;
+        var name = WithoutAssemblyExtension(Path.GetFileName((comma >= 0 ? candidate.AsSpan(0, comma) : candidate).Trim()));
+        return name.IsWhiteSpace() ? [] : name;
     }
 
-    /// <summary>The first non-empty dot-separated segment of a normalized symbol; empty when there is none.</summary>
-    private static ReadOnlySpan<char> SymbolCandidate(string? candidate, out string? normalized)
-    {
-        normalized = null;
-        if (string.IsNullOrWhiteSpace(candidate))
-        {
-            return [];
-        }
+    /// <summary>The name without a trailing <c>.dll</c>, <c>.exe</c> or <c>.winmd</c>.</summary>
+    private static ReadOnlySpan<char> WithoutAssemblyExtension(ReadOnlySpan<char> name) =>
+        IsAssemblyFile(name) ? name[..name.LastIndexOf('.')] : name;
 
-        normalized = NormalizeSymbol(candidate);
-        var start = 0;
-        while (start < normalized.Length && normalized[start] == '.')
-        {
-            start++;
-        }
-
-        if (start == normalized.Length)
-        {
-            return [];
-        }
-
-        var end = normalized.IndexOf('.', start);
-        var first = end < 0 ? normalized.AsSpan(start) : normalized.AsSpan(start, end - start);
-        return first.IsWhiteSpace() ? [] : first;
-    }
+    private static bool IsAssemblyFile(ReadOnlySpan<char> name) =>
+        name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) || name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) || name.EndsWith(".winmd", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>The first <see cref="SystemPackagePrefixes" /> entry the name equals or continues with a dot.</summary>
     private static bool TryResolveSystemPurl(string qualifiedName, out string purl)
@@ -823,7 +820,14 @@ public sealed partial class PackageUrlResolver
 
         foreach (var asset in assets.EnumerateObject())
         {
-            var assemblyName = Path.GetFileNameWithoutExtension(asset.Name.Replace('/', Path.DirectorySeparatorChar));
+            // Assemblies only: an asset list also holds the `_._` placeholder and XML docs.
+            var fileName = Path.GetFileName(asset.Name.Replace('/', Path.DirectorySeparatorChar).AsSpan());
+            if (!IsAssemblyFile(fileName))
+            {
+                continue;
+            }
+
+            var assemblyName = WithoutAssemblyExtension(fileName).ToString();
             if (!string.IsNullOrWhiteSpace(assemblyName))
             {
                 _tree.AddAssembly(assemblyName, purl);
