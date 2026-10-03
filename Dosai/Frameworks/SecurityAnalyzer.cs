@@ -267,7 +267,7 @@ public static class SecurityAnalyzer
 
         foreach (var tree in context.CSharpTrees)
         {
-            foreach (var typeDeclaration in tree.GetRoot().DescendantNodes().OfType<TypeDeclarationSyntax>())
+            foreach (var typeDeclaration in FrameworkContext.Declarations<TypeDeclarationSyntax>(tree))
             {
                 if (!string.Equals(typeDeclaration.Identifier.Text, simpleName, StringComparison.Ordinal))
                 {
@@ -312,7 +312,7 @@ public static class SecurityAnalyzer
         foreach (var tree in context.CSharpTrees)
         {
             var model = context.CSharp.GetSemanticModel(tree);
-            foreach (var invocation in tree.GetRoot().DescendantNodes().OfType<InvocationExpressionSyntax>())
+            foreach (var invocation in context.InvocationsNamed(tree, IsCorsRegistrationName))
             {
                 var syntacticName = ProviderHelpers.InvocationName(invocation);
                 if (!IsCorsRegistrationName(syntacticName))

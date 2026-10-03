@@ -147,6 +147,15 @@ dotnet test ./Dosai.sln
   ignores, indented options) falls back to the serializer, so new result properties need no
   writer change; `ParallelJsonWriter_IsByteIdenticalToTheSerializerForEveryWorkerCount` guards
   the equivalence. Stream other large outputs too - never build a whole document as a string.
+- Framework providers must not walk every syntax tree for their node kinds: a dozen full walks
+  of the source were most of the framework phase on large trees. Read type, method and using
+  declarations through `FrameworkContext.Declarations<T>(tree)` (it skips statements and
+  expressions, where none of them occurs), invocations through
+  `ctx.InvocationsNamed(tree, mayMatch)` when the loop acts only on invocations whose
+  `ProviderHelpers.InvocationName` passes `mayMatch` (a tree without such a name is skipped;
+  the predicate must admit every name the loop acts on), and gate any other walk on the file
+  text (`TextContainsAny`). Never cache syntax nodes across trees: a node list pins the Roslyn
+  red trees the walks let the collector reclaim (2.4 GB on dotnet/runtime).
 - `PackageUrlResolver.Resolve` runs for every method, call, node and edge: keep it free of
   per-call splits, concatenations and scans over every known package (it probes the qualified
   name's dotted prefixes against the package tables instead).
