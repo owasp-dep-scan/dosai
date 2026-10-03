@@ -658,6 +658,111 @@ public static class Shouting
         Assert.Equal(NormalizeGeneratedAt(sequential), NormalizeGeneratedAt(parallel));
     }
 
+    [Fact]
+    public void PackageUrlResolver_ResolvesExactlyLikeTheCandidateSplittingImplementation()
+    {
+        // Resolve runs for every method, call, node and edge; it no longer splits whole symbols
+        // or concatenates a prefix per known package. A verbatim port of the previous algorithm
+        // over the resolver's own tables must agree on every input combination, including
+        // dotted package names, nested prefixes, case differences, empty segments and the
+        // ordered system-prefix table.
+        using var tempDirectory = new TemporaryDirectory();
+        var packages = new[] { ("Serilog", "3.1.1"), ("Serilog.Sinks.Console", "5.0.1"), ("Newtonsoft.Json", "13.0.3"), ("Microsoft.Extensions.Logging", "8.0.0"), ("Microsoft.Extensions.Logging.Abstractions", "8.0.0"), ("Polly", "8.2.0") };
+        Directory.CreateDirectory(Path.Combine(tempDirectory.Path, "obj"));
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "obj", "project.assets.json"), JsonSerializer.Serialize(new Dictionary<string, object>
+        {
+            ["version"] = 3,
+            ["targets"] = new Dictionary<string, object>
+            {
+                ["net10.0"] = packages.ToDictionary(package => $"{package.Item1}/{package.Item2}", package => (object)new Dictionary<string, object>
+                {
+                    ["type"] = "package",
+                    ["runtime"] = new Dictionary<string, object> { [$"lib/net8.0/{package.Item1}.dll"] = new Dictionary<string, object>() }
+                })
+            },
+            ["libraries"] = packages.ToDictionary(package => $"{package.Item1}/{package.Item2}", package => (object)new Dictionary<string, object>
+            {
+                ["sha512"] = "",
+                ["type"] = "package",
+                ["path"] = $"{package.Item1.ToLowerInvariant()}/{package.Item2}"
+            })
+        }));
+        var resolver = PackageUrlResolver.Create(tempDirectory.Path);
+
+        var flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+        var assemblyToPurl = (Dictionary<string, string>)typeof(PackageUrlResolver).GetField("_assemblyToPurl", flags)!.GetValue(resolver)!;
+        var packageToPurl = (Dictionary<string, string>)typeof(PackageUrlResolver).GetField("_packageToPurl", flags)!.GetValue(resolver)!;
+        var systemPrefixes = ((string Prefix, string PackageName)[])typeof(PackageUrlResolver).GetField("SystemPackagePrefixes", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.GetValue(null)!;
+        Assert.Contains("Serilog.Sinks.Console", packageToPurl.Keys);
+        var namespacePrefixes = packageToPurl.Keys.Where(name => name.Contains('.', StringComparison.Ordinal)).OrderByDescending(name => name.Length).Select(name => (Prefix: name, Purl: packageToPurl[name])).ToList();
+
+        static string Normalize(string value) => System.Text.RegularExpressions.Regex.Replace(value.Replace("global::", string.Empty, StringComparison.Ordinal).Replace("Global.", string.Empty, StringComparison.Ordinal), "`[0-9]+", string.Empty);
+        static string Escape(string value) => Uri.EscapeDataString(value).Replace("%2E", ".", StringComparison.Ordinal).Replace("%2D", "-", StringComparison.Ordinal).Replace("%5F", "_", StringComparison.Ordinal);
+        static IEnumerable<string> Candidates(string? assembly, string? module, string? symbol, string? typeName)
+        {
+            foreach (var candidate in new[] { assembly, module })
+            {
+                if (string.IsNullOrWhiteSpace(candidate)) continue;
+                var cleaned = Path.GetFileNameWithoutExtension(candidate.Split(',')[0].Trim());
+                if (!string.IsNullOrWhiteSpace(cleaned)) yield return cleaned;
+            }
+
+            foreach (var candidate in new[] { symbol, typeName })
+            {
+                if (string.IsNullOrWhiteSpace(candidate)) continue;
+                var first = Normalize(candidate).Split('.', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
+                if (!string.IsNullOrWhiteSpace(first)) yield return first;
+            }
+        }
+
+        string? Reference(string? assembly, string? module, string? symbol, string? namespaceName, string? typeName)
+        {
+            foreach (var candidate in Candidates(assembly, module, symbol, typeName))
+            {
+                if (assemblyToPurl.TryGetValue(candidate, out var purl) || packageToPurl.TryGetValue(candidate, out purl)) return purl;
+            }
+
+            var qualifiedName = new[] { symbol, typeName, namespaceName }.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
+            if (string.IsNullOrWhiteSpace(qualifiedName)) return null;
+            qualifiedName = Normalize(qualifiedName);
+            foreach (var (prefix, purl) in namespacePrefixes)
+            {
+                if (qualifiedName.Equals(prefix, StringComparison.OrdinalIgnoreCase) || qualifiedName.StartsWith(prefix + ".", StringComparison.OrdinalIgnoreCase)) return purl;
+            }
+
+            foreach (var (prefix, packageName) in systemPrefixes)
+            {
+                if (qualifiedName.Equals(prefix, StringComparison.OrdinalIgnoreCase) || qualifiedName.StartsWith(prefix + ".", StringComparison.OrdinalIgnoreCase)) return $"pkg:nuget/{Escape(packageName)}";
+            }
+
+            return null;
+        }
+
+        string?[] assemblies = [null, "", " ", "Polly.dll", "Serilog.Sinks.Console, Version=5.0.1.0, Culture=neutral", " Unknown.Library , x", "System.Runtime.dll"];
+        string?[] symbols =
+        [
+            null, "", "Serilog.Sinks.Console.ConsoleSink.Emit(Serilog.Events.LogEvent):void", "serilog.SINKS.console.X", "Serilog.Log.Information(string):void",
+            "global::Newtonsoft.Json.Linq.JObject.Parse(string)", "Global.Newtonsoft.Json.JsonConvert`1.X", "Microsoft.Extensions.Logging.Abstractions.ILogger.Log()",
+            "Microsoft.Extensions.Logging.LoggerFactory..ctor()", "Microsoft.Extensions.LoggingX.Y", "..Leading.Dots.Name", "Trailing.", ".", " .x", "A. B",
+            "System.IO.FileStream.Read(byte[],int,int):int", "System.IO.Files.Enumerate()", "system.threading.tasks.Task.Run()", "System", "SystemX.Y",
+            "System.Security.Cryptography.X509Certificates.X509Store..ctor()", "Polly.Policy.Handle()", "My.App.Service.Run()",
+        ];
+        string?[] namespaces = [null, "Serilog.Sinks", "System.Text.Json", "My.App"];
+        string?[] typeNames = [null, "ConsoleSink", "Newtonsoft.Json.JsonConvert", "..x"];
+        var checkedCount = 0;
+        foreach (var assembly in assemblies)
+        foreach (var module in assemblies)
+        foreach (var symbol in symbols)
+        foreach (var namespaceName in namespaces)
+        foreach (var typeName in typeNames)
+        {
+            Assert.Equal(Reference(assembly, module, symbol, namespaceName, typeName), resolver.Resolve(assembly, module, symbol, namespaceName, typeName));
+            checkedCount++;
+        }
+
+        Assert.Equal(assemblies.Length * assemblies.Length * symbols.Length * namespaces.Length * typeNames.Length, checkedCount);
+    }
+
     #endregion
 
     #region Issue #70 - per-edge key strings in CollapseDuplicateCallSites
