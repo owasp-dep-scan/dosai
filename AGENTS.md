@@ -161,7 +161,9 @@ dotnet test ./Dosai.sln
 - `PackageUrlResolver.Resolve` runs for every method, call, node and edge: keep it free of
   per-call splits, concatenations, substrings, regexes and scans over every known package (it
   probes the qualified name's dotted prefixes against the package tables through span lookups,
-  and skips prefixes longer than any registered name). Enrichment resolves the lists on the
+  and skips prefixes longer than any registered name). Names match whole: no last-segment
+  aliases for packages, no truncating `Castle.Core` to `Castle` as if `.Core` were an
+  extension, and the longest matching name wins over a symbol's first segment. Enrichment resolves the lists on the
   worker team, so `Resolve` must also stay read-only: no memo tables filled while resolving
   (the per-location project memo is a concurrent cache of a pure function). Pass every record's
   file as `location`: each project has its own package tables and a record resolves in its own

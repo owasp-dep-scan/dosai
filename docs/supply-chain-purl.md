@@ -70,13 +70,14 @@ flowchart LR
 
 ## Resolution order
 
-Given an assembly/module/symbol/type, Dosai tries:
+Given an assembly/module/symbol/type, Dosai tries, in the record's own project first and then across the tree:
 
-1. assembly name, e.g. `Microsoft.Data.SqlClient`
-2. module/DLL name, e.g. `Microsoft.Data.SqlClient.dll`
-3. package name and last package segment
-4. namespace/type/symbol prefix matching
-5. best-effort framework symbol fallback for common `System.*` APIs
+1. assembly name, e.g. `Microsoft.Data.SqlClient` from `Microsoft.Data.SqlClient, Version=5.2.0.0, ...`, matched against the assemblies packages ship, then against package names
+2. module/DLL name, e.g. `Microsoft.Data.SqlClient.dll` (only an assembly file extension is dropped; `Castle.Core` stays `Castle.Core`)
+3. the longest package (or packaged assembly) name that the symbol, else the type name, else the namespace equals or continues with a dot: `Serilog.Sinks.Console.ConsoleSink` belongs to `Serilog.Sinks.Console`, not `Serilog`
+4. best-effort framework symbol fallback for common `System.*` APIs
+
+Matching is by whole names only. A package's last name segment is not an alias for it: `System.Console` code is not `Serilog.Sinks.Console`'s, and `Azure.*` SDK code is not `Microsoft.Data.SqlClient.Extensions.Azure`'s. Restore placeholders such as `_._` are not assemblies.
 
 Resolution is best-effort. Missing PURLs do not fail analysis.
 
