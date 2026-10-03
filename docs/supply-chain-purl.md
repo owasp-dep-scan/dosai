@@ -22,16 +22,32 @@ NuGet has no namespace component. Package names are case-preserving and generall
 
 `PackageUrlResolver` reads sources in order of trust:
 
-1. `project.assets.json` (restore output)
-2. `*.deps.json` (build output)
-3. `packages.lock.json` (NuGet lock file, schema 4.1.0)
-4. `paket.lock` (Paket lock file, schema 4.1.0)
-5. `packages.config` (legacy packages config, schema 4.1.0)
+1. `packages.lock.json` (NuGet lock file, schema 4.1.0)
+2. `paket.lock` (Paket lock file, schema 4.1.0)
+3. `packages.config` (legacy packages config, schema 4.1.0)
+4. `project.assets.json` (restore output)
+5. `*.deps.json` (build output)
 6. direct `.csproj` `<PackageReference>` entries (schema 4.1.0)
 
-The first two are produced by restore/build and contain package libraries plus compile/runtime assets. The remaining four let unrestored trees, source-only checkouts, and CI caches that skip restore still resolve packages. Lock files are reproducible, so they outrank the config and project-file fallbacks; direct `<PackageReference>` parsing is the lowest-confidence source because floating versions and Directory.Build.props indirection are invisible to it.
+Lock files are reproducible, so they outrank everything else. Restore and build output contain package libraries plus compile/runtime assets, and the lock, config and project-file sources let unrestored trees, source-only checkouts, and CI caches that skip restore still resolve packages. Direct `<PackageReference>` parsing is the lowest-confidence source because floating versions and Directory.Build.props indirection are invisible to it. Files of one kind are read in path order, so the result never depends on the file system's enumeration order.
 
-When two sources disagree on the version of the same package, the resolver keeps the most-trusted answer and records the conflict as a diagnostic. `ResolutionFacts` exposes, per package, which source file produced the purl (name, version, purl, source, confidence), so downstream tools can weigh the evidence.
+### One version per project
+
+Every source belongs to a project: the project its restore output names (`project.restore.projectPath`, which also covers artifacts layouts that move `obj/` out of the project, and their `bin/<project>/` build output beside it), otherwise the nearest directory at or above the source that holds a `.csproj`, `.vbproj` or `.fsproj`. A `paket.lock`, and any source outside every project, applies to the whole tree. A record with a file - a method, call site, `using` directive, member, call-graph edge or data-flow node - resolves against its own project's packages first, at every resolution step, so two projects that restore two versions of one package each report their own version (issue #72). Records without a project of their own, and call-graph nodes, which are shared by every project that calls them, carry the tree-wide answer: the first source read. Call-graph edges sit at one call site and resolve both endpoints in that site's project, so `PackageReachability` lists one entry per version, each with only its own project's locations.
+
+Both reports (`methods` and `dataflows`) say where versions split, in `Diagnostics`:
+
+```text
+Package Moq resolves to 2 versions across projects: 4.15.1 (ProjA), 4.18.0 (ProjB). Each project's records carry its own version; records outside those projects, and call-graph nodes shared by them, carry 4.15.1.
+```
+
+When two sources of the same project disagree on a version, the resolver keeps the most-trusted answer for that project and records the disagreement:
+
+```text
+PURL version ambiguity for Moq in ProjB: csproj says 4.17.6; keeping 4.18.0 from project.assets.json.
+```
+
+The resolver's `ResolutionFacts` (a library API, not part of either report) lists every fact it read: name, version, purl, source kind, confidence, and the project it belongs to.
 
 ### Restore output as a source of reference assemblies
 
@@ -49,18 +65,19 @@ flowchart LR
     Resolver --> AssemblyMap[assembly -> purl]
     Resolver --> PackageMap[package -> purl]
     Resolver --> NamespacePrefix[namespace prefix -> purl]
-    Resolver --> Facts[ResolutionFacts + conflict diagnostics]
+    Resolver --> Facts[ResolutionFacts + version diagnostics]
 ```
 
 ## Resolution order
 
-Given an assembly/module/symbol/type, Dosai tries:
+Given an assembly/module/symbol/type, Dosai tries, in the record's own project first and then across the tree:
 
-1. assembly name, e.g. `Microsoft.Data.SqlClient`
-2. module/DLL name, e.g. `Microsoft.Data.SqlClient.dll`
-3. package name and last package segment
-4. namespace/type/symbol prefix matching
-5. best-effort framework symbol fallback for common `System.*` APIs
+1. assembly name, e.g. `Microsoft.Data.SqlClient` from `Microsoft.Data.SqlClient, Version=5.2.0.0, ...`, matched against the assemblies packages ship, then against package names
+2. module/DLL name, e.g. `Microsoft.Data.SqlClient.dll` (only an assembly file extension is dropped; `Castle.Core` stays `Castle.Core`)
+3. the longest package (or packaged assembly) name that the symbol, else the type name, else the namespace equals or continues with a dot: `Serilog.Sinks.Console.ConsoleSink` belongs to `Serilog.Sinks.Console`, not `Serilog`
+4. best-effort framework symbol fallback for common `System.*` APIs
+
+Matching is by whole names only. A package's last name segment is not an alias for it: `System.Console` code is not `Serilog.Sinks.Console`'s, and `Azure.*` SDK code is not `Microsoft.Data.SqlClient.Extensions.Azure`'s. Restore placeholders such as `_._` are not assemblies.
 
 Resolution is best-effort. Missing PURLs do not fail analysis.
 
@@ -197,12 +214,13 @@ packages.config / csproj references      (fallbacks)
         ├── CallGraph.Nodes[].Purl
         ├── CallGraph.Edges[].TargetPurl
         ├── DataFlow.Slices[].Purls[]
-        └── ResolutionFacts + diagnostics (which source, which version)
+        └── Diagnostics: versions split across projects, sources disagreeing in one
 ```
 
 ## Limitations
 
 - Dependencies that appear in none of the readable sources (for example transitives in an unrestored tree with no lock file) may not resolve.
-- Multiple packages can expose the same namespace prefix; Dosai chooses the longest prefix and first discovered package, and version conflicts across sources are reported as diagnostics.
+- Multiple packages can expose the same namespace prefix; Dosai chooses the longest prefix and the first source read. Version splits across projects and disagreements inside one project are reported as diagnostics.
+- A call-graph node is shared by every project that calls it, so it carries one version (the tree-wide answer) even when projects restore different ones; the edges into it carry each call site's own version.
 - Runtime binding redirects and assembly unification are not modeled.
 - PURL enrichment is not a vulnerability verdict; it is correlation metadata.

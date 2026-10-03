@@ -114,9 +114,11 @@ internal class Sample
             }
         }
 
+        // Sizes keep one decimal from 1 GB up ("1.3 GB"), and the test process's heap can be
+        // that large when it runs; either way the separator must be a dot.
         var lines = recorder.Snapshot();
         Assert.Contains(lines, line => Regex.IsMatch(line, @"^\[dosai \+\d+\.\d{3}s\] start locale-invariance-test$"));
-        Assert.Contains(lines, line => Regex.IsMatch(line, @"^\[dosai \+\d+\.\d{3}s\] end locale-invariance-test in \d+\.\d{3}s, managed heap \d+ [KMG]B, working set \d+(\.\d+)? [KMG]B$"));
+        Assert.Contains(lines, line => Regex.IsMatch(line, @"^\[dosai \+\d+\.\d{3}s\] end locale-invariance-test in \d+\.\d{3}s, managed heap \d+(\.\d+)? [KMG]B, working set \d+(\.\d+)? [KMG]B$"));
     }
 
     [Fact]

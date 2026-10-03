@@ -301,7 +301,9 @@ GraphML/GEXF include PURL metadata where available.
 
 ## Reachability and dead code
 
-The reachability analyzer runs once over the merged call graph. It performs a bounded forward BFS per entry point (every visited node records which entry points reached it, capped at 16 with an exact `Reachable` flag that never saturates), computes minimum depth, fan-in and fan-out, and Tarjan strongly-connected components for recursion clusters. Bucketed forward-reachable sizes are computed on the SCC condensation in reverse topological order so large graphs stay cheap.
+The reachability analyzer runs once over the merged call graph. It performs a bounded forward BFS per entry point (every visited node records which entry points reached it, capped at 16 with an exact `Reachable` flag that never saturates), computes minimum depth, fan-in and fan-out, and Tarjan strongly-connected components for recursion clusters. Bucketed forward-reachable sizes are computed on the SCC condensation in reverse topological order so large graphs stay cheap: a bucket only distinguishes counts up to 1,000, so each component keeps the components it reaches only until their node count passes that cap. Graphs too large for the per-component bitsets the condensation used to allocate keep the budgeted per-node walk and its diagnostics.
+
+Every one of these walks runs over a dense integer graph built once from the sorted edge list (ids mapped to ints, forward rows in edge order), with per-walk stamps instead of id-keyed hash sets; the entry-point walks run on the worker team and fold into the facts in entry-point order, so the result is the same for any worker count. On a full `dotnet/runtime` scan (768k nodes, 2.36M collapsed edges, 1,521 entry points) this took the computation from about 44 s to 1.5 s with byte-identical output.
 
 The dead-code report lists source-declared methods and constructors that no entry point reaches and that no keep-alive evidence protects. Keep-alive evidence is reflection or DI/framework-model usage that proves runtime callability: an `AddSingleton<Foo>()` registration, an `Activator.CreateInstance` target, or a `typeof(T).GetMethod(...)` receiver. The report is empty for assembly-only inputs and is suppressed entirely, with a diagnostic, when the reachability budget was exhausted, because an unvisited node is then unknown rather than unreachable.
 
@@ -329,7 +331,7 @@ Resolution uses:
 3. package name
 4. namespace/type/symbol prefix matching
 
-Version conflicts across sources are recorded as diagnostics, and `ResolutionFacts` exposes which source file produced each purl (name, version, purl, source, confidence). PURLs are best-effort and never fail analysis.
+Every record resolves in its own project (the project its file belongs to), so projects that restore different versions of a package each keep theirs; version splits across projects and disagreements between one project's sources are reported in the output's `Diagnostics`, and `ResolutionFacts` exposes which source and project produced each purl (name, version, purl, source, confidence, project). PURLs are best-effort and never fail analysis.
 
 ## Weakness candidate model
 
@@ -360,8 +362,9 @@ tail after symbol analysis had finished during which the heap kept climbing):
 - **Graph assembly allocates no key strings.** Call-site de-duplication and the canonical
   edge/node orderings run through `GraphAssembly`: an `EdgeSiteKey` struct (source, target,
   file, line, column, call-type tag, evidence-kind tag) replaces one concatenated
-  ~200-byte string per edge, and stable in-place sorts (an index sort with an
-  original-position tiebreak) replace `OrderBy` chains. At millions of edges the old key
+  ~200-byte string per edge, and stable in-place sorts (runs sorted on the worker team, then
+  merged along merge paths with the left run first on ties, so the order is the sequential
+  stable sort's) replace `OrderBy` chains. At millions of edges the old key
   strings alone were gigabytes of garbage allocated exactly in the tail, and duplicate call
   sites used to allocate their edge object before the de-duplication discarded it - dedup now
   happens on the call record before the edge exists. String legs compare by reference first
@@ -388,9 +391,26 @@ tail after symbol analysis had finished during which the heap kept climbing):
   workers (visible as CPU collapsing to one core "while the GC was under pressure"). Server
   GC keeps reclamation parallel to allocation. On .NET 9 and later it runs with dynamic heap
   count adaptation (DATAS) by default, so small scans do not pay for one heap per core;
-  `DOTNET_gcServer=0` restores workstation GC for a host that needs it.
+  `DOTNET_gcServer=0` restores workstation GC for a host that needs it. The peak working set
+  is set during symbol analysis, where a large share of the heap is garbage the server GC has
+  not yet collected; a host short on memory can trade time for it with
+  `DOTNET_GCConserveMemory=7` (on `dotnet/runtime`: 20.8 GB peak to 17.0 GB, about 7% more
+  time; lower levels made no difference there).
 - `DOSAI_DEBUG_GC=1` forces a full compacting collection before each `--debug` phase-end heap
   read, so heap figures compare runs without GC-timing noise.
+- **No phase after source analysis runs a per-item loop on one thread.** Package-URL
+  enrichment resolves its lists in chunks on the worker team (the resolver only reads its
+  tables and probes them by span), the F#, R and C/C++ frontends analyze files on the team
+  and append results in file order, and the framework providers no longer walk every syntax
+  tree per node kind: declarations come from a walk that skips statements and expressions,
+  and invocation loops skip trees whose invocations carry none of the names they act on. On
+  `dotnet/runtime` these took enrichment from 4.8 s to 0.9 s, the frontends from 7.3 s to
+  2.6 s and framework analysis from 44 s to 11 s, with byte-identical output.
+- **The output is serialized on the worker team.** One serializer call over the whole slice
+  ran on one core for the entire phase. `ParallelJsonWriter` writes the slice's top levels from
+  the serializer's own contract and hands each large list to the workers in chunks, appending
+  the chunks in order straight to the file; the bytes are identical to the single call's, and
+  memory stays at a few chunks per worker.
 
 ## Current limitations
 
