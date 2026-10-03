@@ -131,6 +131,9 @@ dotnet test ./Dosai.sln
   arrays). Resolve members through `AssemblyScan.Resolve` (memoized per token, so call sites
   share one id string) and source locations through the per-assembly source map (binary search,
   one path and file-name string per document) - never per instruction.
+- `PackageUrlResolver.Resolve` runs for every method, call, node and edge: keep it free of
+  per-call splits, concatenations and scans over every known package (it probes the qualified
+  name's dotted prefixes against the package tables instead).
 - Phase order in `BuildMethodsSlice` is a memory contract: framework analysis and the security
   analyzer run immediately after source analysis (they are the only compilation consumers),
   then the compilations are dropped before the assembly IL call graph, enrichment,

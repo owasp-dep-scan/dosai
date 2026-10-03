@@ -34,13 +34,20 @@ public sealed partial class PackageUrlResolver
         ("System", "System.Runtime")
     ];
 
+    /// <summary>
+    ///     <see cref="SystemPackagePrefixes" /> by prefix, with each entry's list position (the
+    ///     first matching entry wins) and its purl built once.
+    /// </summary>
+    private static readonly Dictionary<string, (int Order, string Purl)> SystemPackagePurls = SystemPackagePrefixes
+        .Select((entry, order) => (entry.Prefix, Order: order, Purl: $"pkg:nuget/{EscapePurl(entry.PackageName)}"))
+        .ToDictionary(entry => entry.Prefix, entry => (entry.Order, entry.Purl), StringComparer.OrdinalIgnoreCase);
+
     private readonly Dictionary<string, string> _assemblyToPurl = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _packageToPurl = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, (string Version, string Source)> _packageVersions = new(StringComparer.OrdinalIgnoreCase);
     // Version conflicts collected during the read and aggregated once per package, a
     // multi-project/multi-TFM solution would otherwise emit thousands of duplicate lines.
     private readonly Dictionary<string, List<(string Version, string Source)>> _versionConflicts = new(StringComparer.OrdinalIgnoreCase);
-    private readonly List<(string Prefix, string Purl)> _namespacePrefixes = [];
 
     private PackageUrlResolver()
     {
@@ -100,10 +107,6 @@ public sealed partial class PackageUrlResolver
             resolver.Diagnostics.Add($"PURL version ambiguity for {packageName}: {detail}; keeping {resolver._packageVersions.GetValueOrDefault(packageName).Version}.");
         }
 
-        resolver._namespacePrefixes.AddRange(resolver._packageToPurl.Keys
-            .Where(name => name.Contains('.', StringComparison.Ordinal))
-            .OrderByDescending(name => name.Length)
-            .Select(name => (Prefix: name, Purl: resolver._packageToPurl[name])));
         return resolver;
     }
 
@@ -136,25 +139,37 @@ public sealed partial class PackageUrlResolver
         }
     }
 
+    /// <remarks>
+    ///     Runs for every method, call, node and edge of a scan, millions of times on a large tree,
+    ///     so it allocates nothing it does not return: the candidate names are cut out of the
+    ///     inputs directly (no split of the whole symbol on every dot), and the namespace-prefix
+    ///     tables are probed with the qualified name's own dotted prefixes instead of walking every
+    ///     known package with a concatenated <c>prefix + "."</c> per entry.
+    /// </remarks>
     public string? Resolve(string? assembly = null, string? module = null, string? symbol = null, string? namespaceName = null, string? typeName = null)
     {
-        foreach (var candidate in BuildAssemblyCandidates(assembly, module, symbol, typeName))
+        string? normalizedSymbol = null;
+        if (TryResolveCandidate(AssemblyCandidate(assembly), out var purl)
+            || TryResolveCandidate(AssemblyCandidate(module), out purl)
+            || TryResolveCandidate(SymbolCandidate(symbol, out normalizedSymbol), out purl)
+            || TryResolveCandidate(SymbolCandidate(typeName, out _), out purl))
         {
-            if (_assemblyToPurl.TryGetValue(candidate, out var purl) || _packageToPurl.TryGetValue(candidate, out purl))
-            {
-                return purl;
-            }
+            return purl;
         }
 
-        var qualifiedName = FirstNonEmpty(symbol, typeName, namespaceName);
+        var qualifiedName = !string.IsNullOrWhiteSpace(symbol) ? symbol : !string.IsNullOrWhiteSpace(typeName) ? typeName : namespaceName;
         if (!string.IsNullOrWhiteSpace(qualifiedName))
         {
-            qualifiedName = NormalizeSymbol(qualifiedName);
-            foreach (var (prefix, purl) in _namespacePrefixes)
+            qualifiedName = ReferenceEquals(qualifiedName, symbol) && normalizedSymbol is not null ? normalizedSymbol : NormalizeSymbol(qualifiedName);
+            // The longest matching package prefix wins (the prefixes are ordered by length, and
+            // two names of one length cannot both prefix the same name); a package name is a
+            // prefix when the qualified name equals it or continues it with a dot.
+            for (var end = qualifiedName.Length; end > 0; end = qualifiedName.LastIndexOf('.', end - 1))
             {
-                if (qualifiedName.Equals(prefix, StringComparison.OrdinalIgnoreCase) || qualifiedName.StartsWith(prefix + ".", StringComparison.OrdinalIgnoreCase))
+                var prefix = end == qualifiedName.Length ? qualifiedName : qualifiedName[..end];
+                if (prefix.Contains('.', StringComparison.Ordinal) && _packageToPurl.TryGetValue(prefix, out var packagePurl))
                 {
-                    return purl;
+                    return packagePurl;
                 }
             }
 
@@ -167,19 +182,66 @@ public sealed partial class PackageUrlResolver
         return null;
     }
 
+    private bool TryResolveCandidate(string? candidate, out string? purl)
+    {
+        purl = null;
+        return candidate is not null && (_assemblyToPurl.TryGetValue(candidate, out purl) || _packageToPurl.TryGetValue(candidate, out purl));
+    }
+
+    /// <summary>An assembly or module name without its display-name tail and file extension.</summary>
+    private static string? AssemblyCandidate(string? candidate)
+    {
+        if (string.IsNullOrWhiteSpace(candidate))
+        {
+            return null;
+        }
+
+        var comma = candidate.IndexOf(',', StringComparison.Ordinal);
+        var cleaned = Path.GetFileNameWithoutExtension((comma >= 0 ? candidate[..comma] : candidate).Trim());
+        return string.IsNullOrWhiteSpace(cleaned) ? null : cleaned;
+    }
+
+    /// <summary>The first non-empty dot-separated segment of a normalized symbol.</summary>
+    private static string? SymbolCandidate(string? candidate, out string? normalized)
+    {
+        normalized = null;
+        if (string.IsNullOrWhiteSpace(candidate))
+        {
+            return null;
+        }
+
+        normalized = NormalizeSymbol(candidate);
+        var start = 0;
+        while (start < normalized.Length && normalized[start] == '.')
+        {
+            start++;
+        }
+
+        if (start == normalized.Length)
+        {
+            return null;
+        }
+
+        var end = normalized.IndexOf('.', start);
+        var first = end < 0 ? normalized[start..] : normalized[start..end];
+        return string.IsNullOrWhiteSpace(first) ? null : first;
+    }
+
+    /// <summary>The first <see cref="SystemPackagePrefixes" /> entry the name equals or continues with a dot.</summary>
     private static bool TryResolveSystemPurl(string qualifiedName, out string purl)
     {
-        foreach (var (prefix, packageName) in SystemPackagePrefixes)
+        var best = int.MaxValue;
+        purl = string.Empty;
+        for (var end = qualifiedName.Length; end > 0; end = qualifiedName.LastIndexOf('.', end - 1))
         {
-            if (qualifiedName.Equals(prefix, StringComparison.OrdinalIgnoreCase) || qualifiedName.StartsWith(prefix + ".", StringComparison.OrdinalIgnoreCase))
+            if (SystemPackagePurls.TryGetValue(end == qualifiedName.Length ? qualifiedName : qualifiedName[..end], out var entry) && entry.Order < best)
             {
-                purl = $"pkg:nuget/{EscapePurl(packageName)}";
-                return true;
+                best = entry.Order;
+                purl = entry.Purl;
             }
         }
 
-        purl = string.Empty;
-        return false;
+        return best != int.MaxValue;
     }
 
     private void ReadProjectAssets(string filePath)
@@ -497,41 +559,6 @@ public sealed partial class PackageUrlResolver
             _packageToPurl.TryAdd(lastSegment, purl);
         }
     }
-
-    private static IEnumerable<string> BuildAssemblyCandidates(string? assembly, string? module, string? symbol, string? typeName)
-    {
-        foreach (var candidate in new[] { assembly, module })
-        {
-            if (string.IsNullOrWhiteSpace(candidate))
-            {
-                continue;
-            }
-
-            var cleaned = candidate.Split(',')[0].Trim();
-            cleaned = Path.GetFileNameWithoutExtension(cleaned);
-            if (!string.IsNullOrWhiteSpace(cleaned))
-            {
-                yield return cleaned;
-            }
-        }
-
-        foreach (var candidate in new[] { symbol, typeName })
-        {
-            if (string.IsNullOrWhiteSpace(candidate))
-            {
-                continue;
-            }
-
-            var cleaned = NormalizeSymbol(candidate);
-            var first = cleaned.Split('.', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
-            if (!string.IsNullOrWhiteSpace(first))
-            {
-                yield return first;
-            }
-        }
-    }
-
-    private static string? FirstNonEmpty(params string?[] values) => values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
 
     private static string NormalizeSymbol(string value) => GenericArityRegex().Replace(value.Replace("global::", string.Empty, StringComparison.Ordinal).Replace("Global.", string.Empty, StringComparison.Ordinal), string.Empty);
 
