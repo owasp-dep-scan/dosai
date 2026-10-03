@@ -102,9 +102,75 @@ dotnet test ./Dosai.sln
   node name from `IMethodSymbol.Name` directly - use `SourceRenderCache.MemberName`.
 - Graph de-duplication and ordering go through `GraphAssembly`: an `EdgeSiteKey` struct
   instead of a concatenated key string per edge, stable in-place sorts instead of `OrderBy`
-  chains. Dedupe the call record before building the edge. String legs of the key compare by
+  chains (`ParallelSort.StableSort`: runs sorted on the worker team and merged along merge
+  paths, left run first on ties, so the order is the sequential stable sort's for every
+  worker count). Dedupe the call record before building the edge. String legs of the key compare by
   reference first, so route edge endpoint ids through the render cache (single instance per
-  distinct member) rather than fresh strings.
+  distinct member) rather than fresh strings. Same-pair collapsing
+  (`ReachabilityAnalyzer.CollapseDuplicateCallSites`) groups through an open-addressing table
+  of group ids keyed by `CollapseKey` (no key stored per edge) and sorts only the distinct
+  keys; the collapsed list comes out sorted by (source, target, call type, evidence kind) in
+  exactly the old concatenated-key order (`GraphAssembly.CompareCollapseKeys` - the separator
+  emulation matters: a strict-prefix continuation below U+001F sorts before the whole shorter
+  field, and rendered ids do contain CR/LF/tab). Each grouping stage runs in its own
+  `NoInlining` frame so only the placement arrays survive into the merge loop. Keep `ValueTuple`
+  scratch keys free of nullable items: tuple hashing boxes them. `ReachabilityAnalyzer.Compute`
+  maps ids to dense ints once (`ReachabilityGraph`: nodes first, in node order, then edge
+  endpoints that are not nodes) and builds its forward rows and FanIn counts by run-length over
+  that order; an edge list in any other order is sorted as a copy (`SortedByCollapseKey`), never
+  in place, so the facts do not depend on the caller's edge order. Every walk (entry points,
+  Tarjan, the budgeted bucket walk) runs on int arrays with per-walk stamps - never on id-keyed
+  hash sets or dictionaries. Entry-point walks run on the worker team and fold into the facts
+  in entry-point order. Their results, budget cut-offs included, must stay exactly the
+  string-keyed walks' (`ReferenceReachability` in the tests is that implementation;
+  `Compute_MatchesTheStringKeyedWalksOnRandomGraphsAndBudgets` drives it with tiny budgets):
+  each vertex is queued once, and attempt counters stand in for the repeats the old queue held
+  when deciding whether a walk was cut short.
+- Never reuse a per-group scratch `HashSet`/`List` across millions of groups without a cap:
+  `Clear()` is O(capacity), so one group with a thousand call sites taxes every later group
+  with that capacity (issue #70's second hotspot). Drop and re-grow scratch above ~64 entries.
+- The assembly IL call graph (`AssemblyCallGraphAnalyzer.Analyze`) decodes each assembly on the
+  worker team (`DedicatedStack.ForEachInOrder`, same worker knob as symbol analysis) into an
+  `AssemblyFragment`, and fragments merge in assembly order. The per-assembly body may touch only
+  its fragment and its `AssemblyScan` caches; everything shared (`AnalysisContext`: known methods
+  by assembly path, the token lookup) is read-only. A fragment node is the in-order replay of
+  that assembly's `AddNode` calls, and `MergeFragmentNode` folds it in with the same
+  first-value-wins/AND/append rules, so any new node field needs a merge rule that keeps that
+  equivalence. Call-site keys dedupe inside the assembly while it is analyzed and across
+  assemblies at the merge (`GraphAssembly.EdgeSiteIndex`, chunked keys, no giant reference
+  arrays). Resolve members through `AssemblyScan.Resolve` (memoized per token, so call sites
+  share one id string) and source locations through the per-assembly source map (binary search,
+  one path and file-name string per document) - never per instruction.
+- The methods and data-flow outputs are written by `ParallelJsonWriter`, byte-identical to
+  `JsonSerializer.Serialize(stream, value, options)`: the root object and its object-valued
+  properties are written from the serializer's contract, and every large `List<T>` is cut into
+  chunks that the worker team serializes (one serializer call per chunk) and that are appended
+  in list order. Anything the writer cannot reproduce exactly (custom converters, conditional
+  ignores, indented options) falls back to the serializer, so new result properties need no
+  writer change; `ParallelJsonWriter_IsByteIdenticalToTheSerializerForEveryWorkerCount` guards
+  the equivalence. Stream other large outputs too - never build a whole document as a string.
+- Framework providers must not walk every syntax tree for their node kinds: a dozen full walks
+  of the source were most of the framework phase on large trees. Read type, method and using
+  declarations through `FrameworkContext.Declarations<T>(tree)` (it skips statements and
+  expressions, where none of them occurs), invocations through
+  `ctx.InvocationsNamed(tree, mayMatch)` when the loop acts only on invocations whose
+  `ProviderHelpers.InvocationName` passes `mayMatch` (a tree without such a name is skipped;
+  the predicate must admit every name the loop acts on), and gate any other walk on the file
+  text (`TextContainsAny`). Never cache syntax nodes across trees: a node list pins the Roslyn
+  red trees the walks let the collector reclaim (2.4 GB on dotnet/runtime).
+- `PackageUrlResolver.Resolve` runs for every method, call, node and edge: keep it free of
+  per-call splits, concatenations, substrings, regexes and scans over every known package (it
+  probes the qualified name's dotted prefixes against the package tables through span lookups,
+  and skips prefixes longer than any registered name). Names match whole: no last-segment
+  aliases for packages, no truncating `Castle.Core` to `Castle` as if `.Core` were an
+  extension, and the longest matching name wins over a symbol's first segment. Enrichment resolves the lists on the
+  worker team, so `Resolve` must also stay read-only: no memo tables filled while resolving
+  (the per-location project memo is a concurrent cache of a pure function). Pass every record's
+  file as `location`: each project has its own package tables and a record resolves in its own
+  project first, so two projects on two versions of a package each keep theirs (issue #72).
+  Call-graph nodes are shared across projects and resolve tree-wide; edges resolve both
+  endpoints at their call site. Sources are read in path order so the tree-wide answer never
+  depends on the file system, and `VersionDiagnostics` belong in every report's `Diagnostics`.
 - Phase order in `BuildMethodsSlice` is a memory contract: framework analysis and the security
   analyzer run immediately after source analysis (they are the only compilation consumers),
   then the compilations are dropped before the assembly IL call graph, enrichment,

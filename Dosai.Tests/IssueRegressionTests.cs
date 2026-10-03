@@ -629,4 +629,515 @@ public static class Shouting
     }
 
     #endregion
+
+    #region Issue #65 - the assembly IL call graph on the worker team
+
+    [Fact]
+    public void AssemblyCallGraph_IsByteIdenticalForEveryWorkerCount()
+    {
+        // Assemblies decode on the worker team and merge in assembly order. Real assemblies with
+        // portable PDBs (delegates, async state machines, virtual dispatch); Dosai.dll sits in two
+        // directories, so call sites repeat across assemblies and nodes merge across fragments.
+        using var tempDirectory = new TemporaryDirectory();
+        foreach (var (directory, files) in new[] { ("a", new[] { "Dosai.dll", DosaiTestDataCSharpDLL, DosaiTestDataVBDLL }), ("b", new[] { "Dosai.dll" }) })
+        {
+            var target = Directory.CreateDirectory(Path.Combine(tempDirectory.Path, directory)).FullName;
+            foreach (var file in files)
+            {
+                File.Copy(file, Path.Combine(target, file));
+                File.Copy(Path.ChangeExtension(file, ".pdb"), Path.Combine(target, Path.ChangeExtension(file, ".pdb")));
+            }
+        }
+
+        var sequential = WithSymbolAnalysisWorkers(1, () => Depscan.Dosai.GetMethods(tempDirectory.Path));
+        var parallel = WithSymbolAnalysisWorkers(5, () => Depscan.Dosai.GetMethods(tempDirectory.Path));
+
+        Assert.Contains("\"EvidenceKind\":\"AssemblyIlVirtualCandidate\"", sequential, StringComparison.Ordinal);
+        Assert.Contains("\"EvidenceKind\":\"AssemblyIlDelegateTarget\"", sequential, StringComparison.Ordinal);
+        Assert.Contains("\"EvidenceKind\":\"AssemblyIlGeneratedState\"", sequential, StringComparison.Ordinal);
+        Assert.Equal(NormalizeGeneratedAt(sequential), NormalizeGeneratedAt(parallel));
+    }
+
+    [Fact]
+    public void PackageUrlResolver_ResolvesLikeTheLongestNameReference()
+    {
+        // Resolve runs for every method, call, node and edge, so it probes spans instead of
+        // splitting symbols or concatenating a prefix per known package. A plain string
+        // implementation of its rules over the resolver's own tables must agree on every input
+        // combination: an assembly or module name (only an assembly file extension dropped),
+        // then the longest package or packaged-assembly name the symbol, type or namespace
+        // equals or continues with a dot, then the ordered system-prefix table. Including the
+        // aliases the resolver no longer has: a package's last segment, a truncated display
+        // name, and a first namespace segment shadowing a longer package name.
+        using var tempDirectory = new TemporaryDirectory();
+        var packages = new[] { ("Serilog", "3.1.1"), ("Serilog.Sinks.Console", "5.0.1"), ("Newtonsoft.Json", "13.0.3"), ("Microsoft.Extensions.Logging", "8.0.0"), ("Microsoft.Extensions.Logging.Abstractions", "8.0.0"), ("Polly", "8.2.0") };
+        Directory.CreateDirectory(Path.Combine(tempDirectory.Path, "obj"));
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "obj", "project.assets.json"), JsonSerializer.Serialize(new Dictionary<string, object>
+        {
+            ["version"] = 3,
+            ["targets"] = new Dictionary<string, object>
+            {
+                ["net10.0"] = packages.ToDictionary(package => $"{package.Item1}/{package.Item2}", package => (object)new Dictionary<string, object>
+                {
+                    ["type"] = "package",
+                    ["runtime"] = new Dictionary<string, object> { [$"lib/net8.0/{package.Item1}.dll"] = new Dictionary<string, object>() }
+                })
+            },
+            ["libraries"] = packages.ToDictionary(package => $"{package.Item1}/{package.Item2}", package => (object)new Dictionary<string, object>
+            {
+                ["sha512"] = "",
+                ["type"] = "package",
+                ["path"] = $"{package.Item1.ToLowerInvariant()}/{package.Item2}"
+            })
+        }));
+        var resolver = PackageUrlResolver.Create(tempDirectory.Path);
+
+        var flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+        // No project file in this tree, so every record resolves against the tree-wide tables.
+        var tree = typeof(PackageUrlResolver).GetField("_tree", flags)!.GetValue(resolver)!;
+        var assemblyToPurl = (Dictionary<string, string>)tree.GetType().GetField("_assemblyToPurl", flags)!.GetValue(tree)!;
+        var packageToPurl = (Dictionary<string, string>)tree.GetType().GetField("_packageToPurl", flags)!.GetValue(tree)!;
+        var systemPrefixes = ((string Prefix, string PackageName)[])typeof(PackageUrlResolver).GetField("SystemPackagePrefixes", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.GetValue(null)!;
+        Assert.Contains("Serilog.Sinks.Console", packageToPurl.Keys);
+        Assert.DoesNotContain("Console", packageToPurl.Keys);
+
+        static string Normalize(string value) => System.Text.RegularExpressions.Regex.Replace(value.Replace("global::", string.Empty, StringComparison.Ordinal).Replace("Global.", string.Empty, StringComparison.Ordinal), "`[0-9]+", string.Empty);
+        static string Escape(string value) => Uri.EscapeDataString(value).Replace("%2E", ".", StringComparison.Ordinal).Replace("%2D", "-", StringComparison.Ordinal).Replace("%5F", "_", StringComparison.Ordinal);
+        static string? AssemblyName(string? candidate)
+        {
+            if (string.IsNullOrWhiteSpace(candidate)) return null;
+            var name = Path.GetFileName(candidate.Split(',')[0].Trim());
+            foreach (var extension in new[] { ".dll", ".exe", ".winmd" })
+            {
+                if (name.EndsWith(extension, StringComparison.OrdinalIgnoreCase)) name = name[..^extension.Length];
+            }
+
+            return string.IsNullOrWhiteSpace(name) ? null : name;
+        }
+
+        string? Reference(string? assembly, string? module, string? symbol, string? namespaceName, string? typeName)
+        {
+            foreach (var candidate in new[] { AssemblyName(assembly), AssemblyName(module) })
+            {
+                if (candidate is not null && (assemblyToPurl.TryGetValue(candidate, out var purl) || packageToPurl.TryGetValue(candidate, out purl))) return purl;
+            }
+
+            foreach (var name in new[] { symbol, typeName, namespaceName }.Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => Normalize(value!)))
+            {
+                var match = packageToPurl.Select(pair => (pair.Key, pair.Value, Rank: 0)).Concat(assemblyToPurl.Select(pair => (pair.Key, pair.Value, Rank: 1)))
+                    .Where(entry => name.Equals(entry.Key, StringComparison.OrdinalIgnoreCase) || name.StartsWith(entry.Key + ".", StringComparison.OrdinalIgnoreCase))
+                    .OrderByDescending(entry => entry.Key.Length).ThenBy(entry => entry.Rank)
+                    .Select(entry => entry.Value).FirstOrDefault();
+                if (match is not null) return match;
+            }
+
+            var qualifiedName = new[] { symbol, typeName, namespaceName }.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
+            if (string.IsNullOrWhiteSpace(qualifiedName)) return null;
+            qualifiedName = Normalize(qualifiedName);
+            foreach (var (prefix, packageName) in systemPrefixes)
+            {
+                if (qualifiedName.Equals(prefix, StringComparison.OrdinalIgnoreCase) || qualifiedName.StartsWith(prefix + ".", StringComparison.OrdinalIgnoreCase)) return $"pkg:nuget/{Escape(packageName)}";
+            }
+
+            return null;
+        }
+
+        string?[] assemblies = [null, "", " ", "Polly.dll", "Serilog.Sinks.Console, Version=5.0.1.0, Culture=neutral", " Unknown.Library , x", "System.Runtime.dll", "Newtonsoft.Json", "Microsoft.Extensions.Logging.Abstractions.DLL", "/lib/net8.0/Serilog.dll", "Console"];
+        string?[] symbols =
+        [
+            null, "", "Serilog.Sinks.Console.ConsoleSink.Emit(Serilog.Events.LogEvent):void", "serilog.SINKS.console.X", "Serilog.Log.Information(string):void",
+            "global::Newtonsoft.Json.Linq.JObject.Parse(string)", "Global.Newtonsoft.Json.JsonConvert`1.X", "Microsoft.Extensions.Logging.Abstractions.ILogger.Log()",
+            "Microsoft.Extensions.Logging.LoggerFactory..ctor()", "Microsoft.Extensions.LoggingX.Y", "..Leading.Dots.Name", "Trailing.", ".", " .x", "A. B",
+            "System.IO.FileStream.Read(byte[],int,int):int", "System.IO.Files.Enumerate()", "system.threading.tasks.Task.Run()", "System", "SystemX.Y",
+            "System.Security.Cryptography.X509Certificates.X509Store..ctor()", "Polly.Policy.Handle()", "My.App.Service.Run()",
+            // Generic arity markers: digits after a backtick go, a bare or trailing backtick stays.
+            "Newtonsoft.Json`12`3.Linq.JToken.Parse()", "Serilog`.Sinks.X", "Serilog.Sinks`", "Polly``1.Policy", "Polly`a1.Policy", "`1Serilog.Sinks.Console.X",
+            "System.Collections.Generic.List`1[[System.String]].Add()", "Serilog.Sinks.Console`10",
+            // Former aliases: last package segments and bare first segments.
+            "System.Console.WriteLine(string):void", "Console.Out", "Abstractions.Thing", "Json.Linq.JObject", "Sinks.Console", "Logging.ILogger",
+        ];
+        string?[] namespaces = [null, "Serilog.Sinks", "System.Text.Json", "My.App"];
+        string?[] typeNames = [null, "ConsoleSink", "Newtonsoft.Json.JsonConvert", "..x"];
+        var checkedCount = 0;
+        foreach (var assembly in assemblies)
+        foreach (var module in assemblies)
+        foreach (var symbol in symbols)
+        foreach (var namespaceName in namespaces)
+        foreach (var typeName in typeNames)
+        {
+            Assert.Equal(Reference(assembly, module, symbol, namespaceName, typeName), resolver.Resolve(assembly, module, symbol, namespaceName, typeName));
+            checkedCount++;
+        }
+
+        Assert.Equal(assemblies.Length * assemblies.Length * symbols.Length * namespaces.Length * typeNames.Length, checkedCount);
+    }
+
+    #endregion
+
+    #region Issue #70 - per-edge key strings in CollapseDuplicateCallSites
+
+    /// <summary>
+    ///     The old grouping key, kept verbatim as the reference the allocation-free comparison
+    ///     must reproduce: same groups, same order, including the separator's ordering trap for
+    ///     ids that contain characters below U+001F.
+    /// </summary>
+    private static string CollapseKeyReference(MethodCallEdge edge) =>
+        $"{edge.SourceId}\u001f{edge.TargetId}\u001f{edge.CallType}\u001f{edge.EvidenceKind}";
+
+    private static List<MethodCallEdge> CollapseReference(CallGraph callGraph)
+    {
+        var collapsed = new List<MethodCallEdge>();
+        foreach (var group in callGraph.Edges
+                     .GroupBy(CollapseKeyReference, StringComparer.Ordinal)
+                     .OrderBy(group => group.Key, StringComparer.Ordinal))
+        {
+            var edges = group.ToList();
+            var keeper = edges
+                .OrderBy(edge => edge.CallLocation?.FileName ?? string.Empty, StringComparer.Ordinal)
+                .ThenBy(edge => edge.CallLocation?.LineNumber ?? 0)
+                .ThenBy(edge => edge.CallLocation?.ColumnNumber ?? 0)
+                .First();
+            keeper.CallSiteCount = edges
+                .Select(edge => $"{edge.CallLocation?.FileName}:{edge.CallLocation?.LineNumber}:{edge.CallLocation?.ColumnNumber}")
+                .Distinct(StringComparer.Ordinal)
+                .Count();
+            keeper.Arguments = edges.SelectMany(edge => edge.Arguments ?? []).Distinct(StringComparer.Ordinal).ToList();
+            keeper.ArgumentExpressions = edges.SelectMany(edge => edge.ArgumentExpressions ?? []).Distinct(StringComparer.Ordinal).ToList();
+            keeper.Evidence = edges.SelectMany(edge => edge.Evidence)
+                .DistinctBy(evidence => (evidence.Kind, evidence.Source, evidence.Description, evidence.FileName, evidence.LineNumber, evidence.ColumnNumber))
+                .ToList();
+            collapsed.Add(keeper);
+        }
+
+        return collapsed;
+    }
+
+    private static void AssertSameCollapse(List<MethodCallEdge> expected, CallGraph actual)
+    {
+        Assert.Equal(expected.Count, actual.Edges.Count);
+        for (var i = 0; i < expected.Count; i++)
+        {
+            var want = expected[i];
+            var got = actual.Edges[i];
+            // The same input edge must survive as the keeper: same original id, location, fields.
+            Assert.Equal(want.Id, got.Id);
+            Assert.Equal(want.SourceId, got.SourceId);
+            Assert.Equal(want.TargetId, got.TargetId);
+            Assert.Equal(want.CallType, got.CallType);
+            Assert.Equal(want.EvidenceKind, got.EvidenceKind);
+            Assert.Equal(want.CallSiteCount, got.CallSiteCount);
+            Assert.Equal(want.CallLocation?.FileName, got.CallLocation?.FileName);
+            Assert.Equal(want.CallLocation?.LineNumber, got.CallLocation?.LineNumber);
+            Assert.Equal(want.CallLocation?.ColumnNumber, got.CallLocation?.ColumnNumber);
+            Assert.Equal(want.Arguments, got.Arguments);
+            Assert.Equal(want.ArgumentExpressions, got.ArgumentExpressions);
+            Assert.Equal(want.Evidence.Count, got.Evidence.Count);
+            for (var e = 0; e < want.Evidence.Count; e++)
+            {
+                Assert.Same(want.Evidence[e], got.Evidence[e]);
+            }
+        }
+    }
+
+    private static MethodCallEdge CloneEdge(MethodCallEdge edge) => new()
+    {
+        Id = edge.Id,
+        SourceId = edge.SourceId,
+        TargetId = edge.TargetId,
+        CallType = edge.CallType,
+        EvidenceKind = edge.EvidenceKind,
+        CallLocation = edge.CallLocation,
+        Arguments = edge.Arguments,
+        ArgumentExpressions = edge.ArgumentExpressions,
+        Evidence = [.. edge.Evidence],
+    };
+
+    [Fact]
+    public void CollapseDuplicateCallSites_MatchesTheConcatenatedKeyReference()
+    {
+        MethodCallEdge Edge(string src, string tgt, CallType type, AnalysisEvidenceKind kind, string file, int line, int col, int id,
+            string[]? arguments = null, string[]? expressions = null, (AnalysisEvidenceKind Kind, string Description, string Confidence, int Line)[]? evidence = null)
+        => new()
+        {
+            Id = $"e{id}",
+            SourceId = src,
+            TargetId = tgt,
+            CallType = type,
+            EvidenceKind = kind,
+            CallLocation = new CallLocation { FileName = file, LineNumber = line, ColumnNumber = col },
+            Arguments = arguments is null ? null : [.. arguments],
+            ArgumentExpressions = expressions is null ? null : [.. expressions],
+            Evidence = evidence?.Select(e => new AnalysisEvidence
+            {
+                Kind = e.Kind,
+                Source = "test",
+                Description = e.Description,
+                Confidence = e.Confidence,
+                FileName = file,
+                LineNumber = e.Line,
+            }).ToList() ?? [],
+        };
+
+        var graph = new CallGraph
+        {
+            Edges =
+            [
+                // Same pair, three sites, two distinct: count 2, keeper minimal by (file, line, col).
+                Edge("Ns.A.Run():void", "Ns.B.Save(string):void", CallType.MethodCall, AnalysisEvidenceKind.SourceRoslynDirect, "/src/B.cs", 10, 3, 1, ["b", "a"], ["x"]),
+                Edge("Ns.A.Run():void", "Ns.B.Save(string):void", CallType.MethodCall, AnalysisEvidenceKind.SourceRoslynDirect, "/src/A.cs", 90, 9, 2, ["a", "c"], ["y", "x"]),
+                Edge("Ns.A.Run():void", "Ns.B.Save(string):void", CallType.MethodCall, AnalysisEvidenceKind.SourceRoslynDirect, "/src/A.cs", 90, 9, 3),
+                // Same pair, other call type: a separate fact that stays a separate edge.
+                Edge("Ns.A.Run():void", "Ns.B.Save(string):void", CallType.ConstructorCall, AnalysisEvidenceKind.SourceRoslynDirect, "/src/A.cs", 1, 1, 4, arguments: ["z"]),
+                // Tie on (file, line, col): the first in encounter order is the keeper.
+                Edge("Ns.C.X():void", "Ns.D.Y():void", CallType.MethodCall, AnalysisEvidenceKind.AssemblyIlDirect, "/src/T.cs", 5, 5, 5, ["first"]),
+                Edge("Ns.C.X():void", "Ns.D.Y():void", CallType.MethodCall, AnalysisEvidenceKind.AssemblyIlDirect, "/src/T.cs", 5, 5, 6, ["second"]),
+                // Duplicates inside one edge's own lists are deduped even in a singleton group,
+                // and the lists are empty (never null) after collapsing.
+                Edge("Ns.E.One():void", "Ns.F.Two():void", CallType.PropertyGet, AnalysisEvidenceKind.SourceUnresolved, "/src/U.cs", 2, 8, 7,
+                    ["dup", "dup"], ["e1", "e2", "e1"],
+                    [(AnalysisEvidenceKind.SourceUnresolved, "unresolved call", "Low", 1), (AnalysisEvidenceKind.SourceUnresolved, "unresolved call", "High", 1)]),
+                // Evidence merging: the same tuple from two edges keeps the first occurrence.
+                Edge("Ns.G.M():void", "Ns.H.N():void", CallType.MethodCall, AnalysisEvidenceKind.SourceRoslynVirtualCandidate, "/src/V.cs", 3, 1, 8,
+                    evidence: [(AnalysisEvidenceKind.SourceRoslynVirtualCandidate, "candidate", "Medium", 3)]),
+                Edge("Ns.G.M():void", "Ns.H.N():void", CallType.MethodCall, AnalysisEvidenceKind.SourceRoslynVirtualCandidate, "/src/W.cs", 4, 1, 9,
+                    evidence: [(AnalysisEvidenceKind.SourceRoslynVirtualCandidate, "candidate", "High", 3), (AnalysisEvidenceKind.SourceRoslynVirtualCandidate, "other", "Low", 4)]),
+                // Null argument lists and a null call location keep the old defensive shape.
+                Edge("Ns.I.J():void", "Ns.J.K():void", CallType.MethodCall, AnalysisEvidenceKind.ExternalSummary, "/src/Z.cs", 7, 2, 10),
+                Edge("Ns.I.J():void", "Ns.J.K():void", CallType.MethodCall, AnalysisEvidenceKind.ExternalSummary, "/src/Z.cs", 7, 2, 11),
+            ]
+        };
+        graph.Edges[10].CallLocation = null!;
+
+        var expected = CollapseReference(new CallGraph { Edges = [.. graph.Edges.Select(CloneEdge)] });
+
+        ReachabilityAnalyzer.CollapseDuplicateCallSites(graph);
+
+        AssertSameCollapse(expected, graph);
+    }
+
+    [Fact]
+    public void CompareCollapseEdges_ReproducesConcatenatedKeyOrderOnControlCharIds()
+    {
+        // Ids that make field-by-field comparison diverge from the concatenated key: strict
+        // prefixes continuing with CR/LF/tab (below U+001F, they sort before the separator and
+        // so before the whole shorter id) and with ordinary characters (above it). Rendered ids
+        // really do contain CR/LF/tab; none contains U+001F itself, and it is exactly that
+        // absence that makes the field-wise comparison reproduce the concatenation.
+        var ids = new[]
+        {
+            "", "A", "A\r", "A\n", "A\t", "A0", "AA", "B", "B\nC", "B0",
+            "Ns.Space<T>.Run(\u0000int):void", "Ns.Space<T>.Run(\u0000int):void\r", "x", "xy",
+            "xy\n", "xy\u001ez", "Ns.X.M(string):void", "Ns.X.M(string\u000b):void",
+        };
+        var edges = new List<MethodCallEdge>();
+        var n = 0;
+        foreach (var source in ids)
+        {
+            foreach (var target in ids)
+            {
+                foreach (var callType in new[] { CallType.Unknown, CallType.MethodCall, CallType.ConstructorCall })
+                {
+                    edges.Add(new MethodCallEdge
+                    {
+                        Id = $"e{++n}",
+                        SourceId = source,
+                        TargetId = target,
+                        CallType = callType,
+                        EvidenceKind = n % 2 == 0 ? AnalysisEvidenceKind.SourceRoslynDirect : AnalysisEvidenceKind.SourceUnresolved,
+                        CallLocation = new CallLocation(),
+                    });
+                }
+            }
+        }
+
+        // Shuffle deterministically so the sort under test actually reorders.
+        var rng = new Random(70);
+        var shuffled = edges.OrderBy(_ => rng.Next()).ToList();
+
+        var expected = CollapseReference(new CallGraph { Edges = [.. shuffled.Select(CloneEdge)] });
+        var actual = new CallGraph { Edges = [.. shuffled.Select(CloneEdge)] };
+        ReachabilityAnalyzer.CollapseDuplicateCallSites(actual);
+
+        // Group keys in output order: identical sequences mean identical grouping and ordering.
+        Assert.Equal(
+            expected.Select(CollapseKeyReference),
+            actual.Edges.Select(CollapseKeyReference));
+    }
+
+    [Fact]
+    public void CompareCollapseEdges_SortsPrefixContinuationsBelowSeparatorBeforeThePrefix()
+    {
+        MethodCallEdge Edge(string source) => new()
+        {
+            SourceId = source,
+            TargetId = "T",
+            CallType = CallType.MethodCall,
+            EvidenceKind = AnalysisEvidenceKind.SourceRoslynDirect,
+            CallLocation = new CallLocation(),
+        };
+
+        // "A\r..." continues below the separator: the concatenated key sorts it BEFORE "A",
+        // where a plain field-wise comparison would put it after.
+        var edges = new List<MethodCallEdge> { Edge("A"), Edge("A\rX") };
+        GraphAssembly.StableSortInPlace(edges, GraphAssembly.CompareCollapseEdges);
+        Assert.Equal("A\rX", edges[0].SourceId);
+        Assert.Equal("A", edges[1].SourceId);
+
+        // Ordinary continuation ("AA" continues with 'A' > U+001F): the prefix sorts first,
+        // as both comparisons agree.
+        edges = [Edge("A"), Edge("AA")];
+        GraphAssembly.StableSortInPlace(edges, GraphAssembly.CompareCollapseEdges);
+        Assert.Equal("A", edges[0].SourceId);
+        Assert.Equal("AA", edges[1].SourceId);
+    }
+
+    [Fact]
+    public void CollapseDuplicateCallSites_CountsAMissingCallLocationApartFromAnEmptyOne()
+    {
+        // The old key rendered a missing location as "::" and an empty one as ":0:0", so the
+        // two are distinct call sites; only the null and empty file name render alike.
+        MethodCallEdge Edge(int id, CallLocation? location) => new()
+        {
+            Id = $"e{id}",
+            SourceId = "Ns.A.Run():void",
+            TargetId = "Ns.B.Save():void",
+            CallType = CallType.MethodCall,
+            EvidenceKind = AnalysisEvidenceKind.SourceRoslynDirect,
+            CallLocation = location!,
+        };
+
+        var graph = new CallGraph
+        {
+            Edges = [Edge(1, null), Edge(2, new CallLocation()), Edge(3, new CallLocation { FileName = string.Empty })]
+        };
+        var expected = CollapseReference(new CallGraph { Edges = [.. graph.Edges.Select(CloneEdge)] });
+
+        ReachabilityAnalyzer.CollapseDuplicateCallSites(graph);
+
+        AssertSameCollapse(expected, graph);
+        Assert.Equal(2, graph.Edges[0].CallSiteCount);
+    }
+
+    [Fact]
+    public void CompareCollapseEdges_StaysATotalOrderWhenIdsHoldTheSeparator()
+    {
+        // The concatenated key was ambiguous for ids holding U+001F itself: ("A\u001fB", "C")
+        // and ("A", "B\u001fC") built the same string and collapsed into one edge. Field-wise
+        // grouping keeps them apart, and the order is the field-wise order of each field
+        // followed by the separator - a consistent total order over every id.
+        var ids = new[] { "", "\u001f", "A", "A\u001f", "A\u001fB", "A\u001f\u001f", "A\r", "AB", "B", "B\u001fC", "C" };
+        MethodCallEdge Edge(string source, string target, CallType callType) => new()
+        {
+            SourceId = source,
+            TargetId = target,
+            CallType = callType,
+            EvidenceKind = AnalysisEvidenceKind.SourceRoslynDirect,
+            CallLocation = new CallLocation(),
+        };
+
+        static int Terminated(MethodCallEdge x, MethodCallEdge y)
+        {
+            var c = string.CompareOrdinal(x.SourceId + "\u001f", y.SourceId + "\u001f");
+            if (c != 0) return c;
+            c = string.CompareOrdinal(x.TargetId + "\u001f", y.TargetId + "\u001f");
+            if (c != 0) return c;
+            c = string.CompareOrdinal(x.CallType + "\u001f", y.CallType + "\u001f");
+            return c != 0 ? c : string.CompareOrdinal(x.EvidenceKind.ToString(), y.EvidenceKind.ToString());
+        }
+
+        var edges = (from source in ids
+                     from target in ids
+                     from callType in new[] { CallType.MethodCall, CallType.ConstructorCall }
+                     select Edge(source, target, callType)).ToList();
+        foreach (var x in edges)
+        {
+            foreach (var y in edges)
+            {
+                Assert.Equal(Math.Sign(Terminated(x, y)), Math.Sign(GraphAssembly.CompareCollapseEdges(x, y)));
+            }
+        }
+
+        var graph = new CallGraph { Edges = [Edge("A\u001fB", "C", CallType.MethodCall), Edge("A", "B\u001fC", CallType.MethodCall)] };
+        ReachabilityAnalyzer.CollapseDuplicateCallSites(graph);
+        Assert.Equal(["A", "A\u001fB"], graph.Edges.Select(edge => edge.SourceId));
+    }
+
+    private static MethodNode ReachabilityNode(string id, MethodIdentity? identity = null, params AnalysisEvidenceKind[] evidence) => new()
+    {
+        Id = id,
+        Name = id,
+        ClassName = "C",
+        Namespace = "Ns",
+        FileName = "/src/C.cs",
+        Identity = identity,
+        Evidence = [.. evidence.Select(kind => new AnalysisEvidence { Kind = kind })],
+    };
+
+    [Fact]
+    public void Compute_ToleratesANodeIdentityWithoutAnEvidenceList()
+    {
+        var graph = new CallGraph { Nodes = [ReachabilityNode("Ns.C.M():void", new MethodIdentity { Evidence = null! })] };
+
+        var (nodes, _, _) = ReachabilityAnalyzer.Compute(graph, [], []);
+
+        Assert.False(Assert.Single(nodes).KeepAlive);
+    }
+
+    [Fact]
+    public void Compute_IsIndependentOfTheCallersEdgeOrderAndLeavesItAlone()
+    {
+        // A random graph with duplicate pairs under several call types, self-loops, cycles and
+        // keep-alive evidence, collapsed the way the pipeline does it. Compute over the sorted
+        // list and over a shuffled copy must agree on every fact, and the shuffled list must
+        // come back in the order it went in: the run-length builds sort a copy, never the
+        // caller's list.
+        var rng = new Random(7070);
+        var ids = Enumerable.Range(0, 120).Select(i => $"Ns.T{i % 7}.M{i}():void").ToArray();
+        var kinds = new[] { AnalysisEvidenceKind.SourceRoslynDirect, AnalysisEvidenceKind.FrameworkModel, AnalysisEvidenceKind.ReflectionHeuristic };
+        var nodes = ids.Select((id, i) => i % 9 == 0
+            ? ReachabilityNode(id, new MethodIdentity { Evidence = [AnalysisEvidenceKind.ReflectionHeuristic] }, AnalysisEvidenceKind.FrameworkModel)
+            : ReachabilityNode(id)).ToList();
+        var edges = new List<MethodCallEdge>();
+        for (var i = 0; i < 220; i++)
+        {
+            var source = ids[rng.Next(ids.Length)];
+            var target = rng.Next(12) == 0 ? source : ids[rng.Next(ids.Length)];
+            edges.Add(new MethodCallEdge
+            {
+                Id = $"e{i}",
+                SourceId = source,
+                TargetId = target,
+                CallType = rng.Next(3) == 0 ? CallType.ConstructorCall : CallType.MethodCall,
+                EvidenceKind = kinds[rng.Next(kinds.Length)],
+                CallLocation = new CallLocation { FileName = "/src/C.cs", LineNumber = rng.Next(1, 50), ColumnNumber = 1 },
+                Evidence = rng.Next(4) == 0 ? [new AnalysisEvidence { Kind = kinds[rng.Next(kinds.Length)] }] : [],
+            });
+        }
+
+        var sortedGraph = new CallGraph { Nodes = nodes, Edges = edges };
+        ReachabilityAnalyzer.CollapseDuplicateCallSites(sortedGraph);
+        var shuffled = sortedGraph.Edges.OrderBy(_ => rng.Next()).ToList();
+        var shuffledOrder = shuffled.Select(edge => edge.Id).ToList();
+        var shuffledGraph = new CallGraph { Nodes = nodes, Edges = shuffled };
+        EntryPoint Entry(int index) => new() { Id = $"ep{index}", Kind = "Test", MethodId = ids[index] };
+
+        var fromSorted = ReachabilityAnalyzer.Compute(sortedGraph, [Entry(1), Entry(5)], []);
+        var fromShuffled = ReachabilityAnalyzer.Compute(shuffledGraph, [Entry(1), Entry(5)], []);
+
+        Assert.Equal(shuffledOrder, shuffledGraph.Edges.Select(edge => edge.Id));
+        Assert.Equal(JsonSerializer.Serialize(fromSorted.Nodes), JsonSerializer.Serialize(fromShuffled.Nodes));
+        Assert.Equal(JsonSerializer.Serialize(fromSorted.Clusters), JsonSerializer.Serialize(fromShuffled.Clusters));
+        Assert.Contains(fromSorted.Clusters, cluster => cluster.Id.StartsWith("scc-self-", StringComparison.Ordinal));
+        Assert.Contains(fromSorted.Nodes, fact => fact.KeepAlive);
+
+        // Fan-in/out against the hash-set definition the run-length counts replaced.
+        var nonSelf = sortedGraph.Edges.Where(edge => edge.SourceId != edge.TargetId).ToList();
+        foreach (var fact in fromSorted.Nodes)
+        {
+            Assert.Equal(nonSelf.Where(edge => edge.TargetId == fact.NodeId).Select(edge => edge.SourceId).Distinct().Count(), fact.FanIn);
+            Assert.Equal(nonSelf.Where(edge => edge.SourceId == fact.NodeId).Select(edge => edge.TargetId).Distinct().Count(), fact.FanOut);
+        }
+    }
+
+    #endregion
 }

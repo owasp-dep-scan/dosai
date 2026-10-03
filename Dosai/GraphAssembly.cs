@@ -104,6 +104,85 @@ internal static class GraphAssembly
         private static int Hash(string? s) => s?.GetHashCode(StringComparison.Ordinal) ?? 0;
     }
 
+    /// <summary>
+    ///     A set of call-site keys for graphs with millions of sites. Keys live in fixed-size
+    ///     chunks below the large-object threshold and are never moved; the index is an
+    ///     open-addressing table of (hash, position) pairs. Growing it copies plain longs, where a
+    ///     <c>HashSet&lt;EdgeSiteKey&gt;</c> copies its whole entry array (five references per key,
+    ///     each copy through the write barrier) on the large-object heap at every doubling - on a
+    ///     10 M-site assembly graph those resizes and the full collections they triggered were a
+    ///     third of the phase. The caller supplies the key's hash so it is computed once, where the
+    ///     key is built.
+    /// </summary>
+    internal sealed class EdgeSiteIndex
+    {
+        private const int ChunkBits = 10;
+        private const int ChunkSize = 1 << ChunkBits;
+        private readonly List<EdgeSiteKey[]> _chunks = [];
+        private long[] _slots = new long[64];
+        private int _count;
+
+        public int Count => _count;
+
+        /// <summary>Adds <paramref name="key" /> (whose hash is <paramref name="hash" />); false when it is already present.</summary>
+        public bool Add(in EdgeSiteKey key, int hash)
+        {
+            if ((_count + 1) * 2L > _slots.Length)
+            {
+                Grow();
+            }
+
+            var mask = _slots.Length - 1;
+            for (var slot = hash & mask; ; slot = (slot + 1) & mask)
+            {
+                var entry = _slots[slot];
+                if (entry == 0)
+                {
+                    if ((_count & (ChunkSize - 1)) == 0)
+                    {
+                        _chunks.Add(new EdgeSiteKey[ChunkSize]);
+                    }
+
+                    _chunks[_count >> ChunkBits][_count & (ChunkSize - 1)] = key;
+                    _slots[slot] = ((long)hash << 32) | (uint)++_count;
+                    return true;
+                }
+
+                if ((int)(entry >> 32) == hash)
+                {
+                    var position = (int)(uint)entry - 1;
+                    if (_chunks[position >> ChunkBits][position & (ChunkSize - 1)].Equals(key))
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        private void Grow()
+        {
+            var slots = new long[_slots.Length * 2];
+            var mask = slots.Length - 1;
+            foreach (var entry in _slots)
+            {
+                if (entry == 0)
+                {
+                    continue;
+                }
+
+                var slot = (int)(entry >> 32) & mask;
+                while (slots[slot] != 0)
+                {
+                    slot = (slot + 1) & mask;
+                }
+
+                slots[slot] = entry;
+            }
+
+            _slots = slots;
+        }
+    }
+
     internal sealed class EdgeSiteKeyComparer : IEqualityComparer<EdgeSiteKey>
     {
         public static readonly EdgeSiteKeyComparer Instance = new();
@@ -138,27 +217,151 @@ internal static class GraphAssembly
     ///     stability the previous LINQ chain provided) while skipping its key arrays and
     ///     per-element delegates.
     /// </summary>
-    internal static void SortEdgesInPlace(List<MethodCallEdge> edges)
+    internal static void SortEdgesInPlace(List<MethodCallEdge> edges) => StableSortInPlace(edges, CompareEdges);
+
+    /// <summary>
+    ///     Stable in-place sort under an arbitrary edge comparison, on the worker team
+    ///     (<see cref="ParallelSort" />): equivalent to the LINQ <c>OrderBy</c> chain it replaces,
+    ///     without per-element key materialization, and the same order for every worker count.
+    /// </summary>
+    internal static void StableSortInPlace(List<MethodCallEdge> edges, Comparison<MethodCallEdge> compare)
     {
-        var order = new int[edges.Count];
-        for (var i = 0; i < order.Length; i++)
+        var items = edges.ToArray();
+        ParallelSort.StableSort(items, compare);
+        items.AsSpan().CopyTo(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(edges));
+    }
+
+    /// <summary>The separator the collapsed-edge grouping used to build as one string per edge.</summary>
+    private const char CollapseSeparator = '\u001f';
+
+    /// <summary>
+    ///     Group identity of a collapsed edge: who called whom, with which call type and evidence
+    ///     kind. A struct so grouping and ordering work without materializing the concatenated
+    ///     key string the collapse step used to allocate per edge (issue #70: ~447 bytes x 4.1 M
+    ///     edges on a large tree, ~7 GB on a 15.4 M-edge one). A missing id reads as empty, as it
+    ///     rendered into that key, so equality, hashing and ordering agree on it.
+    /// </summary>
+    internal readonly struct CollapseKey : IEquatable<CollapseKey>
+    {
+        internal readonly string _sourceId;
+        internal readonly string _targetId;
+        internal readonly CallType _callType;
+        internal readonly AnalysisEvidenceKind _evidenceKind;
+
+        public CollapseKey(string sourceId, string targetId, CallType callType, AnalysisEvidenceKind evidenceKind)
         {
-            order[i] = i;
+            _sourceId = sourceId;
+            _targetId = targetId;
+            _callType = callType;
+            _evidenceKind = evidenceKind;
         }
 
-        Array.Sort(order, (i, j) =>
+        public static CollapseKey From(MethodCallEdge edge) =>
+            new(edge.SourceId ?? string.Empty, edge.TargetId ?? string.Empty, edge.CallType, edge.EvidenceKind);
+
+        public bool Equals(CollapseKey other) =>
+            _callType == other._callType
+            && _evidenceKind == other._evidenceKind
+            && string.Equals(_sourceId, other._sourceId, StringComparison.Ordinal)
+            && string.Equals(_targetId, other._targetId, StringComparison.Ordinal);
+
+        public override bool Equals([System.Diagnostics.CodeAnalysis.NotNullWhen(true)] object? obj) => obj is CollapseKey other && Equals(other);
+
+        public override int GetHashCode() => HashCode.Combine(
+            _sourceId.GetHashCode(StringComparison.Ordinal),
+            _targetId.GetHashCode(StringComparison.Ordinal),
+            _callType,
+            _evidenceKind);
+    }
+
+    /// <summary>
+    ///     Orders edges the way the concatenated key <c>source\u001ftarget\u001fcallType\u001fevidenceKind</c>
+    ///     ordered them, without building that key: the collapse step used to allocate and retain
+    ///     one ~447-byte key per edge (issue #70) - 1.7 GB on a tree with 4.1 M merged edges, and
+    ///     the allocation that pushed a 15.4 M-edge scan out of memory. Field-by-field ordinal
+    ///     comparison is *almost* this order; where one field is a strict prefix of the other, the
+    ///     concatenated key continues with the separator, and end-of-string sorts below the
+    ///     CR/LF/tab characters rendered ids can contain while U+001F sorts above them.
+    ///     <see cref="CompareSeparated" /> encodes exactly that.
+    /// </summary>
+    internal static int CompareCollapseEdges(MethodCallEdge x, MethodCallEdge y) => CompareCollapseKeys(CollapseKey.From(x), CollapseKey.From(y));
+
+    /// <summary><see cref="CompareCollapseEdges" /> over the group-identity struct.</summary>
+    internal static int CompareCollapseKeys(CollapseKey x, CollapseKey y)
+    {
+        var c = CompareSeparated(x._sourceId, y._sourceId);
+        if (c != 0) return c;
+        c = CompareSeparated(x._targetId, y._targetId);
+        if (c != 0) return c;
+        c = CompareSeparated(CallTypeName(x._callType), CallTypeName(y._callType));
+        if (c != 0) return c;
+        return string.CompareOrdinal(EvidenceKindName(x._evidenceKind), EvidenceKindName(y._evidenceKind));
+    }
+
+    /// <summary>
+    ///     Compares <c>a + separator</c> against <c>b + separator</c> ordinally without
+    ///     concatenating. A difference before either string ends decides directly; only a strict
+    ///     prefix reaches the separator position, and there the sign flips for continuations
+    ///     below U+001F (a CR/LF/tab continuation sorts before the separator, and after the whole
+    ///     shorter field). A field that itself contains U+001F falls back to the exact
+    ///     character-wise form, where such fields made the old concatenated keys ambiguous
+    ///     (different field tuples could collide into one key and be wrongly collapsed together).
+    /// </summary>
+    private static int CompareSeparated(string a, string b)
+    {
+        var c = string.CompareOrdinal(a, b);
+        if (c == 0)
         {
-            var c = CompareEdges(edges[i], edges[j]);
-            return c != 0 ? c : i.CompareTo(j);
-        });
-        var sorted = new MethodCallEdge[edges.Count];
-        for (var i = 0; i < order.Length; i++)
-        {
-            sorted[i] = edges[order[i]];
+            return 0;
         }
 
-        edges.Clear();
-        edges.AddRange(sorted);
+        string prefix, longer;
+        if (c < 0)
+        {
+            if (a.Length >= b.Length || !b.StartsWith(a, StringComparison.Ordinal))
+            {
+                return c;
+            }
+
+            prefix = a;
+            longer = b;
+        }
+        else
+        {
+            if (b.Length >= a.Length || !a.StartsWith(b, StringComparison.Ordinal))
+            {
+                return c;
+            }
+
+            prefix = b;
+            longer = a;
+        }
+
+        var next = longer[prefix.Length];
+        if (next == CollapseSeparator)
+        {
+            return CompareSeparatedExact(a, b);
+        }
+
+        var shorterFirst = next > CollapseSeparator ? -1 : 1;
+        return ReferenceEquals(prefix, a) ? shorterFirst : -shorterFirst;
+    }
+
+    private static int CompareSeparatedExact(string a, string b)
+    {
+        var la = a.Length + 1;
+        var lb = b.Length + 1;
+        for (var i = 0; i < Math.Min(la, lb); i++)
+        {
+            var ca = i < a.Length ? a[i] : CollapseSeparator;
+            var cb = i < b.Length ? b[i] : CollapseSeparator;
+            if (ca != cb)
+            {
+                return ca < cb ? -1 : 1;
+            }
+        }
+
+        return la.CompareTo(lb);
     }
 
     /// <summary>Sorts nodes by id. Ids are unique per graph (they are dictionary keys), so stability is moot.</summary>

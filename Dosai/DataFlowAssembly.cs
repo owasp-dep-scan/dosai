@@ -2017,7 +2017,7 @@ public static partial class DataFlowAnalyzer
 
             var path = Directory.Exists(basePath) ? Path.GetRelativePath(basePath, location.FilePath) : Path.GetFileName(location.FilePath);
             var purl = matchedPatterns.Select(pattern => pattern.Purl).FirstOrDefault(purl => !string.IsNullOrWhiteSpace(purl)) ??
-                       _purlResolver.Resolve(method.AssemblyName, Path.GetFileName(assemblyPath), symbol, method.Namespace, typeName);
+                       _purlResolver.Resolve(method.AssemblyName, Path.GetFileName(assemblyPath), symbol, method.Namespace, typeName, assemblyPath);
             var node = new DataFlowNode
             {
                 Id = $"dfn{++_nodeCounter}",

@@ -29,7 +29,7 @@ packages.config / csproj references      (fallbacks)
         ├── CallGraph.Nodes[].Purl
         ├── CallGraph.Edges[].TargetPurl
         ├── DataFlow.Slices[].Purls[]
-        └── ResolutionFacts + diagnostics (which source, which version)
+        └── Diagnostics: versions split across projects, sources disagreeing in one
 ```
 
 Resolution is a best-effort ladder from exact assembly name down to namespace prefix matching, with a versionless fallback for common `System.*` APIs such as `pkg:nuget/System.Diagnostics.Process`. Enrichment never fails the analysis; a missing PURL is simply a missing field.
@@ -119,7 +119,7 @@ Reading the network slices tells you whether untrusted input flows toward the af
 
 ## Correlation, not verdict
 
-PURL enrichment has real limits worth repeating in any report. Packages can share namespace prefixes and Dosai picks the longest prefix of the first discovered package; when two sources disagree on a version, the conflict is recorded as a diagnostic and `ResolutionFacts` names the source that won. Binding redirects and assembly unification are not modeled. Dependencies that appear in none of the readable sources may not resolve. A PURL on a node means correlation, and the verdict still belongs to the reviewer. This is the same division of labor as the rest of the tool: reproducible evidence in, human judgment out.
+PURL enrichment has real limits worth repeating in any report. Packages can share namespace prefixes and Dosai picks the longest prefix of the first source read. Each record resolves in its own project, so two projects on two versions of a package each report theirs, and `Diagnostics` says where versions split and where one project's sources disagree. Binding redirects and assembly unification are not modeled. Dependencies that appear in none of the readable sources may not resolve. A PURL on a node means correlation, and the verdict still belongs to the reviewer. This is the same division of labor as the rest of the tool: reproducible evidence in, human judgment out.
 
 ## Try next
 

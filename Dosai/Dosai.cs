@@ -610,6 +610,10 @@ public static class Dosai
         // sit at Low confidence: unbuilt trees degrade semantic binding, and that fact should
         // reach consumers instead of hiding behind silently missing call edges.
         sliceDiagnostics.AddRange(NuGetRestoreCache.GetDiagnostics(path));
+        // Packages restored at different versions by different projects, and sources of one
+        // project that disagree on a version: every record's purl follows its own project, and
+        // the report says where versions split (issue #72).
+        sliceDiagnostics.AddRange(purlResolver.VersionDiagnostics);
         sliceDiagnostics.AddRange(sourceDiagnostics);
         sliceDiagnostics.AddRange(assemblyDiagnostics);
         var unresolvedCallCount = methodCalls.Count(call => call.EvidenceKind == AnalysisEvidenceKind.SourceUnresolved);
@@ -880,7 +884,7 @@ public static class Dosai
     {
         using var phase = DebugLog.Phase("methods.serialization");
         using var stream = new FileStream(outputFile, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize: 65536);
-        JsonSerializer.Serialize(stream, slice, Options);
+        ParallelJsonWriter.Serialize(stream, slice, Options);
         if (DebugLog.Enabled)
         {
             DebugLog.Log($"methods output: wrote {DebugLog.FormatBytes(stream.Length)} to '{outputFile}'");
@@ -970,6 +974,13 @@ public static class Dosai
         return relevantExtensions.Contains(extension);
     }
 
+    /// <summary>
+    ///     Package URLs for every method, call, member, node and edge. Each item's purl depends only
+    ///     on that item and the resolver's read-only tables, so the lists are resolved in chunks on
+    ///     the worker team; millions of independent lookups were one thread's work. Every item that
+    ///     has a file resolves in that file's project, so two projects restoring two versions of a
+    ///     package each keep their own (issue #72).
+    /// </summary>
     private static void EnrichPackageUrls(
         PackageUrlResolver resolver,
         List<Method> methods,
@@ -983,75 +994,63 @@ public static class Dosai
         List<AssemblyInformation> assemblyInformation,
         List<SourceAssemblyMapping> sourceAssemblyMappings)
     {
-        foreach (var method in methods)
+        ForEachItem(methods, method => method.Purl = resolver.Resolve(method.Assembly, method.Module, method.SourceSignature ?? method.AssemblySignature, method.Namespace, method.ClassName, method.Path));
+        ForEachItem(dependencies, dependency => dependency.Purl = resolver.Resolve(dependency.Assembly, dependency.Module, dependency.Name, dependency.Namespace, null, dependency.Path));
+        ForEachItem(methodCalls, call =>
         {
-            method.Purl = resolver.Resolve(method.Assembly, method.Module, method.SourceSignature ?? method.AssemblySignature, method.Namespace, method.ClassName);
-        }
-
-        foreach (var dependency in dependencies)
-        {
-            dependency.Purl = resolver.Resolve(dependency.Assembly, dependency.Module, dependency.Name, dependency.Namespace, null);
-        }
-
-        foreach (var call in methodCalls)
-        {
-            call.Purl = resolver.Resolve(call.Assembly, call.Module, call.TargetId ?? call.CalledMethod, call.Namespace, call.ClassName);
+            call.Purl = resolver.Resolve(call.Assembly, call.Module, call.TargetId ?? call.CalledMethod, call.Namespace, call.ClassName, call.Path);
             // Unresolved call sites carry no assembly identity, so the first Resolve pass sees
             // only the bare call name. The namespace recovered from syntax (a using directive
             // or a qualified receiver) is the one fact that still maps to a package.
             if (call.Purl is null && call.EvidenceKind == AnalysisEvidenceKind.SourceUnresolved && !string.IsNullOrWhiteSpace(call.Namespace))
             {
-                call.Purl = resolver.Resolve(namespaceName: call.Namespace);
+                call.Purl = resolver.Resolve(namespaceName: call.Namespace, location: call.Path);
             }
-        }
+        });
+        ForEachItem(properties, property => property.Purl = resolver.Resolve(property.Assembly, property.Module, property.TypeFullName, property.Namespace, property.ClassName, property.Path));
+        ForEachItem(fields, field => field.Purl = resolver.Resolve(field.Assembly, field.Module, field.TypeFullName, field.Namespace, field.ClassName, field.Path));
+        ForEachItem(events, @event => @event.Purl = resolver.Resolve(@event.Assembly, @event.Module, @event.TypeFullName, @event.Namespace, @event.ClassName, @event.Path));
+        ForEachItem(constructors, constructor => constructor.Purl = resolver.Resolve(constructor.Assembly, constructor.Module, constructor.Name, constructor.Namespace, constructor.ClassName, constructor.Path));
+        ForEachItem(assemblyInformation, assembly => assembly.Purl = resolver.Resolve(assembly.Name, assembly.Name, assembly.Name, assembly.Name, assembly.Name));
+        // A node is shared by every project that calls it, so it carries the tree-wide answer.
+        ForEachItem(callGraph.Nodes, node => node.Purl = NodePurl(node, location: null));
 
-        foreach (var property in properties)
-        {
-            property.Purl = resolver.Resolve(property.Assembly, property.Module, property.TypeFullName, property.Namespace, property.ClassName);
-        }
-
-        foreach (var field in fields)
-        {
-            field.Purl = resolver.Resolve(field.Assembly, field.Module, field.TypeFullName, field.Namespace, field.ClassName);
-        }
-
-        foreach (var @event in events)
-        {
-            @event.Purl = resolver.Resolve(@event.Assembly, @event.Module, @event.TypeFullName, @event.Namespace, @event.ClassName);
-        }
-
-        foreach (var constructor in constructors)
-        {
-            constructor.Purl = resolver.Resolve(constructor.Assembly, constructor.Module, constructor.Name, constructor.Namespace, constructor.ClassName);
-        }
-
-        foreach (var assembly in assemblyInformation)
-        {
-            assembly.Purl = resolver.Resolve(assembly.Name, assembly.Name, assembly.Name, assembly.Name, assembly.Name);
-        }
-
-        var nodePurls = new Dictionary<string, string?>(StringComparer.Ordinal);
+        // In node order, so a repeated id keeps its last node, as before.
+        var nodesById = new Dictionary<string, MethodNode>(callGraph.Nodes.Count, StringComparer.Ordinal);
         foreach (var node in callGraph.Nodes)
         {
-            node.Purl = resolver.Resolve(node.Assembly, node.Module, node.Id, node.Namespace, node.ClassName);
+            nodesById[node.Id] = node;
+        }
+
+        // An edge sits at one call site, so its endpoints resolve in that site's project: the
+        // version the call binds to there, where the shared node can only carry one.
+        ForEachItem(callGraph.Edges, edge =>
+        {
+            var scoped = resolver.IsProjectScoped(edge.Path);
+            var source = nodesById.GetValueOrDefault(edge.SourceId);
+            var target = nodesById.GetValueOrDefault(edge.TargetId);
+            edge.SourcePurl = source is null ? null : scoped ? NodePurl(source, edge.Path) : source.Purl;
+            edge.TargetPurl = (target is null ? null : scoped ? NodePurl(target, edge.Path) : target.Purl) ?? resolver.Resolve(null, null, edge.TargetId, null, edge.TargetName, edge.Path);
+        });
+        ForEachItem(sourceAssemblyMappings, mapping => mapping.Purl = resolver.Resolve(mapping.AssemblyName, mapping.ModuleName, mapping.AssemblyId ?? mapping.SourceId, mapping.Namespace, mapping.ClassName, mapping.SourcePath));
+
+        string? NodePurl(MethodNode node, string? location) =>
+            resolver.Resolve(node.Assembly, node.Module, node.Id, node.Namespace, node.ClassName, location)
             // Unresolved-target nodes carry no assembly identity; the namespace recovered from
             // syntax is the one fact that still maps them to a package (same rule as calls).
-            if (node.Purl is null && node.Id.StartsWith("Unresolved:", StringComparison.Ordinal) && !string.IsNullOrWhiteSpace(node.Namespace))
+            ?? (node.Id.StartsWith("Unresolved:", StringComparison.Ordinal) && !string.IsNullOrWhiteSpace(node.Namespace) ? resolver.Resolve(namespaceName: node.Namespace, location: location) : null);
+
+        static void ForEachItem<T>(List<T> items, Action<T> enrich)
+        {
+            const int chunk = 4096;
+            DedicatedStack.ForEach("Dosai package urls", Math.Max(1, MaxSymbolAnalysisWorkers), (items.Count + chunk - 1) / chunk, index =>
             {
-                node.Purl = resolver.Resolve(namespaceName: node.Namespace);
-            }
-            nodePurls[node.Id] = node.Purl;
-        }
-
-        foreach (var edge in callGraph.Edges)
-        {
-            edge.SourcePurl = nodePurls.GetValueOrDefault(edge.SourceId);
-            edge.TargetPurl = nodePurls.GetValueOrDefault(edge.TargetId) ?? resolver.Resolve(null, null, edge.TargetId, null, edge.TargetName);
-        }
-
-        foreach (var mapping in sourceAssemblyMappings)
-        {
-            mapping.Purl = resolver.Resolve(mapping.AssemblyName, mapping.ModuleName, mapping.AssemblyId ?? mapping.SourceId, mapping.Namespace, mapping.ClassName);
+                var end = Math.Min(items.Count, (index + 1) * chunk);
+                for (var item = index * chunk; item < end; item++)
+                {
+                    enrich(items[item]);
+                }
+            });
         }
     }
 
@@ -1632,10 +1631,18 @@ public static class Dosai
         var assemblyMethods = new List<Method>();
         var processedAssemblyIdentities = new HashSet<string>();
         var sharedFrameworkDirs = GetSharedFrameworkProbingPaths();
-        foreach (var assemblyFilePath in assembliesToInspect)
+        // The first open of a file is where a cold machine waits: real-time antivirus scans a
+        // file on its first access (Windows Defender: ~60 ms per DLL), which left this phase at a
+        // fifth of one core on a 1662-assembly tree (issue #65). The managed-assembly check is
+        // that first open and a pure function of the file, so it runs on the worker team up
+        // front; the scans overlap, and the loop below reads warm files in its usual order.
+        var isManaged = new bool[assembliesToInspect.Count];
+        DedicatedStack.ForEach("Dosai assembly probe", Math.Max(1, MaxSymbolAnalysisWorkers), isManaged.Length, index => isManaged[index] = IsManagedAssembly(assembliesToInspect[index]));
+        for (var assemblyIndex = 0; assemblyIndex < assembliesToInspect.Count; assemblyIndex++)
         {
+            var assemblyFilePath = assembliesToInspect[assemblyIndex];
             var fileName = Path.GetFileName(assemblyFilePath);
-            if (!IsManagedAssembly(assemblyFilePath))
+            if (!isManaged[assemblyIndex])
             {
                 Console.WriteLine($"Info: Skipping native library or non-assembly file: {assemblyFilePath}");
                 continue;

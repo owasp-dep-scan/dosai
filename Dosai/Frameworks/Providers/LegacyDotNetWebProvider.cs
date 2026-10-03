@@ -26,9 +26,8 @@ public sealed class LegacyDotNetWebProvider : IFrameworkProvider
             foreach (var tree in ctx.CSharpTrees)
             {
                 var model = ctx.CSharp.GetSemanticModel(tree);
-                var root = tree.GetCompilationUnitRoot();
                 var rawUrls = ctx.RawUrlsFor(tree);
-                foreach (var typeDeclaration in root.DescendantNodes().OfType<TypeDeclarationSyntax>())
+                foreach (var typeDeclaration in FrameworkContext.Declarations<TypeDeclarationSyntax>(tree))
                 {
                     AnalyzeType(ctx, results, typeDeclaration, model, tree.FilePath, rawUrls);
                 }
