@@ -14,13 +14,38 @@ public enum CallGraphExportFormat
 
 public static class CallGraphExporter
 {
-    public static string Export(CallGraph callGraph, CallGraphExportFormat format, IReadOnlyDictionary<string, NodeReachability>? reachability = null) => format switch
+    /// <summary>Longest indent the formats use, sliced per write so no per-line padding strings are allocated.</summary>
+    private const string Indent = "          ";
+
+    public static string Export(CallGraph callGraph, CallGraphExportFormat format, IReadOnlyDictionary<string, NodeReachability>? reachability = null)
     {
-        CallGraphExportFormat.Mermaid => ToMermaid(callGraph),
-        CallGraphExportFormat.GraphMl => ToGraphMl(callGraph, reachability),
-        CallGraphExportFormat.Gexf => ToGexf(callGraph, reachability),
-        _ => throw new ArgumentOutOfRangeException(nameof(format), format, "Unsupported call graph export format")
-    };
+        using var writer = new StringWriter();
+        Export(writer, callGraph, format, reachability);
+        return writer.ToString();
+    }
+
+    /// <summary>
+    ///     Writes the export straight to <paramref name="writer" />. The string overload above
+    ///     wraps this one; callers with a file write through a <see cref="StreamWriter" /> so the
+    ///     document is never materialised as one string (issue #75).
+    /// </summary>
+    public static void Export(TextWriter writer, CallGraph callGraph, CallGraphExportFormat format, IReadOnlyDictionary<string, NodeReachability>? reachability = null)
+    {
+        switch (format)
+        {
+            case CallGraphExportFormat.Mermaid:
+                WriteMermaid(writer, callGraph);
+                break;
+            case CallGraphExportFormat.GraphMl:
+                WriteGraphMl(writer, callGraph, reachability);
+                break;
+            case CallGraphExportFormat.Gexf:
+                WriteGexf(writer, callGraph, reachability);
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(format), format, "Unsupported call graph export format");
+        }
+    }
 
     public static bool TryParseFormat(string? value, out CallGraphExportFormat format)
     {
@@ -53,10 +78,9 @@ public static class CallGraphExporter
         return true;
     }
 
-    private static string ToMermaid(CallGraph callGraph)
+    private static void WriteMermaid(TextWriter writer, CallGraph callGraph)
     {
-        var builder = new StringBuilder();
-        builder.AppendLine("flowchart LR");
+        writer.WriteLine("flowchart LR");
 
         var mermaidIds = callGraph.Nodes
             .OrderBy(n => n.Id, StringComparer.Ordinal)
@@ -66,11 +90,11 @@ public static class CallGraphExporter
 
         foreach (var node in callGraph.Nodes.OrderBy(n => n.Id, StringComparer.Ordinal))
         {
-            builder.Append("    ")
-                .Append(mermaidIds[node.Id])
-                .Append("[\"")
-                .Append(EscapeMermaidLabel(node.Label ?? node.Name))
-                .AppendLine("\"]");
+            writer.Write("    ");
+            writer.Write(mermaidIds[node.Id]);
+            writer.Write("[\"");
+            writer.Write(EscapeMermaidLabel(node.Label ?? node.Name));
+            writer.WriteLine("\"]");
         }
 
         foreach (var edge in callGraph.Edges.OrderBy(e => e.SourceId, StringComparer.Ordinal).ThenBy(e => e.TargetId, StringComparer.Ordinal).ThenBy(e => e.CallLocation?.FileName, StringComparer.Ordinal).ThenBy(e => e.CallLocation?.LineNumber).ThenBy(e => e.CallLocation?.ColumnNumber))
@@ -80,167 +104,189 @@ public static class CallGraphExporter
                 continue;
             }
 
-            builder.Append("    ")
-                .Append(sourceId)
-                .Append(" -->|\"")
-                .Append(EscapeMermaidLabel(edge.CallType.ToString()))
-                .Append("\"| ")
-                .AppendLine(targetId);
+            writer.Write("    ");
+            writer.Write(sourceId);
+            writer.Write(" -->|\"");
+            writer.Write(EscapeMermaidLabel(edge.CallType.ToString()));
+            writer.Write("\"| ");
+            writer.WriteLine(targetId);
         }
-
-        return builder.ToString();
     }
 
-    private static string ToGraphMl(CallGraph callGraph, IReadOnlyDictionary<string, NodeReachability>? reachability)
+    private static void WriteGraphMl(TextWriter writer, CallGraph callGraph, IReadOnlyDictionary<string, NodeReachability>? reachability)
     {
-        var builder = new StringBuilder();
-        builder.AppendLine("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
-        builder.AppendLine("<graphml xmlns=\"http://graphml.graphdrawing.org/xmlns\">");
-        builder.AppendLine("  <key id=\"label\" for=\"node\" attr.name=\"label\" attr.type=\"string\" />");
-        builder.AppendLine("  <key id=\"kind\" for=\"node\" attr.name=\"kind\" attr.type=\"string\" />");
-        builder.AppendLine("  <key id=\"file\" for=\"node\" attr.name=\"file\" attr.type=\"string\" />");
-        builder.AppendLine("  <key id=\"purl\" for=\"node\" attr.name=\"purl\" attr.type=\"string\" />");
-        builder.AppendLine("  <key id=\"external\" for=\"node\" attr.name=\"external\" attr.type=\"boolean\" />");
-        builder.AppendLine("  <key id=\"reachableEntryPoints\" for=\"node\" attr.name=\"reachableEntryPoints\" attr.type=\"string\" />");
-        builder.AppendLine("  <key id=\"minDepthFromEntryPoint\" for=\"node\" attr.name=\"minDepthFromEntryPoint\" attr.type=\"int\" />");
-        builder.AppendLine("  <key id=\"fanIn\" for=\"node\" attr.name=\"fanIn\" attr.type=\"int\" />");
-        builder.AppendLine("  <key id=\"fanOut\" for=\"node\" attr.name=\"fanOut\" attr.type=\"int\" />");
-        builder.AppendLine("  <key id=\"inRecursiveCycle\" for=\"node\" attr.name=\"inRecursiveCycle\" attr.type=\"boolean\" />");
-        builder.AppendLine("  <key id=\"genericInstantiation\" for=\"node\" attr.name=\"genericInstantiation\" attr.type=\"string\" />");
-        builder.AppendLine("  <key id=\"callType\" for=\"edge\" attr.name=\"callType\" attr.type=\"string\" />");
-        builder.AppendLine("  <key id=\"sourcePurl\" for=\"edge\" attr.name=\"sourcePurl\" attr.type=\"string\" />");
-        builder.AppendLine("  <key id=\"targetPurl\" for=\"edge\" attr.name=\"targetPurl\" attr.type=\"string\" />");
-        builder.AppendLine("  <key id=\"location\" for=\"edge\" attr.name=\"location\" attr.type=\"string\" />");
-        builder.AppendLine("  <key id=\"callSiteCount\" for=\"edge\" attr.name=\"callSiteCount\" attr.type=\"int\" />");
-        builder.AppendLine("  <key id=\"dispatchConfidence\" for=\"edge\" attr.name=\"dispatchConfidence\" attr.type=\"string\" />");
-        builder.AppendLine("  <graph id=\"callgraph\" edgedefault=\"directed\">");
+        writer.WriteLine("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
+        writer.WriteLine("<graphml xmlns=\"http://graphml.graphdrawing.org/xmlns\">");
+        writer.WriteLine("  <key id=\"label\" for=\"node\" attr.name=\"label\" attr.type=\"string\" />");
+        writer.WriteLine("  <key id=\"kind\" for=\"node\" attr.name=\"kind\" attr.type=\"string\" />");
+        writer.WriteLine("  <key id=\"file\" for=\"node\" attr.name=\"file\" attr.type=\"string\" />");
+        writer.WriteLine("  <key id=\"purl\" for=\"node\" attr.name=\"purl\" attr.type=\"string\" />");
+        writer.WriteLine("  <key id=\"external\" for=\"node\" attr.name=\"external\" attr.type=\"boolean\" />");
+        writer.WriteLine("  <key id=\"reachableEntryPoints\" for=\"node\" attr.name=\"reachableEntryPoints\" attr.type=\"string\" />");
+        writer.WriteLine("  <key id=\"minDepthFromEntryPoint\" for=\"node\" attr.name=\"minDepthFromEntryPoint\" attr.type=\"int\" />");
+        writer.WriteLine("  <key id=\"fanIn\" for=\"node\" attr.name=\"fanIn\" attr.type=\"int\" />");
+        writer.WriteLine("  <key id=\"fanOut\" for=\"node\" attr.name=\"fanOut\" attr.type=\"int\" />");
+        writer.WriteLine("  <key id=\"inRecursiveCycle\" for=\"node\" attr.name=\"inRecursiveCycle\" attr.type=\"boolean\" />");
+        writer.WriteLine("  <key id=\"genericInstantiation\" for=\"node\" attr.name=\"genericInstantiation\" attr.type=\"string\" />");
+        writer.WriteLine("  <key id=\"callType\" for=\"edge\" attr.name=\"callType\" attr.type=\"string\" />");
+        writer.WriteLine("  <key id=\"sourcePurl\" for=\"edge\" attr.name=\"sourcePurl\" attr.type=\"string\" />");
+        writer.WriteLine("  <key id=\"targetPurl\" for=\"edge\" attr.name=\"targetPurl\" attr.type=\"string\" />");
+        writer.WriteLine("  <key id=\"location\" for=\"edge\" attr.name=\"location\" attr.type=\"string\" />");
+        writer.WriteLine("  <key id=\"callSiteCount\" for=\"edge\" attr.name=\"callSiteCount\" attr.type=\"int\" />");
+        writer.WriteLine("  <key id=\"dispatchConfidence\" for=\"edge\" attr.name=\"dispatchConfidence\" attr.type=\"string\" />");
+        writer.WriteLine("  <graph id=\"callgraph\" edgedefault=\"directed\">");
 
         foreach (var node in callGraph.Nodes.OrderBy(n => n.Id, StringComparer.Ordinal))
         {
-            builder.Append("    <node id=\"").Append(Xml(node.Id)).AppendLine("\">");
-            AppendGraphMlData(builder, "label", node.Label ?? node.Name, 6);
-            AppendGraphMlData(builder, "kind", node.Kind, 6);
-            AppendGraphMlData(builder, "file", node.FileName, 6);
-            AppendGraphMlData(builder, "purl", node.Purl, 6);
-            AppendGraphMlData(builder, "external", node.IsExternal.ToString().ToLowerInvariant(), 6);
+            writer.Write("    <node id=\"");
+            writer.Write(Xml(node.Id));
+            writer.WriteLine("\">");
+            WriteGraphMlData(writer, "label", node.Label ?? node.Name, 6);
+            WriteGraphMlData(writer, "kind", node.Kind, 6);
+            WriteGraphMlData(writer, "file", node.FileName, 6);
+            WriteGraphMlData(writer, "purl", node.Purl, 6);
+            WriteGraphMlData(writer, "external", node.IsExternal.ToString().ToLowerInvariant(), 6);
             if (reachability is not null && reachability.TryGetValue(node.Id, out var facts))
             {
-                AppendGraphMlData(builder, "reachableEntryPoints", string.Join(",", facts.ReachableEntryPoints), 6);
+                WriteGraphMlData(writer, "reachableEntryPoints", string.Join(",", facts.ReachableEntryPoints), 6);
                 if (facts.DepthFromEntryPoint is { } depth)
                 {
-                    AppendGraphMlData(builder, "minDepthFromEntryPoint", depth.ToString(CultureInfo.InvariantCulture), 6);
+                    WriteGraphMlData(writer, "minDepthFromEntryPoint", depth.ToString(CultureInfo.InvariantCulture), 6);
                 }
 
-                AppendGraphMlData(builder, "fanIn", facts.FanIn.ToString(CultureInfo.InvariantCulture), 6);
-                AppendGraphMlData(builder, "fanOut", facts.FanOut.ToString(CultureInfo.InvariantCulture), 6);
-                AppendGraphMlData(builder, "inRecursiveCycle", facts.InRecursiveCycle.ToString().ToLowerInvariant(), 6);
+                WriteGraphMlData(writer, "fanIn", facts.FanIn.ToString(CultureInfo.InvariantCulture), 6);
+                WriteGraphMlData(writer, "fanOut", facts.FanOut.ToString(CultureInfo.InvariantCulture), 6);
+                WriteGraphMlData(writer, "inRecursiveCycle", facts.InRecursiveCycle.ToString().ToLowerInvariant(), 6);
             }
 
-            AppendGraphMlData(builder, "genericInstantiation", node.GenericInstantiation, 6);
-            builder.AppendLine("    </node>");
+            WriteGraphMlData(writer, "genericInstantiation", node.GenericInstantiation, 6);
+            writer.WriteLine("    </node>");
         }
 
         var edgeIndex = 0;
         foreach (var edge in callGraph.Edges.OrderBy(e => e.SourceId, StringComparer.Ordinal).ThenBy(e => e.TargetId, StringComparer.Ordinal).ThenBy(e => e.CallLocation?.FileName, StringComparer.Ordinal).ThenBy(e => e.CallLocation?.LineNumber).ThenBy(e => e.CallLocation?.ColumnNumber))
         {
-            builder.Append("    <edge id=\"e").Append(++edgeIndex).Append("\" source=\"").Append(Xml(edge.SourceId)).Append("\" target=\"").Append(Xml(edge.TargetId)).AppendLine("\">");
-            AppendGraphMlData(builder, "callType", edge.CallType.ToString(), 6);
-            AppendGraphMlData(builder, "sourcePurl", edge.SourcePurl, 6);
-            AppendGraphMlData(builder, "targetPurl", edge.TargetPurl, 6);
-            AppendGraphMlData(builder, "location", FormatLocation(edge.CallLocation), 6);
-            AppendGraphMlData(builder, "callSiteCount", edge.CallSiteCount.ToString(CultureInfo.InvariantCulture), 6);
-            AppendGraphMlData(builder, "dispatchConfidence", edge.DispatchConfidence, 6);
-            builder.AppendLine("    </edge>");
+            writer.Write("    <edge id=\"e");
+            writer.Write(++edgeIndex);
+            writer.Write("\" source=\"");
+            writer.Write(Xml(edge.SourceId));
+            writer.Write("\" target=\"");
+            writer.Write(Xml(edge.TargetId));
+            writer.WriteLine("\">");
+            WriteGraphMlData(writer, "callType", edge.CallType.ToString(), 6);
+            WriteGraphMlData(writer, "sourcePurl", edge.SourcePurl, 6);
+            WriteGraphMlData(writer, "targetPurl", edge.TargetPurl, 6);
+            WriteGraphMlData(writer, "location", FormatLocation(edge.CallLocation), 6);
+            WriteGraphMlData(writer, "callSiteCount", edge.CallSiteCount.ToString(CultureInfo.InvariantCulture), 6);
+            WriteGraphMlData(writer, "dispatchConfidence", edge.DispatchConfidence, 6);
+            writer.WriteLine("    </edge>");
         }
 
-        builder.AppendLine("  </graph>");
-        builder.AppendLine("</graphml>");
-        return builder.ToString();
+        writer.WriteLine("  </graph>");
+        writer.WriteLine("</graphml>");
     }
 
-    private static string ToGexf(CallGraph callGraph, IReadOnlyDictionary<string, NodeReachability>? reachability)
+    private static void WriteGexf(TextWriter writer, CallGraph callGraph, IReadOnlyDictionary<string, NodeReachability>? reachability)
     {
-        var builder = new StringBuilder();
-        builder.AppendLine("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
-        builder.AppendLine("<gexf xmlns=\"http://www.gexf.net/1.3\" version=\"1.3\">");
-        builder.AppendLine("  <graph mode=\"static\" defaultedgetype=\"directed\">");
-        builder.AppendLine("    <attributes class=\"node\">");
-        builder.AppendLine("      <attribute id=\"kind\" title=\"kind\" type=\"string\" />");
-        builder.AppendLine("      <attribute id=\"file\" title=\"file\" type=\"string\" />");
-        builder.AppendLine("      <attribute id=\"purl\" title=\"purl\" type=\"string\" />");
-        builder.AppendLine("      <attribute id=\"external\" title=\"external\" type=\"boolean\" />");
-        builder.AppendLine("      <attribute id=\"reachableEntryPoints\" title=\"reachableEntryPoints\" type=\"string\" />");
-        builder.AppendLine("      <attribute id=\"minDepthFromEntryPoint\" title=\"minDepthFromEntryPoint\" type=\"int\" />");
-        builder.AppendLine("      <attribute id=\"fanIn\" title=\"fanIn\" type=\"int\" />");
-        builder.AppendLine("      <attribute id=\"fanOut\" title=\"fanOut\" type=\"int\" />");
-        builder.AppendLine("      <attribute id=\"inRecursiveCycle\" title=\"inRecursiveCycle\" type=\"boolean\" />");
-        builder.AppendLine("    </attributes>");
-        builder.AppendLine("    <attributes class=\"edge\">");
-        builder.AppendLine("      <attribute id=\"callType\" title=\"callType\" type=\"string\" />");
-        builder.AppendLine("      <attribute id=\"sourcePurl\" title=\"sourcePurl\" type=\"string\" />");
-        builder.AppendLine("      <attribute id=\"targetPurl\" title=\"targetPurl\" type=\"string\" />");
-        builder.AppendLine("      <attribute id=\"location\" title=\"location\" type=\"string\" />");
-        builder.AppendLine("      <attribute id=\"callSiteCount\" title=\"callSiteCount\" type=\"int\" />");
-        builder.AppendLine("      <attribute id=\"dispatchConfidence\" title=\"dispatchConfidence\" type=\"string\" />");
-        builder.AppendLine("    </attributes>");
-        builder.AppendLine("    <nodes>");
+        writer.WriteLine("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
+        writer.WriteLine("<gexf xmlns=\"http://www.gexf.net/1.3\" version=\"1.3\">");
+        writer.WriteLine("  <graph mode=\"static\" defaultedgetype=\"directed\">");
+        writer.WriteLine("    <attributes class=\"node\">");
+        writer.WriteLine("      <attribute id=\"kind\" title=\"kind\" type=\"string\" />");
+        writer.WriteLine("      <attribute id=\"file\" title=\"file\" type=\"string\" />");
+        writer.WriteLine("      <attribute id=\"purl\" title=\"purl\" type=\"string\" />");
+        writer.WriteLine("      <attribute id=\"external\" title=\"external\" type=\"boolean\" />");
+        writer.WriteLine("      <attribute id=\"reachableEntryPoints\" title=\"reachableEntryPoints\" type=\"string\" />");
+        writer.WriteLine("      <attribute id=\"minDepthFromEntryPoint\" title=\"minDepthFromEntryPoint\" type=\"int\" />");
+        writer.WriteLine("      <attribute id=\"fanIn\" title=\"fanIn\" type=\"int\" />");
+        writer.WriteLine("      <attribute id=\"fanOut\" title=\"fanOut\" type=\"int\" />");
+        writer.WriteLine("      <attribute id=\"inRecursiveCycle\" title=\"inRecursiveCycle\" type=\"boolean\" />");
+        writer.WriteLine("    </attributes>");
+        writer.WriteLine("    <attributes class=\"edge\">");
+        writer.WriteLine("      <attribute id=\"callType\" title=\"callType\" type=\"string\" />");
+        writer.WriteLine("      <attribute id=\"sourcePurl\" title=\"sourcePurl\" type=\"string\" />");
+        writer.WriteLine("      <attribute id=\"targetPurl\" title=\"targetPurl\" type=\"string\" />");
+        writer.WriteLine("      <attribute id=\"location\" title=\"location\" type=\"string\" />");
+        writer.WriteLine("      <attribute id=\"callSiteCount\" title=\"callSiteCount\" type=\"int\" />");
+        writer.WriteLine("      <attribute id=\"dispatchConfidence\" title=\"dispatchConfidence\" type=\"string\" />");
+        writer.WriteLine("    </attributes>");
+        writer.WriteLine("    <nodes>");
 
         foreach (var node in callGraph.Nodes.OrderBy(n => n.Id, StringComparer.Ordinal))
         {
-            builder.Append("      <node id=\"").Append(Xml(node.Id)).Append("\" label=\"").Append(Xml(node.Label ?? node.Name)).AppendLine("\">");
-            builder.AppendLine("        <attvalues>");
-            AppendGexfValue(builder, "kind", node.Kind, 10);
-            AppendGexfValue(builder, "file", node.FileName, 10);
-            AppendGexfValue(builder, "purl", node.Purl, 10);
-            AppendGexfValue(builder, "external", node.IsExternal.ToString().ToLowerInvariant(), 10);
+            writer.Write("      <node id=\"");
+            writer.Write(Xml(node.Id));
+            writer.Write("\" label=\"");
+            writer.Write(Xml(node.Label ?? node.Name));
+            writer.WriteLine("\">");
+            writer.WriteLine("        <attvalues>");
+            WriteGexfValue(writer, "kind", node.Kind, 10);
+            WriteGexfValue(writer, "file", node.FileName, 10);
+            WriteGexfValue(writer, "purl", node.Purl, 10);
+            WriteGexfValue(writer, "external", node.IsExternal.ToString().ToLowerInvariant(), 10);
             if (reachability is not null && reachability.TryGetValue(node.Id, out var facts))
             {
-                AppendGexfValue(builder, "reachableEntryPoints", string.Join(",", facts.ReachableEntryPoints), 10);
+                WriteGexfValue(writer, "reachableEntryPoints", string.Join(",", facts.ReachableEntryPoints), 10);
                 if (facts.DepthFromEntryPoint is { } depth)
                 {
-                    AppendGexfValue(builder, "minDepthFromEntryPoint", depth.ToString(CultureInfo.InvariantCulture), 10);
+                    WriteGexfValue(writer, "minDepthFromEntryPoint", depth.ToString(CultureInfo.InvariantCulture), 10);
                 }
 
-                AppendGexfValue(builder, "fanIn", facts.FanIn.ToString(CultureInfo.InvariantCulture), 10);
-                AppendGexfValue(builder, "fanOut", facts.FanOut.ToString(CultureInfo.InvariantCulture), 10);
-                AppendGexfValue(builder, "inRecursiveCycle", facts.InRecursiveCycle.ToString().ToLowerInvariant(), 10);
+                WriteGexfValue(writer, "fanIn", facts.FanIn.ToString(CultureInfo.InvariantCulture), 10);
+                WriteGexfValue(writer, "fanOut", facts.FanOut.ToString(CultureInfo.InvariantCulture), 10);
+                WriteGexfValue(writer, "inRecursiveCycle", facts.InRecursiveCycle.ToString().ToLowerInvariant(), 10);
             }
 
-            builder.AppendLine("        </attvalues>");
-            builder.AppendLine("      </node>");
+            writer.WriteLine("        </attvalues>");
+            writer.WriteLine("      </node>");
         }
 
-        builder.AppendLine("    </nodes>");
-        builder.AppendLine("    <edges>");
+        writer.WriteLine("    </nodes>");
+        writer.WriteLine("    <edges>");
         var edgeIndex = 0;
         foreach (var edge in callGraph.Edges.OrderBy(e => e.SourceId, StringComparer.Ordinal).ThenBy(e => e.TargetId, StringComparer.Ordinal).ThenBy(e => e.CallLocation?.FileName, StringComparer.Ordinal).ThenBy(e => e.CallLocation?.LineNumber).ThenBy(e => e.CallLocation?.ColumnNumber))
         {
-            builder.Append("      <edge id=\"e").Append(++edgeIndex).Append("\" source=\"").Append(Xml(edge.SourceId)).Append("\" target=\"").Append(Xml(edge.TargetId)).AppendLine("\">");
-            builder.AppendLine("        <attvalues>");
-            AppendGexfValue(builder, "callType", edge.CallType.ToString(), 10);
-            AppendGexfValue(builder, "sourcePurl", edge.SourcePurl, 10);
-            AppendGexfValue(builder, "targetPurl", edge.TargetPurl, 10);
-            AppendGexfValue(builder, "location", FormatLocation(edge.CallLocation), 10);
-            AppendGexfValue(builder, "callSiteCount", edge.CallSiteCount.ToString(CultureInfo.InvariantCulture), 10);
-            AppendGexfValue(builder, "dispatchConfidence", edge.DispatchConfidence, 10);
-            builder.AppendLine("        </attvalues>");
-            builder.AppendLine("      </edge>");
+            writer.Write("      <edge id=\"e");
+            writer.Write(++edgeIndex);
+            writer.Write("\" source=\"");
+            writer.Write(Xml(edge.SourceId));
+            writer.Write("\" target=\"");
+            writer.Write(Xml(edge.TargetId));
+            writer.WriteLine("\">");
+            writer.WriteLine("        <attvalues>");
+            WriteGexfValue(writer, "callType", edge.CallType.ToString(), 10);
+            WriteGexfValue(writer, "sourcePurl", edge.SourcePurl, 10);
+            WriteGexfValue(writer, "targetPurl", edge.TargetPurl, 10);
+            WriteGexfValue(writer, "location", FormatLocation(edge.CallLocation), 10);
+            WriteGexfValue(writer, "callSiteCount", edge.CallSiteCount.ToString(CultureInfo.InvariantCulture), 10);
+            WriteGexfValue(writer, "dispatchConfidence", edge.DispatchConfidence, 10);
+            writer.WriteLine("        </attvalues>");
+            writer.WriteLine("      </edge>");
         }
 
-        builder.AppendLine("    </edges>");
-        builder.AppendLine("  </graph>");
-        builder.AppendLine("</gexf>");
-        return builder.ToString();
+        writer.WriteLine("    </edges>");
+        writer.WriteLine("  </graph>");
+        writer.WriteLine("</gexf>");
     }
 
-    private static void AppendGraphMlData(StringBuilder builder, string key, string? value, int indent)
+    private static void WriteGraphMlData(TextWriter writer, string key, string? value, int indent)
     {
-        builder.Append(' ', indent).Append("<data key=\"").Append(Xml(key)).Append("\">").Append(Xml(value ?? string.Empty)).AppendLine("</data>");
+        writer.Write(Indent[..indent]);
+        writer.Write("<data key=\"");
+        writer.Write(Xml(key));
+        writer.Write("\">");
+        writer.Write(Xml(value ?? string.Empty));
+        writer.WriteLine("</data>");
     }
 
-    private static void AppendGexfValue(StringBuilder builder, string key, string? value, int indent)
+    private static void WriteGexfValue(TextWriter writer, string key, string? value, int indent)
     {
-        builder.Append(' ', indent).Append("<attvalue for=\"").Append(Xml(key)).Append("\" value=\"").Append(Xml(value ?? string.Empty)).AppendLine("\" />");
+        writer.Write(Indent[..indent]);
+        writer.Write("<attvalue for=\"");
+        writer.Write(Xml(key));
+        writer.Write("\" value=\"");
+        writer.Write(Xml(value ?? string.Empty));
+        writer.WriteLine("\" />");
     }
 
     private static string FormatLocation(CallLocation? location) => location is null
@@ -253,6 +299,5 @@ public static class CallGraphExporter
         .Replace("\r", " ", StringComparison.Ordinal)
         .Replace("\n", " ", StringComparison.Ordinal);
 
-    private static string Xml(string value) => SecurityElement.Escape(value) ?? string.Empty;
+    private static string Xml(string value) => SecurityElement.Escape(value ?? string.Empty) ?? string.Empty;
 }
-

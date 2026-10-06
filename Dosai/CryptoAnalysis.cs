@@ -19,6 +19,22 @@ public enum CryptoOutputFormat
     CycloneDx
 }
 
+/// <summary>
+///     How much of the crypto data-flow graph rides along in the dosai-format crypto JSON.
+///     <see cref="Full" /> keeps the whole <see cref="DataFlowResult" /> (the default, so output
+///     stays byte-identical); <see cref="Slices" /> keeps the slices and only the nodes and edges
+///     they reference, so every <c>dosai:crypto:dataFlowSliceIds</c> reference still resolves;
+///     <see cref="None" /> omits <c>CryptoDataFlows</c> while keeping the slice-id properties and
+///     the statistics. Large consumers that only read Assets/Operations/Materials (cdxgen) should
+///     pass <c>none</c>: the graph is the bulk of the output and passes their readable size.
+/// </summary>
+public enum CryptoDataFlowDetail
+{
+    Full,
+    Slices,
+    None
+}
+
 public sealed class CryptoAnalysisResult
 {
     public AnalysisMetadata Metadata { get; set; } = new();
@@ -166,6 +182,18 @@ public static class CryptoAnalyzer
     public static string Export(CryptoAnalysisResult result, string? format = null) => CryptoBomExporter.Export(result, ParseFormat(format));
 
     /// <summary>
+    ///     Serialize the result straight to <paramref name="stream" /> without materialising the
+    ///     JSON as one contiguous string: the serializer's buffer stayed alive for the whole
+    ///     document and passed the .NET array limit on large trees, which crashed the crypto
+    ///     command with an uncatchable-looking OutOfMemoryException (issue #75). The stream path
+    ///     writes incrementally; the string overload above stays for callers that need the whole
+    ///     document in memory (the MCP server, tests).
+    /// </summary>
+    public static void Export(Stream stream, CryptoAnalysisResult result, string? format = null) => CryptoBomExporter.Export(stream, result, ParseFormat(format));
+
+    public static void Export(Stream stream, CryptoAnalysisResult result, CryptoOutputFormat format) => CryptoBomExporter.Export(stream, result, format);
+
+    /// <summary>
     ///     Crypto misuse findings as WeaknessCandidate-shaped entries so dataflows and crypto
     ///     converge on one weakness list (agent-context and downstream consumers get a single
     ///     CWE-stamped queue). Ids are prefixed `wcc` to never collide with dataflow `wc` ids.
@@ -221,9 +249,20 @@ public static class CryptoAnalyzer
     ///     failure that writes no output (owasp-dep-scan/dosai#60).
     /// </summary>
     public static CryptoAnalysisResult Analyze(string path, MethodsSlice? methodsSlice, BuildPreparationMode buildPreparation = BuildPreparationMode.None)
-        => DedicatedStack.Run("Dosai crypto analysis", () => AnalyzeCore(path, methodsSlice, buildPreparation));
+        => Analyze(path, methodsSlice, buildPreparation, CryptoDataFlowDetail.Full);
 
-    private static CryptoAnalysisResult AnalyzeCore(string path, MethodsSlice? methodsSlice, BuildPreparationMode buildPreparation)
+    public static CryptoAnalysisResult Analyze(string path, BuildPreparationMode buildPreparation, CryptoDataFlowDetail dataFlowDetail)
+        => Analyze(path, methodsSlice: null, buildPreparation, dataFlowDetail);
+
+    /// <param name="dataFlowDetail">
+    ///     Trims <see cref="CryptoAnalysisResult.CryptoDataFlows" /> after the slice-id correlation
+    ///     has run, so a detail below <see cref="CryptoDataFlowDetail.Full" /> drops the graph the
+    ///     output does not need instead of pinning it through serialization.
+    /// </param>
+    public static CryptoAnalysisResult Analyze(string path, MethodsSlice? methodsSlice, BuildPreparationMode buildPreparation, CryptoDataFlowDetail dataFlowDetail)
+        => DedicatedStack.Run("Dosai crypto analysis", () => AnalyzeCore(path, methodsSlice, buildPreparation, dataFlowDetail));
+
+    private static CryptoAnalysisResult AnalyzeCore(string path, MethodsSlice? methodsSlice, BuildPreparationMode buildPreparation, CryptoDataFlowDetail dataFlowDetail)
     {
         if (!File.Exists(path) && !Directory.Exists(path))
         {
@@ -251,9 +290,10 @@ public static class CryptoAnalyzer
         {
             AnalyzeTextSources(path, files, reachability, result);
         }
+        var cryptoDataFlowSliceCount = 0;
         using (DebugLog.Phase("crypto.dataflow-correlation"))
         {
-            AttachCryptoDataFlows(path, result);
+            cryptoDataFlowSliceCount = AttachCryptoDataFlows(path, result, dataFlowDetail);
         }
 
         result.Assets = result.Assets.OrderBy(a => a.Location.FileName, StringComparer.Ordinal).ThenBy(a => a.Location.LineNumber).ThenBy(a => a.Id, StringComparer.Ordinal).ToList();
@@ -267,7 +307,9 @@ public static class CryptoAnalyzer
         result.Statistics.ProtocolCount = result.Protocols.Count;
         result.Statistics.FindingCount = result.Findings.Count;
         result.Statistics.ReachableFindingCount = result.Findings.Count(f => f.ReachableFromEntryPoint);
-        result.Statistics.CryptoDataFlowSliceCount = result.CryptoDataFlows?.Slices.Count ?? 0;
+        // Captured while the data flows were still attached: `none` detail drops them from the
+        // result, but the slice count is a fact of the analysis and stays in the statistics.
+        result.Statistics.CryptoDataFlowSliceCount = cryptoDataFlowSliceCount;
         if (DebugLog.Enabled)
         {
             DebugLog.Count("crypto assets", result.Statistics.AssetCount);
@@ -281,18 +323,66 @@ public static class CryptoAnalyzer
         return result;
     }
 
-    private static void AttachCryptoDataFlows(string path, CryptoAnalysisResult result)
+    /// <summary>
+    ///     Runs the crypto-pattern data-flow analysis, correlates its slices onto the crypto
+    ///     evidence, and returns the slice count. Correlation always runs - the slice-id
+    ///     properties survive every detail mode - but what of the graph is kept afterwards is
+    ///     decided by <paramref name="dataFlowDetail" />. The trimmed or dropped graph stops
+    ///     pinning the full data-flow result through the serialization phase.
+    /// </summary>
+    private static int AttachCryptoDataFlows(string path, CryptoAnalysisResult result, CryptoDataFlowDetail dataFlowDetail)
     {
         try
         {
             var dataFlows = DataFlowAnalyzer.Analyze(path, patternPacks: "crypto");
-            result.CryptoDataFlows = dataFlows;
             CryptoDataFlowCorrelator.Attach(result, dataFlows);
+            var sliceCount = dataFlows.Slices.Count;
+            result.CryptoDataFlows = dataFlowDetail switch
+            {
+                CryptoDataFlowDetail.None => null,
+                CryptoDataFlowDetail.Slices => TrimToReferencedBySlices(dataFlows),
+                _ => dataFlows
+            };
+            return sliceCount;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or BadImageFormatException or JsonException or InvalidOperationException or ArgumentException or NotSupportedException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or BadImageFormatException or JsonException or InvalidOperationException or NotSupportedException)
         {
             result.Diagnostics.Add($"Crypto data-flow fallback: {ex.Message}");
+            return 0;
         }
+    }
+
+    /// <summary>
+    ///     <see cref="CryptoDataFlowDetail.Slices" />: keeps the slices and only the nodes and
+    ///     edges they reference (in the result's own order), so every slice and every
+    ///     <c>dosai:crypto:dataFlowSliceIds</c> reference still resolves while the unreferenced
+    ///     bulk of the graph becomes collectable. The statistics are recomputed over the retained
+    ///     collections so the trimmed JSON stays self-consistent.
+    /// </summary>
+    private static DataFlowResult TrimToReferencedBySlices(DataFlowResult dataFlows)
+    {
+        var referencedNodeIds = new HashSet<string>(StringComparer.Ordinal);
+        var referencedEdgeIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var slice in dataFlows.Slices)
+        {
+            foreach (var nodeId in slice.NodeIds)
+            {
+                referencedNodeIds.Add(nodeId);
+            }
+
+            foreach (var edgeId in slice.EdgeIds)
+            {
+                referencedEdgeIds.Add(edgeId);
+            }
+        }
+
+        dataFlows.Nodes = dataFlows.Nodes.Where(node => referencedNodeIds.Contains(node.Id)).ToList();
+        dataFlows.Edges = dataFlows.Edges.Where(edge => referencedEdgeIds.Contains(edge.Id)).ToList();
+        dataFlows.Statistics.NodeCount = dataFlows.Nodes.Count;
+        dataFlows.Statistics.EdgeCount = dataFlows.Edges.Count;
+        dataFlows.Statistics.SourceCount = dataFlows.Nodes.Count(node => node.IsSource);
+        dataFlows.Statistics.SinkCount = dataFlows.Nodes.Count(node => node.IsSink);
+        return dataFlows;
     }
 
     /// <summary>A tree's text split the way <see cref="File.ReadAllLines(string)" /> splits the file it was parsed from.</summary>
@@ -1549,11 +1639,31 @@ public static class CryptoBomExporter
         [property: JsonPropertyName("affects")] object Affects,
         [property: JsonPropertyName("properties")] object? Properties);
 
-    public static string Export(CryptoAnalysisResult result, CryptoOutputFormat format) => format switch
+    public static string Export(CryptoAnalysisResult result, CryptoOutputFormat format)
     {
-        CryptoOutputFormat.CycloneDx => ExportCycloneDx(result),
-        _ => JsonSerializer.Serialize(result, JsonOptions)
-    };
+        using var buffer = new MemoryStream();
+        Export(buffer, result, format);
+        return System.Text.Encoding.UTF8.GetString(buffer.ToArray());
+    }
+
+    /// <summary>
+    ///     Serializes straight to <paramref name="stream" />. Both formats used to be built as
+    ///     one string first; on a large tree that string passed the .NET array limit and the
+    ///     crypto command died with OutOfMemoryException (issue #75). The serializer flushes to
+    ///     the stream as it writes, so memory stays bounded by the serializer's own buffer.
+    /// </summary>
+    public static void Export(Stream stream, CryptoAnalysisResult result, CryptoOutputFormat format)
+    {
+        switch (format)
+        {
+            case CryptoOutputFormat.CycloneDx:
+                ExportCycloneDx(stream, result);
+                break;
+            default:
+                JsonSerializer.Serialize(stream, result, JsonOptions);
+                break;
+        }
+    }
 
     /// <summary>
     ///     Emits a CycloneDX 1.6 CBOM. Every emitted key must exist in the 1.6 JSON schema:
@@ -1561,7 +1671,7 @@ public static class CryptoBomExporter
     ///     <c>cryptographic-asset</c> component carries <c>cryptoProperties.assetType</c>. The
     ///     document also declares <c>$schema</c> so strict validators can locate the spec.
     /// </summary>
-    private static string ExportCycloneDx(CryptoAnalysisResult result)
+    private static void ExportCycloneDx(Stream stream, CryptoAnalysisResult result)
     {
         var components = new List<object>();
         components.AddRange(result.Assets.Select(asset => new CycloneDxComponent(
@@ -1710,7 +1820,7 @@ public static class CryptoBomExporter
             ["dependencies"] = dependencies,
             ["vulnerabilities"] = vulnerabilities
         };
-        return JsonSerializer.Serialize(bom, JsonOptions);
+        JsonSerializer.Serialize(stream, bom, JsonOptions);
     }
 
     /// <summary>

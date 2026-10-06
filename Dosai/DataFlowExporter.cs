@@ -13,13 +13,39 @@ public enum DataFlowExportFormat
 
 public static class DataFlowExporter
 {
-    public static string Export(DataFlowResult result, DataFlowExportFormat format) => format switch
+    /// <summary>Longest indent the formats use, sliced per write so no per-line padding strings are allocated.</summary>
+    private const string Indent = "          ";
+
+    public static string Export(DataFlowResult result, DataFlowExportFormat format)
     {
-        DataFlowExportFormat.Mermaid => ToMermaid(result),
-        DataFlowExportFormat.GraphMl => ToGraphMl(result),
-        DataFlowExportFormat.Gexf => ToGexf(result),
-        _ => throw new ArgumentOutOfRangeException(nameof(format), format, "Unsupported data-flow export format")
-    };
+        using var writer = new StringWriter();
+        Export(writer, result, format);
+        return writer.ToString();
+    }
+
+    /// <summary>
+    ///     Writes the export straight to <paramref name="writer" />. The string overload above
+    ///     wraps this one; callers with a file (the CLI's graph sidecars) write through a
+    ///     <see cref="StreamWriter" /> so the document is never materialised as one string -
+    ///     on a large tree that string bounded peak memory for no benefit (issue #75).
+    /// </summary>
+    public static void Export(TextWriter writer, DataFlowResult result, DataFlowExportFormat format)
+    {
+        switch (format)
+        {
+            case DataFlowExportFormat.Mermaid:
+                WriteMermaid(writer, result);
+                break;
+            case DataFlowExportFormat.GraphMl:
+                WriteGraphMl(writer, result);
+                break;
+            case DataFlowExportFormat.Gexf:
+                WriteGexf(writer, result);
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(format), format, "Unsupported data-flow export format");
+        }
+    }
 
     public static bool TryParseFormat(string? value, out DataFlowExportFormat format)
     {
@@ -52,10 +78,9 @@ public static class DataFlowExporter
         return true;
     }
 
-    private static string ToMermaid(DataFlowResult result)
+    private static void WriteMermaid(TextWriter writer, DataFlowResult result)
     {
-        var builder = new StringBuilder();
-        builder.AppendLine("flowchart LR");
+        writer.WriteLine("flowchart LR");
         var ids = result.Nodes
             .OrderBy(n => n.Id, StringComparer.Ordinal)
             .Select((node, index) => new { node.Id, MermaidId = $"df{index + 1}" })
@@ -66,7 +91,13 @@ public static class DataFlowExporter
         {
             var shape = node.IsSource ? "([" : node.IsSink ? "[[" : "[";
             var endShape = node.IsSource ? "])" : node.IsSink ? "]]" : "]";
-            builder.Append("    ").Append(ids[node.Id]).Append(shape).Append('"').Append(EscapeMermaid(node.Name)).Append('"').AppendLine(endShape);
+            writer.Write("    ");
+            writer.Write(ids[node.Id]);
+            writer.Write(shape);
+            writer.Write('"');
+            writer.Write(EscapeMermaid(node.Name));
+            writer.Write(endShape);
+            writer.WriteLine();
         }
 
         foreach (var edge in result.Edges.OrderBy(e => e.Id, StringComparer.Ordinal))
@@ -75,126 +106,169 @@ public static class DataFlowExporter
             {
                 continue;
             }
-            builder.Append("    ").Append(sourceId).Append(" -->|\"").Append(EscapeMermaid(edge.Kind)).Append("\"| ").AppendLine(targetId);
+            writer.Write("    ");
+            writer.Write(sourceId);
+            writer.Write(" -->|\"");
+            writer.Write(EscapeMermaid(edge.Kind));
+            writer.Write("\"| ");
+            writer.Write(targetId);
+            writer.WriteLine();
         }
-
-        return builder.ToString();
     }
 
-    private static string ToGraphMl(DataFlowResult result)
+    private static void WriteGraphMl(TextWriter writer, DataFlowResult result)
     {
-        var builder = new StringBuilder();
-        builder.AppendLine("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
-        builder.AppendLine("<graphml xmlns=\"http://graphml.graphdrawing.org/xmlns\">");
+        writer.WriteLine("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
+        writer.WriteLine("<graphml xmlns=\"http://graphml.graphdrawing.org/xmlns\">");
         foreach (var key in new[] { "label", "kind", "symbol", "type", "purl", "file", "method", "line", "category", "source", "sink", "code" })
         {
-            builder.Append("  <key id=\"").Append(Xml(key)).Append("\" for=\"node\" attr.name=\"").Append(Xml(key)).Append("\" attr.type=\"string\" />").AppendLine();
+            writer.Write("  <key id=\"");
+            writer.Write(Xml(key));
+            writer.Write("\" for=\"node\" attr.name=\"");
+            writer.Write(Xml(key));
+            writer.Write("\" attr.type=\"string\" />");
+            writer.WriteLine();
         }
         foreach (var key in new[] { "kind", "label", "sourcePurl", "targetPurl", "file", "line" })
         {
-            builder.Append("  <key id=\"edge_").Append(Xml(key)).Append("\" for=\"edge\" attr.name=\"").Append(Xml(key)).Append("\" attr.type=\"string\" />").AppendLine();
+            writer.Write("  <key id=\"edge_");
+            writer.Write(Xml(key));
+            writer.Write("\" for=\"edge\" attr.name=\"");
+            writer.Write(Xml(key));
+            writer.Write("\" attr.type=\"string\" />");
+            writer.WriteLine();
         }
-        builder.AppendLine("  <graph id=\"dataflows\" edgedefault=\"directed\">");
+        writer.WriteLine("  <graph id=\"dataflows\" edgedefault=\"directed\">");
 
         foreach (var node in result.Nodes.OrderBy(n => n.Id, StringComparer.Ordinal))
         {
-            builder.Append("    <node id=\"").Append(Xml(node.Id)).AppendLine("\">");
-            AppendGraphMlData(builder, "label", node.Name, 6);
-            AppendGraphMlData(builder, "kind", node.Kind, 6);
-            AppendGraphMlData(builder, "symbol", node.Symbol, 6);
-            AppendGraphMlData(builder, "type", node.Type, 6);
-            AppendGraphMlData(builder, "purl", node.Purl, 6);
-            AppendGraphMlData(builder, "file", node.FileName, 6);
-            AppendGraphMlData(builder, "method", node.MethodName, 6);
-            AppendGraphMlData(builder, "line", node.LineNumber.ToString(CultureInfo.InvariantCulture), 6);
-            AppendGraphMlData(builder, "category", node.Category, 6);
-            AppendGraphMlData(builder, "source", node.IsSource.ToString().ToLowerInvariant(), 6);
-            AppendGraphMlData(builder, "sink", node.IsSink.ToString().ToLowerInvariant(), 6);
-            AppendGraphMlData(builder, "code", node.Code, 6);
-            builder.AppendLine("    </node>");
+            writer.Write("    <node id=\"");
+            writer.Write(Xml(node.Id));
+            writer.WriteLine("\">");
+            WriteGraphMlData(writer, "label", node.Name, 6);
+            WriteGraphMlData(writer, "kind", node.Kind, 6);
+            WriteGraphMlData(writer, "symbol", node.Symbol, 6);
+            WriteGraphMlData(writer, "type", node.Type, 6);
+            WriteGraphMlData(writer, "purl", node.Purl, 6);
+            WriteGraphMlData(writer, "file", node.FileName, 6);
+            WriteGraphMlData(writer, "method", node.MethodName, 6);
+            WriteGraphMlData(writer, "line", node.LineNumber.ToString(CultureInfo.InvariantCulture), 6);
+            WriteGraphMlData(writer, "category", node.Category, 6);
+            WriteGraphMlData(writer, "source", node.IsSource.ToString().ToLowerInvariant(), 6);
+            WriteGraphMlData(writer, "sink", node.IsSink.ToString().ToLowerInvariant(), 6);
+            WriteGraphMlData(writer, "code", node.Code, 6);
+            writer.WriteLine("    </node>");
         }
 
         foreach (var edge in result.Edges.OrderBy(e => e.Id, StringComparer.Ordinal))
         {
-            builder.Append("    <edge id=\"").Append(Xml(edge.Id)).Append("\" source=\"").Append(Xml(edge.SourceId)).Append("\" target=\"").Append(Xml(edge.TargetId)).AppendLine("\">");
-            AppendGraphMlData(builder, "edge_kind", edge.Kind, 6);
-            AppendGraphMlData(builder, "edge_label", edge.Label, 6);
-            AppendGraphMlData(builder, "edge_sourcePurl", edge.SourcePurl, 6);
-            AppendGraphMlData(builder, "edge_targetPurl", edge.TargetPurl, 6);
-            AppendGraphMlData(builder, "edge_file", edge.FileName, 6);
-            AppendGraphMlData(builder, "edge_line", edge.LineNumber.ToString(CultureInfo.InvariantCulture), 6);
-            builder.AppendLine("    </edge>");
+            writer.Write("    <edge id=\"");
+            writer.Write(Xml(edge.Id));
+            writer.Write("\" source=\"");
+            writer.Write(Xml(edge.SourceId));
+            writer.Write("\" target=\"");
+            writer.Write(Xml(edge.TargetId));
+            writer.WriteLine("\">");
+            WriteGraphMlData(writer, "edge_kind", edge.Kind, 6);
+            WriteGraphMlData(writer, "edge_label", edge.Label, 6);
+            WriteGraphMlData(writer, "edge_sourcePurl", edge.SourcePurl, 6);
+            WriteGraphMlData(writer, "edge_targetPurl", edge.TargetPurl, 6);
+            WriteGraphMlData(writer, "edge_file", edge.FileName, 6);
+            WriteGraphMlData(writer, "edge_line", edge.LineNumber.ToString(CultureInfo.InvariantCulture), 6);
+            writer.WriteLine("    </edge>");
         }
 
-        builder.AppendLine("  </graph>");
-        builder.AppendLine("</graphml>");
-        return builder.ToString();
+        writer.WriteLine("  </graph>");
+        writer.WriteLine("</graphml>");
     }
 
-    private static string ToGexf(DataFlowResult result)
+    private static void WriteGexf(TextWriter writer, DataFlowResult result)
     {
-        var builder = new StringBuilder();
-        builder.AppendLine("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
-        builder.AppendLine("<gexf xmlns=\"http://www.gexf.net/1.3\" version=\"1.3\">");
-        builder.AppendLine("  <graph mode=\"static\" defaultedgetype=\"directed\">");
-        builder.AppendLine("    <attributes class=\"node\">");
+        writer.WriteLine("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
+        writer.WriteLine("<gexf xmlns=\"http://www.gexf.net/1.3\" version=\"1.3\">");
+        writer.WriteLine("  <graph mode=\"static\" defaultedgetype=\"directed\">");
+        writer.WriteLine("    <attributes class=\"node\">");
         foreach (var key in new[] { "kind", "symbol", "type", "purl", "file", "method", "line", "category", "source", "sink", "code" })
         {
-            builder.Append("      <attribute id=\"").Append(Xml(key)).Append("\" title=\"").Append(Xml(key)).Append("\" type=\"string\" />").AppendLine();
+            writer.Write("      <attribute id=\"");
+            writer.Write(Xml(key));
+            writer.Write("\" title=\"");
+            writer.Write(Xml(key));
+            writer.Write("\" type=\"string\" />");
+            writer.WriteLine();
         }
-        builder.AppendLine("    </attributes>");
-        builder.AppendLine("    <attributes class=\"edge\">");
-        builder.AppendLine("      <attribute id=\"kind\" title=\"kind\" type=\"string\" />");
-        builder.AppendLine("      <attribute id=\"label\" title=\"label\" type=\"string\" />");
-        builder.AppendLine("      <attribute id=\"sourcePurl\" title=\"sourcePurl\" type=\"string\" />");
-        builder.AppendLine("      <attribute id=\"targetPurl\" title=\"targetPurl\" type=\"string\" />");
-        builder.AppendLine("    </attributes>");
-        builder.AppendLine("    <nodes>");
+        writer.WriteLine("    </attributes>");
+        writer.WriteLine("    <attributes class=\"edge\">");
+        writer.WriteLine("      <attribute id=\"kind\" title=\"kind\" type=\"string\" />");
+        writer.WriteLine("      <attribute id=\"label\" title=\"label\" type=\"string\" />");
+        writer.WriteLine("      <attribute id=\"sourcePurl\" title=\"sourcePurl\" type=\"string\" />");
+        writer.WriteLine("      <attribute id=\"targetPurl\" title=\"targetPurl\" type=\"string\" />");
+        writer.WriteLine("    </attributes>");
+        writer.WriteLine("    <nodes>");
         foreach (var node in result.Nodes.OrderBy(n => n.Id, StringComparer.Ordinal))
         {
-            builder.Append("      <node id=\"").Append(Xml(node.Id)).Append("\" label=\"").Append(Xml(node.Name)).AppendLine("\">");
-            builder.AppendLine("        <attvalues>");
-            AppendGexfValue(builder, "kind", node.Kind, 10);
-            AppendGexfValue(builder, "symbol", node.Symbol, 10);
-            AppendGexfValue(builder, "type", node.Type, 10);
-            AppendGexfValue(builder, "purl", node.Purl, 10);
-            AppendGexfValue(builder, "file", node.FileName, 10);
-            AppendGexfValue(builder, "method", node.MethodName, 10);
-            AppendGexfValue(builder, "line", node.LineNumber.ToString(CultureInfo.InvariantCulture), 10);
-            AppendGexfValue(builder, "category", node.Category, 10);
-            AppendGexfValue(builder, "source", node.IsSource.ToString().ToLowerInvariant(), 10);
-            AppendGexfValue(builder, "sink", node.IsSink.ToString().ToLowerInvariant(), 10);
-            AppendGexfValue(builder, "code", node.Code, 10);
-            builder.AppendLine("        </attvalues>");
-            builder.AppendLine("      </node>");
+            writer.Write("      <node id=\"");
+            writer.Write(Xml(node.Id));
+            writer.Write("\" label=\"");
+            writer.Write(Xml(node.Name));
+            writer.WriteLine("\">");
+            writer.WriteLine("        <attvalues>");
+            WriteGexfValue(writer, "kind", node.Kind, 10);
+            WriteGexfValue(writer, "symbol", node.Symbol, 10);
+            WriteGexfValue(writer, "type", node.Type, 10);
+            WriteGexfValue(writer, "purl", node.Purl, 10);
+            WriteGexfValue(writer, "file", node.FileName, 10);
+            WriteGexfValue(writer, "method", node.MethodName, 10);
+            WriteGexfValue(writer, "line", node.LineNumber.ToString(CultureInfo.InvariantCulture), 10);
+            WriteGexfValue(writer, "category", node.Category, 10);
+            WriteGexfValue(writer, "source", node.IsSource.ToString().ToLowerInvariant(), 10);
+            WriteGexfValue(writer, "sink", node.IsSink.ToString().ToLowerInvariant(), 10);
+            WriteGexfValue(writer, "code", node.Code, 10);
+            writer.WriteLine("        </attvalues>");
+            writer.WriteLine("      </node>");
         }
-        builder.AppendLine("    </nodes>");
-        builder.AppendLine("    <edges>");
+        writer.WriteLine("    </nodes>");
+        writer.WriteLine("    <edges>");
         foreach (var edge in result.Edges.OrderBy(e => e.Id, StringComparer.Ordinal))
         {
-            builder.Append("      <edge id=\"").Append(Xml(edge.Id)).Append("\" source=\"").Append(Xml(edge.SourceId)).Append("\" target=\"").Append(Xml(edge.TargetId)).AppendLine("\">");
-            builder.AppendLine("        <attvalues>");
-            AppendGexfValue(builder, "kind", edge.Kind, 10);
-            AppendGexfValue(builder, "label", edge.Label, 10);
-            AppendGexfValue(builder, "sourcePurl", edge.SourcePurl, 10);
-            AppendGexfValue(builder, "targetPurl", edge.TargetPurl, 10);
-            builder.AppendLine("        </attvalues>");
-            builder.AppendLine("      </edge>");
+            writer.Write("      <edge id=\"");
+            writer.Write(Xml(edge.Id));
+            writer.Write("\" source=\"");
+            writer.Write(Xml(edge.SourceId));
+            writer.Write("\" target=\"");
+            writer.Write(Xml(edge.TargetId));
+            writer.WriteLine("\">");
+            writer.WriteLine("        <attvalues>");
+            WriteGexfValue(writer, "kind", edge.Kind, 10);
+            WriteGexfValue(writer, "label", edge.Label, 10);
+            WriteGexfValue(writer, "sourcePurl", edge.SourcePurl, 10);
+            WriteGexfValue(writer, "targetPurl", edge.TargetPurl, 10);
+            writer.WriteLine("        </attvalues>");
+            writer.WriteLine("      </edge>");
         }
-        builder.AppendLine("    </edges>");
-        builder.AppendLine("  </graph>");
-        builder.AppendLine("</gexf>");
-        return builder.ToString();
+        writer.WriteLine("    </edges>");
+        writer.WriteLine("  </graph>");
+        writer.WriteLine("</gexf>");
     }
 
-    private static void AppendGraphMlData(StringBuilder builder, string key, string? value, int indent)
+    private static void WriteGraphMlData(TextWriter writer, string key, string? value, int indent)
     {
-        builder.Append(' ', indent).Append("<data key=\"").Append(Xml(key)).Append("\">").Append(Xml(value ?? string.Empty)).AppendLine("</data>");
+        writer.Write(Indent[..indent]);
+        writer.Write("<data key=\"");
+        writer.Write(Xml(key));
+        writer.Write("\">");
+        writer.Write(Xml(value ?? string.Empty));
+        writer.WriteLine("</data>");
     }
 
-    private static void AppendGexfValue(StringBuilder builder, string key, string? value, int indent)
+    private static void WriteGexfValue(TextWriter writer, string key, string? value, int indent)
     {
-        builder.Append(' ', indent).Append("<attvalue for=\"").Append(Xml(key)).Append("\" value=\"").Append(Xml(value ?? string.Empty)).AppendLine("\" />");
+        writer.Write(Indent[..indent]);
+        writer.Write("<attvalue for=\"");
+        writer.Write(Xml(key));
+        writer.Write("\" value=\"");
+        writer.Write(Xml(value ?? string.Empty));
+        writer.WriteLine("\" />");
     }
 
     private static string EscapeMermaid(string value) => value

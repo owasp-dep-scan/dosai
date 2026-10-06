@@ -203,3 +203,29 @@ number is byte-identical across locales.
 
 Symbol analysis also runs on one worker per processor (`DOSAI_SYMBOL_ANALYSIS_WORKERS` caps it);
 the output is identical for every worker count.
+
+## Crypto output streaming and `--crypto-dataflows` (issue #75)
+
+The `crypto` command serializes both output formats (`dosai` and `cyclonedx`) straight to the
+output file instead of building the document as one string; graph sidecars and the
+methods/dataflows graph exports are written through a `StreamWriter` the same way. Default
+output is byte-identical to the previous string-based path - only `Metadata.GeneratedAt` (and
+the CycloneDX `serialNumber` GUID, both already per-run values) differ between two runs.
+
+A new `crypto` option bounds the output's size on large trees, where `CryptoDataFlows` is
+roughly 90% of the native JSON and the whole-document string passed the .NET array limit and
+crashed with `OutOfMemoryException`:
+
+- `--crypto-dataflows full` (default): unchanged output.
+- `--crypto-dataflows slices`: `CryptoDataFlows.Nodes` and `.Edges` keep only the nodes and edges
+  the slices reference (in result order), so every `DataFlowSliceIds` value on materials,
+  operations, and findings still resolves. `CryptoDataFlows.Statistics.NodeCount`, `EdgeCount`,
+  `SourceCount`, and `SinkCount` are recomputed over the retained collections; `SliceCount` and
+  `FilesAnalyzed` are unchanged.
+- `--crypto-dataflows none`: the `CryptoDataFlows` property is omitted entirely. The
+  `DataFlowSliceIds` lists, the `dosai:crypto:dataFlowSliceIds`-style properties, and
+  `Statistics` (including `CryptoDataFlowSliceCount`, which still reflects the analysis) are
+  kept.
+
+Consumers that read only `Assets`, `Operations`, and `Materials` (cdxgen's crypto path) should
+pass `none`.

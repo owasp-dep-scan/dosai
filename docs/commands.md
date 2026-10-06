@@ -295,6 +295,24 @@ dotnet run --project ./Dosai/Dosai.csproj -- crypto \
 
 `--graph-format` exports crypto data-flow sidecars in `mermaid`, `graphml`, and/or `gexf` format. Multiple formats can be comma-separated. With the command above, Dosai writes `/tmp/dosai-cbom-dataflows.graphml` and `/tmp/dosai-cbom-dataflows.gexf`. Use `--graph-out` with a single graph format for an explicit sidecar path.
 
+`--crypto-dataflows` controls how much of the crypto data-flow graph rides along in the `dosai`-format output (it has no effect on `cyclonedx`, which never embeds the graph):
+
+| Value | Behavior |
+| --- | --- |
+| `full` (default) | The whole `CryptoDataFlows` result, exactly as before the option existed. |
+| `slices` | Keeps the slices and only the nodes and edges they reference, so every `dosai:crypto:dataFlowSliceIds` reference still resolves. `CryptoDataFlows.Statistics` is recomputed over the retained nodes and edges. |
+| `none` | Omits `CryptoDataFlows` entirely. The `DataFlowSliceIds` lists, the `dosai:crypto:dataFlowSliceIds` properties, and the statistics (including `CryptoDataFlowSliceCount`) are kept. |
+
+The graph is the bulk of the output on large trees: on the issue-#75 corpus a 47 MB `dosai` report is roughly 90% `CryptoDataFlows`, and past 2 GB the whole-document string the exporter used to build exceeded the .NET array limit and crashed with `OutOfMemoryException`. Both formats are now streamed straight to the output file. Large consumers that only read `Assets`, `Operations`, and `Materials` - such as cdxgen with `--include-crypto` - should pass `--crypto-dataflows none`; that keeps the file well under the ~512 MB string limit of Node's `readFileSync`/`JSON.parse` path and loses nothing those consumers read.
+
+```bash
+dotnet run --project ./Dosai/Dosai.csproj -- crypto \
+  --path ./big-tree \
+  --o /tmp/dosai-crypto.json \
+  --format dosai \
+  --crypto-dataflows none
+```
+
 ### Implementation flow
 
 ```text

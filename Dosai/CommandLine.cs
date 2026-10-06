@@ -86,6 +86,12 @@ public class CommandLine
             Arity = ArgumentArity.ExactlyOne
         };
 
+        var cryptoDataFlowsOption = new Option<string?>("--crypto-dataflows")
+        {
+            Description = "How much of the crypto data-flow graph to include in the dosai-format output: full (default, whole graph), slices (slices plus only the nodes and edges they reference), none (omit CryptoDataFlows; slice-id properties and statistics are kept). Large consumers that only read Assets/Operations/Materials, such as cdxgen, should pass none.",
+            Arity = ArgumentArity.ExactlyOne
+        };
+
         var cryptoGraphFormatOption = new Option<string?>("--graph-format")
         {
             Description = "Export crypto data-flow graph sidecars in one or more comma-separated formats: mermaid, graphml, gexf.",
@@ -214,6 +220,7 @@ public class CommandLine
             excludeOption,
             outputFileOption,
             cryptoFormatOption,
+            cryptoDataFlowsOption,
             cryptoGraphFormatOption,
             cryptoGraphOutputFileOption,
             restoreOption,
@@ -327,7 +334,7 @@ public class CommandLine
                     // Node reachability facts and fan-in/out ride along as graph attributes.
                     var reachabilityByNode = methodsSlice.Reachability?.ToDictionary(facts => facts.NodeId, StringComparer.Ordinal);
                     callGraphOutputFile ??= Path.ChangeExtension(outputFile!, CallGraphExporter.GetDefaultExtension(format));
-                    File.WriteAllText(callGraphOutputFile, CallGraphExporter.Export(methodsSlice.CallGraph, format, reachabilityByNode));
+                    WriteGraphFile(callGraphOutputFile, writer => CallGraphExporter.Export(writer, methodsSlice.CallGraph, format, reachabilityByNode));
                     LogWrittenBytes("call graph export", callGraphOutputFile);
                 }
 
@@ -376,7 +383,7 @@ public class CommandLine
                 }
 
                 graphOutputFile ??= Path.ChangeExtension(outputFile!, DataFlowExporter.GetDefaultExtension(format));
-                File.WriteAllText(graphOutputFile, DataFlowExporter.Export(dataFlowResult, format));
+                WriteGraphFile(graphOutputFile, writer => DataFlowExporter.Export(writer, dataFlowResult, format));
                 LogWrittenBytes("data-flow graph export", graphOutputFile);
             }
 
@@ -391,6 +398,7 @@ public class CommandLine
             using var exclusions = PathExclusions.Apply(path, excludePatterns);
             var outputFile = parseResult.GetValue(outputFileOption)!;
             var format = parseResult.GetValue(cryptoFormatOption);
+            var dataFlowDetailOption = parseResult.GetValue(cryptoDataFlowsOption);
             var graphFormat = parseResult.GetValue(cryptoGraphFormatOption);
             var graphOutputFile = parseResult.GetValue(cryptoGraphOutputFileOption);
             var buildPreparation = ParseBuildPreparation(parseResult.GetValue(restoreOption), parseResult.GetValue(buildOption));
@@ -398,8 +406,16 @@ public class CommandLine
             using var commandPhase = DebugLog.Phase("crypto");
             try
             {
-                var result = CryptoAnalyzer.Analyze(path, buildPreparation);
-                File.WriteAllText(outputFile, CryptoAnalyzer.Export(result, format));
+                var dataFlowDetail = ParseCryptoDataFlowDetail(dataFlowDetailOption);
+                var result = CryptoAnalyzer.Analyze(path, buildPreparation, dataFlowDetail);
+                // Streamed like methods/dataflows: the crypto JSON used to be built as one string,
+                // and on a large tree that string passed the .NET array limit and crashed with
+                // OutOfMemoryException (issue #75).
+                using (var stream = new FileStream(outputFile, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize: 65536))
+                {
+                    CryptoAnalyzer.Export(stream, result, format);
+                }
+
                 LogWrittenBytes("crypto export", outputFile);
                 if (!string.IsNullOrWhiteSpace(graphFormat))
                 {
@@ -584,6 +600,34 @@ public class CommandLine
         => build ? BuildPreparationMode.Build : restore ? BuildPreparationMode.Restore : BuildPreparationMode.None;
 
     /// <summary>
+    ///     Validates the --crypto-dataflows value (full|slices|none). The default keeps the whole
+    ///     crypto data-flow graph so output stays byte-identical to a run without the flag.
+    /// </summary>
+    private static CryptoDataFlowDetail ParseCryptoDataFlowDetail(string? value)
+    {
+        var normalized = (value ?? "full").Trim().ToLowerInvariant();
+        return normalized switch
+        {
+            "" or "full" => CryptoDataFlowDetail.Full,
+            "slices" => CryptoDataFlowDetail.Slices,
+            "none" => CryptoDataFlowDetail.None,
+            _ => throw new ArgumentException($"Unsupported crypto data-flow detail: {value}. Supported values: full, slices, none.")
+        };
+    }
+
+    /// <summary>
+    ///     Writes a graph export through a <see cref="StreamWriter" /> instead of a whole-document
+    ///     string: graph sidecars of large trees were the last exports materialised as one string,
+    ///     which bounds peak memory away for no benefit (issue #75). The writer's default UTF-8
+    ///     no-BOM encoding matches what <see cref="File.WriteAllText(string,string)" /> produced.
+    /// </summary>
+    private static void WriteGraphFile(string path, Action<StreamWriter> write)
+    {
+        using var writer = new StreamWriter(path);
+        write(writer);
+    }
+
+    /// <summary>
     ///     Top-level guard around one command action (issue-#56 containment): an unhandled
     ///     exception is written to stderr with a non-zero exit code instead of aborting the
     ///     process and leaving no output at all, and when the output file already holds a
@@ -723,7 +767,7 @@ public class CommandLine
             }
 
             var sidecarPath = graphOutputFile ?? BuildCryptoDataFlowSidecarPath(outputFile, format);
-            File.WriteAllText(sidecarPath, DataFlowExporter.Export(result.CryptoDataFlows, format));
+            WriteGraphFile(sidecarPath, writer => DataFlowExporter.Export(writer, result.CryptoDataFlows, format));
         }
 
         return 0;
