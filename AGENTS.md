@@ -68,7 +68,10 @@ dotnet test ./Dosai.sln
   and on Windows every `LoadFromStream` pays an `AmsiScanBuffer` call. Sharing changes how
   many times an assembly loads, never which file a reference resolves to (dependencies
   probe their own directory first, so keep the cache keyed by directory, not one context
-  for the whole tree).
+  for the whole tree). A live context holds by-value copies of everything its directory
+  loaded, so contexts are released in a `finally` as well as after their directory's last
+  file: a collectible context stays rooted until `Unload`, and the MCP server scans many
+  trees in one process.
 - Keep runtime-loader work (`Assembly.GetTypes()` and member reflection over inspected
   assemblies) inside `GetAssemblyMethods`, which runs it on a dedicated large-stack thread. The
   runtime type loader recurses per hierarchy level and, when a base type is missing, can

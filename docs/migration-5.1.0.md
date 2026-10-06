@@ -283,5 +283,5 @@ phase on large build-output folders). Loading stays by value with `FileShare.Rea
 FileShare.Delete`, so inspected files stay deletable and replaceable during and after the
 scan. The methods JSON for assembly inputs is byte-identical to the per-assembly contexts -
 verified field-by-field against a copy of the old loop on missing-dependency fixtures and
-byte-for-byte against the previous release build on the full OrchardCore web-app output
+byte-for-byte against the per-assembly build (659b86d) on the full OrchardCore web-app output
 (1.4 GB of JSON) and on Dosai's own Release output, on macOS and Windows.

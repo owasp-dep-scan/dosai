@@ -147,6 +147,90 @@ public sealed class Issue76AssemblyLoadingTests
     }
 
     [Fact]
+    public void AssemblyInspection_StateLeftInTheSharedContextByEarlierFiles_DoesNotChangeLaterFiles()
+    {
+        // The two cases where a shared context answers a later file from what an earlier file
+        // left in it, instead of probing afresh as a per-assembly context did:
+        // - version skew: the folder ships Lib 1.0, the app was compiled against Lib 2.0, and
+        //   Lib is inspected first, so the app's 2.0 request meets an already-loaded 1.0;
+        // - a cached type-load failure: Mid's base type is missing and Mid is inspected first,
+        //   so the consumer's signatures over Mid's broken type hit the failure Mid left.
+        // Both must render exactly what the per-assembly reference renders.
+        using var fixture = new TempDir();
+        var compiledAgainst = Path.Combine(fixture.Path, "v2");
+        var withheld = Path.Combine(fixture.Path, "withheld");
+        var output = Path.Combine(fixture.Path, "bin");
+        Directory.CreateDirectory(compiledAgainst);
+        Directory.CreateDirectory(withheld);
+        Directory.CreateDirectory(output);
+        const string LibSource = """
+            [assembly: System.Reflection.AssemblyVersion("{0}")]
+            namespace Issue76Skew;
+
+            public class Widget
+            {{
+                public virtual string Name() => "{0}";
+            }}
+            """;
+        var libV2 = EmitAssembly(compiledAgainst, "Issue76AaLib", string.Format(System.Globalization.CultureInfo.InvariantCulture, LibSource, "2.0.0.0"));
+        EmitAssembly(output, "Issue76AaLib", string.Format(System.Globalization.CultureInfo.InvariantCulture, LibSource, "1.0.0.0"));
+        EmitAssembly(output, "Issue76ApApp",
+            """
+            namespace Issue76SkewApp;
+
+            public class Fancy : Issue76Skew.Widget
+            {
+                public override string Name() => "fancy";
+                public Issue76Skew.Widget Wrap(Issue76Skew.Widget inner) => inner;
+            }
+            """, libV2);
+
+        var baseLib = EmitAssembly(withheld, "Issue76MissingBase",
+            """
+            namespace Issue76MissingBase;
+
+            public abstract class Root
+            {
+            }
+            """);
+        var mid = EmitAssembly(output, "Issue76BaMid",
+            """
+            namespace Issue76Mid;
+
+            public class Broken : Issue76MissingBase.Root
+            {
+                public int Value() => 1;
+            }
+
+            public class Fine
+            {
+                public int Other() => 2;
+            }
+            """, baseLib);
+        EmitAssembly(output, "Issue76BpConsumer",
+            """
+            namespace Issue76Consumer;
+
+            public class UsesMid
+            {
+                public Issue76Mid.Fine KeepsFine(Issue76Mid.Fine fine) => fine;
+                public object TouchesBroken(Issue76Mid.Broken broken) => broken;
+            }
+            """, mid, baseLib);
+        Directory.Delete(withheld, recursive: true);
+
+        var slice = Depscan.Dosai.GetMethodsSlice(output);
+        var reference = InspectWithPerAssemblyContexts(output);
+        // The fixture has to reach both shapes, or the comparison below proves nothing.
+        Assert.Contains(slice.Methods!, method => method.FileName == "Issue76ApApp.dll" && method.Name == "Wrap");
+        Assert.Contains(slice.Methods!, method => method.FileName == "Issue76BaMid.dll" && method.Name == "Other");
+        Assert.DoesNotContain(slice.Methods!, method => method.FileName == "Issue76BaMid.dll" && method.Name == "Value");
+        Assert.Equal(
+            JsonSerializer.Serialize(GroupByFile(reference), RenderOptions),
+            JsonSerializer.Serialize(GroupByFile(slice.Methods!), RenderOptions));
+    }
+
+    [Fact]
     public void AssemblyInspection_MissingBaseAndAttributeTypes_PartialInventoryWithContainment()
     {
         using var fixture = new TempDir();
@@ -362,11 +446,14 @@ public sealed class Issue76AssemblyLoadingTests
     #region The pre-#76 per-assembly reference
 
     /// <summary>
-    ///     Verbatim copy of the inspection loop before issue #76 (one collectible
+    ///     The inspection loop before issue #76 (one collectible
     ///     <see cref="InspectionAssemblyLoadContext" /> per assembly, unloaded per file), kept
-    ///     as the independent reference the shared per-directory contexts must reproduce.
-    ///     Only debug logging and console warnings are absent; every string that reaches the
-    ///     JSON is rendered exactly as the pipeline does.
+    ///     as the independent reference the shared per-directory contexts must reproduce. It
+    ///     keeps the pipeline's exception handlers (a load failure part-way through an assembly
+    ///     keeps the members already added) and drops only debug logging and console output.
+    ///     Shared-framework probing is the running runtime's directory alone, not
+    ///     <c>GetSharedFrameworkProbingPaths</c>: the fixtures reference nothing beyond the core
+    ///     library, so the two agree there and nowhere else.
     /// </summary>
     private static List<Method> InspectWithPerAssemblyContexts(string path)
     {
@@ -446,6 +533,14 @@ public sealed class Issue76AssemblyLoadingTests
                     assemblyMethods.AddRange(from field in type.GetFields() where $"{field.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName select CreateMethodObjectFromMember(field, assemblyFilePath, fileName, field.Attributes.ToString(), field.Name, field.FieldType.Name, []));
                     assemblyMethods.AddRange(from evt in type.GetEvents() where $"{evt.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName select CreateMethodObjectFromMember(evt, assemblyFilePath, fileName, evt.Attributes.ToString(), evt.Name, evt.EventHandlerType?.Name ?? string.Empty, []));
                 }
+            }
+            catch (Exception e) when (e is FileLoadException or FileNotFoundException or BadImageFormatException or TypeLoadException or NotSupportedException)
+            {
+                // The pipeline's handler: the members this assembly already added stay, the
+                // rest of it is skipped. A reference without it cannot reach this path at all.
+            }
+            catch (Exception)
+            {
             }
             finally
             {

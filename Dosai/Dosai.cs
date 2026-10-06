@@ -1765,138 +1765,149 @@ public static class Dosai
         // front; the scans overlap, and the loop below reads warm files in its usual order.
         var isManaged = new bool[assembliesToInspect.Count];
         DedicatedStack.ForEach("Dosai assembly probe", Math.Max(1, MaxSymbolAnalysisWorkers), isManaged.Length, index => isManaged[index] = IsManagedAssembly(assembliesToInspect[index]));
-        for (var assemblyIndex = 0; assemblyIndex < assembliesToInspect.Count; assemblyIndex++)
+        // A collectible context stays rooted until Unload: whatever leaves this loop (an
+        // exception the per-file handlers do not catch included) must still release every live
+        // directory context, or its in-memory assembly copies stay for the process lifetime -
+        // the MCP server runs many scans in one process.
+        try
         {
-            var assemblyFilePath = assembliesToInspect[assemblyIndex];
-            var fileName = Path.GetFileName(assemblyFilePath);
-            var fileDirectory = Path.GetDirectoryName(assemblyFilePath) ?? string.Empty;
-            if (!isManaged[assemblyIndex])
+            for (var assemblyIndex = 0; assemblyIndex < assembliesToInspect.Count; assemblyIndex++)
             {
-                Console.WriteLine($"Info: Skipping native library or non-assembly file: {assemblyFilePath}");
-                continue;
-            }
-            ReleaseDirectoriesDoneWith(assemblyIndex);
-            if (!loadContextsByDirectory.TryGetValue(fileDirectory, out var loadContext))
-            {
-                var inspectedDirs = new List<string> { fileDirectory, Path.GetDirectoryName(path)! };
-                loadContext = new InspectionAssemblyLoadContext(inspectedDirs, sharedFrameworkDirs);
-                loadContextsByDirectory[fileDirectory] = loadContext;
-            }
-            // Per-assembly timing exists only for the debug log; the stopwatch is not created
-            // when debug is off, so the inspection loop pays nothing.
-            var assemblyWatch = DebugLog.Enabled ? Stopwatch.StartNew() : null;
-            var membersBefore = assemblyMethods.Count;
-            try
-            {
-                var assemblyName = AssemblyName.GetAssemblyName(assemblyFilePath);
-                if (processedAssemblyIdentities.Contains(assemblyName.FullName))
+                var assemblyFilePath = assembliesToInspect[assemblyIndex];
+                var fileName = Path.GetFileName(assemblyFilePath);
+                var fileDirectory = Path.GetDirectoryName(assemblyFilePath) ?? string.Empty;
+                if (!isManaged[assemblyIndex])
                 {
+                    Console.WriteLine($"Info: Skipping native library or non-assembly file: {assemblyFilePath}");
                     continue;
                 }
-                var assembly = loadContext.LoadFromAssemblyName(assemblyName);
-                Type[] types;
+                ReleaseDirectoriesDoneWith(assemblyIndex);
+                if (!loadContextsByDirectory.TryGetValue(fileDirectory, out var loadContext))
+                {
+                    var inspectedDirs = new List<string> { fileDirectory, Path.GetDirectoryName(path)! };
+                    loadContext = new InspectionAssemblyLoadContext(inspectedDirs, sharedFrameworkDirs);
+                    loadContextsByDirectory[fileDirectory] = loadContext;
+                }
+                // Per-assembly timing exists only for the debug log; the stopwatch is not created
+                // when debug is off, so the inspection loop pays nothing.
+                var assemblyWatch = DebugLog.Enabled ? Stopwatch.StartNew() : null;
+                var membersBefore = assemblyMethods.Count;
                 try
                 {
-                    types = assembly.GetTypes();
-                }
-                catch (ReflectionTypeLoadException ex)
-                {
-                    Console.WriteLine($"Warning: Could not load all types from {fileName}. Some types will be skipped.");
-                    if (ex.LoaderExceptions is not null)
+                    var assemblyName = AssemblyName.GetAssemblyName(assemblyFilePath);
+                    if (processedAssemblyIdentities.Contains(assemblyName.FullName))
                     {
-                        var uniqueLoaderErrors = ex.LoaderExceptions
-                            .Where(e => e is not null)
-                            .Select(e => e?.Message)
-                            .Distinct();
-
-                        foreach (var errorMessage in uniqueLoaderErrors)
-                        {
-                            Console.WriteLine($"  - {errorMessage}");
-                            if (errorMessage is null ||
-                                !errorMessage.Contains("The system cannot find the file specified")) continue;
-                            Console.WriteLine("    Suggestion: This error often means a .NET Shared Framework is missing. Ensure the machine running this analysis has the necessary .NET SDKs and Runtimes (e.g., ASP.NET Core Runtime) installed. Some projects might require Windows for building.");
-                        }
+                        continue;
                     }
-                    types = ex.Types.Where(t => t is not null).ToArray()!;
-                }
-
-                foreach (var type in types)
-                {
-                    foreach (var method in type.GetMethods())
+                    var assembly = loadContext.LoadFromAssemblyName(assemblyName);
+                    Type[] types;
+                    try
                     {
-                        if ($"{method.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" != fileName) continue;
-
-                        var parameters = method.GetParameters().Select(p => p.ParameterType.FullName ?? p.ParameterType.Name).ToList();
-                        var paramString = string.Join(",", parameters);
-                        var returnType = method.ReturnType.FullName ?? method.ReturnType.Name;
-                        var className = method.DeclaringType?.Name ?? "UnknownType";
-                        var ns = method.DeclaringType?.Namespace ?? "";
-                        var assemblySignature = $"{ns}.{className}.{method.Name}({paramString}):{returnType}";
-                        if (method.Name is ".ctor" or ".cctor")
-                        {
-                            assemblySignature = $"{ns}.{className}.{method.Name}({paramString})";
-                        }
-
-                        var methodParams = method.GetParameters().Select(p => new Parameter
-                        {
-                            Name = p.Name,
-                            Type = p.ParameterType.FullName ?? p.ParameterType.Name,
-                            TypeFullName = p.ParameterType.FullName ?? p.ParameterType.Name,
-                            IsGenericParameter = p.ParameterType.IsGenericParameter
-                        }).ToList();
-
-                        var genericParameters = method.IsGenericMethodDefinition
-                            ? method.GetGenericArguments().Select(t => t.Name).ToList()
-                            : [];
-
-                        assemblyMethods.Add(CreateMethodObjectFromMember(
-                            method, assemblyFilePath, fileName, method.Attributes.ToString(), method.Name, returnType,
-                            methodParams, method.MetadataToken, assemblySignature,
-                            method.IsGenericMethod, method.IsGenericMethodDefinition, genericParameters
-                        ));
+                        types = assembly.GetTypes();
                     }
-                    processedAssemblyIdentities.Add(assembly.FullName!);
-                    assemblyMethods.AddRange(from ctor in type.GetConstructors() where $"{ctor.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName let ctorParams = ctor.GetParameters().Select(p => new Parameter { Name = p.Name, Type = p.ParameterType.FullName }).ToList() let assemblySignature = $"{ctor.DeclaringType?.Name}" select CreateMethodObjectFromMember(ctor, assemblyFilePath, fileName, ctor.Attributes.ToString(), ".ctor", "Void", ctorParams, ctor.MetadataToken, assemblySignature));
-                    assemblyMethods.AddRange(from prop in type.GetProperties() where $"{prop.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName select CreateMethodObjectFromMember(prop, assemblyFilePath, fileName, "Property", prop.Name, prop.PropertyType.Name, []));
-                    assemblyMethods.AddRange(from field in type.GetFields() where $"{field.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName select CreateMethodObjectFromMember(field, assemblyFilePath, fileName, field.Attributes.ToString(), field.Name, field.FieldType.Name, []));
-                    assemblyMethods.AddRange(from evt in type.GetEvents() where $"{evt.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName select CreateMethodObjectFromMember(evt, assemblyFilePath, fileName, evt.Attributes.ToString(), evt.Name, evt.EventHandlerType?.Name ?? string.Empty, []));
-                }
-            }
-            catch (Exception e) when (e is FileLoadException or FileNotFoundException or BadImageFormatException or TypeLoadException or NotSupportedException)
-            {
-                if (DebugLog.Enabled)
-                {
-                    DebugLog.Log($"assembly '{fileName}' failed to load: {e.GetType().Name}: {e.Message}");
-                }
-                Console.WriteLine($"Warning: Skipping assembly {assemblyFilePath} as it could not be fully loaded for inspection.");
-                Console.WriteLine($"  - Reason: {e.GetType().Name}: {e.Message}");
-            }
-            catch (Exception e)
-            {
-                if (DebugLog.Enabled)
-                {
-                    DebugLog.Log($"assembly '{fileName}' failed to load: {e.GetType().Name}: {e.Message}");
-                }
-                Console.WriteLine($"Error: An unexpected error occurred while processing {fileName}. Details: {e.Message}");
-            }
-            finally
-            {
-                if (assemblyWatch is not null)
-                {
-                    assemblyWatch.Stop();
-                    // Only assemblies that took over a second get a line; per-assembly output is
-                    // otherwise noise on large trees.
-                    if (assemblyWatch.Elapsed.TotalSeconds >= 1)
+                    catch (ReflectionTypeLoadException ex)
                     {
-                        DebugLog.Log(string.Create(CultureInfo.InvariantCulture, $"assembly '{fileName}': {assemblyMethods.Count - membersBefore} members in {assemblyWatch.Elapsed.TotalSeconds:F3}s"));
+                        Console.WriteLine($"Warning: Could not load all types from {fileName}. Some types will be skipped.");
+                        if (ex.LoaderExceptions is not null)
+                        {
+                            var uniqueLoaderErrors = ex.LoaderExceptions
+                                .Where(e => e is not null)
+                                .Select(e => e?.Message)
+                                .Distinct();
+
+                            foreach (var errorMessage in uniqueLoaderErrors)
+                            {
+                                Console.WriteLine($"  - {errorMessage}");
+                                if (errorMessage is null ||
+                                    !errorMessage.Contains("The system cannot find the file specified")) continue;
+                                Console.WriteLine("    Suggestion: This error often means a .NET Shared Framework is missing. Ensure the machine running this analysis has the necessary .NET SDKs and Runtimes (e.g., ASP.NET Core Runtime) installed. Some projects might require Windows for building.");
+                            }
+                        }
+                        types = ex.Types.Where(t => t is not null).ToArray()!;
+                    }
+
+                    foreach (var type in types)
+                    {
+                        foreach (var method in type.GetMethods())
+                        {
+                            if ($"{method.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" != fileName) continue;
+
+                            var parameters = method.GetParameters().Select(p => p.ParameterType.FullName ?? p.ParameterType.Name).ToList();
+                            var paramString = string.Join(",", parameters);
+                            var returnType = method.ReturnType.FullName ?? method.ReturnType.Name;
+                            var className = method.DeclaringType?.Name ?? "UnknownType";
+                            var ns = method.DeclaringType?.Namespace ?? "";
+                            var assemblySignature = $"{ns}.{className}.{method.Name}({paramString}):{returnType}";
+                            if (method.Name is ".ctor" or ".cctor")
+                            {
+                                assemblySignature = $"{ns}.{className}.{method.Name}({paramString})";
+                            }
+
+                            var methodParams = method.GetParameters().Select(p => new Parameter
+                            {
+                                Name = p.Name,
+                                Type = p.ParameterType.FullName ?? p.ParameterType.Name,
+                                TypeFullName = p.ParameterType.FullName ?? p.ParameterType.Name,
+                                IsGenericParameter = p.ParameterType.IsGenericParameter
+                            }).ToList();
+
+                            var genericParameters = method.IsGenericMethodDefinition
+                                ? method.GetGenericArguments().Select(t => t.Name).ToList()
+                                : [];
+
+                            assemblyMethods.Add(CreateMethodObjectFromMember(
+                                method, assemblyFilePath, fileName, method.Attributes.ToString(), method.Name, returnType,
+                                methodParams, method.MetadataToken, assemblySignature,
+                                method.IsGenericMethod, method.IsGenericMethodDefinition, genericParameters
+                            ));
+                        }
+                        processedAssemblyIdentities.Add(assembly.FullName!);
+                        assemblyMethods.AddRange(from ctor in type.GetConstructors() where $"{ctor.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName let ctorParams = ctor.GetParameters().Select(p => new Parameter { Name = p.Name, Type = p.ParameterType.FullName }).ToList() let assemblySignature = $"{ctor.DeclaringType?.Name}" select CreateMethodObjectFromMember(ctor, assemblyFilePath, fileName, ctor.Attributes.ToString(), ".ctor", "Void", ctorParams, ctor.MetadataToken, assemblySignature));
+                        assemblyMethods.AddRange(from prop in type.GetProperties() where $"{prop.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName select CreateMethodObjectFromMember(prop, assemblyFilePath, fileName, "Property", prop.Name, prop.PropertyType.Name, []));
+                        assemblyMethods.AddRange(from field in type.GetFields() where $"{field.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName select CreateMethodObjectFromMember(field, assemblyFilePath, fileName, field.Attributes.ToString(), field.Name, field.FieldType.Name, []));
+                        assemblyMethods.AddRange(from evt in type.GetEvents() where $"{evt.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName select CreateMethodObjectFromMember(evt, assemblyFilePath, fileName, evt.Attributes.ToString(), evt.Name, evt.EventHandlerType?.Name ?? string.Empty, []));
+                    }
+                }
+                catch (Exception e) when (e is FileLoadException or FileNotFoundException or BadImageFormatException or TypeLoadException or NotSupportedException)
+                {
+                    if (DebugLog.Enabled)
+                    {
+                        DebugLog.Log($"assembly '{fileName}' failed to load: {e.GetType().Name}: {e.Message}");
+                    }
+                    Console.WriteLine($"Warning: Skipping assembly {assemblyFilePath} as it could not be fully loaded for inspection.");
+                    Console.WriteLine($"  - Reason: {e.GetType().Name}: {e.Message}");
+                }
+                catch (Exception e)
+                {
+                    if (DebugLog.Enabled)
+                    {
+                        DebugLog.Log($"assembly '{fileName}' failed to load: {e.GetType().Name}: {e.Message}");
+                    }
+                    Console.WriteLine($"Error: An unexpected error occurred while processing {fileName}. Details: {e.Message}");
+                }
+                finally
+                {
+                    if (assemblyWatch is not null)
+                    {
+                        assemblyWatch.Stop();
+                        // Only assemblies that took over a second get a line; per-assembly output is
+                        // otherwise noise on large trees.
+                        if (assemblyWatch.Elapsed.TotalSeconds >= 1)
+                        {
+                            DebugLog.Log(string.Create(CultureInfo.InvariantCulture, $"assembly '{fileName}': {assemblyMethods.Count - membersBefore} members in {assemblyWatch.Elapsed.TotalSeconds:F3}s"));
+                        }
                     }
                 }
             }
         }
-
-        foreach (var loadContext in loadContextsByDirectory.Values)
+        finally
         {
-            loadContext.Unload();
+            foreach (var loadContext in loadContextsByDirectory.Values)
+            {
+                loadContext.Unload();
+            }
+
+            loadContextsByDirectory.Clear();
         }
 
         return assemblyMethods;
