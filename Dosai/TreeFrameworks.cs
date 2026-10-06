@@ -34,10 +34,13 @@ internal static partial class TreeFrameworks
                 .ToList();
             foreach (var project in projects)
             {
-                if (!SafeFileRead.TryReadAllText(project, out var content))
+                if (!SafeFileRead.TryReadAllText(project, out var rawContent))
                 {
                     continue;
                 }
+
+                // A commented-out FrameworkReference or Use* property is not part of the build.
+                var content = GlobalUsings.WithoutXmlComments(rawContent);
 
                 var projectDirectory = Path.GetDirectoryName(project)!;
                 var reference = Path.GetRelativePath(root, project);
@@ -72,10 +75,12 @@ internal static partial class TreeFrameworks
                          .Concat(SafeFileRead.EnumerateAllFilesSafe(root, "Directory.Build.targets"))
                          .Where(file => !IsUnderBuildDirectory(root, file)).Order(SafeFileRead.PathComparer))
             {
-                if (!SafeFileRead.TryReadAllText(buildFile, out var content))
+                if (!SafeFileRead.TryReadAllText(buildFile, out var rawContent))
                 {
                     continue;
                 }
+
+                var content = GlobalUsings.WithoutXmlComments(rawContent);
 
                 foreach (var match in FrameworkReferenceItemRegex().Matches(content).Cast<Match>())
                 {
@@ -234,7 +239,7 @@ internal static partial class TreeFrameworks
                 if (File.Exists(candidate) && !IsUnderBuildDirectory(root, candidate))
                 {
                     return SafeFileRead.TryReadAllText(candidate, out var content)
-                        && Regex.IsMatch(content, $@"<(?:{propertyName})\s*>\s*true\s*</(?:{propertyName})\s*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+                        && Regex.IsMatch(GlobalUsings.WithoutXmlComments(content), $@"<(?:{propertyName})\s*>\s*true\s*</(?:{propertyName})\s*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
                 }
 
                 if (string.Equals(directory, root, SafeFileRead.PathComparison))

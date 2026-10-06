@@ -118,6 +118,12 @@ public static class McpServer
         }
 
         var name = GetString(parameters.Value, "name") ?? throw new ArgumentException("Missing tool name.");
+        // Per-root caches (targets, global usings, framework packs) outlive one analysis in this
+        // long-lived process; a tree restored, built or edited between two calls must be seen
+        // fresh, exactly as a new CLI process would see it.
+        TargetFrameworkDetection.ResetCaches();
+        GlobalUsings.ResetCache();
+        FrameworkReferences.ResetTreeCache();
         var arguments = GetProperty(parameters.Value, "arguments") ?? default;
         var path = GetString(arguments, "path") ?? defaultPath;
         var localPatterns = GetString(arguments, "patterns") ?? patternsPath;

@@ -230,10 +230,16 @@ dotnet test ./Dosai.sln
   reference packs (issue #74): frameworks detected by `TreeFrameworks.Detect` (SDK attribute,
   `<FrameworkReference>` items, `UseWindowsForms`/`UseWPF`, project.assets.json
   `frameworkReferences`, `*.runtimeconfig.json`) resolve to
-  `dotnet packs/<Name>.Ref/<ver>/ref/<tfm>`, the NuGet cache copy, then the installed shared
-  framework, version-matched to the tree's representative target framework (exact major first,
-  highest patch, releases over prereleases; a non-exact major always names the version used in
-  the set's diagnostic). Exactly one reference per assembly simple name survives, claimed in a
+  `dotnet packs/<Name>.Ref/<ver>/ref/<tfm>` and the NuGet cache copy (`NUGET_PACKAGES`, else
+  `~/.nuget/packages`), gathered together, then the installed shared framework only when no
+  pack of any major exists, version-matched to the tree's representative target framework
+  (exact major, else the nearest major above, else below; highest patch, releases over
+  prereleases; a non-exact major always names the version used in the set's diagnostic). A
+  pack of version N carries only `ref/netN.0`: read another major's pack from its own moniker,
+  never the analyzed one. A base pack of Dosai's own major is skipped (the process-wide set is
+  that major). Per-root caches (`TargetFrameworkDetection`, `GlobalUsings`,
+  `FrameworkReferences.ForTree`) are reset before each MCP tool call; keep any new per-root
+  cache in that reset. Exactly one reference per assembly simple name survives, claimed in a
   fixed order - target-matched `Microsoft.NETCore.App.Ref` (only when its major differs from
   Dosai's own runtime), the tree's other packs sorted by name, then the process-wide set
   filling. When a base reference pack owns the corlib, the fallback must not add its

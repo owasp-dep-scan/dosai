@@ -58,9 +58,13 @@ Roslyn operations -> nodes/edges/slices -> transparency facts -> reports/agent c
 tree's own reference packs on the process-wide set: `TreeFrameworks.Detect` reads the SDK
 attribute, explicit `<FrameworkReference>` items, `UseWindowsForms`/`UseWPF`,
 project.assets.json's `frameworkReferences` and `*.runtimeconfig.json`, and each named framework
-resolves to `packs/<Name>.Ref/<version>/ref/<tfm>`, the NuGet cache copy, or the installed
-shared framework - exact target major first, then highest patch with releases over prereleases,
-and a non-exact major always names the version used. Exactly one reference per assembly simple
+resolves to `packs/<Name>.Ref/<version>/ref/<tfm>` or the NuGet cache copy (gathered together,
+so a target-matched pack that only restore downloaded wins over an installed pack of another
+major), or, when no pack of any major exists, the installed shared framework. The version is the
+exact target major, else the nearest major above, else the nearest below, then the highest patch
+with releases over prereleases; a non-exact major always names the version used. A net9.0 web
+tree on a machine with only 8.x and 10.x packs therefore binds against the 10.x base and
+ASP.NET Core packs, a consistent pair, rather than the newest shared runtime. Exactly one reference per assembly simple
 name survives: the pack that matches the analyzed target claims shared names (this is what keeps
 .NET 11's nine `Microsoft.Extensions.*` assemblies from colliding with an ASP.NET Core 8/9/10
 pack), and every dropped duplicate is reported. A base reference pack owns the corlib: the

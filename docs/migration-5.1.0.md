@@ -264,4 +264,12 @@ them, which changes several outputs additively:
 - The synthetic implicit-usings tree now follows the project's SDK (base list plus the Web,
   Worker and Windows Forms additions, `System.Net.Http.Json` on .NET 11+, no `System.Net.Http`
   on .NET Framework targets) and the project's `<Using>` items, including `Remove` - a project
-  that removes an implicit using no longer binds calls through it.
+  that removes an implicit using no longer binds calls through it. `<Using>` items apply in
+  MSBuild's order (nearest `Directory.Build.props`, the project, nearest
+  `Directory.Build.targets`), `Include`/`Remove` accept `;`-separated lists, and the
+  `global::` prefix in a generated `GlobalUsings.g.cs` is normalized away, so a built and an
+  unbuilt copy of one project no longer count as disagreeing.
+- A target whose own reference pack is not installed binds against the nearest installed major
+  (above before below) for both the base framework and its shared frameworks, named in a
+  diagnostic. It used to fall through to the newest shared runtime for every framework but the
+  base.

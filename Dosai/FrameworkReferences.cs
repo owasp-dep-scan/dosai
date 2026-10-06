@@ -56,6 +56,15 @@ internal static class FrameworkReferences
     private static readonly Lock TreeResolveLock = new();
     private static readonly Dictionary<string, FrameworkReferenceSet> TreeResolvedByRoot = new(SafeFileRead.PathComparer);
 
+    /// <summary>Forgets every per-root reference decision (see <see cref="TargetFrameworkDetection.ResetCaches" />). The process-wide <see cref="Current" /> set is immutable and stays.</summary>
+    internal static void ResetTreeCache()
+    {
+        lock (TreeResolveLock)
+        {
+            TreeResolvedByRoot.Clear();
+        }
+    }
+
     /// <summary>The framework references for this process (or a test override).</summary>
     internal static FrameworkReferenceSet Current => Override.Value ?? Resolved.Value;
 
@@ -196,9 +205,10 @@ internal static class FrameworkReferences
             // Same major as Dosai's own runtime: the process-wide set already matches the
             // target, and re-deriving it from a pack would only churn the reference list.
         }
-        else if (ResolvePackDirectory("Microsoft.NETCore.App", monikerName, major.Value, notes) is { } corePack)
+        else if (ResolvePackDirectory("Microsoft.NETCore.App", monikerName, major.Value, notes) is { } corePack
+                 && ParseVersion(corePack.Version).Version.Major != Environment.Version.Major)
         {
-            AddDirectory(corePack.Directory, $"pack Microsoft.NETCore.App.Ref {corePack.Version} (matches {moniker})");
+            AddDirectory(corePack.Directory, $"base framework Microsoft.NETCore.App {corePack.Version} for {moniker} ({(corePack.ExactMajor ? "exact major" : "nearest installed major")})");
             // A base reference pack owns the corlib: its System.Runtime declares the primitive
             // types, and Dosai's own System.Private.CoreLib (a different major) beside it makes
             // Roslyn report CS0518 for every predefined type - two competing corlibs. The
@@ -206,11 +216,11 @@ internal static class FrameworkReferences
             // pack's; the pack compiles on its own.
             corePackOwnsCorlib = true;
         }
-        else if (detected.Any(framework => framework.Name != "Microsoft.NETCore.App") is false)
+        else
         {
-            // Only when the tree's frameworks need packs at all (the no-frameworks case returned
-            // Current above): say which base references a foreign-major tree got.
-            notes.Add($"No {major}.x Microsoft.NETCore.App reference pack is installed for target '{moniker}'; the base framework references come from Dosai's own runtime ({current.Source}, .NET {Environment.Version}), so APIs added after .NET {Environment.Version.Major} bind through a newer base than the tree targets.");
+            // No base framework nearer to the target than Dosai's own runtime: say which base
+            // references a foreign-major tree got (the tree's packs are layered on it below).
+            notes.Add($"No {major}.x Microsoft.NETCore.App reference pack is installed for target '{moniker}'; the base framework references come from Dosai's own runtime ({current.Source}, .NET {Environment.Version.Major}), so APIs that differ between .NET {major} and .NET {Environment.Version.Major} bind through a different base than the tree targets.");
         }
 
         // 2. The tree's other frameworks, sorted by name so several packs are deterministic.
@@ -218,7 +228,7 @@ internal static class FrameworkReferences
         {
             if (ResolvePackDirectory(framework.Name, monikerName, major.Value, notes) is { } pack)
             {
-                AddDirectory(pack.Directory, $"pack for {framework.Name} {pack.Version} via {framework.Evidence} (matches {moniker}: {(pack.ExactMajor ? "exact major" : $"no {major}.x pack installed, used {pack.Version}")})");
+                AddDirectory(pack.Directory, $"{framework.Name} {pack.Version} via {framework.Evidence} for {moniker} ({(pack.ExactMajor ? "exact major" : $"no {major}.x pack installed")})");
             }
             else
             {
@@ -247,9 +257,11 @@ internal static class FrameworkReferences
             filled++;
         }
 
-        if (references.Count == 0)
+        if (references.Count == 0 || packOrigins.Count == 0)
         {
-            return current;
+            // Nothing came from a pack: the set is the process-wide one, under its own source
+            // name (the self-contained smoke test greps for it), with the notes saying why.
+            return new FrameworkReferenceSet(current.References, current.Source, JoinNotes(notes), current.Warnings);
         }
 
         var source = $"{TreePacksSourcePrefix}[{string.Join(",", packOrigins)}]+{current.Source}";
@@ -289,103 +301,152 @@ internal static class FrameworkReferences
     }
 
     /// <summary>
-    ///     The reference-pack (or shared-framework) directory for one framework name: pack
-    ///     directories under every dotnet root, the NuGet cache, then the newest installed
-    ///     shared framework, each filtered to the moniker's ref directory. Version choice:
-    ///     exact major first, then the highest version with releases over prereleases; a
-    ///     non-exact major adds a note naming the version used.
+    ///     The reference-pack (or shared-framework) directory for one framework name. Candidates
+    ///     are gathered from the pack directories under every dotnet root and the NuGet cache
+    ///     together (a target-matched pack that only restore downloaded must not lose to an
+    ///     installed pack of another major), then from the installed shared frameworks only when
+    ///     no reference pack of any major exists. A pack of version N carries <c>ref/netN.0</c>,
+    ///     so an exact-major pack is read from the analyzed moniker's directory and another
+    ///     major's pack from its own. Version choice: the exact major, else the nearest major
+    ///     above the target, else the nearest below; within a major the highest version,
+    ///     releases over prereleases. A non-exact major always adds a note naming the version.
     /// </summary>
     private static (string Directory, string Version, bool ExactMajor)? ResolvePackDirectory(string frameworkName, string moniker, int targetMajor, List<string> notes)
-        => ResolvePackDirectory(frameworkName, moniker, targetMajor, notes, PackDirectories());
+        => ResolvePackDirectory(frameworkName, moniker, targetMajor, notes, PackDirectories(), NuGetPackageRoots(), InstalledSharedRoots());
 
-    /// <summary>Testable core: the pack directories are supplied by the caller.</summary>
-    internal static (string Directory, string Version, bool ExactMajor)? ResolvePackDirectory(string frameworkName, string moniker, int targetMajor, List<string> notes, IEnumerable<string> packDirectories)
+    /// <summary>Testable core: the pack, NuGet-cache and shared-framework roots are supplied by the caller.</summary>
+    internal static (string Directory, string Version, bool ExactMajor)? ResolvePackDirectory(
+        string frameworkName,
+        string moniker,
+        int targetMajor,
+        List<string> notes,
+        IEnumerable<string> packDirectories,
+        IEnumerable<string>? nugetPackageRoots = null,
+        IEnumerable<string>? sharedRoots = null)
     {
-        // The desktop sub-frameworks (.WPF/.WindowsForms) share one reference pack.
-        var packName = frameworkName.StartsWith("Microsoft.WindowsDesktop.App", StringComparison.OrdinalIgnoreCase)
-            ? "Microsoft.WindowsDesktop.App.Ref"
-            : frameworkName + ".Ref";
-        var candidates = new List<(string Directory, Version Version, bool IsRelease)>();
-        foreach (var packsDirectory in packDirectories)
+        // The desktop sub-frameworks (.WPF/.WindowsForms) share one reference pack and one
+        // shared framework.
+        var isDesktop = frameworkName.StartsWith("Microsoft.WindowsDesktop.App", StringComparison.OrdinalIgnoreCase);
+        var packName = isDesktop ? "Microsoft.WindowsDesktop.App.Ref" : frameworkName + ".Ref";
+        var sharedName = isDesktop ? "Microsoft.WindowsDesktop.App" : frameworkName;
+        var candidates = new List<VersionedDirectory>();
+
+        void CollectPacks(string packRoot)
         {
-            var packRoot = Path.Combine(packsDirectory, packName);
             if (!Directory.Exists(packRoot))
             {
-                continue;
+                return;
             }
 
-            foreach (var versionDirectory in Directory.EnumerateDirectories(packRoot))
+            foreach (var versionDirectory in Directory.EnumerateDirectories(packRoot).Order(StringComparer.Ordinal))
             {
-                var referenceDirectory = Path.Combine(versionDirectory, "ref", moniker);
-                if (Directory.Exists(referenceDirectory) && ParseVersion(Path.GetFileName(versionDirectory)) is { } version && version.Version > new Version(0, 0))
+                var label = Path.GetFileName(versionDirectory);
+                var (version, isRelease) = ParseVersion(label);
+                if (version <= new Version(0, 0))
                 {
-                    candidates.Add((referenceDirectory, version.Version, version.IsRelease));
+                    continue;
+                }
+
+                var referenceMoniker = version.Major == targetMajor
+                    ? moniker
+                    : string.Create(CultureInfo.InvariantCulture, $"net{version.Major}.0");
+                var referenceDirectory = Path.Combine(versionDirectory, "ref", referenceMoniker);
+                if (Directory.Exists(referenceDirectory))
+                {
+                    candidates.Add(new VersionedDirectory(referenceDirectory, version, isRelease, label));
                 }
             }
         }
 
-        if (candidates.Count == 0)
+        foreach (var packsDirectory in packDirectories)
         {
-            // The NuGet cache keeps framework ref packs under their package id (all lowercase).
-            var cacheRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".nuget", "packages", packName.ToLowerInvariant());
-            if (Directory.Exists(cacheRoot))
-            {
-                foreach (var versionDirectory in Directory.EnumerateDirectories(cacheRoot))
-                {
-                    var referenceDirectory = Path.Combine(versionDirectory, "ref", moniker);
-                    if (Directory.Exists(referenceDirectory) && ParseVersion(Path.GetFileName(versionDirectory)) is { } version && version.Version > new Version(0, 0))
-                    {
-                        candidates.Add((referenceDirectory, version.Version, version.IsRelease));
-                    }
-                }
-            }
+            CollectPacks(Path.Combine(packsDirectory, packName));
         }
 
-        if (candidates.Count > 0)
+        foreach (var nugetRoot in nugetPackageRoots ?? [])
         {
-            var ordered = candidates
-                .OrderByDescending(candidate => candidate.Version.Major == targetMajor)
-                .ThenByDescending(candidate => candidate.Version)
-                .ThenByDescending(candidate => candidate.IsRelease)
-                .ToList();
-            var chosen = ordered[0];
-            if (chosen.Version.Major != targetMajor)
-            {
-                notes.Add($"No {targetMajor}.x reference pack for '{frameworkName}' is installed; using version {chosen.Version} ({Path.GetFileName(Path.GetDirectoryName(chosen.Directory))}) instead, so APIs added or removed after .NET {targetMajor} bind incorrectly.");
-            }
-
-            return (chosen.Directory, chosen.Version.ToString(), chosen.Version.Major == targetMajor);
+            // The NuGet cache keeps framework ref packs under their package id, lowercased.
+            CollectPacks(Path.Combine(nugetRoot, packName.ToLowerInvariant()));
         }
 
-        // Last resort: the installed shared framework's runtime directory for this framework.
-        foreach (var sharedRoot in InstalledSharedRoots())
+        if (SelectNearestMajor(candidates, targetMajor) is { } pack)
         {
-            var frameworkRoot = Path.Combine(sharedRoot, frameworkName);
+            if (pack.Version.Major != targetMajor)
+            {
+                notes.Add($"No {targetMajor}.x reference pack for '{frameworkName}' is installed; using reference pack {pack.Label} instead, so APIs that differ between .NET {targetMajor} and .NET {pack.Version.Major} may bind differently.");
+            }
+
+            return (pack.Directory, pack.Label, pack.Version.Major == targetMajor);
+        }
+
+        // Last resort: an installed shared framework's runtime directory, chosen the same way.
+        var shared = new List<VersionedDirectory>();
+        foreach (var sharedRoot in sharedRoots ?? [])
+        {
+            var frameworkRoot = Path.Combine(sharedRoot, sharedName);
             if (!Directory.Exists(frameworkRoot))
             {
                 continue;
             }
 
-            var versions = Directory.EnumerateDirectories(frameworkRoot)
-                .Select(directory => (Directory: directory, ParseVersion(Path.GetFileName(directory))))
-                .Where(candidate => candidate.Item2.Version > new Version(0, 0))
-                .OrderByDescending(candidate => candidate.Item2.Version.Major == targetMajor)
-                .ThenByDescending(candidate => candidate.Item2.Version)
-                .ThenByDescending(candidate => candidate.Item2.IsRelease)
-                .ToList();
-            if (versions.Count > 0)
+            foreach (var directory in Directory.EnumerateDirectories(frameworkRoot).Order(StringComparer.Ordinal))
             {
-                var chosen = versions[0];
-                if (chosen.Item2.Version.Major != targetMajor)
+                var label = Path.GetFileName(directory);
+                var (version, isRelease) = ParseVersion(label);
+                if (version > new Version(0, 0))
                 {
-                    notes.Add($"No {targetMajor}.x reference pack for '{frameworkName}' is installed; using shared framework version {chosen.Item2.Version} instead.");
+                    shared.Add(new VersionedDirectory(directory, version, isRelease, label));
                 }
-
-                return (chosen.Directory, chosen.Item2.Version.ToString(), chosen.Item2.Version.Major == targetMajor);
             }
         }
 
+        if (SelectNearestMajor(shared, targetMajor) is { } runtime)
+        {
+            notes.Add(runtime.Version.Major == targetMajor
+                ? $"No reference pack for '{frameworkName}' is installed; using the installed shared framework {runtime.Label} (runtime implementation assemblies) instead."
+                : $"No {targetMajor}.x reference pack for '{frameworkName}' is installed; using the installed shared framework {runtime.Label} instead.");
+            return (runtime.Directory, runtime.Label, runtime.Version.Major == targetMajor);
+        }
+
         return null;
+    }
+
+    private readonly record struct VersionedDirectory(string Directory, Version Version, bool IsRelease, string Label);
+
+    /// <summary>
+    ///     Exact major first, then the nearest major above the target, then the nearest below;
+    ///     within a major the highest version, releases over prereleases, then the path (so two
+    ///     roots holding one version resolve the same way on every run).
+    /// </summary>
+    private static VersionedDirectory? SelectNearestMajor(List<VersionedDirectory> candidates, int targetMajor)
+    {
+        if (candidates.Count == 0)
+        {
+            return null;
+        }
+
+        // Above the target ranks before the same distance below: a newer framework's API is
+        // close to a superset of the target's, an older one misses what the target added.
+        static int Distance(int major, int target) => major == target ? 0 : major > target ? ((major - target) * 2) - 1 : (target - major) * 2;
+        return candidates
+            .OrderBy(candidate => Distance(candidate.Version.Major, targetMajor))
+            .ThenByDescending(candidate => candidate.Version)
+            .ThenByDescending(candidate => candidate.IsRelease)
+            .ThenBy(candidate => candidate.Directory, StringComparer.Ordinal)
+            .First();
+    }
+
+    /// <summary>NuGet's global packages folder: <c>NUGET_PACKAGES</c> when set, else <c>~/.nuget/packages</c>.</summary>
+    private static IEnumerable<string> NuGetPackageRoots()
+    {
+        if (Environment.GetEnvironmentVariable("NUGET_PACKAGES") is { Length: > 0 } configured)
+        {
+            return [configured];
+        }
+
+        return Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) is { Length: > 0 } home
+            ? [Path.Combine(home, ".nuget", "packages")]
+            : [];
     }
 
     private static IEnumerable<string> PackDirectories()

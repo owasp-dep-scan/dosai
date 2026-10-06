@@ -288,31 +288,211 @@ public class Issue74BindingTests
         Assert.DoesNotContain("Microsoft.NETCore.App", detected.Keys);
     }
 
-    [Fact]
-    public void FrameworkReferences_PackResolution_PrefersExactMajorAndReportsFallbacks()
+    /// <summary>A pack directory the way the SDK lays one out: version N carries ref/netN.0 only.</summary>
+    private static void WritePack(string packsRoot, string packName, string version)
     {
-        using var packs = new TempDir();
-        // A synthetic pack layout with two versions: an exact-major 8.0.1 and a newer 9.0.0.
-        foreach (var version in new[] { "8.0.1", "9.0.0" })
+        var major = version.Split('.')[0];
+        Write(System.IO.Path.Combine(packsRoot, packName, version, "ref", $"net{major}.0"), "Test.Framework.dll", "directory shape only");
+    }
+
+    [Fact]
+    public void FrameworkReferences_PackResolution_UsesRealPackShapesAndTheNearestMajor()
+    {
+        // Real packs of version N only carry ref/netN.0. The first implementation looked for
+        // the analyzed moniker inside every pack, so another major's pack could never match and
+        // a net9.0 tree skipped an installed 10.x pack for the newest shared runtime; it also
+        // consulted the NuGet cache only when no dotnet pack matched at all.
+        using var roots = new TempDir();
+        var dotnetPacks = System.IO.Path.Combine(roots.Path, "dotnet", "packs");
+        var nugetCache = System.IO.Path.Combine(roots.Path, "nuget");
+        WritePack(dotnetPacks, "Test.Framework.Ref", "10.0.10");
+        WritePack(dotnetPacks, "Test.Framework.Ref", "11.0.0-rc.1.26425.128");
+        WritePack(dotnetPacks, "Test.Framework.Ref", "11.0.0");
+        WritePack(nugetCache, "test.framework.ref", "8.0.31");
+        WritePack(nugetCache, "test.framework.ref", "8.0.4");
+
+        (string Directory, string Version, bool ExactMajor)? Resolve(int major, List<string> notes) =>
+            FrameworkReferences.ResolvePackDirectory("Test.Framework", $"net{major}.0", major, notes, [dotnetPacks], [nugetCache], []);
+
+        // Exact major from the NuGet cache wins over installed packs of other majors; highest patch.
+        var notes = new List<string>();
+        var net8 = Resolve(8, notes);
+        Assert.Equal(("8.0.31", true), (net8!.Value.Version, net8.Value.ExactMajor));
+        Assert.EndsWith(System.IO.Path.Combine("8.0.31", "ref", "net8.0"), net8.Value.Directory, StringComparison.Ordinal);
+        Assert.Empty(notes);
+
+        // No 9.x pack: the nearest major above (10), read from its own ref/net10.0, with a note.
+        var net9 = Resolve(9, notes);
+        Assert.Equal(("10.0.10", false), (net9!.Value.Version, net9.Value.ExactMajor));
+        Assert.EndsWith(System.IO.Path.Combine("ref", "net10.0"), net9.Value.Directory, StringComparison.Ordinal);
+        Assert.Contains(notes, note => note.Contains("No 9.x reference pack", StringComparison.Ordinal) && note.Contains("10.0.10", StringComparison.Ordinal));
+
+        // Exact 11: the release beats the prerelease of the same version, and the label keeps it.
+        Assert.Equal("11.0.0", Resolve(11, []).Value.Version);
+
+        // Above every installed major: the nearest below.
+        Assert.Equal("11.0.0", Resolve(12, []).Value.Version);
+
+        // Below every installed major: the nearest above, never the newest.
+        Assert.Equal("8.0.31", Resolve(7, []).Value.Version);
+
+        Assert.Null(FrameworkReferences.ResolvePackDirectory("Missing.Framework", "net8.0", 8, [], [dotnetPacks], [nugetCache], []));
+    }
+
+    [Fact]
+    public void FrameworkReferences_PackResolution_FallsBackToTheNearestSharedFrameworkOnlyWithoutAnyPack()
+    {
+        using var roots = new TempDir();
+        var shared = System.IO.Path.Combine(roots.Path, "dotnet", "shared");
+        foreach (var version in new[] { "8.0.12", "10.0.5", "11.0.0-rc.1.26425.128" })
         {
-            var referenceDirectory = System.IO.Path.Combine(packs.Path, "packs", "Test.Framework.Ref", version, "ref", "net8.0");
-            Write(referenceDirectory, "Test.Framework.dll", "not a real assembly - only the directory shape matters for selection");
+            // The desktop sub-frameworks resolve to the one Microsoft.WindowsDesktop.App runtime.
+            Write(System.IO.Path.Combine(shared, "Microsoft.WindowsDesktop.App", version), "System.Windows.Forms.dll", "shape only");
         }
 
         var notes = new List<string>();
-        var exact = FrameworkReferences.ResolvePackDirectory("Test.Framework", "net8.0", 8, notes, [packs.Path + System.IO.Path.DirectorySeparatorChar + "packs"]);
-        Assert.NotNull(exact);
-        Assert.Equal("8.0.1", exact!.Value.Version);
-        Assert.True(exact.Value.ExactMajor);
+        var forms = FrameworkReferences.ResolvePackDirectory("Microsoft.WindowsDesktop.App.WindowsForms", "net9.0", 9, notes, [], [], [shared]);
+        Assert.Equal(("10.0.5", false), (forms!.Value.Version, forms.Value.ExactMajor));
+        Assert.Contains(notes, note => note.Contains("shared framework 10.0.5", StringComparison.Ordinal));
 
-        var fallback = FrameworkReferences.ResolvePackDirectory("Test.Framework", "net8.0", 7, notes, [System.IO.Path.Combine(packs.Path, "packs")]);
-        Assert.NotNull(fallback);
-        Assert.Equal("9.0.0", fallback!.Value.Version);
-        Assert.False(fallback.Value.ExactMajor);
-        Assert.Contains(notes, note => note.Contains("No 7.x reference pack", StringComparison.Ordinal) && note.Contains("9.0.0", StringComparison.Ordinal));
+        // Any reference pack, even of another major, beats a shared runtime directory.
+        var packs = System.IO.Path.Combine(roots.Path, "dotnet", "packs");
+        WritePack(packs, "Microsoft.WindowsDesktop.App.Ref", "11.0.0-rc.1.26425.128");
+        var withPack = FrameworkReferences.ResolvePackDirectory("Microsoft.WindowsDesktop.App.WPF", "net9.0", 9, [], [packs], [], [shared]);
+        Assert.Equal("11.0.0-rc.1.26425.128", withPack!.Value.Version);
+        Assert.Contains(System.IO.Path.Combine("ref", "net11.0"), withPack.Value.Directory, StringComparison.Ordinal);
+    }
 
-        var missing = FrameworkReferences.ResolvePackDirectory("Missing.Framework", "net8.0", 8, notes, [System.IO.Path.Combine(packs.Path, "packs")]);
-        Assert.Null(missing);
+    [Fact]
+    public void GlobalUsings_UsingItems_FollowMSBuildEvaluationOrder_AndItemLists()
+    {
+        // Directory.Build.props is imported before the project body and Directory.Build.targets
+        // after it, so a project's Remove drops a props Include and a targets Remove drops the
+        // project's Include. Include/Remove values are ';'-separated item lists, and a
+        // commented-out item is not an item.
+        using var fixture = new TempDir();
+        Write(fixture.Path, "Directory.Build.props", """
+<Project>
+  <ItemGroup>
+    <Using Include="System.Text" />
+    <Using Include="System.Buffers" />
+  </ItemGroup>
+</Project>
+""");
+        Write(fixture.Path, "Directory.Build.targets", """
+<Project>
+  <ItemGroup>
+    <Using Remove="System.Xml" />
+  </ItemGroup>
+</Project>
+""");
+        var projectDirectory = System.IO.Path.Combine(fixture.Path, "app");
+        Write(projectDirectory, "app.csproj", """
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <Using Remove="System.Text" />
+    <Using Include="System.Xml;System.Numerics" />
+    <!-- <Using Include="System.Commented.Out" /> -->
+  </ItemGroup>
+</Project>
+""");
+        var text = GlobalUsings.Resolve(fixture.Path).Tree!.GetText().ToString();
+        Assert.DoesNotContain("global using System.Text;", text, StringComparison.Ordinal);
+        Assert.Contains("global using System.Buffers;", text, StringComparison.Ordinal);
+        Assert.Contains("global using System.Numerics;", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("global using System.Xml;", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("System.Xml;System.Numerics", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("Commented", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void GlobalUsings_BuiltAndUnbuiltProjectsWithTheSameUsings_DoNotDisagree()
+    {
+        // MSBuild's generated file spells usings global::System; the SDK list spells System.
+        // A built and an unbuilt copy of one project shape must merge to one directive each
+        // and must not be reported as disagreeing.
+        using var fixture = new TempDir();
+        foreach (var name in new[] { "built", "unbuilt" })
+        {
+            Write(System.IO.Path.Combine(fixture.Path, name), $"{name}.csproj", string.Format(Net8Csproj, "Microsoft.NET.Sdk"));
+        }
+
+        var builtProject = System.IO.Path.Combine(fixture.Path, "built", "built.csproj");
+        File.SetLastWriteTimeUtc(builtProject, DateTime.UtcNow.AddMinutes(-5));
+        Write(System.IO.Path.Combine(fixture.Path, "built", "obj", "Debug", "net8.0"), "built.GlobalUsings.g.cs", """
+// <auto-generated/>
+global using global::System;
+global using global::System.Collections.Generic;
+global using global::System.IO;
+global using global::System.Linq;
+global using global::System.Net.Http;
+global using global::System.Threading;
+global using global::System.Threading.Tasks;
+""");
+        var decision = GlobalUsings.Resolve(fixture.Path);
+        var text = decision.Tree!.GetText().ToString();
+        Assert.Equal(7, text.Split('\n').Count(line => line.StartsWith("global using ", StringComparison.Ordinal)));
+        Assert.DoesNotContain("global::", text, StringComparison.Ordinal);
+        Assert.DoesNotContain(decision.Diagnostics, diagnostic => diagnostic.Contains("differ between projects", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void GlobalUsings_TargetFrameworkInheritedFromDirectoryBuildProps_GatesTheNet11Using()
+    {
+        // The project's target comes from Directory.Build.props, as in most monorepos; the
+        // .NET 11 System.Net.Http.Json using (and the generated-file target match) depend on it.
+        using var fixture = new TempDir();
+        Write(fixture.Path, "Directory.Build.props", """
+<Project>
+  <PropertyGroup>
+    <TargetFramework>net11.0</TargetFramework>
+  </PropertyGroup>
+</Project>
+""");
+        Write(System.IO.Path.Combine(fixture.Path, "app"), "app.csproj", """
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+</Project>
+""");
+        var text = GlobalUsings.Resolve(fixture.Path).Tree!.GetText().ToString();
+        Assert.Contains("global using System.Net.Http.Json;", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Mcp_ToolCalls_SeeATreeThatChangedSinceThePreviousCall()
+    {
+        // The MCP server is one long-lived process: per-root caches must not keep the global
+        // usings (or targets, or framework packs) of a tree the user edited between two calls.
+        using var fixture = new TempDir();
+        var project = Write(fixture.Path, "app.csproj", """
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+  </PropertyGroup>
+</Project>
+""");
+        Write(fixture.Path, "Program.cs", "public static class P { public static void M() => Console.WriteLine(1); }");
+        Assert.False(GlobalUsings.Resolve(fixture.Path).Enabled);
+
+        File.WriteAllText(project, string.Format(Net8Csproj, "Microsoft.NET.Sdk"));
+        var request = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            jsonrpc = "2.0",
+            id = 1,
+            method = "tools/call",
+            @params = new { name = "dosai.methods", arguments = new { path = fixture.Path } }
+        });
+        using var input = new StringReader(request + "\n");
+        using var output = new StringWriter();
+        McpServer.Run(defaultPath: fixture.Path, input: input, output: output);
+        Assert.Contains("\"result\"", output.ToString(), StringComparison.Ordinal);
+        Assert.True(GlobalUsings.Resolve(fixture.Path).Enabled);
     }
 
     [Fact]

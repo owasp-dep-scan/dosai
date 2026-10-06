@@ -65,6 +65,22 @@ internal static class TargetFrameworkDetection
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, ProjectTargets?> ProjectTargetsCache = new(SafeFileRead.PathComparer);
 
     /// <summary>
+    ///     Forgets every per-root detection. A one-shot CLI command never needs it; the MCP
+    ///     server calls it before each tool call because a long-lived process otherwise keeps
+    ///     the targets of a tree the user has since edited, restored or built.
+    /// </summary>
+    internal static void ResetCaches()
+    {
+        lock (DetectionLock)
+        {
+            DetectedByRoot.Clear();
+        }
+
+        NearestProjectDirectoryCache.Clear();
+        ProjectTargetsCache.Clear();
+    }
+
+    /// <summary>
     ///     The target frameworks governing one source file: those of the nearest project at or
     ///     above the file's directory, up to the scan root - the project that compiles it - and
     ///     the scan root's detection for a file outside every project or under one whose target

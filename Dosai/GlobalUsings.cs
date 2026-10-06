@@ -84,6 +84,15 @@ internal static partial class GlobalUsings
     private static readonly Lock ResolveLock = new();
     private static readonly Dictionary<string, GlobalUsingsDecision> DecisionsByRoot = new(SafeFileRead.PathComparer);
 
+    /// <summary>Forgets every per-root decision (see <see cref="TargetFrameworkDetection.ResetCaches" />): a build writes GlobalUsings.g.cs and restore writes project.assets.json between two MCP calls.</summary>
+    internal static void ResetCache()
+    {
+        lock (ResolveLock)
+        {
+            DecisionsByRoot.Clear();
+        }
+    }
+
     public static GlobalUsingsDecision Resolve(string? path)
     {
         if (string.IsNullOrWhiteSpace(path))
@@ -128,7 +137,17 @@ internal static partial class GlobalUsings
             {
                 if (ProjectUsings(root, project, diagnostics) is { Count: > 0 } directives)
                 {
-                    projectSets.Add((Path.GetRelativePath(root, project), directives));
+                    var normalized = new List<string>(directives.Count);
+                    var unique = new HashSet<string>(StringComparer.Ordinal);
+                    foreach (var directive in directives)
+                    {
+                        if (NormalizeDirective(directive) is { Length: > 0 } spelled && unique.Add(spelled))
+                        {
+                            normalized.Add(spelled);
+                        }
+                    }
+
+                    projectSets.Add((Path.GetRelativePath(root, project), normalized));
                 }
             }
 
@@ -195,7 +214,10 @@ internal static partial class GlobalUsings
             return [];
         }
 
-        var targets = ProjectTargets(project);
+        // The project's targets as the guard evaluation sees them (its own file, else the
+        // nearest Directory.Build.props/targets): a monorepo commonly sets TargetFramework once
+        // in Directory.Build.props, and a regex over the project file alone missed it.
+        var targets = TargetFrameworkDetection.ForFile(root, projectFile, ".csproj").TargetFrameworks;
         var representative = FrameworkPreprocessorDefines.TrySelectRepresentative(targets, out var selected) ? selected : null;
         var isNetFramework = representative?.StartsWith("net4", StringComparison.OrdinalIgnoreCase) == true;
 
@@ -264,32 +286,30 @@ internal static partial class GlobalUsings
 
     private static void ApplyUsingItems(string root, string projectFile, string project, string projectDirectory, List<string> directives, HashSet<string> names, List<string> diagnostics)
     {
-        // <Using> items apply from the project file and from Directory.Build.props/targets up
-        // the tree; the project's own file wins on ordering. Conditions are not evaluated: the
-        // item is included and the skipped condition is reported, because an extra using that
-        // does not resolve errors alone and never blocks other bindings.
+        // <Using> items in MSBuild evaluation order: the nearest Directory.Build.props (imported
+        // before the project body), the project file, then the nearest Directory.Build.targets
+        // (imported after it). Order matters for Remove: a project's <Using Remove> drops an
+        // Include its Directory.Build.props made, and a Directory.Build.targets Remove drops the
+        // project's. Conditions are not evaluated: the item is applied and the skipped condition
+        // reported, because an extra using that does not resolve errors alone and never blocks
+        // other bindings.
         var items = new List<(string File, Match Match)>();
-        foreach (var match in UsingItemRegex().Matches(project).Cast<Match>())
+        void AddItems(string file, string content)
         {
-            items.Add((projectFile, match));
+            foreach (var match in UsingItemRegex().Matches(WithoutXmlComments(content)).Cast<Match>())
+            {
+                items.Add((file, match));
+            }
         }
 
-        foreach (var buildFile in new[] { "Directory.Build.props", "Directory.Build.targets" })
+        string? NearestBuildFile(string buildFile)
         {
             for (var directory = projectDirectory; directory is not null; directory = Path.GetDirectoryName(directory))
             {
                 var candidate = Path.Combine(directory, buildFile);
                 if (File.Exists(candidate) && !IsUnderBuildDirectory(root, candidate))
                 {
-                    if (SafeFileRead.TryReadAllText(candidate, out var content))
-                    {
-                        foreach (var match in UsingItemRegex().Matches(content).Cast<Match>())
-                        {
-                            items.Add((candidate, match));
-                        }
-                    }
-
-                    break;
+                    return candidate;
                 }
 
                 if (string.Equals(directory, root, SafeFileRead.PathComparison))
@@ -297,6 +317,19 @@ internal static partial class GlobalUsings
                     break;
                 }
             }
+
+            return null;
+        }
+
+        if (NearestBuildFile("Directory.Build.props") is { } props && SafeFileRead.TryReadAllText(props, out var propsContent))
+        {
+            AddItems(props, propsContent);
+        }
+
+        AddItems(projectFile, project);
+        if (NearestBuildFile("Directory.Build.targets") is { } targets && SafeFileRead.TryReadAllText(targets, out var targetsContent))
+        {
+            AddItems(targets, targetsContent);
         }
 
         foreach (var (file, item) in items)
@@ -307,22 +340,31 @@ internal static partial class GlobalUsings
                 diagnostics.Add($"Using item in '{Path.GetRelativePath(root, file)}' carries the condition '{condition}', which Dosai does not evaluate; the using is applied unconditionally.");
             }
 
-            if (attributes.TryGetValue("Remove", out var remove))
+            if (attributes.TryGetValue("Remove", out var removeList))
             {
-                var pattern = UsingDirectiveName(remove);
-                for (var index = directives.Count - 1; index >= 0; index--)
+                // An item list: MSBuild splits Include/Remove on ';'.
+                foreach (var remove in SplitItemList(removeList))
                 {
-                    if (UsingDirectiveName(directives[index]) == pattern)
+                    var pattern = UsingDirectiveName(remove);
+                    for (var index = directives.Count - 1; index >= 0; index--)
                     {
-                        names.Remove(UsingDirectiveName(directives[index]));
-                        directives.RemoveAt(index);
+                        if (UsingDirectiveName(directives[index]) == pattern)
+                        {
+                            names.Remove(directives[index]);
+                            directives.RemoveAt(index);
+                        }
                     }
                 }
 
                 continue;
             }
 
-            if (attributes.TryGetValue("Include", out var include))
+            if (!attributes.TryGetValue("Include", out var includeList))
+            {
+                continue;
+            }
+
+            foreach (var include in SplitItemList(includeList))
             {
                 var alias = attributes.GetValueOrDefault("Alias");
                 var isStatic = attributes.GetValueOrDefault("Static", "").Equals("true", StringComparison.OrdinalIgnoreCase);
@@ -345,6 +387,23 @@ internal static partial class GlobalUsings
             }
         }
     }
+
+    /// <summary>An MSBuild item list split the way MSBuild splits it: on ';', trimmed, empty entries dropped.</summary>
+    private static IEnumerable<string> SplitItemList(string value) =>
+        value.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    /// <summary>A project file's text with its XML comments blanked: a commented-out <c>&lt;Using&gt;</c> is not an item.</summary>
+    internal static string WithoutXmlComments(string content) => XmlCommentRegex().Replace(content, string.Empty);
+
+    /// <summary>
+    ///     One spelling per directive: MSBuild's generated file writes <c>global::System</c>,
+    ///     the SDK lists and <c>&lt;Using&gt;</c> items write <c>System</c>. A top-level using
+    ///     already binds from the global namespace, so the qualifier changes nothing and is
+    ///     dropped; otherwise a built project and an unbuilt one would emit the same using twice
+    ///     and be reported as disagreeing.
+    /// </summary>
+    internal static string NormalizeDirective(string directive) =>
+        directive.Replace("global::", string.Empty, StringComparison.Ordinal).Trim();
 
     private static string UsingDirectiveName(string directive)
     {
@@ -403,7 +462,7 @@ internal static partial class GlobalUsings
 
         if (chosen.Written < File.GetLastWriteTimeUtc(projectFile))
         {
-            diagnostics.Add($"obj output '{chosen.Path}' is older than the project file; global usings were recomputed from the project instead.");
+            diagnostics.Add($"obj output '{Path.GetRelativePath(projectDirectory, chosen.Path)}' of '{projectName}' is older than the project file; global usings were recomputed from the project instead.");
             return null;
         }
 
@@ -439,20 +498,6 @@ internal static partial class GlobalUsings
         return sdks;
     }
 
-    private static List<string> ProjectTargets(string project)
-    {
-        var targets = new List<string>();
-        foreach (Match match in TargetFrameworksElementRegex().Matches(project))
-        {
-            foreach (var value in match.Groups[1].Value.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-            {
-                targets.Add(value);
-            }
-        }
-
-        return targets;
-    }
-
     /// <summary>The property's effective value: the project's own, else the nearest Directory.Build.props/targets above it; unevaluated conditions make the value unusable and reported.</summary>
     private static string? PropertyWithInheritance(string root, string projectDirectory, string project, string propertyName)
     {
@@ -485,7 +530,7 @@ internal static partial class GlobalUsings
 
     private static string? ProjectPropertyValue(string project, string propertyName)
     {
-        foreach (Match match in Regex.Matches(project, $@"<(?:{propertyName})\s*((?:Condition\s*=""[^""]*""\s*)?)>([^<]*)</(?:{propertyName})\s*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+        foreach (Match match in Regex.Matches(WithoutXmlComments(project), $@"<(?:{propertyName})\s*((?:Condition\s*=""[^""]*""\s*)?)>([^<]*)</(?:{propertyName})\s*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
         {
             if (match.Groups[1].Value.Length > 0)
             {
@@ -545,6 +590,9 @@ internal static partial class GlobalUsings
         return false;
     }
 
+    [GeneratedRegex(@"<!--.*?-->", RegexOptions.CultureInvariant | RegexOptions.Singleline)]
+    private static partial Regex XmlCommentRegex();
+
     [GeneratedRegex(@"<Using\s+([^>]*?)(?:/>|>(.*?)</Using\s*>)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Singleline)]
     private static partial Regex UsingItemRegex();
 
@@ -553,9 +601,6 @@ internal static partial class GlobalUsings
 
     [GeneratedRegex(@"<Sdk\b[^>]*?\bName\s*=\s*""([^""]+)""", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex ProjectSdkElementRegex();
-
-    [GeneratedRegex(@"<TargetFrameworks?\s*>([^<]+)</TargetFrameworks?\s*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
-    private static partial Regex TargetFrameworksElementRegex();
 
     [GeneratedRegex(@"([\w]+)\s*=\s*""([^""]*)""", RegexOptions.CultureInvariant)]
     private static partial Regex AttributeRegex();
