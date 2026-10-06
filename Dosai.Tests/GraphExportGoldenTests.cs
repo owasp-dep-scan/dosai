@@ -116,12 +116,40 @@ public class GraphExportGoldenTests
         {
             Assert.True(File.Exists(GoldenPath(expected)), $"missing golden {expected}");
             Assert.True(File.Exists(Path.Combine(output.Path, expected)), $"CLI did not write {expected}");
-            Assert.Equal(File.ReadAllBytes(GoldenPath(expected)), File.ReadAllBytes(Path.Combine(output.Path, expected)));
+            Assert.Equal(File.ReadAllBytes(GoldenPath(expected)), WithLfLineTerminators(File.ReadAllBytes(Path.Combine(output.Path, expected))));
         }
 
         Assert.Equal(
             MaskRunIdentity(File.ReadAllText(GoldenPath("crypto-cyclonedx.json"))),
-            MaskRunIdentity(File.ReadAllText(Path.Combine(output.Path, "crypto-cyclonedx.json"))));
+            MaskRunIdentity(File.ReadAllText(Path.Combine(output.Path, "crypto-cyclonedx.json")).Replace("\r\n", "\n", StringComparison.Ordinal)));
+    }
+
+    /// <summary>
+    ///     The goldens were written on a Unix host, where the exporters' <c>WriteLine</c> ends lines
+    ///     with LF; on Windows the same build ends them with CRLF (<see cref="Environment.NewLine" />).
+    ///     The fixture is checked out byte-exact (<c>.gitattributes</c>), so its labels never carry
+    ///     a CR and folding CRLF back to LF recovers exactly the Unix bytes. A no-op off Windows,
+    ///     where the comparison stays exact.
+    /// </summary>
+    private static byte[] WithLfLineTerminators(byte[] bytes)
+    {
+        if (Environment.NewLine == "\n")
+        {
+            return bytes;
+        }
+
+        var folded = new List<byte>(bytes.Length);
+        for (var index = 0; index < bytes.Length; index++)
+        {
+            if (bytes[index] == (byte)'\r' && index + 1 < bytes.Length && bytes[index + 1] == (byte)'\n')
+            {
+                continue;
+            }
+
+            folded.Add(bytes[index]);
+        }
+
+        return [.. folded];
     }
 
     private static void RunCliCommands(string fixture, string output)
