@@ -62,6 +62,12 @@ internal static partial class FSharpRegex
 ///     process - a caller could not scan its own output directory and then clean or replace it.
 ///     Shared-framework assemblies keep the mapped path: they are immutable, nobody deletes
 ///     them, and copying them per inspected assembly would read tens of megabytes each time.
+///     One context is shared by every inspected file of a directory (issue #76) instead of one
+///     per file: dependencies load once per directory rather than once per inspected assembly,
+///     and on Windows each <see cref="AssemblyLoadContext.LoadFromStream(Stream)" /> pays an
+///     AMSI scan, so the per-file contexts paid that scan again for every neighbour. The
+///     caller releases a directory's context after its last file, before the async unload
+///     window can overlap the next directory.
 /// </remarks>
 internal sealed class InspectionAssemblyLoadContext(IEnumerable<string> inspectedPaths, IEnumerable<string> sharedFrameworkPaths)
     : AssemblyLoadContext(isCollectible: true)
@@ -1737,6 +1743,21 @@ public static class Dosai
         var assemblyMethods = new List<Method>();
         var processedAssemblyIdentities = new HashSet<string>();
         var sharedFrameworkDirs = GetSharedFrameworkProbingPaths(path);
+        // One load context per distinct inspected directory, shared by every file in it
+        // (issue #76): a fresh context per assembly reloaded each shared dependency once per
+        // inspected assembly, and on Windows every LoadFromStream pays an AmsiScanBuffer
+        // call, which owned most of this phase on large build-output folders. Dependencies
+        // still probe this directory first, exactly as before, so sharing changes how many
+        // times an assembly is loaded, never which file a reference resolves to. A context
+        // is released once its directory's last file is behind the loop - native skips and
+        // identity-deduped files included, they still mark their directory live - so one
+        // bad assembly cannot outlive its neighbours' context.
+        var lastFileIndexByDirectory = new Dictionary<string, int>(StringComparer.Ordinal);
+        for (var assemblyIndex = 0; assemblyIndex < assembliesToInspect.Count; assemblyIndex++)
+        {
+            lastFileIndexByDirectory[Path.GetDirectoryName(assembliesToInspect[assemblyIndex]) ?? string.Empty] = assemblyIndex;
+        }
+        var loadContextsByDirectory = new Dictionary<string, InspectionAssemblyLoadContext>(StringComparer.Ordinal);
         // The first open of a file is where a cold machine waits: real-time antivirus scans a
         // file on its first access (Windows Defender: ~60 ms per DLL), which left this phase at a
         // fifth of one core in the issue #65 run. The managed-assembly check is
@@ -1748,13 +1769,19 @@ public static class Dosai
         {
             var assemblyFilePath = assembliesToInspect[assemblyIndex];
             var fileName = Path.GetFileName(assemblyFilePath);
+            var fileDirectory = Path.GetDirectoryName(assemblyFilePath) ?? string.Empty;
             if (!isManaged[assemblyIndex])
             {
                 Console.WriteLine($"Info: Skipping native library or non-assembly file: {assemblyFilePath}");
                 continue;
             }
-            var inspectedDirs = new List<string> { Path.GetDirectoryName(assemblyFilePath)!, Path.GetDirectoryName(path)! };
-            var loadContext = new InspectionAssemblyLoadContext(inspectedDirs, sharedFrameworkDirs);
+            ReleaseDirectoriesDoneWith(assemblyIndex);
+            if (!loadContextsByDirectory.TryGetValue(fileDirectory, out var loadContext))
+            {
+                var inspectedDirs = new List<string> { fileDirectory, Path.GetDirectoryName(path)! };
+                loadContext = new InspectionAssemblyLoadContext(inspectedDirs, sharedFrameworkDirs);
+                loadContextsByDirectory[fileDirectory] = loadContext;
+            }
             // Per-assembly timing exists only for the debug log; the stopwatch is not created
             // when debug is off, so the inspection loop pays nothing.
             var assemblyWatch = DebugLog.Enabled ? Stopwatch.StartNew() : null;
@@ -1854,7 +1881,6 @@ public static class Dosai
             }
             finally
             {
-                loadContext.Unload();
                 if (assemblyWatch is not null)
                 {
                     assemblyWatch.Stop();
@@ -1868,7 +1894,43 @@ public static class Dosai
             }
         }
 
+        foreach (var loadContext in loadContextsByDirectory.Values)
+        {
+            loadContext.Unload();
+        }
+
         return assemblyMethods;
+
+        // Unloads every directory context whose files are all behind the loop; called at the
+        // top of each iteration so skipped files (native, identity-deduped) still retire
+        // their directory's context through the next iteration or the post-loop release.
+        void ReleaseDirectoriesDoneWith(int nextFileIndex)
+        {
+            if (loadContextsByDirectory.Count == 0)
+            {
+                return;
+            }
+
+            List<KeyValuePair<string, InspectionAssemblyLoadContext>>? finished = null;
+            foreach (var entry in loadContextsByDirectory)
+            {
+                if (lastFileIndexByDirectory[entry.Key] < nextFileIndex)
+                {
+                    (finished ??= []).Add(entry);
+                }
+            }
+
+            if (finished is null)
+            {
+                return;
+            }
+
+            foreach (var entry in finished)
+            {
+                loadContextsByDirectory.Remove(entry.Key);
+                entry.Value.Unload();
+            }
+        }
 
         Method CreateMethodObjectFromMember(
             MemberInfo member, string filePath, string file, string attributes, string name, string returnType,

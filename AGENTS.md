@@ -62,7 +62,13 @@ dotnet test ./Dosai.sln
 - Never leave an inspected file locked. Metadata readers open with
   `FileShare.ReadWrite | FileShare.Delete`, and inspected assemblies are loaded by value
   (`InspectionAssemblyLoadContext`), because a mapped path stays locked on Windows for the
-  process lifetime even after a collectible context is unloaded.
+  process lifetime even after a collectible context is unloaded. One context is shared by
+  every inspected file of a directory and released after that directory's last file (issue
+  #76): a per-assembly context reloaded each shared dependency once per inspected assembly,
+  and on Windows every `LoadFromStream` pays an `AmsiScanBuffer` call. Sharing changes how
+  many times an assembly loads, never which file a reference resolves to (dependencies
+  probe their own directory first, so keep the cache keyed by directory, not one context
+  for the whole tree).
 - Keep runtime-loader work (`Assembly.GetTypes()` and member reflection over inspected
   assemblies) inside `GetAssemblyMethods`, which runs it on a dedicated large-stack thread. The
   runtime type loader recurses per hierarchy level and, when a base type is missing, can

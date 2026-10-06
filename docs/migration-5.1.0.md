@@ -273,3 +273,15 @@ them, which changes several outputs additively:
   (above before below) for both the base framework and its shared frameworks, named in a
   diagnostic. It used to fall through to the newest shared runtime for every framework but the
   base.
+
+## Assembly inspection load sharing (issue #76)
+
+No output change. The methods command loads the inspected files of each directory through
+one shared collectible load context instead of one per assembly, cutting redundant
+dependency loads (on Windows every in-memory load pays an AMSI scan, which dominated the
+phase on large build-output folders). Loading stays by value with `FileShare.ReadWrite |
+FileShare.Delete`, so inspected files stay deletable and replaceable during and after the
+scan. The methods JSON for assembly inputs is byte-identical to the per-assembly contexts -
+verified field-by-field against a copy of the old loop on missing-dependency fixtures and
+byte-for-byte against the previous release build on the full OrchardCore web-app output
+(1.4 GB of JSON) and on Dosai's own Release output, on macOS and Windows.
