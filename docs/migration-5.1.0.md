@@ -221,11 +221,27 @@ crashed with `OutOfMemoryException`:
   the slices reference (in result order), so every `DataFlowSliceIds` value on materials,
   operations, and findings still resolves. `CryptoDataFlows.Statistics.NodeCount`, `EdgeCount`,
   `SourceCount`, and `SinkCount` are recomputed over the retained collections; `SliceCount` and
-  `FilesAnalyzed` are unchanged.
+  `FilesAnalyzed` are unchanged. Referential integrity holds for every other id-carrying
+  collection too: `PackageReachability.NodeIds`/`EdgeIds` and `DangerousApiReachability.NodeIds`
+  are pruned to the retained ids and entries left with no id evidence of any kind (no node, edge,
+  slice, or entry-point ids) are dropped; weakness candidates and exploit chains keep their
+  findings but lose trimmed node references (`SourceId`/`SinkId`, `SourceNodeId`/`SinkNodeId`
+  become null); `SanitizedFlow.SourceIds` keeps only retained nodes. The `Reachable` flag,
+  confidence, categories, and locations on retained reachability entries keep describing the
+  full analysis.
 - `--crypto-dataflows none`: the `CryptoDataFlows` property is omitted entirely. The
   `DataFlowSliceIds` lists, the `dosai:crypto:dataFlowSliceIds`-style properties, and
   `Statistics` (including `CryptoDataFlowSliceCount`, which still reflects the analysis) are
-  kept.
+  kept; those slice ids intentionally reference the omitted graph.
+
+The option applies to the JSON only. Crypto graph sidecars (`--graph-format`) always carry the
+full graph: they are written before the detail trim, so `--crypto-dataflows none` plus
+`--graph-format` produces sidecars and a graph-less JSON instead of failing after doing all the
+work.
+
+The MCP `dosai.crypto` tool takes the same value as an optional `crypto_dataflows` argument
+(default `full`); unknown values are rejected in both the CLI (parse error) and the MCP tool
+(JSON-RPC error).
 
 Consumers that read only `Assets`, `Operations`, and `Materials` (cdxgen's crypto path) should
 pass `none`.

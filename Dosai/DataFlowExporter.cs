@@ -18,7 +18,8 @@ public static class DataFlowExporter
 
     public static string Export(DataFlowResult result, DataFlowExportFormat format)
     {
-        using var writer = new StringWriter();
+        // Invariant culture matches the CLI's file writes (locale policy, issue #63).
+        using var writer = new StringWriter(CultureInfo.InvariantCulture);
         Export(writer, result, format);
         return writer.ToString();
     }
@@ -96,6 +97,7 @@ public static class DataFlowExporter
             writer.Write(shape);
             writer.Write('"');
             writer.Write(EscapeMermaid(node.Name));
+            writer.Write('"');
             writer.Write(endShape);
             writer.WriteLine();
         }

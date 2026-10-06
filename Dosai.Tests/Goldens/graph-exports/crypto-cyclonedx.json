@@ -1,0 +1,50 @@
+{
+  "$schema": "http://cyclonedx.org/schema/bom-1.6.schema.json",
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "serialNumber": "urn:uuid:228347c0-60ab-4d62-b801-7906c0d9bae2",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-10-06T09:56:21.715444+00:00",
+    "tools": [
+      {
+        "vendor": "OWASP",
+        "name": "Dosai",
+        "version": "5.0.0.0"
+      }
+    ],
+    "properties": [
+      {
+        "name": "dosai:inputPath",
+        "value": "Dosai.Tests/Goldens/graph-labels-fixture"
+      },
+      {
+        "name": "dosai:crypto:assetCount",
+        "value": "0"
+      },
+      {
+        "name": "dosai:crypto:operationCount",
+        "value": "0"
+      },
+      {
+        "name": "dosai:crypto:materialCount",
+        "value": "0"
+      },
+      {
+        "name": "dosai:crypto:protocolCount",
+        "value": "0"
+      },
+      {
+        "name": "dosai:crypto:findingCount",
+        "value": "0"
+      },
+      {
+        "name": "dosai:crypto:dataFlowSliceCount",
+        "value": "1"
+      }
+    ]
+  },
+  "components": [],
+  "dependencies": [],
+  "vulnerabilities": []
+}

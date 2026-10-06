@@ -47,8 +47,10 @@ dotnet run --project ./Dosai/Dosai.csproj -- crypto \
 ```
 
 - `full` (default) keeps the whole `CryptoDataFlows` graph; output is unchanged from a run without the flag.
-- `slices` keeps the slices and only the nodes and edges they reference. Every `DataFlowSliceIds` value on `Materials`, `Operations`, and `Findings` (and every `dosai:crypto:dataFlowSliceIds` property in the CycloneDX export, which derives from them) still resolves.
+- `slices` keeps the slices and only the nodes and edges they reference. Every `DataFlowSliceIds` value on `Materials`, `Operations`, and `Findings` (and every `dosai:crypto:dataFlowSliceIds` property in the CycloneDX export, which derives from them) still resolves, as does every id inside `CryptoDataFlows` itself: the derived collections' id lists are pruned to the retained graph.
 - `none` omits `CryptoDataFlows` while keeping the slice-id properties and `Statistics` (including `CryptoDataFlowSliceCount`), so downstream counts stay meaningful.
+
+The option shapes the JSON only; crypto graph sidecars (`--graph-format`) always carry the full graph. The MCP `dosai.crypto` tool accepts the same value as `crypto_dataflows`.
 
 cdxgen should pass `--crypto-dataflows none`: `analyzeDosaiCrypto` reads only `Assets`, `Operations`, and `Materials`, and Node's `readFileSync`/`JSON.parse` path silently returns nothing for files past the ~512 MB string limit, which previously dropped all dosai crypto components from SBOM runs on large trees.
 

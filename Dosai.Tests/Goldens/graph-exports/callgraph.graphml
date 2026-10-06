@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<graphml xmlns="http://graphml.graphdrawing.org/xmlns">
+  <key id="label" for="node" attr.name="label" attr.type="string" />
+  <key id="kind" for="node" attr.name="kind" attr.type="string" />
+  <key id="file" for="node" attr.name="file" attr.type="string" />
+  <key id="purl" for="node" attr.name="purl" attr.type="string" />
+  <key id="external" for="node" attr.name="external" attr.type="boolean" />
+  <key id="reachableEntryPoints" for="node" attr.name="reachableEntryPoints" attr.type="string" />
+  <key id="minDepthFromEntryPoint" for="node" attr.name="minDepthFromEntryPoint" attr.type="int" />
+  <key id="fanIn" for="node" attr.name="fanIn" attr.type="int" />
+  <key id="fanOut" for="node" attr.name="fanOut" attr.type="int" />
+  <key id="inRecursiveCycle" for="node" attr.name="inRecursiveCycle" attr.type="boolean" />
+  <key id="genericInstantiation" for="node" attr.name="genericInstantiation" attr.type="string" />
+  <key id="callType" for="edge" attr.name="callType" attr.type="string" />
+  <key id="sourcePurl" for="edge" attr.name="sourcePurl" attr.type="string" />
+  <key id="targetPurl" for="edge" attr.name="targetPurl" attr.type="string" />
+  <key id="location" for="edge" attr.name="location" attr.type="string" />
+  <key id="callSiteCount" for="edge" attr.name="callSiteCount" attr.type="int" />
+  <key id="dispatchConfidence" for="edge" attr.name="dispatchConfidence" attr.type="string" />
+  <graph id="callgraph" edgedefault="directed">
+    <node id="System.Diagnostics.Process.Start(string,string):System.Diagnostics.Process">
+      <data key="label">Process.System.Diagnostics.Process.Start(string, string?)</data>
+      <data key="kind">Method</data>
+      <data key="file"></data>
+      <data key="purl">pkg:nuget/System.Diagnostics.Process</data>
+      <data key="external">true</data>
+      <data key="reachableEntryPoints">ep:Cli#::Ünïcödé.日本語.NastyLabels.Main(string[]):void</data>
+      <data key="minDepthFromEntryPoint">1</data>
+      <data key="fanIn">1</data>
+      <data key="fanOut">0</data>
+      <data key="inRecursiveCycle">false</data>
+      <data key="genericInstantiation"></data>
+    </node>
+    <node id="Ünïcödé.日本語.NastyLabels.Main(string[]):void">
+      <data key="label">NastyLabels.Main</data>
+      <data key="kind">Method</data>
+      <data key="file">NastyLabels.cs</data>
+      <data key="purl"></data>
+      <data key="external">false</data>
+      <data key="reachableEntryPoints">ep:Cli#::Ünïcödé.日本語.NastyLabels.Main(string[]):void</data>
+      <data key="minDepthFromEntryPoint">0</data>
+      <data key="fanIn">0</data>
+      <data key="fanOut">1</data>
+      <data key="inRecursiveCycle">false</data>
+      <data key="genericInstantiation"></data>
+    </node>
+    <edge id="e1" source="Ünïcödé.日本語.NastyLabels.Main(string[]):void" target="System.Diagnostics.Process.Start(string,string):System.Diagnostics.Process">
+      <data key="callType">MethodCall</data>
+      <data key="sourcePurl"></data>
+      <data key="targetPurl">pkg:nuget/System.Diagnostics.Process</data>
+      <data key="location">NastyLabels.cs:15:9</data>
+      <data key="callSiteCount">1</data>
+      <data key="dispatchConfidence"></data>
+    </edge>
+  </graph>
+</graphml>

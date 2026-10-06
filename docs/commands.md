@@ -300,8 +300,10 @@ dotnet run --project ./Dosai/Dosai.csproj -- crypto \
 | Value | Behavior |
 | --- | --- |
 | `full` (default) | The whole `CryptoDataFlows` result, exactly as before the option existed. |
-| `slices` | Keeps the slices and only the nodes and edges they reference, so every `dosai:crypto:dataFlowSliceIds` reference still resolves. `CryptoDataFlows.Statistics` is recomputed over the retained nodes and edges. |
+| `slices` | Keeps the slices and only the nodes and edges they reference, so every `dosai:crypto:dataFlowSliceIds` reference still resolves. `CryptoDataFlows.Statistics` is recomputed over the retained nodes and edges, and every other id list inside `CryptoDataFlows` (`PackageReachability`, `DangerousApiReachability`, weakness/exploit-chain node refs, `SanitizedFlows`) is pruned to the retained graph so no reference dangles. |
 | `none` | Omits `CryptoDataFlows` entirely. The `DataFlowSliceIds` lists, the `dosai:crypto:dataFlowSliceIds` properties, and the statistics (including `CryptoDataFlowSliceCount`) are kept. |
+
+The option applies to the JSON only. Crypto graph sidecars (`--graph-format`) always carry the full graph - they are written before the trim - so `none` plus `--graph-format` writes complete sidecars and a graph-less JSON instead of failing after doing all the work.
 
 The graph is the bulk of the output on large trees: on the issue-#75 corpus a 47 MB `dosai` report is roughly 90% `CryptoDataFlows`, and past 2 GB the whole-document string the exporter used to build exceeded the .NET array limit and crashed with `OutOfMemoryException`. Both formats are now streamed straight to the output file. Large consumers that only read `Assets`, `Operations`, and `Materials` - such as cdxgen with `--include-crypto` - should pass `--crypto-dataflows none`; that keeps the file well under the ~512 MB string limit of Node's `readFileSync`/`JSON.parse` path and loses nothing those consumers read.
 

@@ -4248,59 +4248,6 @@ class CryptoWorkflow
     }
 
     [Fact]
-    public void CryptoExport_StreamPathIsByteIdenticalToTheStringPath()
-    {
-        // Issue #75: the crypto command used to build the whole JSON document as one string
-        // (File.WriteAllText(CryptoAnalyzer.Export(...))), which passed the .NET array limit on
-        // large trees and died with OutOfMemoryException. The stream path must write the exact
-        // same bytes for both formats, so default output stays byte-identical.
-        using var tempDirectory = new TemporaryDirectory();
-        File.WriteAllText(Path.Combine(tempDirectory.Path, "StreamIdentity.cs"), """
-using System.Security.Cryptography;
-using System.Text;
-
-class StreamIdentity
-{
-    const string ApiKey = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
-    static void Main(string[] args) => Hash(ApiKey + args[0]);
-    static byte[] Hash(string secret)
-    {
-        using var md5 = MD5.Create();
-        return md5.ComputeHash(Encoding.UTF8.GetBytes(secret));
-    }
-}
-""");
-
-        var result = CryptoAnalyzer.Analyze(tempDirectory.Path);
-        Assert.NotNull(result.CryptoDataFlows);
-        Assert.True(result.Statistics.CryptoDataFlowSliceCount >= 1);
-
-        foreach (var format in new[] { "dosai", "cyclonedx" })
-        {
-            var stringPath = Path.Combine(tempDirectory.Path, $"string-{format}.json");
-            var streamPath = Path.Combine(tempDirectory.Path, $"stream-{format}.json");
-            // The pre-#75 CLI path: materialise the whole document, then write it.
-            File.WriteAllText(stringPath, CryptoAnalyzer.Export(result, format));
-            using (var stream = new FileStream(streamPath, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize: 65536))
-            {
-                CryptoAnalyzer.Export(stream, result, format);
-            }
-
-            // The CycloneDX serialNumber is a fresh GUID per export call (same as before #75);
-            // it is the document's only call-to-call difference, so it is masked before the
-            // byte-for-byte comparison.
-            Assert.Equal(
-                MaskCycloneDxSerialNumber(File.ReadAllText(stringPath)),
-                MaskCycloneDxSerialNumber(File.ReadAllText(streamPath)));
-        }
-
-        static string MaskCycloneDxSerialNumber(string json) => System.Text.RegularExpressions.Regex.Replace(
-            json,
-            "\"serialNumber\": \"urn:uuid:[0-9a-f-]+\"",
-            "\"serialNumber\": \"urn:uuid:<masked>\"");
-    }
-
-    [Fact]
     public void CryptoExport_DataFlowDetailModes_KeepSliceReferencesResolvable()
     {
         using var tempDirectory = new TemporaryDirectory();
@@ -4417,62 +4364,6 @@ class CliDetail
                     }
                 }
             }
-        }
-    }
-
-    [Fact]
-    public void GraphExporters_TextWriterOverloads_WriteTheStringOverloadsBytesExactly()
-    {
-        // The CLI graph sidecars moved from File.WriteAllText(Export(...)) to a StreamWriter over
-        // the TextWriter overloads (issue #75); the bytes on disk must not change.
-        using var tempDirectory = new TemporaryDirectory();
-        var dataFlowResult = new DataFlowResult
-        {
-            Nodes =
-            [
-                new DataFlowNode { Id = "n1", Kind = "parameter", Name = "args", IsSource = true, Category = "cli", Code = "args", LineNumber = 3 },
-                new DataFlowNode { Id = "n2", Kind = "argument", Name = "Process.Start", IsSink = true, Category = "command", Symbol = "System.Diagnostics.Process.Start(string)", LineNumber = 4 }
-            ],
-            Edges = [new DataFlowEdge { Id = "e1", SourceId = "n1", TargetId = "n2", Kind = "argument", Label = "args[0]", LineNumber = 4 }],
-            Slices = [new DataFlowSlice { Id = "s1", SourceId = "n1", SinkId = "n2", NodeIds = ["n1", "n2"], EdgeIds = ["e1"], SinkArgument = "args[0]" }]
-        };
-        foreach (var format in new[] { DataFlowExportFormat.Mermaid, DataFlowExportFormat.GraphMl, DataFlowExportFormat.Gexf })
-        {
-            var stringPath = Path.Combine(tempDirectory.Path, $"df-string{DataFlowExporter.GetDefaultExtension(format)}");
-            var writerPath = Path.Combine(tempDirectory.Path, $"df-writer{DataFlowExporter.GetDefaultExtension(format)}");
-            File.WriteAllText(stringPath, DataFlowExporter.Export(dataFlowResult, format));
-            using (var writer = new StreamWriter(writerPath))
-            {
-                DataFlowExporter.Export(writer, dataFlowResult, format);
-            }
-
-            Assert.Equal(File.ReadAllBytes(stringPath), File.ReadAllBytes(writerPath));
-        }
-
-        var callGraph = new CallGraph
-        {
-            Nodes =
-            [
-                new MethodNode { Id = "A.M():void", Kind = "method", Name = "M", Label = "A.M():void", ClassName = "A", Namespace = "", FileName = "A.cs" },
-                new MethodNode { Id = "B.N():void", Kind = "method", Name = "N", Label = "B.N():void", ClassName = "B", Namespace = "", FileName = "B.cs", Purl = "pkg:nuget/B@1.0.0" }
-            ],
-            Edges = [new MethodCallEdge { SourceId = "A.M():void", TargetId = "B.N():void", CallType = CallType.MethodCall, CallSiteCount = 1, CallLocation = new CallLocation { FileName = "A.cs", LineNumber = 4, ColumnNumber = 3 } }]
-        };
-        var reachability = new Dictionary<string, NodeReachability>(StringComparer.Ordinal)
-        {
-            ["A.M():void"] = new NodeReachability { NodeId = "A.M():void", FanIn = 0, FanOut = 1 }
-        };
-        foreach (var format in new[] { CallGraphExportFormat.Mermaid, CallGraphExportFormat.GraphMl, CallGraphExportFormat.Gexf })
-        {
-            var stringPath = Path.Combine(tempDirectory.Path, $"cg-string{CallGraphExporter.GetDefaultExtension(format)}");
-            var writerPath = Path.Combine(tempDirectory.Path, $"cg-writer{CallGraphExporter.GetDefaultExtension(format)}");
-            File.WriteAllText(stringPath, CallGraphExporter.Export(callGraph, format, reachability));
-            using (var writer = new StreamWriter(writerPath))
-            {
-                CallGraphExporter.Export(writer, callGraph, format, reachability);
-            }
-
-            Assert.Equal(File.ReadAllBytes(stringPath), File.ReadAllBytes(writerPath));
         }
     }
 

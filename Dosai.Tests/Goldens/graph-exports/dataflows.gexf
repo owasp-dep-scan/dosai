@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gexf xmlns="http://www.gexf.net/1.3" version="1.3">
+  <graph mode="static" defaultedgetype="directed">
+    <attributes class="node">
+      <attribute id="kind" title="kind" type="string" />
+      <attribute id="symbol" title="symbol" type="string" />
+      <attribute id="type" title="type" type="string" />
+      <attribute id="purl" title="purl" type="string" />
+      <attribute id="file" title="file" type="string" />
+      <attribute id="method" title="method" type="string" />
+      <attribute id="line" title="line" type="string" />
+      <attribute id="category" title="category" type="string" />
+      <attribute id="source" title="source" type="string" />
+      <attribute id="sink" title="sink" type="string" />
+      <attribute id="code" title="code" type="string" />
+    </attributes>
+    <attributes class="edge">
+      <attribute id="kind" title="kind" type="string" />
+      <attribute id="label" title="label" type="string" />
+      <attribute id="sourcePurl" title="sourcePurl" type="string" />
+      <attribute id="targetPurl" title="targetPurl" type="string" />
+    </attributes>
+    <nodes>
+      <node id="dfn1" label="args">
+        <attvalues>
+          <attvalue for="kind" value="Source" />
+          <attvalue for="symbol" value="string[] args" />
+          <attvalue for="type" value="string[]" />
+          <attvalue for="purl" value="" />
+          <attvalue for="file" value="NastyLabels.cs" />
+          <attvalue for="method" value="Main" />
+          <attvalue for="line" value="12" />
+          <attvalue for="category" value="cli" />
+          <attvalue for="source" value="true" />
+          <attvalue for="sink" value="false" />
+          <attvalue for="code" value="args" />
+        </attvalues>
+      </node>
+      <node id="dfn2" label="Binary">
+        <attvalues>
+          <attvalue for="kind" value="Expression" />
+          <attvalue for="symbol" value="" />
+          <attvalue for="type" value="string" />
+          <attvalue for="purl" value="" />
+          <attvalue for="file" value="NastyLabels.cs" />
+          <attvalue for="method" value="Main" />
+          <attvalue for="line" value="16" />
+          <attvalue for="category" value="" />
+          <attvalue for="source" value="false" />
+          <attvalue for="sink" value="false" />
+          <attvalue for="code" value="args[0] + &quot;quote\&quot; apostrophe&apos; lt&lt; gt&gt; amp&amp; pipe| bracket[in] paren(in) brace{in} hash# semi; emoji😀 déjà vu&quot;" />
+        </attvalues>
+      </node>
+      <node id="dfn3" label="Start">
+        <attvalues>
+          <attvalue for="kind" value="Sink" />
+          <attvalue for="symbol" value="System.Diagnostics.Process.Start(string,string)" />
+          <attvalue for="type" value="System.Diagnostics.Process" />
+          <attvalue for="purl" value="pkg:nuget/System.Diagnostics.Process" />
+          <attvalue for="file" value="NastyLabels.cs" />
+          <attvalue for="method" value="Main" />
+          <attvalue for="line" value="15" />
+          <attvalue for="category" value="command" />
+          <attvalue for="source" value="false" />
+          <attvalue for="sink" value="true" />
+          <attvalue for="code" value="Process.Start( 			args[0] + &quot;quote\&quot; apostrophe&apos; lt&lt; gt&gt; amp&amp; pipe| bracket[in] paren(in) brace{in} hash# semi; emoji😀 déjà vu&quot;, 			&quot;&quot;)" />
+        </attvalues>
+      </node>
+    </nodes>
+    <edges>
+      <edge id="dfe1" source="dfn1" target="dfn2">
+        <attvalues>
+          <attvalue for="kind" value="Expression" />
+          <attvalue for="label" value="Binary" />
+          <attvalue for="sourcePurl" value="" />
+          <attvalue for="targetPurl" value="" />
+        </attvalues>
+      </edge>
+      <edge id="dfe2" source="dfn1" target="dfn3">
+        <attvalues>
+          <attvalue for="kind" value="SinkArgument" />
+          <attvalue for="label" value="fileName" />
+          <attvalue for="sourcePurl" value="" />
+          <attvalue for="targetPurl" value="pkg:nuget/System.Diagnostics.Process" />
+        </attvalues>
+      </edge>
+      <edge id="dfe3" source="dfn2" target="dfn3">
+        <attvalues>
+          <attvalue for="kind" value="SinkArgument" />
+          <attvalue for="label" value="fileName" />
+          <attvalue for="sourcePurl" value="" />
+          <attvalue for="targetPurl" value="pkg:nuget/System.Diagnostics.Process" />
+        </attvalues>
+      </edge>
+    </edges>
+  </graph>
+</gexf>

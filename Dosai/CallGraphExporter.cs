@@ -19,7 +19,8 @@ public static class CallGraphExporter
 
     public static string Export(CallGraph callGraph, CallGraphExportFormat format, IReadOnlyDictionary<string, NodeReachability>? reachability = null)
     {
-        using var writer = new StringWriter();
+        // Invariant culture matches the CLI's file writes (locale policy, issue #63).
+        using var writer = new StringWriter(CultureInfo.InvariantCulture);
         Export(writer, callGraph, format, reachability);
         return writer.ToString();
     }

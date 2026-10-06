@@ -141,7 +141,7 @@ public static class McpServer
         {
             "dosai.methods" => JsonSerializer.Deserialize<object>(Dosai.GetMethods(RequirePath(path)), JsonOptions)!,
             "dosai.dataflows" => DataFlowAnalyzer.Analyze(RequirePath(path), localPatterns, localPatternPacks),
-            "dosai.crypto" => JsonSerializer.Deserialize<object>(CryptoAnalyzer.GetCryptoAnalysis(RequirePath(path), GetString(arguments, "format") ?? "dosai"), JsonOptions)!,
+            "dosai.crypto" => JsonSerializer.Deserialize<object>(CryptoAnalyzer.GetCryptoAnalysis(RequirePath(path), GetString(arguments, "format") ?? "dosai", GetString(arguments, "crypto_dataflows")), JsonOptions)!,
             "dosai.agent_context" => TransparencyBuilder.BuildAgentContext(DataFlowAnalyzer.Analyze(RequirePath(path), localPatterns, localPatternPacks), RequirePath(path)),
             "dosai.services" => ServicesPayload(RequirePath(path)),
             "dosai.ai_components" => AiComponentsPayload(RequirePath(path)),
@@ -219,6 +219,7 @@ public static class McpServer
                 ["patterns"] = new { type = "string", description = "Optional data-flow pattern JSON file." },
                 ["patternPacks"] = new { type = "string", description = "Comma-separated built-in pattern packs." },
                 ["format"] = new { type = "string", description = "Output format for dosai.crypto: dosai, cyclonedx." },
+                ["crypto_dataflows"] = new { type = "string", description = "How much of the crypto data-flow graph to include in dosai.crypto output: full (default), slices, none. Agents that only need assets/operations/materials should pass none." },
                 ["input"] = new { type = "string", description = "Existing Dosai JSON file for dosai.query." },
                 ["query"] = new { type = "string", description = "Query expression for dosai.query." },
                 ["nodeId"] = new { type = "string", description = "Optional node id to narrow dosai.reachability to a single call-graph node." }

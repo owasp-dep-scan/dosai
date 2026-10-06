@@ -88,9 +88,10 @@ public class CommandLine
 
         var cryptoDataFlowsOption = new Option<string?>("--crypto-dataflows")
         {
-            Description = "How much of the crypto data-flow graph to include in the dosai-format output: full (default, whole graph), slices (slices plus only the nodes and edges they reference), none (omit CryptoDataFlows; slice-id properties and statistics are kept). Large consumers that only read Assets/Operations/Materials, such as cdxgen, should pass none.",
+            Description = "How much of the crypto data-flow graph to include in the dosai-format output: full (default, whole graph), slices (slices plus only the nodes and edges they reference), none (omit CryptoDataFlows; slice-id properties and statistics are kept). Applies to the JSON only; graph sidecars always carry the full graph. Large consumers that only read Assets/Operations/Materials, such as cdxgen, should pass none.",
             Arity = ArgumentArity.ExactlyOne
-        };
+        }
+        .AcceptOnlyFromAmong("full", "slices", "none");
 
         var cryptoGraphFormatOption = new Option<string?>("--graph-format")
         {
@@ -406,8 +407,19 @@ public class CommandLine
             using var commandPhase = DebugLog.Phase("crypto");
             try
             {
-                var dataFlowDetail = ParseCryptoDataFlowDetail(dataFlowDetailOption);
-                var result = CryptoAnalyzer.Analyze(path, buildPreparation, dataFlowDetail);
+                var dataFlowDetail = CryptoAnalyzer.ParseDataFlowDetail(dataFlowDetailOption);
+                var result = CryptoAnalyzer.Analyze(path, buildPreparation);
+                // Graph sidecars are written from the full graph, before the detail option trims
+                // it: --crypto-dataflows controls the JSON only. The sidecar failure code still
+                // surfaces after the JSON is written, so a consumer never loses the primary
+                // output to a sidecar problem.
+                var graphExportResult = 0;
+                if (!string.IsNullOrWhiteSpace(graphFormat))
+                {
+                    graphExportResult = WriteCryptoDataFlowGraphSidecars(result, graphFormat, outputFile, graphOutputFile);
+                }
+
+                CryptoAnalyzer.ApplyDataFlowDetail(result, dataFlowDetail);
                 // Streamed like methods/dataflows: the crypto JSON used to be built as one string,
                 // and on a large tree that string passed the .NET array limit and crashed with
                 // OutOfMemoryException (issue #75).
@@ -417,12 +429,7 @@ public class CommandLine
                 }
 
                 LogWrittenBytes("crypto export", outputFile);
-                if (!string.IsNullOrWhiteSpace(graphFormat))
-                {
-                    var graphExportResult = WriteCryptoDataFlowGraphSidecars(result, graphFormat, outputFile, graphOutputFile);
-                    if (graphExportResult != 0) return graphExportResult;
-                }
-                return 0;
+                return graphExportResult;
             }
             catch (ArgumentException ex)
             {
@@ -598,22 +605,6 @@ public class CommandLine
     /// <summary>Build wins when both flags are given (build implies restore).</summary>
     private static BuildPreparationMode ParseBuildPreparation(bool restore, bool build)
         => build ? BuildPreparationMode.Build : restore ? BuildPreparationMode.Restore : BuildPreparationMode.None;
-
-    /// <summary>
-    ///     Validates the --crypto-dataflows value (full|slices|none). The default keeps the whole
-    ///     crypto data-flow graph so output stays byte-identical to a run without the flag.
-    /// </summary>
-    private static CryptoDataFlowDetail ParseCryptoDataFlowDetail(string? value)
-    {
-        var normalized = (value ?? "full").Trim().ToLowerInvariant();
-        return normalized switch
-        {
-            "" or "full" => CryptoDataFlowDetail.Full,
-            "slices" => CryptoDataFlowDetail.Slices,
-            "none" => CryptoDataFlowDetail.None,
-            _ => throw new ArgumentException($"Unsupported crypto data-flow detail: {value}. Supported values: full, slices, none.")
-        };
-    }
 
     /// <summary>
     ///     Writes a graph export through a <see cref="StreamWriter" /> instead of a whole-document

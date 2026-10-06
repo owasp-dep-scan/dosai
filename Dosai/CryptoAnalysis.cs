@@ -173,10 +173,27 @@ public static class CryptoAnalyzer
     private static readonly Regex RFunctionCall = new(@"(?<name>[A-Za-z_][\w\.:]*)\s*\(", RegexOptions.Compiled);
     private static readonly Regex CppFunctionCall = new(@"(?<name>[A-Za-z_][\w:]*)(?:\s*<[^>]+>)?\s*\(", RegexOptions.Compiled);
 
-    public static string GetCryptoAnalysis(string path, string? format = null)
+    public static string GetCryptoAnalysis(string path, string? format = null, string? cryptoDataFlows = null)
     {
-        var result = Analyze(path);
+        var result = Analyze(path, BuildPreparationMode.None, ParseDataFlowDetail(cryptoDataFlows));
         return Export(result, format);
+    }
+
+    /// <summary>
+    ///     Parses a <c>--crypto-dataflows</c>-style value (full|slices|none, case-insensitive;
+    ///     null/empty is <see cref="CryptoDataFlowDetail.Full" />). Shared by the CLI option and
+    ///     the MCP tool so both reject unknown values the same way.
+    /// </summary>
+    public static CryptoDataFlowDetail ParseDataFlowDetail(string? value)
+    {
+        var normalized = (value ?? "full").Trim().ToLowerInvariant();
+        return normalized switch
+        {
+            "" or "full" => CryptoDataFlowDetail.Full,
+            "slices" => CryptoDataFlowDetail.Slices,
+            "none" => CryptoDataFlowDetail.None,
+            _ => throw new ArgumentException($"Unsupported crypto data-flow detail: {value}. Supported values: full, slices, none.")
+        };
     }
 
     public static string Export(CryptoAnalysisResult result, string? format = null) => CryptoBomExporter.Export(result, ParseFormat(format));
@@ -293,7 +310,7 @@ public static class CryptoAnalyzer
         var cryptoDataFlowSliceCount = 0;
         using (DebugLog.Phase("crypto.dataflow-correlation"))
         {
-            cryptoDataFlowSliceCount = AttachCryptoDataFlows(path, result, dataFlowDetail);
+            cryptoDataFlowSliceCount = AttachCryptoDataFlows(path, result);
         }
 
         result.Assets = result.Assets.OrderBy(a => a.Location.FileName, StringComparer.Ordinal).ThenBy(a => a.Location.LineNumber).ThenBy(a => a.Id, StringComparer.Ordinal).ToList();
@@ -320,35 +337,55 @@ public static class CryptoAnalyzer
             DebugLog.Count("crypto findings reachable from an entry point", result.Statistics.ReachableFindingCount);
             DebugLog.Count("crypto data-flow slices", result.Statistics.CryptoDataFlowSliceCount);
         }
+
+        // Trimming runs last, after the statistics and debug counts were taken from the full
+        // graph: the detail level bounds the serialized output, not the analysis facts.
+        ApplyDataFlowDetail(result, dataFlowDetail);
         return result;
     }
 
     /// <summary>
     ///     Runs the crypto-pattern data-flow analysis, correlates its slices onto the crypto
-    ///     evidence, and returns the slice count. Correlation always runs - the slice-id
-    ///     properties survive every detail mode - but what of the graph is kept afterwards is
-    ///     decided by <paramref name="dataFlowDetail" />. The trimmed or dropped graph stops
-    ///     pinning the full data-flow result through the serialization phase.
+    ///     evidence, and returns the slice count. The full graph stays on the result: correlation
+    ///     always runs (the slice-id properties survive every detail mode), and trimming is a
+    ///     separate, explicit step (<see cref="ApplyDataFlowDetail" />) so callers that also want
+    ///     graph sidecars can write them from the full graph first.
     /// </summary>
-    private static int AttachCryptoDataFlows(string path, CryptoAnalysisResult result, CryptoDataFlowDetail dataFlowDetail)
+    private static int AttachCryptoDataFlows(string path, CryptoAnalysisResult result)
     {
         try
         {
             var dataFlows = DataFlowAnalyzer.Analyze(path, patternPacks: "crypto");
+            result.CryptoDataFlows = dataFlows;
             CryptoDataFlowCorrelator.Attach(result, dataFlows);
-            var sliceCount = dataFlows.Slices.Count;
-            result.CryptoDataFlows = dataFlowDetail switch
-            {
-                CryptoDataFlowDetail.None => null,
-                CryptoDataFlowDetail.Slices => TrimToReferencedBySlices(dataFlows),
-                _ => dataFlows
-            };
-            return sliceCount;
+            return dataFlows.Slices.Count;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or BadImageFormatException or JsonException or InvalidOperationException or NotSupportedException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or BadImageFormatException or JsonException or InvalidOperationException or ArgumentException or NotSupportedException)
         {
             result.Diagnostics.Add($"Crypto data-flow fallback: {ex.Message}");
             return 0;
+        }
+    }
+
+    /// <summary>
+    ///     Applies <see cref="CryptoDataFlowDetail" /> to an analyzed result: <see cref="CryptoDataFlowDetail.Slices" />
+    ///     keeps the slices and only the nodes and edges they reference, <see cref="CryptoDataFlowDetail.None" />
+    ///     drops <see cref="CryptoAnalysisResult.CryptoDataFlows" /> entirely (the slice-id
+    ///     properties on the crypto evidence are already stamped and stay). Split from
+    ///     <see cref="Analyze(string, MethodsSlice, BuildPreparationMode, CryptoDataFlowDetail)" />
+    ///     so the CLI can write graph sidecars from the full graph before trimming; the trimmed
+    ///     graph also stops pinning the full data-flow result through serialization.
+    /// </summary>
+    public static void ApplyDataFlowDetail(CryptoAnalysisResult result, CryptoDataFlowDetail dataFlowDetail)
+    {
+        switch (dataFlowDetail, result.CryptoDataFlows)
+        {
+            case (CryptoDataFlowDetail.None, _):
+                result.CryptoDataFlows = null;
+                break;
+            case (CryptoDataFlowDetail.Slices, { } dataFlows):
+                TrimToReferencedBySlices(dataFlows);
+                break;
         }
     }
 
@@ -358,8 +395,19 @@ public static class CryptoAnalyzer
     ///     <c>dosai:crypto:dataFlowSliceIds</c> reference still resolves while the unreferenced
     ///     bulk of the graph becomes collectable. The statistics are recomputed over the retained
     ///     collections so the trimmed JSON stays self-consistent.
+    ///     <para>
+    ///         Referential integrity holds for every id-carrying collection, not just the slices:
+    ///         <see cref="PackageReachability.NodeIds" />/<c>EdgeIds</c> and
+    ///         <see cref="DangerousApiReachability.NodeIds" /> are pruned to the retained ids
+    ///         (entries left with no id evidence of any kind are dropped), weakness candidates and
+    ///         exploit chains lose trimmed node refs (<c>SourceId</c>/<c>SinkId</c>,
+    ///         <c>SourceNodeId</c>/<c>SinkNodeId</c> become null - the finding itself stays), and
+    ///         <see cref="SanitizedFlow.SourceIds" /> keeps only retained nodes. Slice ids are
+    ///         never pruned (all slices are kept) and entry-point, weakness and method ids belong
+    ///         to collections trimming does not touch.
+    ///     </para>
     /// </summary>
-    private static DataFlowResult TrimToReferencedBySlices(DataFlowResult dataFlows)
+    private static void TrimToReferencedBySlices(DataFlowResult dataFlows)
     {
         var referencedNodeIds = new HashSet<string>(StringComparer.Ordinal);
         var referencedEdgeIds = new HashSet<string>(StringComparer.Ordinal);
@@ -382,7 +430,35 @@ public static class CryptoAnalyzer
         dataFlows.Statistics.EdgeCount = dataFlows.Edges.Count;
         dataFlows.Statistics.SourceCount = dataFlows.Nodes.Count(node => node.IsSource);
         dataFlows.Statistics.SinkCount = dataFlows.Nodes.Count(node => node.IsSink);
-        return dataFlows;
+        foreach (var package in dataFlows.PackageReachability)
+        {
+            package.NodeIds.RemoveAll(id => !referencedNodeIds.Contains(id));
+            package.EdgeIds.RemoveAll(id => !referencedEdgeIds.Contains(id));
+        }
+
+        dataFlows.PackageReachability.RemoveAll(package => package.NodeIds.Count == 0 && package.EdgeIds.Count == 0 && package.SliceIds.Count == 0 && package.EntryPointIds.Count == 0);
+        foreach (var api in dataFlows.DangerousApiReachability)
+        {
+            api.NodeIds.RemoveAll(id => !referencedNodeIds.Contains(id));
+        }
+
+        dataFlows.DangerousApiReachability.RemoveAll(api => api.NodeIds.Count == 0 && api.SliceIds.Count == 0 && api.EntryPointIds.Count == 0);
+        foreach (var weakness in dataFlows.WeaknessCandidates)
+        {
+            if (weakness.SourceId is not null && !referencedNodeIds.Contains(weakness.SourceId)) weakness.SourceId = null;
+            if (weakness.SinkId is not null && !referencedNodeIds.Contains(weakness.SinkId)) weakness.SinkId = null;
+        }
+
+        foreach (var chain in dataFlows.ExploitChains)
+        {
+            if (chain.SourceNodeId is not null && !referencedNodeIds.Contains(chain.SourceNodeId)) chain.SourceNodeId = null;
+            if (chain.SinkNodeId is not null && !referencedNodeIds.Contains(chain.SinkNodeId)) chain.SinkNodeId = null;
+        }
+
+        foreach (var sanitized in dataFlows.SanitizedFlows)
+        {
+            sanitized.SourceIds.RemoveAll(id => !referencedNodeIds.Contains(id));
+        }
     }
 
     /// <summary>A tree's text split the way <see cref="File.ReadAllLines(string)" /> splits the file it was parsed from.</summary>
