@@ -515,103 +515,19 @@ public static class CSharpSourceParser
         """;
 
     /// <summary>
-    ///     A syntax tree carrying the SDK's implicit global usings, for projects under
-    ///     <paramref name="path" /> that enable <c>ImplicitUsings</c> (detected from csproj or
-    ///     Directory.Build.props/targets). Null when no project enables it, so classic projects
-    ///     keep their explicit-usings semantics.
+    ///     A syntax tree carrying the global usings the analyzed tree's projects compile with:
+    ///     the SDKs' implicit lists (base, Web, Worker, Windows Forms - see
+    ///     <see cref="GlobalUsings" />), the projects' <c>&lt;Using&gt;</c> items, or MSBuild's
+    ///     generated <c>GlobalUsings.g.cs</c> when it is authoritative. Null when no project
+    ///     enables implicit usings, so classic projects keep their explicit-usings semantics.
     ///     Granularity limitation: <c>global using</c> directives are compilation-wide in
-    ///     Roslyn, and one compilation covers every scanned file, so the decision is per scan
-    ///     root — in a mixed monorepo where any project enables ImplicitUsings, files from
-    ///     classic sibling projects also receive the synthetic usings, and a BCL name their own
-    ///     compiler would reject can bind there. That rare false edge is accepted over the
+    ///     Roslyn, and one compilation covers every scanned file, so the merged set applies to
+    ///     the whole tree - in a mixed monorepo where any project enables ImplicitUsings, files
+    ///     from classic sibling projects also receive the synthetic usings, and a BCL name their
+    ///     own compiler would reject can bind there. That rare false edge is accepted over the
     ///     alternative (silently dropping every BCL call in the enabling projects, the common
     ///     case); per-file semantics would need one compilation per project.
     /// </summary>
-    public static CSharpSyntaxTree? TryCreateImplicitUsingsTree(string? path)
-    {
-        if (!ImplicitUsingsEnabled(path))
-        {
-            return null;
-        }
-        return Parse(ImplicitGlobalUsingsSource, "<implicit-usings>", path);
-    }
+    public static CSharpSyntaxTree? TryCreateImplicitUsingsTree(string? path) => GlobalUsings.Resolve(path).Tree;
 
-    // Matches the element with optional attributes (Condition, msbuild metadata), any
-    // surrounding whitespace inside the text node, and any case of the value.
-    private static readonly System.Text.RegularExpressions.Regex ImplicitUsingsRegex =
-        new(@"<ImplicitUsings(?:\s[^>]*)?>\s*enable\s*</ImplicitUsings\s*>", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
-
-    private static readonly System.Threading.Lock DetectionLock = new();
-    private static readonly Dictionary<string, bool> EnabledByRoot = new(SafeFileRead.PathComparer);
-
-    /// <summary>
-    ///     True when any project file or Directory.Build.props/targets under the path enables
-    ///     ImplicitUsings. Absent or disabled stays false: inventing the global usings for a
-    ///     classic project would bind calls its own compiler rejects.
-    /// </summary>
-    private static bool ImplicitUsingsEnabled(string? path)
-    {
-        if (string.IsNullOrWhiteSpace(path))
-        {
-            return false;
-        }
-        string root;
-        try
-        {
-            root = TargetFrameworkDetection.ProjectContextRoot(System.IO.Path.GetFullPath(path));
-        }
-        catch (ArgumentException)
-        {
-            return false;
-        }
-        lock (DetectionLock)
-        {
-            if (EnabledByRoot.TryGetValue(root, out var cached))
-            {
-                return cached;
-            }
-            var enabled = DetectImplicitUsings(root);
-            EnabledByRoot[root] = enabled;
-            return enabled;
-        }
-    }
-
-    private static bool DetectImplicitUsings(string root)
-    {
-        try
-        {
-            foreach (var projectFile in SafeFileRead.EnumerateAllFilesSafe(root, "*.csproj"))
-            {
-                if (ProjectEnablesImplicitUsings(projectFile))
-                {
-                    return true;
-                }
-            }
-            foreach (var buildProps in SafeFileRead.EnumerateAllFilesSafe(root, "Directory.Build.props")
-                         .Concat(SafeFileRead.EnumerateAllFilesSafe(root, "Directory.Build.targets")))
-            {
-                if (ProjectEnablesImplicitUsings(buildProps))
-                {
-                    return true;
-                }
-            }
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
-        {
-            // Best-effort detection; analysis continues with explicit-usings semantics.
-        }
-        return false;
-    }
-
-    private static bool ProjectEnablesImplicitUsings(string projectFile)
-    {
-        try
-        {
-            return ImplicitUsingsRegex.IsMatch(File.ReadAllText(projectFile));
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            return false;
-        }
-    }
 }

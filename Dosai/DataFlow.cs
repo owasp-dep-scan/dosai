@@ -321,7 +321,13 @@ public static partial class DataFlowAnalyzer
             var partition = ReferenceSources.Partition(csharpTrees);
             csharpTrees = partition.Kept;
             result.Diagnostics.AddRange(ReferenceSources.Diagnostics(partition, TargetFrameworkDetection.ProjectContextRoot(Path.GetFullPath(path))));
-            if (CSharpSourceParser.TryCreateImplicitUsingsTree(path) is { } implicitUsingsTree)
+            var globalUsings = GlobalUsings.Resolve(path);
+            foreach (var usingsDiagnostic in globalUsings.Diagnostics.Where(usingsDiagnostic => !result.Diagnostics.Contains(usingsDiagnostic, StringComparer.Ordinal)))
+            {
+                result.Diagnostics.Add(usingsDiagnostic);
+            }
+
+            if (globalUsings.Tree is { } implicitUsingsTree)
             {
                 csharpTrees.Insert(0, implicitUsingsTree);
             }
@@ -1298,7 +1304,7 @@ public static partial class DataFlowAnalyzer
             }
         }
 
-        var frameworkReferences = FrameworkReferences.Current;
+        var frameworkReferences = FrameworkReferences.ForTree(path);
         foreach (var (key, reference) in frameworkReferences.References)
         {
             references.TryAdd(key, reference);

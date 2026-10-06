@@ -245,3 +245,23 @@ The MCP `dosai.crypto` tool takes the same value as an optional `crypto_dataflow
 
 Consumers that read only `Assets`, `Operations`, and `Materials` (cdxgen's crypto path) should
 pass `none`.
+
+## Tree framework references and global usings (issue #74)
+
+Calls into ASP.NET Core, Windows Desktop and package APIs now bind on trees that reference
+them, which changes several outputs additively:
+
+- Semantic binding: a Web/Worker/desktop project's calls (`WebApplication.CreateBuilder`,
+  `ILogger.LogWarning`, `UseSerilog`, ...) resolve instead of reporting `SourceUnresolved`, so
+  `MethodCalls`, the call graph, reachability and `PackageReachability` gain edges they never
+  had. `Methods[].MethodCalls` target ids and the `Semantic binding failed for N call sites`
+  counts change accordingly.
+- New `Diagnostics` entries: reference packs used and their versions when not an exact
+  target-major match, assemblies dropped as duplicates between packs, missing packs (with
+  install-the-SDK guidance instead of restore/build advice when restoring cannot help), global
+  usings that differ between projects, stale or multiple `GlobalUsings.g.cs` files, and
+  condition-carrying `<Using>` items that were applied without evaluating the condition.
+- The synthetic implicit-usings tree now follows the project's SDK (base list plus the Web,
+  Worker and Windows Forms additions, `System.Net.Http.Json` on .NET 11+, no `System.Net.Http`
+  on .NET Framework targets) and the project's `<Using>` items, including `Remove` - a project
+  that removes an implicit using no longer binds calls through it.

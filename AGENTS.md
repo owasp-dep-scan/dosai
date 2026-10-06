@@ -221,16 +221,42 @@ dotnet test ./Dosai.sln
   subdirectories fell back to the latest-modern-net set. A single-file root reads its project
   context from the file's directory (`TargetFrameworkDetection.ProjectContextRoot`), for the
   parse options, the implicit-usings decision and the reported target frameworks alike.
-- Seed every Roslyn compilation of analyzed source from `FrameworkReferences.Current`, never
-  from `typeof(object).Assembly.Location` or `TRUSTED_PLATFORM_ASSEMBLIES` directly: a
-  self-contained single-file Dosai has neither (issue #67), and the provider falls back to the
-  bundled runtime's in-memory metadata (names embedded at build time by the
-  `EmbedFrameworkAssemblyNames` target) and then to the newest installed shared framework.
-  Every build references the same set: trusted platform assemblies are filtered to the core
-  library's directory (a non-bundled host also lists Dosai's own dependencies), and the bundled
-  names are followed into the `System.Private.*` implementations their facades forward to.
-  Surface `FrameworkReferences.Diagnostic` in the command's diagnostics. The
-  `smoke-self-contained` CI job runs a published `-full` build with no `dotnet` reachable.
+- Seed every Roslyn compilation of analyzed source from `FrameworkReferences.ForTree(path)`
+  (methods, dataflows and crypto all do), never from `typeof(object).Assembly.Location` or
+  `TRUSTED_PLATFORM_ASSEMBLIES` directly: a self-contained single-file Dosai has neither
+  (issue #67), and the provider falls back to the bundled runtime's in-memory metadata (names
+  embedded at build time by the `EmbedFrameworkAssemblyNames` target) and then to the newest
+  installed shared framework. On top of that base, `ForTree` resolves the tree's own framework
+  reference packs (issue #74): frameworks detected by `TreeFrameworks.Detect` (SDK attribute,
+  `<FrameworkReference>` items, `UseWindowsForms`/`UseWPF`, project.assets.json
+  `frameworkReferences`, `*.runtimeconfig.json`) resolve to
+  `dotnet packs/<Name>.Ref/<ver>/ref/<tfm>`, the NuGet cache copy, then the installed shared
+  framework, version-matched to the tree's representative target framework (exact major first,
+  highest patch, releases over prereleases; a non-exact major always names the version used in
+  the set's diagnostic). Exactly one reference per assembly simple name survives, claimed in a
+  fixed order - target-matched `Microsoft.NETCore.App.Ref` (only when its major differs from
+  Dosai's own runtime), the tree's other packs sorted by name, then the process-wide set
+  filling. When a base reference pack owns the corlib, the fallback must not add its
+  `System.Private.*` companions: a second `System.Private.CoreLib` of another major beside a
+  pack's core makes every predefined type report CS0518. A missing pack is a diagnostic, never
+  a failure, and the binding-failure diagnostic never advises restore/build for a pack problem.
+  `FrameworkReferences.Current` stays as the process-wide base and the `OverrideForTesting`
+  hook wins the whole `ForTree` decision. Every build references the same set: trusted platform
+  assemblies are filtered to the core library's directory (a non-bundled host also lists
+  Dosai's own dependencies), and the bundled names are followed into the `System.Private.*`
+  implementations their facades forward to. Surface `FrameworkReferences.ForTree(path)`
+  `.Diagnostic` in the command's diagnostics. The `smoke-self-contained` CI job runs a
+  published `-full` build with no `dotnet` reachable (pack resolution then degrades to the
+  process-wide set with a diagnostic).
+- Global usings come from `GlobalUsings` (issue #74), not a hardcoded list: per project, the
+  SDK lists verified on disk (base C#, Web, Worker, Windows Forms - see the provenance comment
+  in `Dosai/GlobalUsings.cs`; Razor, Blazor Web Assembly and WPF add none), the project's and
+  nearest `Directory.Build.props/targets`' `<Using>` items (Include/Remove/Static/Alias;
+  unevaluable conditions are applied with a diagnostic), and MSBuild's generated
+  `obj/**/<Project>.GlobalUsings.g.cs` when it exists for the resolved target and is no older
+  than the project file. One compilation means one union-merged set; disagreeing projects get
+  a diagnostic naming them, and a using that resolves nowhere errors alone - it never stops
+  other bindings (pinned by test).
 - Partition parsed C# trees through `ReferenceSources.Partition` before creating a
   compilation (methods, data-flow and crypto all do): reference-assembly source (GenAPI
   API-surface stubs, `throw null` bodies or the `aka.ms/api-review` header) loses its

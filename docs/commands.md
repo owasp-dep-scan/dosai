@@ -267,6 +267,20 @@ Method inventory, call graph, and data-flow records carry shared source/binary e
 
 This is not a full SSA or path-sensitive theorem prover. Complex aliasing, reflection, dynamic dispatch, deep collection modeling, and framework-specific lifecycle edges may require conservative approximations. Assembly-only analysis cannot recover source syntax that was not emitted to IL/PDB and therefore prefers semantic metadata patterns over source `Code` patterns. Sanitizers are pattern-driven, so custom validation logic may need project-specific patterns.
 
+### Framework reference resolution (issue #74)
+
+Web, worker-adjacent and desktop trees reference shared frameworks beyond the base
+(`Microsoft.AspNetCore.App`, `Microsoft.WindowsDesktop.App`). Dosai detects them from the SDK
+attribute, `<FrameworkReference>` items, `UseWindowsForms`/`UseWPF`, restore output
+(project.assets.json) and `*.runtimeconfig.json`, and references the matching reference packs -
+exact target-framework version preferred, the closest installed version used otherwise and
+named in a diagnostic. Missing packs (for example WindowsDesktop on Linux/macOS) produce a
+diagnostic, never a failure; the binding-failure diagnostic distinguishes pack problems (install
+the SDK/runtime) from package problems (restore/build the tree). `--debug` prints every pack,
+its version, and the duplicates it dropped. Implicit usings follow the SDKs' own lists (Web adds
+nine namespaces, Worker four, Windows Forms two), plus the project's `<Using>` items and
+MSBuild's generated `GlobalUsings.g.cs` when it is current.
+
 ## `crypto`
 
 `crypto` detects cryptographic components and emits native Dosai JSON or combined CycloneDX-style CBOM JSON.

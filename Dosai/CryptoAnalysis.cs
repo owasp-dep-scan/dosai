@@ -498,7 +498,9 @@ public static class CryptoAnalyzer
         var partition = ReferenceSources.Partition(csharpTrees);
         csharpTrees = partition.Kept;
         result.Diagnostics.AddRange(ReferenceSources.Diagnostics(partition, TargetFrameworkDetection.ProjectContextRoot(Path.GetFullPath(basePath))));
-        var implicitUsingsTree = CSharpSourceParser.TryCreateImplicitUsingsTree(basePath);
+        var globalUsings = GlobalUsings.Resolve(basePath);
+        result.Diagnostics.AddRange(globalUsings.Diagnostics.Where(diagnostic => !result.Diagnostics.Contains(diagnostic, StringComparer.Ordinal)));
+        var implicitUsingsTree = globalUsings.Tree;
         if (implicitUsingsTree is not null)
         {
             csharpTrees.Insert(0, implicitUsingsTree);
@@ -1203,7 +1205,7 @@ public static class CryptoAnalyzer
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or BadImageFormatException) { diagnostics.Add($"Could not add metadata reference {referencePath}: {ex.Message}"); }
         }
 
-        var frameworkReferences = FrameworkReferences.Current;
+        var frameworkReferences = FrameworkReferences.ForTree(path);
         foreach (var (key, reference) in frameworkReferences.References)
         {
             references.TryAdd(key, reference);

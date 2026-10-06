@@ -52,6 +52,39 @@ This layer intentionally remains deterministic. It does not query vulnerability 
 Roslyn operations -> nodes/edges/slices -> transparency facts -> reports/agent context/diff
 ```
 
+## Tree framework references and global usings (issue #74)
+
+`FrameworkReferences.ForTree(path)` (used by methods, dataflows and crypto) layers the analyzed
+tree's own reference packs on the process-wide set: `TreeFrameworks.Detect` reads the SDK
+attribute, explicit `<FrameworkReference>` items, `UseWindowsForms`/`UseWPF`,
+project.assets.json's `frameworkReferences` and `*.runtimeconfig.json`, and each named framework
+resolves to `packs/<Name>.Ref/<version>/ref/<tfm>`, the NuGet cache copy, or the installed
+shared framework - exact target major first, then highest patch with releases over prereleases,
+and a non-exact major always names the version used. Exactly one reference per assembly simple
+name survives: the pack that matches the analyzed target claims shared names (this is what keeps
+.NET 11's nine `Microsoft.Extensions.*` assemblies from colliding with an ASP.NET Core 8/9/10
+pack), and every dropped duplicate is reported. A base reference pack owns the corlib: the
+process-wide fallback then skips its `System.Private.*` companions, because a second
+`System.Private.CoreLib` of another major makes Roslyn report CS0518 for every predefined type.
+Missing packs degrade to diagnostics, never failures, and the reference resolution is cached per
+scan root so it is deterministic across the run.
+
+`GlobalUsings` resolves the synthetic implicit-usings tree per scan root: the SDK lists verified
+from the SDKs' own .props files (base C#, Web's nine, Worker's four, Windows Forms' two; the
+11 SDKs add `System.Net.Http.Json` for .NET 11+ targets, and .NET Framework targets drop
+`System.Net.Http`), `<Using>` items with `Remove`/`Static`/`Alias` from the project and the
+nearest Directory.Build.props/targets, and MSBuild's generated `GlobalUsings.g.cs` as the
+authoritative set when it matches the resolved target and is no older than the project. One
+compilation carries the union of per-project sets (the documented granularity limitation); the
+resolver reports projects whose sets disagree and applies condition-carrying items
+unconditionally with a note - a using that resolves nowhere errors alone and never blocks other
+bindings.
+
+Assembly inspection's shared-framework probing reads the tree's runtimeconfig files: frameworks
+they name (ASP.NET Core, Windows Desktop) are probed at their exact named version, then
+newest-first, and only `Microsoft.NETCore.App` directories are filtered by the running-version
+floor (their `System.Runtime` can shadow the host's; the other frameworks carry none).
+
 ## Source compilation model
 
 Dosai now creates per-language compilations from all source files in the inspected tree:

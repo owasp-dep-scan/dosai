@@ -619,9 +619,12 @@ public static class Dosai
         var unresolvedCallCount = methodCalls.Count(call => call.EvidenceKind == AnalysisEvidenceKind.SourceUnresolved);
         if (unresolvedCallCount > 0)
         {
+            var treeReferences = FrameworkReferences.ForTree(path);
             sliceDiagnostics.Add(FrameworkReferences.Current.References.Count == 0
                 ? string.Create(CultureInfo.InvariantCulture, $"Semantic binding failed for {unresolvedCallCount} call sites: Dosai resolved no framework metadata references (see the framework-reference diagnostic), so every framework call is unresolved regardless of the tree's restore state.")
-                : string.Create(CultureInfo.InvariantCulture, $"Semantic binding failed for {unresolvedCallCount} call sites: target assemblies were missing or conflicted with other references. Restore or build the tree (--restore/--build) to raise reachability confidence."));
+                : treeReferences.Diagnostic is { } treeNote && treeNote.Contains("No reference pack", StringComparison.Ordinal)
+                    ? string.Create(CultureInfo.InvariantCulture, $"Semantic binding failed for {unresolvedCallCount} call sites: reference assemblies are missing (see the framework-reference diagnostics naming the packs); installing the SDK or runtime that ships them fixes it, restoring or building the tree does not.")
+                    : string.Create(CultureInfo.InvariantCulture, $"Semantic binding failed for {unresolvedCallCount} call sites: target assemblies were missing or conflicted with other references. Restoring or building the tree (--restore/--build) helps when packages are involved; framework references come from installed packs, not from the tree."));
         }
 
         // Conditional-compilation guards were evaluated against the detected target frameworks;
@@ -1393,10 +1396,66 @@ public static class Dosai
     ///     references, ordered so the running runtime's own version is tried first and the
     ///     remaining installed versions newest-first.
     /// </summary>
-    private static List<string> GetSharedFrameworkProbingPaths()
+    private static List<string> GetSharedFrameworkProbingPaths(string? path = null)
         => GetSharedFrameworkProbingPaths(
             System.Runtime.InteropServices.RuntimeEnvironment.GetRuntimeDirectory(),
-            GetDotnetSharedRuntimePaths());
+            GetDotnetSharedRuntimePaths(),
+            path,
+            ReadRuntimeConfigFrameworks);
+
+    /// <summary>
+    ///     The framework names and versions a tree's <c>*.runtimeconfig.json</c> files declare,
+    ///     for dependency probing of built output (issue #74): a built ASP.NET Core or desktop
+    ///     app names Microsoft.AspNetCore.App / Microsoft.WindowsDesktop.App, whose assemblies
+    ///     the inspected libraries reference.
+    /// </summary>
+    private static List<(string Name, string Version)> ReadRuntimeConfigFrameworks(string path)
+    {
+        var frameworks = new List<(string Name, string Version)>();
+        try
+        {
+            var root = Directory.Exists(path) ? path : Path.GetDirectoryName(path!);
+            if (string.IsNullOrEmpty(root))
+            {
+                return frameworks;
+            }
+
+            foreach (var runtimeConfig in SafeFileRead.EnumerateAllFilesSafe(root, "*.runtimeconfig.json"))
+            {
+                if (!SafeFileRead.TryReadAllText(runtimeConfig, out var content))
+                {
+                    continue;
+                }
+
+                using var document = System.Text.Json.JsonDocument.Parse(content);
+                if (!document.RootElement.TryGetProperty("runtimeOptions", out var runtimeOptions) || runtimeOptions.ValueKind != System.Text.Json.JsonValueKind.Object)
+                {
+                    continue;
+                }
+
+                if (!runtimeOptions.TryGetProperty("frameworks", out var declared) || declared.ValueKind != System.Text.Json.JsonValueKind.Array)
+                {
+                    continue;
+                }
+
+                foreach (var framework in declared.EnumerateArray())
+                {
+                    if (framework.ValueKind == System.Text.Json.JsonValueKind.Object
+                        && framework.TryGetProperty("name", out var name) && name.ValueKind == System.Text.Json.JsonValueKind.String
+                        && framework.TryGetProperty("version", out var version) && version.ValueKind == System.Text.Json.JsonValueKind.String)
+                    {
+                        frameworks.Add((name.GetString() ?? string.Empty, version.GetString() ?? string.Empty));
+                    }
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or System.Text.Json.JsonException)
+        {
+            // Probing falls back to the installed frameworks.
+        }
+
+        return frameworks;
+    }
 
     /// <summary>
     ///     Testable core of <see cref="GetSharedFrameworkProbingPaths" />: the runtime
@@ -1414,7 +1473,7 @@ public static class Dosai
     ///     Newest-first resolves references from a superset framework instead, and the running
     ///     runtime leads because it is the one version guaranteed to be loadable in-process.
     /// </remarks>
-    internal static List<string> GetSharedFrameworkProbingPaths(string runtimeDir, IEnumerable<string> dotnetSharedRuntimePaths)
+    internal static List<string> GetSharedFrameworkProbingPaths(string runtimeDir, IEnumerable<string> dotnetSharedRuntimePaths, string? path = null, Func<string, List<(string Name, string Version)>>? readRuntimeConfigFrameworks = null)
     {
         var sharedRoots = new HashSet<string>(StringComparer.Ordinal);
         var runningSharedRoot = Path.GetFullPath(Path.Combine(runtimeDir, "..", ".."));
@@ -1436,6 +1495,47 @@ public static class Dosai
             if (Directory.Exists(frameworkRoot))
             {
                 versionDirectories.AddRange(Directory.GetDirectories(frameworkRoot));
+            }
+        }
+
+        // Frameworks the analyzed tree's runtimeconfig files name (issue #74): the exact named
+        // version is probed when installed, otherwise every installed version of that framework
+        // joins the candidate list and the ordering pass below picks the newest. These
+        // frameworks carry no System.Runtime of their own, so they are not subject to the
+        // running-version floor that the base framework's directories are filtered by.
+        var runtimeConfigExactDirectories = new HashSet<string>(StringComparer.Ordinal);
+        if (path is not null && readRuntimeConfigFrameworks is not null)
+        {
+            foreach (var (name, version) in readRuntimeConfigFrameworks(path))
+            {
+                if (string.IsNullOrWhiteSpace(name))
+                {
+                    continue;
+                }
+
+                foreach (var sharedRoot in sharedRoots)
+                {
+                    var frameworkRoot = Path.Combine(sharedRoot, name);
+                    if (!Directory.Exists(frameworkRoot))
+                    {
+                        continue;
+                    }
+
+                    var exact = Path.Combine(frameworkRoot, version);
+                    if (Directory.Exists(exact))
+                    {
+                        runtimeConfigExactDirectories.Add(Path.TrimEndingDirectorySeparator(Path.GetFullPath(exact)));
+                    }
+                    else
+                    {
+                        versionDirectories.AddRange(Directory.GetDirectories(frameworkRoot));
+                    }
+                }
+            }
+
+            foreach (var exact in runtimeConfigExactDirectories)
+            {
+                versionDirectories.Add(exact);
             }
         }
 
@@ -1465,8 +1565,10 @@ public static class Dosai
             // already-loaded bundled assemblies instead. The running directory itself is exempt:
             // a self-contained app directory is not named after a framework version.
             .Where(directory => string.Equals(directory, runningVersionDirectory, StringComparison.Ordinal)
+                                || !IsNetCoreAppDirectory(directory)
                                 || ParseFrameworkVersion(Path.GetFileName(directory)).Version >= runningVersion)
             .OrderByDescending(directory => string.Equals(directory, runningVersionDirectory, StringComparison.Ordinal))
+            .ThenByDescending(directory => runtimeConfigExactDirectories.Contains(directory))
             .ThenByDescending(directory => ParseFrameworkVersion(Path.GetFileName(directory)))
             .ToList();
     }
@@ -1484,6 +1586,10 @@ public static class Dosai
             ? (version, separatorIndex < 0)
             : (new Version(0, 0), false);
     }
+
+    /// <summary>True when the directory is a Microsoft.NETCore.App version directory, whose System.Runtime can shadow the running runtime's; other shared frameworks carry none.</summary>
+    private static bool IsNetCoreAppDirectory(string directory)
+        => directory.Contains($"{Path.DirectorySeparatorChar}Microsoft.NETCore.App{Path.DirectorySeparatorChar}", StringComparison.Ordinal);
 
     private static readonly Lazy<HashSet<string>> DotnetSharedRuntimeRoots = new(ListDotnetSharedRuntimeRoots, LazyThreadSafetyMode.ExecutionAndPublication);
 
@@ -1630,7 +1736,7 @@ public static class Dosai
         }
         var assemblyMethods = new List<Method>();
         var processedAssemblyIdentities = new HashSet<string>();
-        var sharedFrameworkDirs = GetSharedFrameworkProbingPaths();
+        var sharedFrameworkDirs = GetSharedFrameworkProbingPaths(path);
         // The first open of a file is where a cold machine waits: real-time antivirus scans a
         // file on its first access (Windows Defender: ~60 ms per DLL), which left this phase at a
         // fifth of one core in the issue #65 run. The managed-assembly check is
@@ -2209,9 +2315,11 @@ public static class Dosai
         var mergedDiagnostics = new List<string>();
         var dispatchIndexes = new Dictionary<Compilation, DispatchResolver.SourceIndex>();
         var metadataReferences = new Dictionary<string, PortableExecutableReference>(StringComparer.OrdinalIgnoreCase);
-        // Framework references: the host's trusted platform assemblies, a self-contained
-        // bundle's own runtime, or the newest installed shared framework (issue #67).
-        var frameworkReferences = FrameworkReferences.Current;
+        // Framework references: the tree's reference packs (AspNetCore/WindowsDesktop for a web
+        // or desktop tree, a target-matched base pack) on top of the process-wide set - the
+        // host's trusted platform assemblies, a self-contained bundle's own runtime, or the
+        // newest installed shared framework (issues #67 and #74).
+        var frameworkReferences = FrameworkReferences.ForTree(path);
         foreach (var (key, reference) in frameworkReferences.References)
         {
             metadataReferences.TryAdd(key, reference);
@@ -2269,7 +2377,9 @@ public static class Dosai
         mergedDiagnostics.AddRange(ReferenceSources.Diagnostics(partition, TargetFrameworkDetection.ProjectContextRoot(Path.GetFullPath(path))));
         // Implicit-usings projects rely on global usings their compiler injects; without the
         // synthetic tree every BCL call in them fails to bind and vanishes from the graph.
-        if (CSharpSourceParser.TryCreateImplicitUsingsTree(path) is { } implicitUsingsTree)
+        var globalUsings = GlobalUsings.Resolve(path);
+        mergedDiagnostics.AddRange(globalUsings.Diagnostics);
+        if (globalUsings.Tree is { } implicitUsingsTree)
         {
             csharpTrees.Insert(0, implicitUsingsTree);
         }
