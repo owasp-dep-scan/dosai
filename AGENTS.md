@@ -150,6 +150,12 @@ dotnet test ./Dosai.sln
   arrays). Resolve members through `AssemblyScan.Resolve` (memoized per token, so call sites
   share one id string) and source locations through the per-assembly source map (binary search,
   one path and file-name string per document) - never per instruction.
+- A PDB document path is the build's, not the scan's: absolute, `/_/`-mapped, or in the other
+  file system's form. Every path an IL record writes goes through `SourceDocumentPaths`
+  (`InTree` relative to the scan root, a tree-built assembly's foreign documents placed by
+  their longest tail in the tree, `FileName` split on both separators), and a call record, its
+  edge, a data-flow node and its edges must carry the same answer (issue #79: the raw path on
+  `MethodCalls` listed every call site twice in cdxgen).
 - The data-flow IL pass reads a built source tree's `bin/` whole, packages included, so flows
   through package code stay in the graph (issue #78). Never drop those assemblies to quiet the
   output: classify them through `DependencyAssemblies` (built from source or a `project`

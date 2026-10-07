@@ -349,3 +349,26 @@ summarizes as returning `arg` by design rather than through the leaked stack ent
 earlier output is still produced and one more is found inside MailKit's NTLM code;
 `MethodSummaries` gains 122 entries, refines 17 and drops 5 bogus ones. eShopOnWeb's slices
 are unchanged.
+
+## Call-site paths from assembly IL (issue #79, fix)
+
+A call site found in assembly IL names its source file through the assembly's portable PDB, and
+the PDB records the path the compiler saw. `MethodCalls[].Path` carried that path as it was,
+while the call graph edge beside it and the source analysis row for the same call carried it
+relative to `--path`, so a tree holding a build of its own project listed each call twice, once
+under the build machine's absolute path. Both now carry the same path:
+
+- A file under the scan root is relative to it, as source rows are (`Program.cs`, `out/App.dll`
+  for a call no sequence point covers).
+- A file of an assembly the tree builds from source that lies elsewhere - a deterministic CI
+  build's `/_/src/App/Program.cs`, a build on another machine (`D:\a\repo\src\App\Program.cs` on
+  Linux too) or in another copy of the tree - is placed by the longest tail of its path that
+  names a file under the root. Edges used to drop such paths.
+- Anything else, such as a package's own sources, has no place in the tree: `Path` is omitted on
+  `MethodCalls` as it already was on edges, and `FileName` still names the file.
+- `FileName` of a document recorded in the other file system's form is the file name, not the
+  whole path.
+
+`dataflows` follows the same rule for IL nodes and edges. Their `Path` falls back to the file
+name as edges already did; nodes used to climb out of the root (`../../../_/Program.cs`).
+Consumers that read `MethodCalls[].Path` should fall back to `FileName` when it is absent.

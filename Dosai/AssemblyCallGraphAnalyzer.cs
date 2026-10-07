@@ -140,9 +140,12 @@ internal static class AssemblyCallGraphAnalyzer
             var evidenceDescription = isGeneratedStateMachine
                 ? "Call edge discovered from generated async/iterator state-machine IL and collapsed to the user method."
                 : "Call edge discovered from assembly IL method body.";
+            // The call record and its edge name the call site's file alike, relative to the scan
+            // root, as the source analysis does (issue #79).
+            var relativePath = scan.RelativeSourcePath(location.FilePath);
             var call = new MethodCalls
             {
-                Path = location.FilePath,
+                Path = relativePath,
                 FileName = location.FileName,
                 Assembly = target.AssemblyName,
                 Module = resolved.TargetFileName,
@@ -173,7 +176,7 @@ internal static class AssemblyCallGraphAnalyzer
                     SourceId = sourceId,
                     TargetId = targetId,
                     CallLocation = new CallLocation { FileName = location.FileName, LineNumber = location.LineNumber, ColumnNumber = location.ColumnNumber },
-                    Path = scan.RelativeSourcePath(location.FilePath),
+                    Path = relativePath,
                     FileName = location.FileName,
                     IsInternal = target.IsInternal,
                     CalledMethodName = target.Name,
@@ -202,7 +205,6 @@ internal static class AssemblyCallGraphAnalyzer
                         continue;
                     }
 
-                    var relativePath = scan.RelativeSourcePath(location.FilePath);
                     fragment.Emit(new MethodCalls
                     {
                         Path = relativePath,
@@ -340,9 +342,10 @@ internal static class AssemblyCallGraphAnalyzer
         var targetId = resolved.Target.TargetId;
         var targetFileName = GetTargetFileName(target);
         AddNode(fragment.Nodes, targetId, target.Name, target.ClassName, target.Namespace, targetFileName, target.AssemblyName, targetFileName, "Method", target.LineNumber, target.ColumnNumber, isExternal: !target.IsInternal, AnalysisEvidenceKind.AssemblyIlDelegateTarget);
+        var relativePath = scan.RelativeSourcePath(location.FilePath);
         var call = new MethodCalls
         {
-            Path = location.FilePath,
+            Path = relativePath,
             FileName = location.FileName,
             Assembly = target.AssemblyName,
             Module = targetFileName,
@@ -373,7 +376,7 @@ internal static class AssemblyCallGraphAnalyzer
                 SourceId = sourceId,
                 TargetId = targetId,
                 CallLocation = new CallLocation { FileName = location.FileName, LineNumber = location.LineNumber, ColumnNumber = location.ColumnNumber },
-                Path = scan.RelativeSourcePath(location.FilePath),
+                Path = relativePath,
                 FileName = location.FileName,
                 IsInternal = target.IsInternal,
                 CalledMethodName = target.Name,
@@ -448,37 +451,6 @@ internal static class AssemblyCallGraphAnalyzer
         metadataToken != 0 && methodLookup.TryGetValue((assemblyPath, metadataToken), out var method) && !string.IsNullOrWhiteSpace(method.AssemblySignature)
             ? method.AssemblySignature!
             : fallbackSymbol;
-
-    /// <summary>The root call-site paths are made relative to: the inspected directory, or a file's directory.</summary>
-    private static string? RelativePathRoot(string inspectedPath)
-    {
-        var root = Directory.Exists(inspectedPath) ? inspectedPath : Path.GetDirectoryName(inspectedPath);
-        if (string.IsNullOrWhiteSpace(root)) return null;
-        try
-        {
-            return Path.GetFullPath(root);
-        }
-        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
-        {
-            return null;
-        }
-    }
-
-    private static string? SafeRelativeSourcePath(string? fullRoot, string sourcePath)
-    {
-        if (string.IsNullOrWhiteSpace(sourcePath) || !Path.IsPathFullyQualified(sourcePath) || fullRoot is null) return null;
-
-        try
-        {
-            var relative = Path.GetRelativePath(fullRoot, Path.GetFullPath(sourcePath));
-            if (string.IsNullOrWhiteSpace(relative) || Path.IsPathFullyQualified(relative) || relative == ".." || relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal) || relative.StartsWith($"..{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal)) return null;
-            return relative;
-        }
-        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
-        {
-            return null;
-        }
-    }
 
     private static AnalysisEvidence CreateEvidence(AnalysisEvidenceKind kind, AssemblyCallSourceLocation location, string description) => new()
     {
@@ -1116,7 +1088,7 @@ internal static class AssemblyCallGraphAnalyzer
                     if (!documents.TryGetValue(sequencePoint.Document, out var document))
                     {
                         var documentPath = reader.GetString(reader.GetDocument(sequencePoint.Document).Name);
-                        document = (documentPath, Path.GetFileName(documentPath));
+                        document = (documentPath, SourceDocumentPaths.FileName(documentPath));
                         documents.Add(sequencePoint.Document, document);
                     }
 
@@ -1254,7 +1226,7 @@ internal static class AssemblyCallGraphAnalyzer
 
         public AnalysisContext(string inspectedPath, IReadOnlyList<Method> knownMethods)
         {
-            RelativeRoot = RelativePathRoot(inspectedPath);
+            RelativeRoot = SourceDocumentPaths.Root(inspectedPath);
             var methodLookup = new Dictionary<(string Path, int Token), Method>();
             // One full-path resolution per known method (issue #65: the dispatch index used to
             // re-resolve every known method's path once per assembly). Grouping keeps the known
@@ -1300,6 +1272,7 @@ internal static class AssemblyCallGraphAnalyzer
     {
         private readonly Dictionary<int, ResolvedMember?> _members = [];
         private readonly Dictionary<string, string?> _relativePaths = new(StringComparer.Ordinal);
+        private bool? _isBuiltFromSource;
 
         public MetadataReader Reader => reader;
         public string AssemblyPath => assemblyPath;
@@ -1326,16 +1299,23 @@ internal static class AssemblyCallGraphAnalyzer
             return resolved;
         }
 
+        /// <summary>
+        ///     A call site's file (a PDB document, or the assembly where no sequence point covers the
+        ///     call) as the scan tree names it, or null when it has no place there. Call records and
+        ///     edges both carry this path (issue #79).
+        /// </summary>
         public string? RelativeSourcePath(string sourcePath)
         {
             if (!_relativePaths.TryGetValue(sourcePath, out var relative))
             {
-                relative = SafeRelativeSourcePath(context.RelativeRoot, sourcePath);
+                relative = SourceDocumentPaths.InTree(context.RelativeRoot, sourcePath, IsBuiltFromSource);
                 _relativePaths.Add(sourcePath, relative);
             }
 
             return relative;
         }
+
+        private bool IsBuiltFromSource => _isBuiltFromSource ??= context.RelativeRoot is { } root && TreeFrameworks.IsBuiltFromSource(root, assemblyPath);
     }
 
     /// <summary>

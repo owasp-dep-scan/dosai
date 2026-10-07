@@ -2040,8 +2040,27 @@ public static partial class DataFlowAnalyzer
         private readonly PackageUrlResolver _purlResolver = PackageUrlResolver.Create(basePath);
         private readonly Dictionary<string, AssemblyTaint> _fieldTaints = new(StringComparer.Ordinal);
         private DependencyAssemblies? _dependencies;
+        private readonly string? _treeRoot = SourceDocumentPaths.Root(basePath);
+        private readonly Dictionary<(string Document, string Assembly), string> _treePaths = [];
 
         private DependencyAssemblies Dependencies => _dependencies ??= new DependencyAssemblies(basePath, _purlResolver);
+
+        /// <summary>
+        ///     A node's or edge's file (a PDB document, or the assembly where no sequence point
+        ///     covers the offset) relative to the scan root, else its file name: the same answer for
+        ///     a node and the edges beside it (issue #79).
+        /// </summary>
+        private string TreePath(string filePath, string assemblyPath)
+        {
+            if (!_treePaths.TryGetValue((filePath, assemblyPath), out var path))
+            {
+                var builtFromSource = _treeRoot is not null && TreeFrameworks.IsBuiltFromSource(_treeRoot, assemblyPath);
+                path = SourceDocumentPaths.InTree(_treeRoot, filePath, builtFromSource) ?? SourceDocumentPaths.FileName(filePath);
+                _treePaths.Add((filePath, assemblyPath), path);
+            }
+
+            return path;
+        }
 
         public IEnumerable<DataFlowPattern> MatchParameterSource(string parameterName, AssemblyMethodInfo method)
         {
@@ -2125,7 +2144,7 @@ public static partial class DataFlowAnalyzer
                 return existingNode;
             }
 
-            var path = Directory.Exists(basePath) ? Path.GetRelativePath(basePath, location.FilePath) : Path.GetFileName(location.FilePath);
+            var path = TreePath(location.FilePath, assemblyKey);
             var purl = matchedPatterns.Select(pattern => pattern.Purl).FirstOrDefault(purl => !string.IsNullOrWhiteSpace(purl)) ??
                        _purlResolver.Resolve(method.AssemblyName, Path.GetFileName(assemblyPath), symbol, method.Namespace, typeName, assemblyPath);
             var node = new DataFlowNode
@@ -2138,7 +2157,7 @@ public static partial class DataFlowAnalyzer
                 Purl = purl,
                 Code = TrimAssemblyCode(code ?? symbol ?? name),
                 Path = path,
-                FileName = Path.GetFileName(location.FilePath),
+                FileName = SourceDocumentPaths.FileName(location.FilePath),
                 Namespace = method.Namespace,
                 ClassName = method.ContainingType.Split('.').LastOrDefault() ?? method.ContainingType,
                 MethodName = method.Name,
@@ -2156,7 +2175,7 @@ public static partial class DataFlowAnalyzer
                         Kind = AnalysisEvidenceKind.AssemblyIlDirect,
                         Source = "assembly-il",
                         Description = "Data-flow node discovered from assembly IL analysis.",
-                        FileName = Path.GetFileName(location.FilePath),
+                        FileName = SourceDocumentPaths.FileName(location.FilePath),
                         LineNumber = location.LineNumber,
                         ColumnNumber = location.ColumnNumber
                     }
@@ -2200,8 +2219,8 @@ public static partial class DataFlowAnalyzer
                     Label = label,
                     SourcePurl = _nodesById.TryGetValue(sourceId, out var sourceNode) ? sourceNode.Purl : null,
                     TargetPurl = _nodesById.TryGetValue(targetId, out var targetNode) ? targetNode.Purl : null,
-                    Path = SafeRelativeSourcePath(basePath, location.FilePath),
-                    FileName = Path.GetFileName(location.FilePath),
+                    Path = TreePath(location.FilePath, string.IsNullOrWhiteSpace(method.AssemblyPath) ? assemblyPath : method.AssemblyPath),
+                    FileName = SourceDocumentPaths.FileName(location.FilePath),
                     LineNumber = location.LineNumber,
                     ColumnNumber = location.ColumnNumber
                 };
@@ -2282,22 +2301,6 @@ public static partial class DataFlowAnalyzer
         {
             code = code.Replace("\r", " ", StringComparison.Ordinal).Replace("\n", " ", StringComparison.Ordinal).Trim();
             return code.Length <= 240 ? code : code[..240] + "…";
-        }
-
-        private static string SafeRelativeSourcePath(string inspectedPath, string sourcePath)
-        {
-            var root = Directory.Exists(inspectedPath) ? inspectedPath : Path.GetDirectoryName(inspectedPath);
-            if (string.IsNullOrWhiteSpace(root)) return Path.GetFileName(sourcePath);
-            try
-            {
-                var relative = Path.GetRelativePath(Path.GetFullPath(root), Path.GetFullPath(sourcePath));
-                if (string.IsNullOrWhiteSpace(relative) || Path.IsPathFullyQualified(relative) || relative == ".." || relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal) || relative.StartsWith($"..{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal)) return Path.GetFileName(sourcePath);
-                return relative;
-            }
-            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
-            {
-                return Path.GetFileName(sourcePath);
-            }
         }
     }
 

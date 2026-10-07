@@ -236,6 +236,30 @@ public class CorpusTests
         Assert.Equal(0, excluded.Statistics.CryptoDataFlowSliceCount);
     }
 
+    // Issue #79 repro, built by setup.sh into out/ twice: a local build, whose PDB names the
+    // absolute source path, and a path-mapped one, whose PDB names /_/Program.cs. The call into
+    // Newtonsoft.Json is found in source and in IL; both rows and the IL edge name Program.cs.
+    [SkippableTheory]
+    [InlineData("local")]
+    [InlineData("pathmap")]
+    public void Corpus_Issue79Newtonsoft_IlCallSitesNameTheSourceRowsFile(string variant)
+    {
+        var path = CorpusPathOrSkip(Path.Combine("issue79-newtonsoft", variant));
+        var slice = JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(path), JsonOptions)!;
+
+        var serializeCalls = slice.MethodCalls!.Where(call => call.ClassName == "JsonConvert" && call.LineNumber == 3).ToList();
+        Assert.Contains(serializeCalls, call => call.EvidenceKind == AnalysisEvidenceKind.SourceRoslynDirect);
+        Assert.Contains(serializeCalls, call => call.EvidenceKind == AnalysisEvidenceKind.AssemblyIlDirect);
+        Assert.All(serializeCalls, call => Assert.Equal("Program.cs", call.Path));
+        Assert.Contains(slice.CallGraph!.Edges, edge => edge.CalledMethodName == "SerializeObject" && edge.EvidenceKind == AnalysisEvidenceKind.AssemblyIlDirect && edge.Path == "Program.cs");
+
+        // No record of the scan names the build machine's path (calls no sequence point covers
+        // name the assembly under out/).
+        Assert.All(slice.MethodCalls!, call => Assert.False(call.Path is not null && (Path.IsPathFullyQualified(call.Path) || call.Path.StartsWith("/_/", StringComparison.Ordinal)), call.Path));
+        Assert.All(slice.CallGraph.Edges, edge => Assert.False(edge.Path is not null && Path.IsPathFullyQualified(edge.Path), edge.Path));
+        Assert.Contains(slice.MethodCalls!, call => call.Path == Path.Combine("out", "Repro.dll"));
+    }
+
     // Added with the target-framework-aware analysis (schema 5.1.0): the corpus previously
     // exercised only net10/net11-era apps, which is how a net8-crashing defect shipped unseen.
     // This is a real .NET 8 LTS app whose TFM comes from src/Directory.Build.props.
