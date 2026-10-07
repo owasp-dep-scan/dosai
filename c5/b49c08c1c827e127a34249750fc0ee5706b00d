@@ -1,0 +1,48 @@
+Dosai.Tests/Corpus/README.md
+  s_24e6f24eac724b::t_86f123471fa646 27,43
+docs/migration-5.1.0.md
+  s_24e6f24eac724b::t_fdba94d8f5fd6a 352-374
+Dosai/SourceDocumentPaths.cs
+  s_24e6f24eac724b::t_6829044abd9229 42-52
+  s_24e6f24eac724b::t_f5a13d6fd8a6dc 10-15
+  s_24e6f24eac724b::t_be8a4de92c2083 66-72
+  s_24e6f24eac724b::t_3a9fc49a5811bd 73,75
+  s_24e6f24eac724b::t_06399f0a5649e7 1-9,16-41,53-65,74,76-124
+Dosai/AssemblyCallGraphAnalyzer.cs
+  s_24e6f24eac724b::t_2be2b25bf2e74f 1091
+  s_24e6f24eac724b::t_e212256e3da72e 1275
+  s_24e6f24eac724b::t_282b4bae0e38ee 143-145,148,179,345,348,379,1229
+  s_24e6f24eac724b::t_d2193c69c613d7 1302-1306,1311,1317-1318
+docs/commands.md
+  s_24e6f24eac724b::t_c5ab5b3d5af339 145
+Dosai.Tests/Issue79IlCallSitePathTests.cs
+  s_24e6f24eac724b::t_743620a7952312 1-74,77-129,131-160,166-228
+  s_24e6f24eac724b::t_66bb28fbe905c7 75,161-165
+  s_24e6f24eac724b::t_37491de98c8ef3 76
+  s_24e6f24eac724b::t_db8a183073d79a 130
+Dosai/DataFlowAssembly.cs
+  s_24e6f24eac724b::t_f2bf13219328aa 2043-2044,2048-2057,2059-2064,2147,2222
+  s_24e6f24eac724b::t_2be2b25bf2e74f 2058,2160,2178,2223
+Dosai.Tests/Corpus/setup.sh
+  s_24e6f24eac724b::t_5085ce6ba51325 87-120
+AGENTS.md
+  s_24e6f24eac724b::t_afe4cb8c931c93 153-158
+Dosai.Tests/CorpusTests.cs
+  s_24e6f24eac724b::t_5085ce6ba51325 239-262
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "c5b49c08c1c827e127a34249750fc0ee5706b00d",
+  "prompts": {},
+  "sessions": {
+    "s_24e6f24eac724b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ba0b7f12-f17c-4c3d-8e65-9e2b548e94dd",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
