@@ -132,6 +132,8 @@ public sealed class WeaknessCandidate
     public List<string> Purls { get; set; } = [];
     public List<string> Evidence { get; set; } = [];
     public string? Summary { get; set; }
+    /// <summary>The slice's <see cref="DataFlowSlice.Scope" />: <c>dependency</c> for a flow confined to dependency code.</summary>
+    public string? Scope { get; set; }
 }
 
 public sealed class AgentContext
@@ -341,24 +343,31 @@ public static class TransparencyBuilder
         var edgesById = result.Edges
             .GroupBy(edge => edge.Id, StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
-        foreach (var node in result.Nodes) Add(node.Purl, "DataFlowNode", node.Id, category: node.Category, evidenceKinds: node.Evidence.Select(evidence => evidence.Kind), sourceLocation: SourceLocationFromDataFlowNode(node, "DataFlowNode"));
+        // Evidence from dependency code alone (a package's own IL, issue #78) shows what the
+        // package does internally, not that the application reaches it: a package with no node,
+        // edge or slice outside dependency code is reported at Low confidence.
+        foreach (var node in result.Nodes) Add(node.Purl, "DataFlowNode", !IsDependencyNode(node), node.Id, category: node.Category, evidenceKinds: node.Evidence.Select(evidence => evidence.Kind), sourceLocation: SourceLocationFromDataFlowNode(node, "DataFlowNode"));
         foreach (var edge in result.Edges)
         {
             var sourceLocation = SourceLocationFromDataFlowEdge(edge, "DataFlowEdge");
-            Add(edge.SourcePurl, "DataFlowEdge", edge.SourceId, edge.Id, sourceLocation: sourceLocation);
-            Add(edge.TargetPurl, "DataFlowEdge", edge.TargetId, edge.Id, sourceLocation: sourceLocation);
+            var fromApplication = !IsDependencyEndpoint(edge.SourceId) || !IsDependencyEndpoint(edge.TargetId);
+            Add(edge.SourcePurl, "DataFlowEdge", fromApplication, edge.SourceId, edge.Id, sourceLocation: sourceLocation);
+            Add(edge.TargetPurl, "DataFlowEdge", fromApplication, edge.TargetId, edge.Id, sourceLocation: sourceLocation);
         }
         foreach (var slice in result.Slices)
         {
             foreach (var purl in slice.Purls)
             {
-                Add(purl, "DataFlowSlice", sliceId: slice.Id, category: slice.SinkCategory, confidence: slice.Confidence, sourceLocations: SourceLocationsForSlice(slice, purl, nodesById, edgesById));
+                Add(purl, "DataFlowSlice", !IsDependencySlice(slice), sliceId: slice.Id, category: slice.SinkCategory, confidence: slice.Confidence, sourceLocations: SourceLocationsForSlice(slice, purl, nodesById, edgesById));
             }
         }
-        FinalizeConfidence(byPurl.Values.Select(accumulator => accumulator.Facts));
+        var confinedToDependencies = byPurl.Values.Where(accumulator => !accumulator.HasApplicationEvidence).Select(accumulator => accumulator.Facts.Purl).ToHashSet(StringComparer.Ordinal);
+        FinalizeConfidence(byPurl.Values.Select(accumulator => accumulator.Facts), confinedToDependencies);
         return byPurl.Values.Select(accumulator => accumulator.Facts).OrderBy(p => p.Purl, StringComparer.Ordinal).ToList();
 
-        void Add(string? purl, string kind, string? nodeId = null, string? edgeId = null, string? sliceId = null, string? category = null, IEnumerable<AnalysisEvidenceKind>? evidenceKinds = null, string? confidence = null, ReachabilityLocation? sourceLocation = null, IEnumerable<ReachabilityLocation>? sourceLocations = null)
+        bool IsDependencyEndpoint(string nodeId) => nodesById.TryGetValue(nodeId, out var node) && IsDependencyNode(node);
+
+        void Add(string? purl, string kind, bool fromApplication, string? nodeId = null, string? edgeId = null, string? sliceId = null, string? category = null, IEnumerable<AnalysisEvidenceKind>? evidenceKinds = null, string? confidence = null, ReachabilityLocation? sourceLocation = null, IEnumerable<ReachabilityLocation>? sourceLocations = null)
         {
             if (string.IsNullOrWhiteSpace(purl)) return;
             if (!byPurl.TryGetValue(purl, out var reachability))
@@ -367,8 +376,31 @@ public static class TransparencyBuilder
                 byPurl[purl] = reachability;
             }
             reachability.Remember(nodeId, edgeId, sliceId, category, evidenceKinds, confidence, sourceLocation, sourceLocations);
+            if (fromApplication) reachability.HasApplicationEvidence = true;
         }
     }
+
+    /// <summary>The <see cref="DataFlowSlice.Scope" /> and <see cref="WeaknessCandidate.Scope" /> of a flow confined to dependency code.</summary>
+    public const string DependencyScope = "dependency";
+
+    /// <summary>The node property that marks a data-flow node found in a dependency assembly's IL.</summary>
+    public const string ScopeProperty = "scope";
+
+    /// <summary>The highest severity a <see cref="DependencyScope" /> slice keeps.</summary>
+    public const string DependencySeverityCap = "low";
+
+    public static bool IsDependencyNode(DataFlowNode node) =>
+        node.Properties.TryGetValue(ScopeProperty, out var scope) && string.Equals(scope, DependencyScope, StringComparison.Ordinal);
+
+    public static bool IsDependencySlice(DataFlowSlice slice) => string.Equals(slice.Scope, DependencyScope, StringComparison.Ordinal);
+
+    /// <summary>
+    ///     A dependency-scoped flow's severity: the slice's own severity, capped at
+    ///     <see cref="DependencySeverityCap" />. The flow stays reportable, but a gate on new
+    ///     high-severity slices must not trip on code the application only ships.
+    /// </summary>
+    public static string DependencySeverity(string severity) =>
+        SeverityRank(severity) > SeverityRank(DependencySeverityCap) ? DependencySeverityCap : severity;
 
 
     private static IEnumerable<ReachabilityLocation> SourceLocationsForSlice(DataFlowSlice slice, string purl, IReadOnlyDictionary<string, DataFlowNode> nodesById, IReadOnlyDictionary<string, DataFlowEdge> edgesById)
@@ -512,6 +544,9 @@ public static class TransparencyBuilder
 
         public PackageReachability Facts { get; } = new() { Purl = purl, Reachable = true, ReachabilityKind = kind };
 
+        /// <summary>Whether any evidence for the package touches application code (data-flow reachability only).</summary>
+        public bool HasApplicationEvidence { get; set; }
+
         public void Remember(string? nodeId = null, string? edgeId = null, string? sliceId = null, string? category = null, IEnumerable<AnalysisEvidenceKind>? evidenceKinds = null, string? confidence = null, ReachabilityLocation? sourceLocation = null, IEnumerable<ReachabilityLocation>? sourceLocations = null)
         {
             if (nodeId is not null && nodeIds.Add(nodeId)) Facts.NodeIds.Add(nodeId);
@@ -552,11 +587,16 @@ public static class TransparencyBuilder
         foreach (var evidenceKind in edge.Evidence.Select(evidence => evidence.Kind)) yield return evidenceKind;
     }
 
-    private static void FinalizeConfidence(IEnumerable<PackageReachability> reachabilityFacts)
+    private static void FinalizeConfidence(IEnumerable<PackageReachability> reachabilityFacts, IReadOnlySet<string>? confinedToDependencies = null)
     {
         foreach (var reachability in reachabilityFacts)
         {
-            if (reachability.EvidenceKinds.Any(kind => EvidenceScore(kind) >= 3))
+            if (confinedToDependencies?.Contains(reachability.Purl) == true)
+            {
+                reachability.Confidence = "Low";
+                AddConfidenceReason(reachability, "All evidence lies inside dependency code: no application node, edge or slice reaches this package in the data-flow graph.");
+            }
+            else if (reachability.EvidenceKinds.Any(kind => EvidenceScore(kind) >= 3))
             {
                 reachability.Confidence = "High";
                 AddConfidenceReason(reachability, "Reachability is supported by direct source or IL call evidence.");
@@ -706,6 +746,8 @@ public static class TransparencyBuilder
             if (sink?.IsSink == true) confidenceReasons.Add($"Sink matched category '{sink.Category}'.");
             if (matchingEntryPoint is not null) confidenceReasons.Add($"Flow is near entrypoint '{matchingEntryPoint.Id}'.");
             if (slice.Purls.Count > 0) confidenceReasons.Add("Slice contains package URL metadata.");
+            var dependencyScoped = IsDependencySlice(slice);
+            if (dependencyScoped) confidenceReasons.Add($"Flow stays inside dependency code; severity is capped at {DependencySeverityCap}.");
             var confidence = matchingEntryPoint is not null && sink?.IsSink == true ? "High" : sink?.IsSink == true ? "Medium" : "Low";
             candidates.Add(new WeaknessCandidate
             {
@@ -725,7 +767,8 @@ public static class TransparencyBuilder
                 Route = matchingEntryPoint?.Route,
                 Purls = slice.Purls,
                 Evidence = BuildEvidence(source, sink, slice),
-                Summary = $"{slice.SourceCategory ?? "input"} data reaches {slice.SinkCategory ?? "sink"} sink {sink?.Name ?? slice.SinkId}."
+                Summary = $"{slice.SourceCategory ?? "input"} data reaches {slice.SinkCategory ?? "sink"} sink {sink?.Name ?? slice.SinkId}.",
+                Scope = dependencyScoped ? DependencyScope : null
             });
         }
         return candidates;
@@ -743,8 +786,12 @@ public static class TransparencyBuilder
                 Purl = node.Purl,
                 NodeIds = [node.Id],
                 SliceIds = result.Slices.Where(slice => slice.SinkId == node.Id).Select(slice => slice.Id).ToList(),
-                Confidence = node.Symbol is null ? "Medium" : "High",
-                Evidence = [FormatLocation(node) ?? node.Id, node.Code ?? node.Name]
+                // A sink inside a dependency's own IL says what the package calls, not that the
+                // application reaches the dangerous API.
+                Confidence = IsDependencyNode(node) ? "Low" : node.Symbol is null ? "Medium" : "High",
+                Evidence = IsDependencyNode(node)
+                    ? [FormatLocation(node) ?? node.Id, node.Code ?? node.Name, "Sink lies inside dependency code."]
+                    : [FormatLocation(node) ?? node.Id, node.Code ?? node.Name]
             })
             .ToList();
     }
@@ -752,7 +799,7 @@ public static class TransparencyBuilder
     public static AgentContext BuildAgentContext(DataFlowResult result, string inputPath)
     {
         var highRiskWeaknesses = result.WeaknessCandidates
-            .Where(w => w.Confidence == "High" || w.SinkCategory is "command" or "sql" or "file" or "deserialization")
+            .Where(w => w.Scope != DependencyScope && (w.Confidence == "High" || w.SinkCategory is "command" or "sql" or "file" or "deserialization"))
             .Take(25)
             .ToList();
         var highRiskSliceIds = highRiskWeaknesses.Select(w => w.SliceId).Where(id => id is not null).ToHashSet(StringComparer.Ordinal);
@@ -1052,6 +1099,7 @@ public static class TransparencyBuilder
         result.WeaknessCandidates = result.WeaknessCandidates.Where(weakness => !suppressedWeaknessIds.Contains(weakness.Id)).ToList();
         result.ExploitChains = result.ExploitChains.Where(chain => chain.SliceId is null || !suppressedSliceIds.Contains(chain.SliceId)).ToList();
         result.Statistics.SliceCount = result.Slices.Count;
+        result.Statistics.DependencySliceCount = result.Slices.Count(IsDependencySlice);
         result.Diagnostics.Add($"Suppressed {suppressedSliceIds.Count} data-flow slice(s) and {suppressedWeaknessIds.Count} weakness candidate(s) via {suppressionsPath}.");
     }
 
@@ -1194,12 +1242,18 @@ public static class TransparencyBuilder
             "## High-priority weakness candidates",
             string.Empty
         };
-        foreach (var weakness in result.WeaknessCandidates.Take(50))
+        if (result.Statistics.DependencySliceCount > 0)
+        {
+            lines.Insert(6, $"- Slices inside dependency code: {result.Statistics.DependencySliceCount}");
+        }
+        // Application findings first; flows confined to dependency code follow in their own order.
+        foreach (var weakness in result.WeaknessCandidates.OrderBy(weakness => weakness.Scope == DependencyScope).Take(50))
         {
             lines.Add($"### {weakness.Id}: {weakness.Kind}");
             lines.Add(string.Empty);
             lines.Add($"- Confidence: {weakness.Confidence}");
             lines.Add($"- Severity: {weakness.Severity}");
+            if (weakness.Scope == DependencyScope) lines.Add("- Scope: dependency code");
             if (!string.IsNullOrWhiteSpace(weakness.Cwe)) lines.Add($"- CWE: {weakness.Cwe}");
             if (!string.IsNullOrWhiteSpace(weakness.Route)) lines.Add($"- Route: {weakness.Route}");
             lines.Add($"- Source: {weakness.SourceLocation}");
@@ -1274,8 +1328,11 @@ public static class TransparencyBuilder
     /// </summary>
     public static string DiffJson(DataFlowResult oldResult, DataFlowResult newResult)
     {
-        var oldSeverityByKey = oldResult.Slices.GroupBy(SliceKey, StringComparer.Ordinal).ToDictionary(group => group.Key, group => group.First().Severity, StringComparer.Ordinal);
-        var newSeverityByKey = newResult.Slices.GroupBy(SliceKey, StringComparer.Ordinal).ToDictionary(group => group.Key, group => group.First().Severity, StringComparer.Ordinal);
+        // A key groups every slice of one category pair, so it carries the group's highest
+        // severity: a dependency-scoped slice capped at low must not mask an application slice of
+        // the same shape.
+        var oldSeverityByKey = oldResult.Slices.GroupBy(SliceKey, StringComparer.Ordinal).ToDictionary(group => group.Key, group => group.MaxBy(slice => SeverityRank(slice.Severity))!.Severity, StringComparer.Ordinal);
+        var newSeverityByKey = newResult.Slices.GroupBy(SliceKey, StringComparer.Ordinal).ToDictionary(group => group.Key, group => group.MaxBy(slice => SeverityRank(slice.Severity))!.Severity, StringComparer.Ordinal);
         var oldSlices = oldSeverityByKey.Keys.ToHashSet(StringComparer.Ordinal);
         var newSlices = newSeverityByKey.Keys.ToHashSet(StringComparer.Ordinal);
         var addedSlices = newSlices.Except(oldSlices).Order(StringComparer.Ordinal).ToList();

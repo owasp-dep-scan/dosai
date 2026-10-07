@@ -2039,6 +2039,9 @@ public static partial class DataFlowAnalyzer
         private readonly DataFlowPatternIndex _patternIndex = new(patterns);
         private readonly PackageUrlResolver _purlResolver = PackageUrlResolver.Create(basePath);
         private readonly Dictionary<string, AssemblyTaint> _fieldTaints = new(StringComparer.Ordinal);
+        private DependencyAssemblies? _dependencies;
+
+        private DependencyAssemblies Dependencies => _dependencies ??= new DependencyAssemblies(basePath, _purlResolver);
 
         public IEnumerable<DataFlowPattern> MatchParameterSource(string parameterName, AssemblyMethodInfo method)
         {
@@ -2167,6 +2170,10 @@ public static partial class DataFlowAnalyzer
                     ["metadataToken"] = $"0x{method.MetadataToken:x8}"
                 }
             };
+            if (Dependencies.IsDependency(assemblyKey))
+            {
+                node.Properties[TransparencyBuilder.ScopeProperty] = TransparencyBuilder.DependencyScope;
+            }
             result.Nodes.Add(node);
             _nodesById[node.Id] = node;
             _nodesByKey[nodeKey] = node;
@@ -2240,6 +2247,12 @@ public static partial class DataFlowAnalyzer
             var guardDependentNote = guardDependent
                 ? "; parser hardening is not observable in IL, so this flow is unconfirmed"
                 : string.Empty;
+
+            // A flow whose every node lies in a dependency assembly is the package's own
+            // behaviour (issue #78): it stays in the graph, scoped and capped at low severity.
+            var dependencyScoped = sliceNodes.Count > 0 && sliceNodes.All(node => TransparencyBuilder.IsDependencyNode(node!));
+            var severity = TransparencyBuilder.SeverityForPattern(sliceCategory, sinkPattern?.Severity, effectiveConfidence);
+            var dependencyNote = dependencyScoped ? "; the flow stays inside dependency code" : string.Empty;
             result.Slices.Add(new DataFlowSlice
             {
                 Id = $"dfs{++_sliceCounter}",
@@ -2257,10 +2270,11 @@ public static partial class DataFlowAnalyzer
                 TaintKinds = trace.TaintKinds.Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
                 FieldPaths = trace.FieldPaths.Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
                 Confidence = effectiveConfidence,
-                Severity = TransparencyBuilder.SeverityForPattern(sliceCategory, sinkPattern?.Severity, effectiveConfidence),
+                Severity = dependencyScoped ? TransparencyBuilder.DependencySeverity(severity) : severity,
                 // Invariant culture, matching the source-mode summaries: a negative argument
                 // index must not pick up a locale minus sign (issue #63).
-                Summary = string.Create(CultureInfo.InvariantCulture, $"Assembly IL data flows from {firstSource} to {sinkNode.Name} argument {sinkArgumentIndex}{guardDependentNote}.")
+                Summary = string.Create(CultureInfo.InvariantCulture, $"Assembly IL data flows from {firstSource} to {sinkNode.Name} argument {sinkArgumentIndex}{guardDependentNote}{dependencyNote}."),
+                Scope = dependencyScoped ? TransparencyBuilder.DependencyScope : null
             });
         }
 

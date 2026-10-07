@@ -689,7 +689,8 @@ public class CommandLine
             .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
 
         writer.WriteLine("Dosai Data-flow Analysis");
-        writer.WriteLine($"Summary: {result.Statistics.SliceCount} {Pluralize(result.Statistics.SliceCount, "flow")}, {result.Statistics.SourceCount} {Pluralize(result.Statistics.SourceCount, "source")}, {result.Statistics.SinkCount} {Pluralize(result.Statistics.SinkCount, "sink")}, {result.Statistics.FilesAnalyzed} {Pluralize(result.Statistics.FilesAnalyzed, "file")} analyzed, {result.WeaknessCandidates.Count} {Pluralize(result.WeaknessCandidates.Count, "weakness candidate")}");
+        var dependencyFlows = result.Statistics.DependencySliceCount > 0 ? $" ({result.Statistics.DependencySliceCount} inside dependency code)" : string.Empty;
+        writer.WriteLine($"Summary: {result.Statistics.SliceCount} {Pluralize(result.Statistics.SliceCount, "flow")}{dependencyFlows}, {result.Statistics.SourceCount} {Pluralize(result.Statistics.SourceCount, "source")}, {result.Statistics.SinkCount} {Pluralize(result.Statistics.SinkCount, "sink")}, {result.Statistics.FilesAnalyzed} {Pluralize(result.Statistics.FilesAnalyzed, "file")} analyzed, {result.WeaknessCandidates.Count} {Pluralize(result.WeaknessCandidates.Count, "weakness candidate")}");
         writer.WriteLine($"Output: {outputFile}");
 
         if (result.Slices.Count == 0)
@@ -709,7 +710,8 @@ public class CommandLine
             var isLastSlice = index == result.Slices.Count - 1;
             var sliceConnector = isLastSlice ? "└─" : "├─";
             var childPrefix = isLastSlice ? "   " : "│  ";
-            var flowTitle = $"DataFlow {slice.Id}: {slice.SourceCategory ?? source?.Category ?? "source"} → {slice.SinkCategory ?? sink?.Category ?? "sink"} ({slice.Confidence})";
+            var scopeLabel = TransparencyBuilder.IsDependencySlice(slice) ? ", dependency code" : string.Empty;
+            var flowTitle = $"DataFlow {slice.Id}: {slice.SourceCategory ?? source?.Category ?? "source"} → {slice.SinkCategory ?? sink?.Category ?? "sink"} ({slice.Confidence}{scopeLabel})";
             writer.WriteLine($"{sliceConnector} {flowTitle}");
             writer.WriteLine($"{childPrefix}Summary: {weakness?.Summary ?? slice.Summary ?? BuildFlowSummary(source, sink, slice)}");
             if (!string.IsNullOrWhiteSpace(slice.SinkArgument))

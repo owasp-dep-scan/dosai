@@ -63,7 +63,7 @@ dotnet run --project ./Dosai/Dosai.csproj -- dataflows \
   --print
 ```
 
-Query high-risk findings for a smaller prompt payload (severity is the triage signal since schema 4.1.0; a Low-confidence pattern match is demoted one rank, so `severity=high` never fires on heuristics alone):
+Query high-risk findings for a smaller prompt payload (severity is the triage signal since schema 4.1.0; a Low-confidence pattern match is demoted one rank, so `severity=high` never fires on heuristics alone, and a flow confined to package code under `bin/` is `Scope: dependency` at low severity):
 
 ```bash
 dotnet run --project ./Dosai/Dosai.csproj -- query \

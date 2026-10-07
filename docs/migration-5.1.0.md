@@ -301,6 +301,42 @@ byte-for-byte against the per-assembly build (659b86d) on the full OrchardCore w
   providers with one vectorized keyword search per list (10.6 s -> 6.8 s on dotnet/runtime's
   `src`).
 
+## Flows confined to dependency code (issue #78, additive)
+
+In a built source tree the data-flow IL pass reads every assembly under `bin/`, the packages
+included, so flows that pass through package code stay in the graph. A flow whose every node
+lies in a dependency assembly is the package's own behaviour rather than an application
+finding, and is now marked and ranked as such. No slice is dropped.
+
+- An assembly is the application's when the tree builds it from source, or when the nearest
+  `*.deps.json` at or above it (within the scan root) lists it as a `project` library. Every
+  other assembly in that build output is a dependency: packages, runtime packs,
+  `<Reference>` copies, and tools a package drops in a subdirectory. Without a `*.deps.json`
+  (.NET Framework output, loose copies) an assembly is a dependency only when the tree's
+  restore metadata names a package that ships it, by whole name. A scan of a single assembly
+  file treats that file as the application.
+- `DataFlowNode.Properties["scope"]` is `dependency` on IL nodes from a dependency assembly.
+- `DataFlowSlice.Scope` is `dependency` when every node of the slice has that property, and
+  absent otherwise. Such a slice keeps its path, categories and confidence; its `Severity` is
+  capped at `low` and its `Summary` ends with "the flow stays inside dependency code".
+- `WeaknessCandidate.Scope` copies the slice's, with a confidence reason naming the cap.
+- `DataFlowStatistics.DependencySliceCount` counts those slices (included in `SliceCount`);
+  the text tree and the Markdown report show it when it is non-zero, and the report lists
+  application weaknesses before dependency ones.
+- `PackageReachability` from `dataflows`: a package whose every node, edge and slice lies in
+  dependency code is `Low` confidence with the reason "All evidence lies inside dependency
+  code". It used to be `High` from the package's own IL alone.
+- `DangerousApiReachability`: a sink inside dependency IL is `Low` confidence with the
+  evidence line "Sink lies inside dependency code".
+- `agent-context` leaves dependency-scoped weaknesses and slices out of `HighRiskWeaknesses`
+  and `HighRiskSlices`.
+- `diff` keys slices by category pair, and a key now carries the highest severity among its
+  slices, so a dependency slice capped at low cannot mask an application slice of the same
+  shape in `RiskDelta`.
+- Crypto: `Statistics.CryptoDependencyDataFlowSliceCount` (and the CycloneDX metadata property
+  `dosai:crypto:dependencyDataFlowSliceCount` when non-zero) counts the crypto data-flow slices
+  confined to dependency code.
+
 ## IL interpreter stack model (issue #78, fix)
 
 A generic `stelem <T>` and `calli` were modelled as popping nothing, so the abstract stack

@@ -150,6 +150,15 @@ dotnet test ./Dosai.sln
   arrays). Resolve members through `AssemblyScan.Resolve` (memoized per token, so call sites
   share one id string) and source locations through the per-assembly source map (binary search,
   one path and file-name string per document) - never per instruction.
+- The data-flow IL pass reads a built source tree's `bin/` whole, packages included, so flows
+  through package code stay in the graph (issue #78). Never drop those assemblies to quiet the
+  output: classify them through `DependencyAssemblies` (built from source or a `project`
+  library in the nearest `*.deps.json` is application code, everything else in that output is
+  a dependency, restore metadata by whole name decides without a `*.deps.json`, a single-file
+  target is the application). IL nodes from dependencies carry `Properties["scope"]`, a slice
+  whose every node does is `Scope: dependency` with severity capped at low
+  (`TransparencyBuilder.DependencySeverity`), and every derived fact that ranks findings
+  (weaknesses, dangerous-API and package reachability, agent context, diff) must honour it.
 - The IL interpreters model every opcode they do not handle explicitly through
   `GetStackEffect` (`OpCode.StackBehaviourPop`/`Push`, the call-site signature for `calli`).
   A pop count that is too low is not a local error: the abstract stack drifts on every pass

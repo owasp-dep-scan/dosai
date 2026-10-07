@@ -155,8 +155,17 @@ public sealed class DataFlowSlice
     public List<string> TaintKinds { get; set; } = [];
     public List<string> FieldPaths { get; set; } = [];
     public string Confidence { get; set; } = "Medium";
-    /// <summary>Derived severity (info/low/medium/high/critical) from the sink pattern or the per-category default.</summary>
+    /// <summary>
+    ///     Derived severity (info/low/medium/high/critical) from the sink pattern or the per-category
+    ///     default, capped at low for a <see cref="TransparencyBuilder.DependencyScope" /> slice.
+    /// </summary>
     public string Severity { get; set; } = "medium";
+    /// <summary>
+    ///     <c>dependency</c> when every node of the slice lies in a dependency assembly of the
+    ///     scanned application (a package, not one of its projects): the flow is kept, but it is
+    ///     the package's own behaviour rather than an application finding. Absent otherwise.
+    /// </summary>
+    public string? Scope { get; set; }
 }
 
 /// <summary>
@@ -206,6 +215,8 @@ public sealed class DataFlowStatistics
     public int SourceCount { get; set; }
     public int SinkCount { get; set; }
     public int SliceCount { get; set; }
+    /// <summary>Slices whose <see cref="DataFlowSlice.Scope" /> is <c>dependency</c>, included in <see cref="SliceCount" />.</summary>
+    public int DependencySliceCount { get; set; }
     public int NodeCount { get; set; }
     public int EdgeCount { get; set; }
     public int FilesAnalyzed { get; set; }
@@ -467,6 +478,7 @@ public static partial class DataFlowAnalyzer
         result.Statistics.SourceCount = result.Nodes.Count(n => n.IsSource);
         result.Statistics.SinkCount = result.Nodes.Count(n => n.IsSink);
         result.Statistics.SliceCount = result.Slices.Count;
+        result.Statistics.DependencySliceCount = result.Slices.Count(TransparencyBuilder.IsDependencySlice);
         // Framework entry points carry stable ids (ep:op:...); analyzer/Cli entry points get
         // sequential ids appended after them. The analyzer path is VB-only (providers own every
         // C# endpoint) and merges through the same dedup as methods mode, rebuilding entry
