@@ -62,7 +62,16 @@ dotnet test ./Dosai.sln
 - Never leave an inspected file locked. Metadata readers open with
   `FileShare.ReadWrite | FileShare.Delete`, and inspected assemblies are loaded by value
   (`InspectionAssemblyLoadContext`), because a mapped path stays locked on Windows for the
-  process lifetime even after a collectible context is unloaded.
+  process lifetime even after a collectible context is unloaded. One context is shared by
+  every inspected file of a directory and released after that directory's last file (issue
+  #76): a per-assembly context reloaded each shared dependency once per inspected assembly,
+  and on Windows every `LoadFromStream` pays an `AmsiScanBuffer` call. Sharing changes how
+  many times an assembly loads, never which file a reference resolves to (dependencies
+  probe their own directory first, so keep the cache keyed by directory, not one context
+  for the whole tree). A live context holds by-value copies of everything its directory
+  loaded, so contexts are released in a `finally` as well as after their directory's last
+  file: a collectible context stays rooted until `Unload`, and the MCP server scans many
+  trees in one process.
 - Keep runtime-loader work (`Assembly.GetTypes()` and member reflection over inspected
   assemblies) inside `GetAssemblyMethods`, which runs it on a dedicated large-stack thread. The
   runtime type loader recurses per hierarchy level and, when a base type is missing, can
@@ -156,7 +165,9 @@ dotnet test ./Dosai.sln
   `ctx.InvocationsNamed(tree, mayMatch)` when the loop acts only on invocations whose
   `ProviderHelpers.InvocationName` passes `mayMatch` (a tree without such a name is skipped;
   the predicate must admit every name the loop acts on), and gate any other walk on the file
-  text (`TextContainsAny`). Never cache syntax nodes across trees: a node list pins the Roslyn
+  text (`TextContainsAny`: tree texts are rendered once on the worker team and each distinct
+  keyword list is one vectorized ordinal `SearchValues` search; keep its answers exactly the
+  per-keyword `Contains` loop's). Never cache syntax nodes across trees: a node list pins the Roslyn
   red trees the walks let the collector reclaim (2.4 GB on dotnet/runtime).
 - `PackageUrlResolver.Resolve` runs for every method, call, node and edge: keep it free of
   per-call splits, concatenations, substrings, regexes and scans over every known package (it
@@ -221,16 +232,53 @@ dotnet test ./Dosai.sln
   subdirectories fell back to the latest-modern-net set. A single-file root reads its project
   context from the file's directory (`TargetFrameworkDetection.ProjectContextRoot`), for the
   parse options, the implicit-usings decision and the reported target frameworks alike.
-- Seed every Roslyn compilation of analyzed source from `FrameworkReferences.Current`, never
-  from `typeof(object).Assembly.Location` or `TRUSTED_PLATFORM_ASSEMBLIES` directly: a
-  self-contained single-file Dosai has neither (issue #67), and the provider falls back to the
-  bundled runtime's in-memory metadata (names embedded at build time by the
-  `EmbedFrameworkAssemblyNames` target) and then to the newest installed shared framework.
-  Every build references the same set: trusted platform assemblies are filtered to the core
-  library's directory (a non-bundled host also lists Dosai's own dependencies), and the bundled
-  names are followed into the `System.Private.*` implementations their facades forward to.
-  Surface `FrameworkReferences.Diagnostic` in the command's diagnostics. The
-  `smoke-self-contained` CI job runs a published `-full` build with no `dotnet` reachable.
+- Seed every Roslyn compilation of analyzed source from `FrameworkReferences.ForTree(path)`
+  (methods, dataflows and crypto all do), never from `typeof(object).Assembly.Location` or
+  `TRUSTED_PLATFORM_ASSEMBLIES` directly: a self-contained single-file Dosai has neither
+  (issue #67), and the provider falls back to the bundled runtime's in-memory metadata (names
+  embedded at build time by the `EmbedFrameworkAssemblyNames` target) and then to the newest
+  installed shared framework. On top of that base, `ForTree` resolves the tree's own framework
+  reference packs (issue #74): frameworks detected by `TreeFrameworks.Detect` (SDK attribute,
+  `<FrameworkReference>` items, `UseWindowsForms`/`UseWPF`, project.assets.json
+  `frameworkReferences`, `*.runtimeconfig.json`) resolve to
+  `dotnet packs/<Name>.Ref/<ver>/ref/<tfm>` and the NuGet cache copy (`NUGET_PACKAGES`, else
+  `~/.nuget/packages`), gathered together, then the installed shared framework only when no
+  pack of any major exists, version-matched to the tree's representative target framework
+  (exact major, else the nearest major above, else below; highest patch, releases over
+  prereleases; a non-exact major always names the version used in the set's diagnostic). A
+  pack of version N carries only `ref/netN.0`: read another major's pack from its own moniker,
+  never the analyzed one. A base pack of Dosai's own major is skipped (the process-wide set is
+  that major). Per-root caches (`TargetFrameworkDetection`, `GlobalUsings`,
+  `FrameworkReferences.ForTree`, `TreeFrameworks.SourceAssemblyNames`) are reset before each
+  MCP tool call; keep any new per-root cache in that reset. Never reference a metadata copy of
+  an assembly the tree builds from source (`TreeFrameworks.IsBuiltFromSource`: a project's
+  `<AssemblyName>`, else its file name): not from a pack (the base pack excepted), the tree's
+  own `bin/` output, or the NuGet cache. The duplicate types made calls ambiguous, and Roslyn
+  settled them by evaluation timing, so output changed with the worker count (issue #65 on
+  dotnet/runtime and OrchardCore); the skipped count is a slice diagnostic. Exactly one reference per assembly simple name survives, claimed in a
+  fixed order - target-matched `Microsoft.NETCore.App.Ref` (only when its major differs from
+  Dosai's own runtime), the tree's other packs sorted by name, then the process-wide set
+  filling. When a base reference pack owns the corlib, the fallback must not add its
+  `System.Private.*` companions: a second `System.Private.CoreLib` of another major beside a
+  pack's core makes every predefined type report CS0518. A missing pack is a diagnostic, never
+  a failure, and the binding-failure diagnostic never advises restore/build for a pack problem.
+  `FrameworkReferences.Current` stays as the process-wide base and the `OverrideForTesting`
+  hook wins the whole `ForTree` decision. Every build references the same set: trusted platform
+  assemblies are filtered to the core library's directory (a non-bundled host also lists
+  Dosai's own dependencies), and the bundled names are followed into the `System.Private.*`
+  implementations their facades forward to. Surface `FrameworkReferences.ForTree(path)`
+  `.Diagnostic` in the command's diagnostics. The `smoke-self-contained` CI job runs a
+  published `-full` build with no `dotnet` reachable (pack resolution then degrades to the
+  process-wide set with a diagnostic).
+- Global usings come from `GlobalUsings` (issue #74), not a hardcoded list: per project, the
+  SDK lists verified on disk (base C#, Web, Worker, Windows Forms - see the provenance comment
+  in `Dosai/GlobalUsings.cs`; Razor, Blazor Web Assembly and WPF add none), the project's and
+  nearest `Directory.Build.props/targets`' `<Using>` items (Include/Remove/Static/Alias;
+  unevaluable conditions are applied with a diagnostic), and MSBuild's generated
+  `obj/**/<Project>.GlobalUsings.g.cs` when it exists for the resolved target and is no older
+  than the project file. One compilation means one union-merged set; disagreeing projects get
+  a diagnostic naming them, and a using that resolves nowhere errors alone - it never stops
+  other bindings (pinned by test).
 - Partition parsed C# trees through `ReferenceSources.Partition` before creating a
   compilation (methods, data-flow and crypto all do): reference-assembly source (GenAPI
   API-surface stubs, `throw null` bodies or the `aka.ms/api-review` header) loses its

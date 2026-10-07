@@ -52,6 +52,43 @@ This layer intentionally remains deterministic. It does not query vulnerability 
 Roslyn operations -> nodes/edges/slices -> transparency facts -> reports/agent context/diff
 ```
 
+## Tree framework references and global usings (issue #74)
+
+`FrameworkReferences.ForTree(path)` (used by methods, dataflows and crypto) layers the analyzed
+tree's own reference packs on the process-wide set: `TreeFrameworks.Detect` reads the SDK
+attribute, explicit `<FrameworkReference>` items, `UseWindowsForms`/`UseWPF`,
+project.assets.json's `frameworkReferences` and `*.runtimeconfig.json`, and each named framework
+resolves to `packs/<Name>.Ref/<version>/ref/<tfm>` or the NuGet cache copy (gathered together,
+so a target-matched pack that only restore downloaded wins over an installed pack of another
+major), or, when no pack of any major exists, the installed shared framework. The version is the
+exact target major, else the nearest major above, else the nearest below, then the highest patch
+with releases over prereleases; a non-exact major always names the version used. A net9.0 web
+tree on a machine with only 8.x and 10.x packs therefore binds against the 10.x base and
+ASP.NET Core packs, a consistent pair, rather than the newest shared runtime. Exactly one reference per assembly simple
+name survives: the pack that matches the analyzed target claims shared names (this is what keeps
+.NET 11's nine `Microsoft.Extensions.*` assemblies from colliding with an ASP.NET Core 8/9/10
+pack), and every dropped duplicate is reported. A base reference pack owns the corlib: the
+process-wide fallback then skips its `System.Private.*` companions, because a second
+`System.Private.CoreLib` of another major makes Roslyn report CS0518 for every predefined type.
+Missing packs degrade to diagnostics, never failures, and the reference resolution is cached per
+scan root so it is deterministic across the run.
+
+`GlobalUsings` resolves the synthetic implicit-usings tree per scan root: the SDK lists verified
+from the SDKs' own .props files (base C#, Web's nine, Worker's four, Windows Forms' two; the
+11 SDKs add `System.Net.Http.Json` for .NET 11+ targets, and .NET Framework targets drop
+`System.Net.Http`), `<Using>` items with `Remove`/`Static`/`Alias` from the project and the
+nearest Directory.Build.props/targets, and MSBuild's generated `GlobalUsings.g.cs` as the
+authoritative set when it matches the resolved target and is no older than the project. One
+compilation carries the union of per-project sets (the documented granularity limitation); the
+resolver reports projects whose sets disagree and applies condition-carrying items
+unconditionally with a note - a using that resolves nowhere errors alone and never blocks other
+bindings.
+
+Assembly inspection's shared-framework probing reads the tree's runtimeconfig files: frameworks
+they name (ASP.NET Core, Windows Desktop) are probed at their exact named version, then
+newest-first, and only `Microsoft.NETCore.App` directories are filtered by the running-version
+floor (their `System.Runtime` can shadow the host's; the other frameworks carry none).
+
 ## Source compilation model
 
 Dosai now creates per-language compilations from all source files in the inspected tree:
@@ -276,6 +313,8 @@ Assembly application scoping from `.deps.json` is best-effort. Malformed library
 
 Assembly file discovery and application scoping are centralized in `AssemblyScope` so methods, assembly call graph, and assembly data-flow use the same `.deps.json` project-library filter and fallback application-name heuristic. The assembly call graph path folds source-file detection into the same recursive enumeration used to collect candidate assemblies, and methods identity enrichment reuses the source-mode result from source enumeration instead of walking the filesystem again.
 
+Assembly inspection loads the files of each inspected directory through one shared `InspectionAssemblyLoadContext`, released after that directory's last file rather than per assembly (issue #76). Loading stays by value — `LoadFromStream` under `FileShare.ReadWrite | FileShare.Delete` with the stream closed as soon as the load returns — so inspected files remain deletable and replaceable during and after the scan on every OS. Sharing removes the redundant dependency loads: a per-assembly context reloaded every shared dependency once per inspected file, and on Windows each in-memory load pays an `AmsiScanBuffer` scan (on the OrchardCore web-app corpus this phase loaded 6,048 assemblies per run where 542 suffice, and warm inspection dropped by the difference). Sharing is keyed by directory on purpose: a dependency reference probes its own directory first, so two directories that each carry a private build of the same dependency still resolve to their own copy, exactly as a per-assembly context would. `System.Reflection.MetadataLoadContext` was evaluated for the same problem and rejected: its metadata-only loading needs no AMSI scan, but it renders `Type.FullName` as null where the runtime loader returns a name, orders `GetInterfaces` and named attribute arguments differently, surfaces pseudo-custom attributes the runtime hides, and measured slower than the runtime loader on the same corpus — five byte-identity rewrites for a performance loss.
+
 ## Endpoint extraction
 
 `ApiEndpointAnalyzer` is syntax-oriented by design. It extracts endpoints without requiring successful semantic binding.
@@ -298,6 +337,12 @@ Call graph and data-flow graph exporters produce:
 - GEXF: Gephi-friendly XML
 
 GraphML/GEXF include PURL metadata where available.
+
+All six exporter formats (`CallGraphExporter`/`DataFlowExporter` x mermaid/graphml/gexf) render into a `TextWriter`; the historical string overloads wrap a `StringWriter` and stay for tests and in-memory callers. The CLI writes every graph sidecar and graph export through a `StreamWriter` over the target file, and the crypto command serializes both its formats straight to a `FileStream` - none of these outputs is ever materialised as one contiguous string anymore. That mattered twice (issue #75): the crypto JSON of a large tree passed the .NET array limit inside `System.Text.Json`'s pooled buffer and crashed the command with `OutOfMemoryException`, and multi-hundred-megabyte graph strings needlessly bounded peak memory. The writer path produces byte-identical files to `File.WriteAllText(Export(...))` (same UTF-8 no-BOM encoding, same newlines); `GraphExporters_TextWriterOverloads_WriteTheStringOverloadsBytesExactly` and `CryptoExport_StreamPathIsByteIdenticalToTheStringPath` guard that equivalence.
+
+The crypto output's size is bounded further by `--crypto-dataflows full|slices|none` (default `full`): the correlation that stamps `DataFlowSliceIds` onto materials, operations, and findings always runs, and the detail level then decides how much of the data-flow graph is retained on the result for serialization - `slices` keeps only slice-referenced nodes and edges (with the nested statistics recomputed over what is retained) and prunes every other id list inside `CryptoDataFlows` to the retained graph (`PackageReachability`/`DangerousApiReachability` entries left with no id evidence are dropped; weakness and exploit-chain node refs are nulled, findings kept; `SanitizedFlows` keep retained sources), `none` drops `CryptoDataFlows` entirely while keeping the slice-id properties and `Statistics.CryptoDataFlowSliceCount` (captured before the drop). Consumers that read only `Assets`/`Operations`/`Materials` - cdxgen - should pass `none`; their Node-side reader cannot parse files past the ~512 MB string limit, which used to silently discard every dosai crypto component on large trees. The detail applies to the JSON only: `CryptoAnalyzer.ApplyDataFlowDetail` is a separate step the CLI runs after writing graph sidecars, so sidecars always carry the full graph.
+
+Two independent guards keep the streaming writers honest (a dropped closing quote in the data-flow Mermaid labels survived the first version, which had compared the new code with itself): `Dosai.Tests/GraphExportReference.cs` is a verbatim copy of the 7292446 exporter implementations compared byte-for-byte over nasty labels, dangling endpoints and reachability facts, and `Dosai.Tests/Goldens/` holds CLI-produced bytes from the 7292446 build for all six formats plus the CycloneDX golden (per-run values masked).
 
 ## Reachability and dead code
 

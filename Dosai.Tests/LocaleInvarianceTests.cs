@@ -280,10 +280,17 @@ internal class Czech
                 string Out(string name) => Path.Combine(output, name);
                 Assert.Equal(0, CommandLine.Main(["methods", "--path", fixture, "--o", Out("methods.json"), "--callgraph-format", "graphml", "--callgraph-out", Out("callgraph.graphml")]));
                 Assert.Equal(0, CommandLine.Main(["methods", "--path", fixture, "--o", Out("methods-gexf.json"), "--callgraph-format", "gexf", "--callgraph-out", Out("callgraph.gexf")]));
+                Assert.Equal(0, CommandLine.Main(["methods", "--path", fixture, "--o", Out("methods-mmd.json"), "--callgraph-format", "mermaid", "--callgraph-out", Out("callgraph.mmd")]));
                 Assert.Equal(0, CommandLine.Main(["dataflows", "--path", fixture, "--o", Out("dataflows.json"), "--graph-format", "graphml", "--graph-out", Out("dataflows.graphml")]));
                 Assert.Equal(0, CommandLine.Main(["dataflows", "--path", fixture, "--o", Out("dataflows-gexf.json"), "--graph-format", "gexf", "--graph-out", Out("dataflows.gexf")]));
+                Assert.Equal(0, CommandLine.Main(["dataflows", "--path", fixture, "--o", Out("dataflows-mmd.json"), "--graph-format", "mermaid", "--graph-out", Out("dataflows.mmd")]));
                 Assert.Equal(0, CommandLine.Main(["crypto", "--path", fixture, "--o", Out("crypto.json")]));
                 Assert.Equal(0, CommandLine.Main(["crypto", "--path", fixture, "--o", Out("cbom.json"), "--format", "cyclonedx"]));
+                // --crypto-dataflows and the crypto graph sidecars write through the same
+                // stream paths as the JSON exports; their bytes must be locale-stable too.
+                Assert.Equal(0, CommandLine.Main(["crypto", "--path", fixture, "--o", Out("crypto-slices.json"), "--crypto-dataflows", "slices"]));
+                Assert.Equal(0, CommandLine.Main(["crypto", "--path", fixture, "--o", Out("crypto-none.json"), "--crypto-dataflows", "none"]));
+                Assert.Equal(0, CommandLine.Main(["crypto", "--path", fixture, "--o", Out("crypto-sidecar.json"), "--crypto-dataflows", "none", "--graph-format", "mermaid,graphml,gexf"]));
                 Assert.Equal(0, CommandLine.Main(["agent-context", "--path", fixture, "--o", Out("agent-context.json")]));
                 Assert.Equal(0, CommandLine.Main(["query", "--input", Out("dataflows.json"), "--o", Out("query.json"), "--query", "slices[sinkArgumentIndex<0]"]));
             }

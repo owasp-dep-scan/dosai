@@ -94,10 +94,35 @@ public sealed class FrameworkContext
             return text;
         }
 
-        text = tree.ToString();
+        _treeTexts ??= MaterializeTreeTexts();
+        text = _treeTexts.TryGetValue(tree, out var materialized) ? materialized : tree.ToString();
         _textCache[tree.FilePath] = text;
         return text;
     }
+
+    /// <summary>
+    ///     Every compilation tree's text, rendered once on the worker team (issue #65): the
+    ///     providers' keyword gates ask for every tree's text, and rendering a large tree's text
+    ///     one tree at a time on the provider thread was a serial pass over the whole source.
+    ///     Keyed by tree, not path, so <see cref="TextFor" /> keeps answering by path exactly as
+    ///     before (the first tree asked for under a path names its text).
+    /// </summary>
+    private Dictionary<SyntaxTree, string> MaterializeTreeTexts()
+    {
+        var trees = (CSharp?.SyntaxTrees ?? []).Concat(VisualBasic?.SyntaxTrees ?? []).ToArray();
+        var texts = new string[trees.Length];
+        DedicatedStack.ForEach("Dosai framework tree text", Math.Max(1, Dosai.MaxSymbolAnalysisWorkers), trees.Length,
+            index => texts[index] = trees[index].ToString());
+        var byTree = new Dictionary<SyntaxTree, string>(trees.Length, ReferenceEqualityComparer.Instance);
+        for (var index = 0; index < trees.Length; index++)
+        {
+            byTree.TryAdd(trees[index], texts[index]);
+        }
+
+        return byTree;
+    }
+
+    private Dictionary<SyntaxTree, string>? _treeTexts;
 
     /// <summary>File-scoped heuristic URLs for a tree (RawUrls), computed once per file.</summary>
     public List<string> RawUrlsFor(SyntaxTree tree)
@@ -116,8 +141,32 @@ public sealed class FrameworkContext
     public bool TextContainsAny(SyntaxTree tree, params string[] keywords)
     {
         var text = TextFor(tree);
-        return keywords.Any(keyword => text.Contains(keyword, StringComparison.Ordinal));
+        // A null search is a list holding an empty keyword, which Contains("") matched in every text.
+        return KeywordSearch(keywords) is not { } search || text.AsSpan().ContainsAny(search);
     }
+
+    /// <summary>
+    ///     One vectorized multi-string search per distinct keyword list (ordinal, like the
+    ///     <c>string.Contains</c> loop it replaces): every provider gates every tree on a keyword
+    ///     list, and one pass over the text per keyword was the framework phase's serial cost on
+    ///     large trees (issue #65). A list holding an empty keyword matches every text, exactly
+    ///     as <c>Contains("")</c> did.
+    /// </summary>
+    private System.Buffers.SearchValues<string>? KeywordSearch(string[] keywords)
+    {
+        var key = string.Join('\u0000', keywords);
+        if (!_keywordSearches.TryGetValue(key, out var search))
+        {
+            search = keywords.Any(keyword => keyword.Length == 0)
+                ? null
+                : System.Buffers.SearchValues.Create(keywords, StringComparison.Ordinal);
+            _keywordSearches[key] = search;
+        }
+
+        return search;
+    }
+
+    private readonly Dictionary<string, System.Buffers.SearchValues<string>?> _keywordSearches = new(StringComparer.Ordinal);
 
     public int MaxConventionalRoutes { get; internal set; } = 500;
 

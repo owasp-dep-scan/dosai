@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<graphml xmlns="http://graphml.graphdrawing.org/xmlns">
+  <key id="label" for="node" attr.name="label" attr.type="string" />
+  <key id="kind" for="node" attr.name="kind" attr.type="string" />
+  <key id="symbol" for="node" attr.name="symbol" attr.type="string" />
+  <key id="type" for="node" attr.name="type" attr.type="string" />
+  <key id="purl" for="node" attr.name="purl" attr.type="string" />
+  <key id="file" for="node" attr.name="file" attr.type="string" />
+  <key id="method" for="node" attr.name="method" attr.type="string" />
+  <key id="line" for="node" attr.name="line" attr.type="string" />
+  <key id="category" for="node" attr.name="category" attr.type="string" />
+  <key id="source" for="node" attr.name="source" attr.type="string" />
+  <key id="sink" for="node" attr.name="sink" attr.type="string" />
+  <key id="code" for="node" attr.name="code" attr.type="string" />
+  <key id="edge_kind" for="edge" attr.name="kind" attr.type="string" />
+  <key id="edge_label" for="edge" attr.name="label" attr.type="string" />
+  <key id="edge_sourcePurl" for="edge" attr.name="sourcePurl" attr.type="string" />
+  <key id="edge_targetPurl" for="edge" attr.name="targetPurl" attr.type="string" />
+  <key id="edge_file" for="edge" attr.name="file" attr.type="string" />
+  <key id="edge_line" for="edge" attr.name="line" attr.type="string" />
+  <graph id="dataflows" edgedefault="directed">
+    <node id="dfn1">
+      <data key="label">args</data>
+      <data key="kind">Source</data>
+      <data key="symbol">string[] args</data>
+      <data key="type">string[]</data>
+      <data key="purl"></data>
+      <data key="file">NastyLabels.cs</data>
+      <data key="method">Main</data>
+      <data key="line">12</data>
+      <data key="category">cli</data>
+      <data key="source">true</data>
+      <data key="sink">false</data>
+      <data key="code">args</data>
+    </node>
+    <node id="dfn2">
+      <data key="label">Binary</data>
+      <data key="kind">Expression</data>
+      <data key="symbol"></data>
+      <data key="type">string</data>
+      <data key="purl"></data>
+      <data key="file">NastyLabels.cs</data>
+      <data key="method">Main</data>
+      <data key="line">16</data>
+      <data key="category"></data>
+      <data key="source">false</data>
+      <data key="sink">false</data>
+      <data key="code">args[0] + &quot;quote\&quot; apostrophe&apos; lt&lt; gt&gt; amp&amp; pipe| bracket[in] paren(in) brace{in} hash# semi; emoji😀 déjà vu&quot;</data>
+    </node>
+    <node id="dfn3">
+      <data key="label">Start</data>
+      <data key="kind">Sink</data>
+      <data key="symbol">System.Diagnostics.Process.Start(string,string)</data>
+      <data key="type">System.Diagnostics.Process</data>
+      <data key="purl">pkg:nuget/System.Diagnostics.Process</data>
+      <data key="file">NastyLabels.cs</data>
+      <data key="method">Main</data>
+      <data key="line">15</data>
+      <data key="category">command</data>
+      <data key="source">false</data>
+      <data key="sink">true</data>
+      <data key="code">Process.Start( 			args[0] + &quot;quote\&quot; apostrophe&apos; lt&lt; gt&gt; amp&amp; pipe| bracket[in] paren(in) brace{in} hash# semi; emoji😀 déjà vu&quot;, 			&quot;&quot;)</data>
+    </node>
+    <edge id="dfe1" source="dfn1" target="dfn2">
+      <data key="edge_kind">Expression</data>
+      <data key="edge_label">Binary</data>
+      <data key="edge_sourcePurl"></data>
+      <data key="edge_targetPurl"></data>
+      <data key="edge_file">NastyLabels.cs</data>
+      <data key="edge_line">16</data>
+    </edge>
+    <edge id="dfe2" source="dfn1" target="dfn3">
+      <data key="edge_kind">SinkArgument</data>
+      <data key="edge_label">fileName</data>
+      <data key="edge_sourcePurl"></data>
+      <data key="edge_targetPurl">pkg:nuget/System.Diagnostics.Process</data>
+      <data key="edge_file">NastyLabels.cs</data>
+      <data key="edge_line">16</data>
+    </edge>
+    <edge id="dfe3" source="dfn2" target="dfn3">
+      <data key="edge_kind">SinkArgument</data>
+      <data key="edge_label">fileName</data>
+      <data key="edge_sourcePurl"></data>
+      <data key="edge_targetPurl">pkg:nuget/System.Diagnostics.Process</data>
+      <data key="edge_file">NastyLabels.cs</data>
+      <data key="edge_line">16</data>
+    </edge>
+  </graph>
+</graphml>

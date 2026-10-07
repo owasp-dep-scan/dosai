@@ -321,7 +321,13 @@ public static partial class DataFlowAnalyzer
             var partition = ReferenceSources.Partition(csharpTrees);
             csharpTrees = partition.Kept;
             result.Diagnostics.AddRange(ReferenceSources.Diagnostics(partition, TargetFrameworkDetection.ProjectContextRoot(Path.GetFullPath(path))));
-            if (CSharpSourceParser.TryCreateImplicitUsingsTree(path) is { } implicitUsingsTree)
+            var globalUsings = GlobalUsings.Resolve(path);
+            foreach (var usingsDiagnostic in globalUsings.Diagnostics.Where(usingsDiagnostic => !result.Diagnostics.Contains(usingsDiagnostic, StringComparer.Ordinal)))
+            {
+                result.Diagnostics.Add(usingsDiagnostic);
+            }
+
+            if (globalUsings.Tree is { } implicitUsingsTree)
             {
                 csharpTrees.Insert(0, implicitUsingsTree);
             }
@@ -1298,7 +1304,7 @@ public static partial class DataFlowAnalyzer
             }
         }
 
-        var frameworkReferences = FrameworkReferences.Current;
+        var frameworkReferences = FrameworkReferences.ForTree(path);
         foreach (var (key, reference) in frameworkReferences.References)
         {
             references.TryAdd(key, reference);
@@ -1318,7 +1324,9 @@ public static partial class DataFlowAnalyzer
             // shared temp directories whose trees contain paths beyond the OS limit or
             // unreadable subtrees. Unreadable subtrees are skipped and reported; the scan
             // continues with the readable remainder.
-            foreach (var assemblyPath in SafeFileRead.EnumerateAllFilesSafe(rootDirectory, "*.dll", diagnostics.Add).Where(IsManagedAssembly))
+            // Never beside the source they were built from (see Dosai.GetSourceMethods).
+            foreach (var assemblyPath in SafeFileRead.EnumerateAllFilesSafe(rootDirectory, "*.dll", diagnostics.Add).Where(IsManagedAssembly)
+                         .Where(assemblyPath => !TreeFrameworks.IsBuiltFromSource(path, assemblyPath)))
             {
                 AddReference(assemblyPath);
             }
@@ -1327,7 +1335,7 @@ public static partial class DataFlowAnalyzer
         // Restored-but-unbuilt trees: the NuGet cache carries the same assemblies the compiler
         // would reference (project.assets.json packageFolders + compile entries), unpinned from
         // bytes so the shared packages folder is never locked.
-        foreach (var cacheAssembly in NuGetRestoreCache.GetReferencePaths(path, references.Keys))
+        foreach (var cacheAssembly in NuGetRestoreCache.GetReferencePaths(path, references.Keys).Where(cacheAssembly => !TreeFrameworks.IsBuiltFromSource(path, cacheAssembly)))
         {
             if (NuGetRestoreCache.TryCreateUnpinnedReference(cacheAssembly) is { } cacheReference)
             {

@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gexf xmlns="http://www.gexf.net/1.3" version="1.3">
+  <graph mode="static" defaultedgetype="directed">
+    <attributes class="node">
+      <attribute id="kind" title="kind" type="string" />
+      <attribute id="file" title="file" type="string" />
+      <attribute id="purl" title="purl" type="string" />
+      <attribute id="external" title="external" type="boolean" />
+      <attribute id="reachableEntryPoints" title="reachableEntryPoints" type="string" />
+      <attribute id="minDepthFromEntryPoint" title="minDepthFromEntryPoint" type="int" />
+      <attribute id="fanIn" title="fanIn" type="int" />
+      <attribute id="fanOut" title="fanOut" type="int" />
+      <attribute id="inRecursiveCycle" title="inRecursiveCycle" type="boolean" />
+    </attributes>
+    <attributes class="edge">
+      <attribute id="callType" title="callType" type="string" />
+      <attribute id="sourcePurl" title="sourcePurl" type="string" />
+      <attribute id="targetPurl" title="targetPurl" type="string" />
+      <attribute id="location" title="location" type="string" />
+      <attribute id="callSiteCount" title="callSiteCount" type="int" />
+      <attribute id="dispatchConfidence" title="dispatchConfidence" type="string" />
+    </attributes>
+    <nodes>
+      <node id="System.Diagnostics.Process.Start(string,string):System.Diagnostics.Process" label="Process.System.Diagnostics.Process.Start(string, string?)">
+        <attvalues>
+          <attvalue for="kind" value="Method" />
+          <attvalue for="file" value="" />
+          <attvalue for="purl" value="pkg:nuget/System.Diagnostics.Process" />
+          <attvalue for="external" value="true" />
+          <attvalue for="reachableEntryPoints" value="ep:Cli#::Ünïcödé.日本語.NastyLabels.Main(string[]):void" />
+          <attvalue for="minDepthFromEntryPoint" value="1" />
+          <attvalue for="fanIn" value="1" />
+          <attvalue for="fanOut" value="0" />
+          <attvalue for="inRecursiveCycle" value="false" />
+        </attvalues>
+      </node>
+      <node id="Ünïcödé.日本語.NastyLabels.Main(string[]):void" label="NastyLabels.Main">
+        <attvalues>
+          <attvalue for="kind" value="Method" />
+          <attvalue for="file" value="NastyLabels.cs" />
+          <attvalue for="purl" value="" />
+          <attvalue for="external" value="false" />
+          <attvalue for="reachableEntryPoints" value="ep:Cli#::Ünïcödé.日本語.NastyLabels.Main(string[]):void" />
+          <attvalue for="minDepthFromEntryPoint" value="0" />
+          <attvalue for="fanIn" value="0" />
+          <attvalue for="fanOut" value="1" />
+          <attvalue for="inRecursiveCycle" value="false" />
+        </attvalues>
+      </node>
+    </nodes>
+    <edges>
+      <edge id="e1" source="Ünïcödé.日本語.NastyLabels.Main(string[]):void" target="System.Diagnostics.Process.Start(string,string):System.Diagnostics.Process">
+        <attvalues>
+          <attvalue for="callType" value="MethodCall" />
+          <attvalue for="sourcePurl" value="" />
+          <attvalue for="targetPurl" value="pkg:nuget/System.Diagnostics.Process" />
+          <attvalue for="location" value="NastyLabels.cs:15:9" />
+          <attvalue for="callSiteCount" value="1" />
+          <attvalue for="dispatchConfidence" value="" />
+        </attvalues>
+      </edge>
+    </edges>
+  </graph>
+</gexf>

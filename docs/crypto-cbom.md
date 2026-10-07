@@ -34,6 +34,26 @@ dotnet run --project ./Dosai/Dosai.csproj -- crypto \
 
 This writes `/tmp/dosai-cbom.json`, `/tmp/dosai-cbom-dataflows.graphml`, and `/tmp/dosai-cbom-dataflows.gexf`. Use `--graph-out` when exporting a single format and you need an explicit sidecar path.
 
+## Output size: `--crypto-dataflows`
+
+`CryptoDataFlows` is the bulk of the native JSON on large trees (roughly 90% on the issue-#75 corpus), and both output formats are streamed to the file rather than built as one string. Consumers that only read `Assets`, `Operations`, and `Materials` can shrink the `dosai` output further with `--crypto-dataflows`:
+
+```bash
+dotnet run --project ./Dosai/Dosai.csproj -- crypto \
+  --path ./big-tree \
+  --o /tmp/dosai-crypto.json \
+  --format dosai \
+  --crypto-dataflows none
+```
+
+- `full` (default) keeps the whole `CryptoDataFlows` graph; output is unchanged from a run without the flag.
+- `slices` keeps the slices and only the nodes and edges they reference. Every `DataFlowSliceIds` value on `Materials`, `Operations`, and `Findings` (and every `dosai:crypto:dataFlowSliceIds` property in the CycloneDX export, which derives from them) still resolves, as does every id inside `CryptoDataFlows` itself: the derived collections' id lists are pruned to the retained graph.
+- `none` omits `CryptoDataFlows` while keeping the slice-id properties and `Statistics` (including `CryptoDataFlowSliceCount`), so downstream counts stay meaningful.
+
+The option shapes the JSON only; crypto graph sidecars (`--graph-format`) always carry the full graph. The MCP `dosai.crypto` tool accepts the same value as `crypto_dataflows`.
+
+cdxgen should pass `--crypto-dataflows none`: `analyzeDosaiCrypto` reads only `Assets`, `Operations`, and `Materials`, and Node's `readFileSync`/`JSON.parse` path silently returns nothing for files past the ~512 MB string limit, which previously dropped all dosai crypto components from SBOM runs on large trees.
+
 ## Evidence model
 
 The native result has five main evidence collections. `assets` describe algorithms, crypto libraries, protocols, certificates, and key-related assets. `operations` capture source operations and API calls that use those assets. `materials` record source-visible key, certificate, IV, nonce, and secret-like values with redaction and fingerprints. `protocols` capture protocol observations such as TLS usage. `findings` record weak crypto, hardcoded material, TLS validation bypass, static IV or nonce use, insecure RNG, low PBKDF2 iteration counts, and legacy TLS references. `statistics` provides aggregate counts, including the number of reachable findings and crypto data-flow slices.

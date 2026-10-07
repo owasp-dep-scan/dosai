@@ -62,6 +62,12 @@ internal static partial class FSharpRegex
 ///     process - a caller could not scan its own output directory and then clean or replace it.
 ///     Shared-framework assemblies keep the mapped path: they are immutable, nobody deletes
 ///     them, and copying them per inspected assembly would read tens of megabytes each time.
+///     One context is shared by every inspected file of a directory (issue #76) instead of one
+///     per file: dependencies load once per directory rather than once per inspected assembly,
+///     and on Windows each <see cref="AssemblyLoadContext.LoadFromStream(Stream)" /> pays an
+///     AMSI scan, so the per-file contexts paid that scan again for every neighbour. The
+///     caller releases a directory's context after its last file, before the async unload
+///     window can overlap the next directory.
 /// </remarks>
 internal sealed class InspectionAssemblyLoadContext(IEnumerable<string> inspectedPaths, IEnumerable<string> sharedFrameworkPaths)
     : AssemblyLoadContext(isCollectible: true)
@@ -619,9 +625,12 @@ public static class Dosai
         var unresolvedCallCount = methodCalls.Count(call => call.EvidenceKind == AnalysisEvidenceKind.SourceUnresolved);
         if (unresolvedCallCount > 0)
         {
+            var treeReferences = FrameworkReferences.ForTree(path);
             sliceDiagnostics.Add(FrameworkReferences.Current.References.Count == 0
                 ? string.Create(CultureInfo.InvariantCulture, $"Semantic binding failed for {unresolvedCallCount} call sites: Dosai resolved no framework metadata references (see the framework-reference diagnostic), so every framework call is unresolved regardless of the tree's restore state.")
-                : string.Create(CultureInfo.InvariantCulture, $"Semantic binding failed for {unresolvedCallCount} call sites: target assemblies were missing or conflicted with other references. Restore or build the tree (--restore/--build) to raise reachability confidence."));
+                : treeReferences.Diagnostic is { } treeNote && treeNote.Contains("No reference pack", StringComparison.Ordinal)
+                    ? string.Create(CultureInfo.InvariantCulture, $"Semantic binding failed for {unresolvedCallCount} call sites: reference assemblies are missing (see the framework-reference diagnostics naming the packs); installing the SDK or runtime that ships them fixes it, restoring or building the tree does not.")
+                    : string.Create(CultureInfo.InvariantCulture, $"Semantic binding failed for {unresolvedCallCount} call sites: target assemblies were missing or conflicted with other references. Restoring or building the tree (--restore/--build) helps when packages are involved; framework references come from installed packs, not from the tree."));
         }
 
         // Conditional-compilation guards were evaluated against the detected target frameworks;
@@ -1393,10 +1402,66 @@ public static class Dosai
     ///     references, ordered so the running runtime's own version is tried first and the
     ///     remaining installed versions newest-first.
     /// </summary>
-    private static List<string> GetSharedFrameworkProbingPaths()
+    private static List<string> GetSharedFrameworkProbingPaths(string? path = null)
         => GetSharedFrameworkProbingPaths(
             System.Runtime.InteropServices.RuntimeEnvironment.GetRuntimeDirectory(),
-            GetDotnetSharedRuntimePaths());
+            GetDotnetSharedRuntimePaths(),
+            path,
+            ReadRuntimeConfigFrameworks);
+
+    /// <summary>
+    ///     The framework names and versions a tree's <c>*.runtimeconfig.json</c> files declare,
+    ///     for dependency probing of built output (issue #74): a built ASP.NET Core or desktop
+    ///     app names Microsoft.AspNetCore.App / Microsoft.WindowsDesktop.App, whose assemblies
+    ///     the inspected libraries reference.
+    /// </summary>
+    private static List<(string Name, string Version)> ReadRuntimeConfigFrameworks(string path)
+    {
+        var frameworks = new List<(string Name, string Version)>();
+        try
+        {
+            var root = Directory.Exists(path) ? path : Path.GetDirectoryName(path!);
+            if (string.IsNullOrEmpty(root))
+            {
+                return frameworks;
+            }
+
+            foreach (var runtimeConfig in SafeFileRead.EnumerateAllFilesSafe(root, "*.runtimeconfig.json"))
+            {
+                if (!SafeFileRead.TryReadAllText(runtimeConfig, out var content))
+                {
+                    continue;
+                }
+
+                using var document = System.Text.Json.JsonDocument.Parse(content);
+                if (!document.RootElement.TryGetProperty("runtimeOptions", out var runtimeOptions) || runtimeOptions.ValueKind != System.Text.Json.JsonValueKind.Object)
+                {
+                    continue;
+                }
+
+                if (!runtimeOptions.TryGetProperty("frameworks", out var declared) || declared.ValueKind != System.Text.Json.JsonValueKind.Array)
+                {
+                    continue;
+                }
+
+                foreach (var framework in declared.EnumerateArray())
+                {
+                    if (framework.ValueKind == System.Text.Json.JsonValueKind.Object
+                        && framework.TryGetProperty("name", out var name) && name.ValueKind == System.Text.Json.JsonValueKind.String
+                        && framework.TryGetProperty("version", out var version) && version.ValueKind == System.Text.Json.JsonValueKind.String)
+                    {
+                        frameworks.Add((name.GetString() ?? string.Empty, version.GetString() ?? string.Empty));
+                    }
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or System.Text.Json.JsonException)
+        {
+            // Probing falls back to the installed frameworks.
+        }
+
+        return frameworks;
+    }
 
     /// <summary>
     ///     Testable core of <see cref="GetSharedFrameworkProbingPaths" />: the runtime
@@ -1414,7 +1479,7 @@ public static class Dosai
     ///     Newest-first resolves references from a superset framework instead, and the running
     ///     runtime leads because it is the one version guaranteed to be loadable in-process.
     /// </remarks>
-    internal static List<string> GetSharedFrameworkProbingPaths(string runtimeDir, IEnumerable<string> dotnetSharedRuntimePaths)
+    internal static List<string> GetSharedFrameworkProbingPaths(string runtimeDir, IEnumerable<string> dotnetSharedRuntimePaths, string? path = null, Func<string, List<(string Name, string Version)>>? readRuntimeConfigFrameworks = null)
     {
         var sharedRoots = new HashSet<string>(StringComparer.Ordinal);
         var runningSharedRoot = Path.GetFullPath(Path.Combine(runtimeDir, "..", ".."));
@@ -1436,6 +1501,47 @@ public static class Dosai
             if (Directory.Exists(frameworkRoot))
             {
                 versionDirectories.AddRange(Directory.GetDirectories(frameworkRoot));
+            }
+        }
+
+        // Frameworks the analyzed tree's runtimeconfig files name (issue #74): the exact named
+        // version is probed when installed, otherwise every installed version of that framework
+        // joins the candidate list and the ordering pass below picks the newest. These
+        // frameworks carry no System.Runtime of their own, so they are not subject to the
+        // running-version floor that the base framework's directories are filtered by.
+        var runtimeConfigExactDirectories = new HashSet<string>(StringComparer.Ordinal);
+        if (path is not null && readRuntimeConfigFrameworks is not null)
+        {
+            foreach (var (name, version) in readRuntimeConfigFrameworks(path))
+            {
+                if (string.IsNullOrWhiteSpace(name))
+                {
+                    continue;
+                }
+
+                foreach (var sharedRoot in sharedRoots)
+                {
+                    var frameworkRoot = Path.Combine(sharedRoot, name);
+                    if (!Directory.Exists(frameworkRoot))
+                    {
+                        continue;
+                    }
+
+                    var exact = Path.Combine(frameworkRoot, version);
+                    if (Directory.Exists(exact))
+                    {
+                        runtimeConfigExactDirectories.Add(Path.TrimEndingDirectorySeparator(Path.GetFullPath(exact)));
+                    }
+                    else
+                    {
+                        versionDirectories.AddRange(Directory.GetDirectories(frameworkRoot));
+                    }
+                }
+            }
+
+            foreach (var exact in runtimeConfigExactDirectories)
+            {
+                versionDirectories.Add(exact);
             }
         }
 
@@ -1465,8 +1571,10 @@ public static class Dosai
             // already-loaded bundled assemblies instead. The running directory itself is exempt:
             // a self-contained app directory is not named after a framework version.
             .Where(directory => string.Equals(directory, runningVersionDirectory, StringComparison.Ordinal)
+                                || !IsNetCoreAppDirectory(directory)
                                 || ParseFrameworkVersion(Path.GetFileName(directory)).Version >= runningVersion)
             .OrderByDescending(directory => string.Equals(directory, runningVersionDirectory, StringComparison.Ordinal))
+            .ThenByDescending(directory => runtimeConfigExactDirectories.Contains(directory))
             .ThenByDescending(directory => ParseFrameworkVersion(Path.GetFileName(directory)))
             .ToList();
     }
@@ -1484,6 +1592,10 @@ public static class Dosai
             ? (version, separatorIndex < 0)
             : (new Version(0, 0), false);
     }
+
+    /// <summary>True when the directory is a Microsoft.NETCore.App version directory, whose System.Runtime can shadow the running runtime's; other shared frameworks carry none.</summary>
+    private static bool IsNetCoreAppDirectory(string directory)
+        => directory.Contains($"{Path.DirectorySeparatorChar}Microsoft.NETCore.App{Path.DirectorySeparatorChar}", StringComparison.Ordinal);
 
     private static readonly Lazy<HashSet<string>> DotnetSharedRuntimeRoots = new(ListDotnetSharedRuntimeRoots, LazyThreadSafetyMode.ExecutionAndPublication);
 
@@ -1630,7 +1742,22 @@ public static class Dosai
         }
         var assemblyMethods = new List<Method>();
         var processedAssemblyIdentities = new HashSet<string>();
-        var sharedFrameworkDirs = GetSharedFrameworkProbingPaths();
+        var sharedFrameworkDirs = GetSharedFrameworkProbingPaths(path);
+        // One load context per distinct inspected directory, shared by every file in it
+        // (issue #76): a fresh context per assembly reloaded each shared dependency once per
+        // inspected assembly, and on Windows every LoadFromStream pays an AmsiScanBuffer
+        // call, which owned most of this phase on large build-output folders. Dependencies
+        // still probe this directory first, exactly as before, so sharing changes how many
+        // times an assembly is loaded, never which file a reference resolves to. A context
+        // is released once its directory's last file is behind the loop - native skips and
+        // identity-deduped files included, they still mark their directory live - so one
+        // bad assembly cannot outlive its neighbours' context.
+        var lastFileIndexByDirectory = new Dictionary<string, int>(StringComparer.Ordinal);
+        for (var assemblyIndex = 0; assemblyIndex < assembliesToInspect.Count; assemblyIndex++)
+        {
+            lastFileIndexByDirectory[Path.GetDirectoryName(assembliesToInspect[assemblyIndex]) ?? string.Empty] = assemblyIndex;
+        }
+        var loadContextsByDirectory = new Dictionary<string, InspectionAssemblyLoadContext>(StringComparer.Ordinal);
         // The first open of a file is where a cold machine waits: real-time antivirus scans a
         // file on its first access (Windows Defender: ~60 ms per DLL), which left this phase at a
         // fifth of one core in the issue #65 run. The managed-assembly check is
@@ -1638,131 +1765,183 @@ public static class Dosai
         // front; the scans overlap, and the loop below reads warm files in its usual order.
         var isManaged = new bool[assembliesToInspect.Count];
         DedicatedStack.ForEach("Dosai assembly probe", Math.Max(1, MaxSymbolAnalysisWorkers), isManaged.Length, index => isManaged[index] = IsManagedAssembly(assembliesToInspect[index]));
-        for (var assemblyIndex = 0; assemblyIndex < assembliesToInspect.Count; assemblyIndex++)
+        // A collectible context stays rooted until Unload: whatever leaves this loop (an
+        // exception the per-file handlers do not catch included) must still release every live
+        // directory context, or its in-memory assembly copies stay for the process lifetime -
+        // the MCP server runs many scans in one process.
+        try
         {
-            var assemblyFilePath = assembliesToInspect[assemblyIndex];
-            var fileName = Path.GetFileName(assemblyFilePath);
-            if (!isManaged[assemblyIndex])
+            for (var assemblyIndex = 0; assemblyIndex < assembliesToInspect.Count; assemblyIndex++)
             {
-                Console.WriteLine($"Info: Skipping native library or non-assembly file: {assemblyFilePath}");
-                continue;
-            }
-            var inspectedDirs = new List<string> { Path.GetDirectoryName(assemblyFilePath)!, Path.GetDirectoryName(path)! };
-            var loadContext = new InspectionAssemblyLoadContext(inspectedDirs, sharedFrameworkDirs);
-            // Per-assembly timing exists only for the debug log; the stopwatch is not created
-            // when debug is off, so the inspection loop pays nothing.
-            var assemblyWatch = DebugLog.Enabled ? Stopwatch.StartNew() : null;
-            var membersBefore = assemblyMethods.Count;
-            try
-            {
-                var assemblyName = AssemblyName.GetAssemblyName(assemblyFilePath);
-                if (processedAssemblyIdentities.Contains(assemblyName.FullName))
+                var assemblyFilePath = assembliesToInspect[assemblyIndex];
+                var fileName = Path.GetFileName(assemblyFilePath);
+                var fileDirectory = Path.GetDirectoryName(assemblyFilePath) ?? string.Empty;
+                if (!isManaged[assemblyIndex])
                 {
+                    Console.WriteLine($"Info: Skipping native library or non-assembly file: {assemblyFilePath}");
                     continue;
                 }
-                var assembly = loadContext.LoadFromAssemblyName(assemblyName);
-                Type[] types;
+                ReleaseDirectoriesDoneWith(assemblyIndex);
+                if (!loadContextsByDirectory.TryGetValue(fileDirectory, out var loadContext))
+                {
+                    var inspectedDirs = new List<string> { fileDirectory, Path.GetDirectoryName(path)! };
+                    loadContext = new InspectionAssemblyLoadContext(inspectedDirs, sharedFrameworkDirs);
+                    loadContextsByDirectory[fileDirectory] = loadContext;
+                }
+                // Per-assembly timing exists only for the debug log; the stopwatch is not created
+                // when debug is off, so the inspection loop pays nothing.
+                var assemblyWatch = DebugLog.Enabled ? Stopwatch.StartNew() : null;
+                var membersBefore = assemblyMethods.Count;
                 try
                 {
-                    types = assembly.GetTypes();
-                }
-                catch (ReflectionTypeLoadException ex)
-                {
-                    Console.WriteLine($"Warning: Could not load all types from {fileName}. Some types will be skipped.");
-                    if (ex.LoaderExceptions is not null)
+                    var assemblyName = AssemblyName.GetAssemblyName(assemblyFilePath);
+                    if (processedAssemblyIdentities.Contains(assemblyName.FullName))
                     {
-                        var uniqueLoaderErrors = ex.LoaderExceptions
-                            .Where(e => e is not null)
-                            .Select(e => e?.Message)
-                            .Distinct();
-
-                        foreach (var errorMessage in uniqueLoaderErrors)
-                        {
-                            Console.WriteLine($"  - {errorMessage}");
-                            if (errorMessage is null ||
-                                !errorMessage.Contains("The system cannot find the file specified")) continue;
-                            Console.WriteLine("    Suggestion: This error often means a .NET Shared Framework is missing. Ensure the machine running this analysis has the necessary .NET SDKs and Runtimes (e.g., ASP.NET Core Runtime) installed. Some projects might require Windows for building.");
-                        }
+                        continue;
                     }
-                    types = ex.Types.Where(t => t is not null).ToArray()!;
-                }
-
-                foreach (var type in types)
-                {
-                    foreach (var method in type.GetMethods())
+                    var assembly = loadContext.LoadFromAssemblyName(assemblyName);
+                    Type[] types;
+                    try
                     {
-                        if ($"{method.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" != fileName) continue;
-
-                        var parameters = method.GetParameters().Select(p => p.ParameterType.FullName ?? p.ParameterType.Name).ToList();
-                        var paramString = string.Join(",", parameters);
-                        var returnType = method.ReturnType.FullName ?? method.ReturnType.Name;
-                        var className = method.DeclaringType?.Name ?? "UnknownType";
-                        var ns = method.DeclaringType?.Namespace ?? "";
-                        var assemblySignature = $"{ns}.{className}.{method.Name}({paramString}):{returnType}";
-                        if (method.Name is ".ctor" or ".cctor")
-                        {
-                            assemblySignature = $"{ns}.{className}.{method.Name}({paramString})";
-                        }
-
-                        var methodParams = method.GetParameters().Select(p => new Parameter
-                        {
-                            Name = p.Name,
-                            Type = p.ParameterType.FullName ?? p.ParameterType.Name,
-                            TypeFullName = p.ParameterType.FullName ?? p.ParameterType.Name,
-                            IsGenericParameter = p.ParameterType.IsGenericParameter
-                        }).ToList();
-
-                        var genericParameters = method.IsGenericMethodDefinition
-                            ? method.GetGenericArguments().Select(t => t.Name).ToList()
-                            : [];
-
-                        assemblyMethods.Add(CreateMethodObjectFromMember(
-                            method, assemblyFilePath, fileName, method.Attributes.ToString(), method.Name, returnType,
-                            methodParams, method.MetadataToken, assemblySignature,
-                            method.IsGenericMethod, method.IsGenericMethodDefinition, genericParameters
-                        ));
+                        types = assembly.GetTypes();
                     }
-                    processedAssemblyIdentities.Add(assembly.FullName!);
-                    assemblyMethods.AddRange(from ctor in type.GetConstructors() where $"{ctor.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName let ctorParams = ctor.GetParameters().Select(p => new Parameter { Name = p.Name, Type = p.ParameterType.FullName }).ToList() let assemblySignature = $"{ctor.DeclaringType?.Name}" select CreateMethodObjectFromMember(ctor, assemblyFilePath, fileName, ctor.Attributes.ToString(), ".ctor", "Void", ctorParams, ctor.MetadataToken, assemblySignature));
-                    assemblyMethods.AddRange(from prop in type.GetProperties() where $"{prop.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName select CreateMethodObjectFromMember(prop, assemblyFilePath, fileName, "Property", prop.Name, prop.PropertyType.Name, []));
-                    assemblyMethods.AddRange(from field in type.GetFields() where $"{field.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName select CreateMethodObjectFromMember(field, assemblyFilePath, fileName, field.Attributes.ToString(), field.Name, field.FieldType.Name, []));
-                    assemblyMethods.AddRange(from evt in type.GetEvents() where $"{evt.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName select CreateMethodObjectFromMember(evt, assemblyFilePath, fileName, evt.Attributes.ToString(), evt.Name, evt.EventHandlerType?.Name ?? string.Empty, []));
-                }
-            }
-            catch (Exception e) when (e is FileLoadException or FileNotFoundException or BadImageFormatException or TypeLoadException or NotSupportedException)
-            {
-                if (DebugLog.Enabled)
-                {
-                    DebugLog.Log($"assembly '{fileName}' failed to load: {e.GetType().Name}: {e.Message}");
-                }
-                Console.WriteLine($"Warning: Skipping assembly {assemblyFilePath} as it could not be fully loaded for inspection.");
-                Console.WriteLine($"  - Reason: {e.GetType().Name}: {e.Message}");
-            }
-            catch (Exception e)
-            {
-                if (DebugLog.Enabled)
-                {
-                    DebugLog.Log($"assembly '{fileName}' failed to load: {e.GetType().Name}: {e.Message}");
-                }
-                Console.WriteLine($"Error: An unexpected error occurred while processing {fileName}. Details: {e.Message}");
-            }
-            finally
-            {
-                loadContext.Unload();
-                if (assemblyWatch is not null)
-                {
-                    assemblyWatch.Stop();
-                    // Only assemblies that took over a second get a line; per-assembly output is
-                    // otherwise noise on large trees.
-                    if (assemblyWatch.Elapsed.TotalSeconds >= 1)
+                    catch (ReflectionTypeLoadException ex)
                     {
-                        DebugLog.Log(string.Create(CultureInfo.InvariantCulture, $"assembly '{fileName}': {assemblyMethods.Count - membersBefore} members in {assemblyWatch.Elapsed.TotalSeconds:F3}s"));
+                        Console.WriteLine($"Warning: Could not load all types from {fileName}. Some types will be skipped.");
+                        if (ex.LoaderExceptions is not null)
+                        {
+                            var uniqueLoaderErrors = ex.LoaderExceptions
+                                .Where(e => e is not null)
+                                .Select(e => e?.Message)
+                                .Distinct();
+
+                            foreach (var errorMessage in uniqueLoaderErrors)
+                            {
+                                Console.WriteLine($"  - {errorMessage}");
+                                if (errorMessage is null ||
+                                    !errorMessage.Contains("The system cannot find the file specified")) continue;
+                                Console.WriteLine("    Suggestion: This error often means a .NET Shared Framework is missing. Ensure the machine running this analysis has the necessary .NET SDKs and Runtimes (e.g., ASP.NET Core Runtime) installed. Some projects might require Windows for building.");
+                            }
+                        }
+                        types = ex.Types.Where(t => t is not null).ToArray()!;
+                    }
+
+                    foreach (var type in types)
+                    {
+                        foreach (var method in type.GetMethods())
+                        {
+                            if ($"{method.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" != fileName) continue;
+
+                            var parameters = method.GetParameters().Select(p => p.ParameterType.FullName ?? p.ParameterType.Name).ToList();
+                            var paramString = string.Join(",", parameters);
+                            var returnType = method.ReturnType.FullName ?? method.ReturnType.Name;
+                            var className = method.DeclaringType?.Name ?? "UnknownType";
+                            var ns = method.DeclaringType?.Namespace ?? "";
+                            var assemblySignature = $"{ns}.{className}.{method.Name}({paramString}):{returnType}";
+                            if (method.Name is ".ctor" or ".cctor")
+                            {
+                                assemblySignature = $"{ns}.{className}.{method.Name}({paramString})";
+                            }
+
+                            var methodParams = method.GetParameters().Select(p => new Parameter
+                            {
+                                Name = p.Name,
+                                Type = p.ParameterType.FullName ?? p.ParameterType.Name,
+                                TypeFullName = p.ParameterType.FullName ?? p.ParameterType.Name,
+                                IsGenericParameter = p.ParameterType.IsGenericParameter
+                            }).ToList();
+
+                            var genericParameters = method.IsGenericMethodDefinition
+                                ? method.GetGenericArguments().Select(t => t.Name).ToList()
+                                : [];
+
+                            assemblyMethods.Add(CreateMethodObjectFromMember(
+                                method, assemblyFilePath, fileName, method.Attributes.ToString(), method.Name, returnType,
+                                methodParams, method.MetadataToken, assemblySignature,
+                                method.IsGenericMethod, method.IsGenericMethodDefinition, genericParameters
+                            ));
+                        }
+                        processedAssemblyIdentities.Add(assembly.FullName!);
+                        assemblyMethods.AddRange(from ctor in type.GetConstructors() where $"{ctor.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName let ctorParams = ctor.GetParameters().Select(p => new Parameter { Name = p.Name, Type = p.ParameterType.FullName }).ToList() let assemblySignature = $"{ctor.DeclaringType?.Name}" select CreateMethodObjectFromMember(ctor, assemblyFilePath, fileName, ctor.Attributes.ToString(), ".ctor", "Void", ctorParams, ctor.MetadataToken, assemblySignature));
+                        assemblyMethods.AddRange(from prop in type.GetProperties() where $"{prop.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName select CreateMethodObjectFromMember(prop, assemblyFilePath, fileName, "Property", prop.Name, prop.PropertyType.Name, []));
+                        assemblyMethods.AddRange(from field in type.GetFields() where $"{field.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName select CreateMethodObjectFromMember(field, assemblyFilePath, fileName, field.Attributes.ToString(), field.Name, field.FieldType.Name, []));
+                        assemblyMethods.AddRange(from evt in type.GetEvents() where $"{evt.Module.Assembly.GetName().Name}{Constants.AssemblyExtension}" == fileName select CreateMethodObjectFromMember(evt, assemblyFilePath, fileName, evt.Attributes.ToString(), evt.Name, evt.EventHandlerType?.Name ?? string.Empty, []));
+                    }
+                }
+                catch (Exception e) when (e is FileLoadException or FileNotFoundException or BadImageFormatException or TypeLoadException or NotSupportedException)
+                {
+                    if (DebugLog.Enabled)
+                    {
+                        DebugLog.Log($"assembly '{fileName}' failed to load: {e.GetType().Name}: {e.Message}");
+                    }
+                    Console.WriteLine($"Warning: Skipping assembly {assemblyFilePath} as it could not be fully loaded for inspection.");
+                    Console.WriteLine($"  - Reason: {e.GetType().Name}: {e.Message}");
+                }
+                catch (Exception e)
+                {
+                    if (DebugLog.Enabled)
+                    {
+                        DebugLog.Log($"assembly '{fileName}' failed to load: {e.GetType().Name}: {e.Message}");
+                    }
+                    Console.WriteLine($"Error: An unexpected error occurred while processing {fileName}. Details: {e.Message}");
+                }
+                finally
+                {
+                    if (assemblyWatch is not null)
+                    {
+                        assemblyWatch.Stop();
+                        // Only assemblies that took over a second get a line; per-assembly output is
+                        // otherwise noise on large trees.
+                        if (assemblyWatch.Elapsed.TotalSeconds >= 1)
+                        {
+                            DebugLog.Log(string.Create(CultureInfo.InvariantCulture, $"assembly '{fileName}': {assemblyMethods.Count - membersBefore} members in {assemblyWatch.Elapsed.TotalSeconds:F3}s"));
+                        }
                     }
                 }
             }
         }
+        finally
+        {
+            foreach (var loadContext in loadContextsByDirectory.Values)
+            {
+                loadContext.Unload();
+            }
+
+            loadContextsByDirectory.Clear();
+        }
 
         return assemblyMethods;
+
+        // Unloads every directory context whose files are all behind the loop; called at the
+        // top of each iteration so skipped files (native, identity-deduped) still retire
+        // their directory's context through the next iteration or the post-loop release.
+        void ReleaseDirectoriesDoneWith(int nextFileIndex)
+        {
+            if (loadContextsByDirectory.Count == 0)
+            {
+                return;
+            }
+
+            List<KeyValuePair<string, InspectionAssemblyLoadContext>>? finished = null;
+            foreach (var entry in loadContextsByDirectory)
+            {
+                if (lastFileIndexByDirectory[entry.Key] < nextFileIndex)
+                {
+                    (finished ??= []).Add(entry);
+                }
+            }
+
+            if (finished is null)
+            {
+                return;
+            }
+
+            foreach (var entry in finished)
+            {
+                loadContextsByDirectory.Remove(entry.Key);
+                entry.Value.Unload();
+            }
+        }
 
         Method CreateMethodObjectFromMember(
             MemberInfo member, string filePath, string file, string attributes, string name, string returnType,
@@ -2209,17 +2388,30 @@ public static class Dosai
         var mergedDiagnostics = new List<string>();
         var dispatchIndexes = new Dictionary<Compilation, DispatchResolver.SourceIndex>();
         var metadataReferences = new Dictionary<string, PortableExecutableReference>(StringComparer.OrdinalIgnoreCase);
-        // Framework references: the host's trusted platform assemblies, a self-contained
-        // bundle's own runtime, or the newest installed shared framework (issue #67).
-        var frameworkReferences = FrameworkReferences.Current;
+        // Framework references: the tree's reference packs (AspNetCore/WindowsDesktop for a web
+        // or desktop tree, a target-matched base pack) on top of the process-wide set - the
+        // host's trusted platform assemblies, a self-contained bundle's own runtime, or the
+        // newest installed shared framework (issues #67 and #74).
+        var frameworkReferences = FrameworkReferences.ForTree(path);
         foreach (var (key, reference) in frameworkReferences.References)
         {
             metadataReferences.TryAdd(key, reference);
         }
 
         DebugLog.Count($"framework metadata references ({frameworkReferences.Source})", frameworkReferences.References.Count);
+        // A metadata copy of an assembly the tree builds from source (its own bin/ output, a
+        // NuGet package of the same name) duplicates the source's types: extension calls into
+        // it became ambiguous and bound to either copy depending on evaluation timing, so the
+        // call graph changed between runs (issue #65). The source is the copy analyzed.
+        var builtFromSourceSkipped = 0;
         foreach (var externalAssembly in assembliesToInspect.Where(IsManagedAssembly))
         {
+            if (TreeFrameworks.IsBuiltFromSource(path, externalAssembly))
+            {
+                builtFromSourceSkipped++;
+                continue;
+            }
+
             metadataReferences.TryAdd(externalAssembly, MetadataReference.CreateFromFile(externalAssembly));
         }
         // Restored-but-unbuilt trees: packageFolders plus the per-target compile entries in
@@ -2228,10 +2420,21 @@ public static class Dosai
         // shared packages folder is never locked for the process lifetime.
         foreach (var cacheAssembly in NuGetRestoreCache.GetReferencePaths(path, metadataReferences.Keys))
         {
+            if (TreeFrameworks.IsBuiltFromSource(path, cacheAssembly))
+            {
+                builtFromSourceSkipped++;
+                continue;
+            }
+
             if (NuGetRestoreCache.TryCreateUnpinnedReference(cacheAssembly) is { } cacheReference)
             {
                 metadataReferences.TryAdd(cacheAssembly, cacheReference);
             }
+        }
+
+        if (builtFromSourceSkipped > 0)
+        {
+            mergedDiagnostics.Add(string.Create(CultureInfo.InvariantCulture, $"{builtFromSourceSkipped} assembly reference(s) were left out of the source compilation because the tree builds an assembly of the same name from source; calls into those assemblies bind to the source."));
         }
 
         var referenceList = metadataReferences.Values.ToList();
@@ -2269,7 +2472,9 @@ public static class Dosai
         mergedDiagnostics.AddRange(ReferenceSources.Diagnostics(partition, TargetFrameworkDetection.ProjectContextRoot(Path.GetFullPath(path))));
         // Implicit-usings projects rely on global usings their compiler injects; without the
         // synthetic tree every BCL call in them fails to bind and vanishes from the graph.
-        if (CSharpSourceParser.TryCreateImplicitUsingsTree(path) is { } implicitUsingsTree)
+        var globalUsings = GlobalUsings.Resolve(path);
+        mergedDiagnostics.AddRange(globalUsings.Diagnostics);
+        if (globalUsings.Tree is { } implicitUsingsTree)
         {
             csharpTrees.Insert(0, implicitUsingsTree);
         }

@@ -19,6 +19,22 @@ public enum CryptoOutputFormat
     CycloneDx
 }
 
+/// <summary>
+///     How much of the crypto data-flow graph rides along in the dosai-format crypto JSON.
+///     <see cref="Full" /> keeps the whole <see cref="DataFlowResult" /> (the default, so output
+///     stays byte-identical); <see cref="Slices" /> keeps the slices and only the nodes and edges
+///     they reference, so every <c>dosai:crypto:dataFlowSliceIds</c> reference still resolves;
+///     <see cref="None" /> omits <c>CryptoDataFlows</c> while keeping the slice-id properties and
+///     the statistics. Large consumers that only read Assets/Operations/Materials (cdxgen) should
+///     pass <c>none</c>: the graph is the bulk of the output and passes their readable size.
+/// </summary>
+public enum CryptoDataFlowDetail
+{
+    Full,
+    Slices,
+    None
+}
+
 public sealed class CryptoAnalysisResult
 {
     public AnalysisMetadata Metadata { get; set; } = new();
@@ -157,13 +173,42 @@ public static class CryptoAnalyzer
     private static readonly Regex RFunctionCall = new(@"(?<name>[A-Za-z_][\w\.:]*)\s*\(", RegexOptions.Compiled);
     private static readonly Regex CppFunctionCall = new(@"(?<name>[A-Za-z_][\w:]*)(?:\s*<[^>]+>)?\s*\(", RegexOptions.Compiled);
 
-    public static string GetCryptoAnalysis(string path, string? format = null)
+    public static string GetCryptoAnalysis(string path, string? format = null, string? cryptoDataFlows = null)
     {
-        var result = Analyze(path);
+        var result = Analyze(path, BuildPreparationMode.None, ParseDataFlowDetail(cryptoDataFlows));
         return Export(result, format);
     }
 
+    /// <summary>
+    ///     Parses a <c>--crypto-dataflows</c>-style value (full|slices|none, case-insensitive;
+    ///     null/empty is <see cref="CryptoDataFlowDetail.Full" />). Shared by the CLI option and
+    ///     the MCP tool so both reject unknown values the same way.
+    /// </summary>
+    public static CryptoDataFlowDetail ParseDataFlowDetail(string? value)
+    {
+        var normalized = (value ?? "full").Trim().ToLowerInvariant();
+        return normalized switch
+        {
+            "" or "full" => CryptoDataFlowDetail.Full,
+            "slices" => CryptoDataFlowDetail.Slices,
+            "none" => CryptoDataFlowDetail.None,
+            _ => throw new ArgumentException($"Unsupported crypto data-flow detail: {value}. Supported values: full, slices, none.")
+        };
+    }
+
     public static string Export(CryptoAnalysisResult result, string? format = null) => CryptoBomExporter.Export(result, ParseFormat(format));
+
+    /// <summary>
+    ///     Serialize the result straight to <paramref name="stream" /> without materialising the
+    ///     JSON as one contiguous string: the serializer's buffer stayed alive for the whole
+    ///     document and passed the .NET array limit on large trees, which crashed the crypto
+    ///     command with an uncatchable-looking OutOfMemoryException (issue #75). The stream path
+    ///     writes incrementally; the string overload above stays for callers that need the whole
+    ///     document in memory (the MCP server, tests).
+    /// </summary>
+    public static void Export(Stream stream, CryptoAnalysisResult result, string? format = null) => CryptoBomExporter.Export(stream, result, ParseFormat(format));
+
+    public static void Export(Stream stream, CryptoAnalysisResult result, CryptoOutputFormat format) => CryptoBomExporter.Export(stream, result, format);
 
     /// <summary>
     ///     Crypto misuse findings as WeaknessCandidate-shaped entries so dataflows and crypto
@@ -221,9 +266,20 @@ public static class CryptoAnalyzer
     ///     failure that writes no output (owasp-dep-scan/dosai#60).
     /// </summary>
     public static CryptoAnalysisResult Analyze(string path, MethodsSlice? methodsSlice, BuildPreparationMode buildPreparation = BuildPreparationMode.None)
-        => DedicatedStack.Run("Dosai crypto analysis", () => AnalyzeCore(path, methodsSlice, buildPreparation));
+        => Analyze(path, methodsSlice, buildPreparation, CryptoDataFlowDetail.Full);
 
-    private static CryptoAnalysisResult AnalyzeCore(string path, MethodsSlice? methodsSlice, BuildPreparationMode buildPreparation)
+    public static CryptoAnalysisResult Analyze(string path, BuildPreparationMode buildPreparation, CryptoDataFlowDetail dataFlowDetail)
+        => Analyze(path, methodsSlice: null, buildPreparation, dataFlowDetail);
+
+    /// <param name="dataFlowDetail">
+    ///     Trims <see cref="CryptoAnalysisResult.CryptoDataFlows" /> after the slice-id correlation
+    ///     has run, so a detail below <see cref="CryptoDataFlowDetail.Full" /> drops the graph the
+    ///     output does not need instead of pinning it through serialization.
+    /// </param>
+    public static CryptoAnalysisResult Analyze(string path, MethodsSlice? methodsSlice, BuildPreparationMode buildPreparation, CryptoDataFlowDetail dataFlowDetail)
+        => DedicatedStack.Run("Dosai crypto analysis", () => AnalyzeCore(path, methodsSlice, buildPreparation, dataFlowDetail));
+
+    private static CryptoAnalysisResult AnalyzeCore(string path, MethodsSlice? methodsSlice, BuildPreparationMode buildPreparation, CryptoDataFlowDetail dataFlowDetail)
     {
         if (!File.Exists(path) && !Directory.Exists(path))
         {
@@ -251,9 +307,10 @@ public static class CryptoAnalyzer
         {
             AnalyzeTextSources(path, files, reachability, result);
         }
+        var cryptoDataFlowSliceCount = 0;
         using (DebugLog.Phase("crypto.dataflow-correlation"))
         {
-            AttachCryptoDataFlows(path, result);
+            cryptoDataFlowSliceCount = AttachCryptoDataFlows(path, result);
         }
 
         result.Assets = result.Assets.OrderBy(a => a.Location.FileName, StringComparer.Ordinal).ThenBy(a => a.Location.LineNumber).ThenBy(a => a.Id, StringComparer.Ordinal).ToList();
@@ -267,7 +324,9 @@ public static class CryptoAnalyzer
         result.Statistics.ProtocolCount = result.Protocols.Count;
         result.Statistics.FindingCount = result.Findings.Count;
         result.Statistics.ReachableFindingCount = result.Findings.Count(f => f.ReachableFromEntryPoint);
-        result.Statistics.CryptoDataFlowSliceCount = result.CryptoDataFlows?.Slices.Count ?? 0;
+        // Captured while the data flows were still attached: `none` detail drops them from the
+        // result, but the slice count is a fact of the analysis and stays in the statistics.
+        result.Statistics.CryptoDataFlowSliceCount = cryptoDataFlowSliceCount;
         if (DebugLog.Enabled)
         {
             DebugLog.Count("crypto assets", result.Statistics.AssetCount);
@@ -278,20 +337,127 @@ public static class CryptoAnalyzer
             DebugLog.Count("crypto findings reachable from an entry point", result.Statistics.ReachableFindingCount);
             DebugLog.Count("crypto data-flow slices", result.Statistics.CryptoDataFlowSliceCount);
         }
+
+        // Trimming runs last, after the statistics and debug counts were taken from the full
+        // graph: the detail level bounds the serialized output, not the analysis facts.
+        ApplyDataFlowDetail(result, dataFlowDetail);
         return result;
     }
 
-    private static void AttachCryptoDataFlows(string path, CryptoAnalysisResult result)
+    /// <summary>
+    ///     Runs the crypto-pattern data-flow analysis, correlates its slices onto the crypto
+    ///     evidence, and returns the slice count. The full graph stays on the result: correlation
+    ///     always runs (the slice-id properties survive every detail mode), and trimming is a
+    ///     separate, explicit step (<see cref="ApplyDataFlowDetail" />) so callers that also want
+    ///     graph sidecars can write them from the full graph first.
+    /// </summary>
+    private static int AttachCryptoDataFlows(string path, CryptoAnalysisResult result)
     {
         try
         {
             var dataFlows = DataFlowAnalyzer.Analyze(path, patternPacks: "crypto");
             result.CryptoDataFlows = dataFlows;
             CryptoDataFlowCorrelator.Attach(result, dataFlows);
+            return dataFlows.Slices.Count;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or BadImageFormatException or JsonException or InvalidOperationException or ArgumentException or NotSupportedException)
         {
             result.Diagnostics.Add($"Crypto data-flow fallback: {ex.Message}");
+            return 0;
+        }
+    }
+
+    /// <summary>
+    ///     Applies <see cref="CryptoDataFlowDetail" /> to an analyzed result: <see cref="CryptoDataFlowDetail.Slices" />
+    ///     keeps the slices and only the nodes and edges they reference, <see cref="CryptoDataFlowDetail.None" />
+    ///     drops <see cref="CryptoAnalysisResult.CryptoDataFlows" /> entirely (the slice-id
+    ///     properties on the crypto evidence are already stamped and stay). Split from
+    ///     <see cref="Analyze(string, MethodsSlice, BuildPreparationMode, CryptoDataFlowDetail)" />
+    ///     so the CLI can write graph sidecars from the full graph before trimming; the trimmed
+    ///     graph also stops pinning the full data-flow result through serialization.
+    /// </summary>
+    public static void ApplyDataFlowDetail(CryptoAnalysisResult result, CryptoDataFlowDetail dataFlowDetail)
+    {
+        switch (dataFlowDetail, result.CryptoDataFlows)
+        {
+            case (CryptoDataFlowDetail.None, _):
+                result.CryptoDataFlows = null;
+                break;
+            case (CryptoDataFlowDetail.Slices, { } dataFlows):
+                TrimToReferencedBySlices(dataFlows);
+                break;
+        }
+    }
+
+    /// <summary>
+    ///     <see cref="CryptoDataFlowDetail.Slices" />: keeps the slices and only the nodes and
+    ///     edges they reference (in the result's own order), so every slice and every
+    ///     <c>dosai:crypto:dataFlowSliceIds</c> reference still resolves while the unreferenced
+    ///     bulk of the graph becomes collectable. The statistics are recomputed over the retained
+    ///     collections so the trimmed JSON stays self-consistent.
+    ///     <para>
+    ///         Referential integrity holds for every id-carrying collection, not just the slices:
+    ///         <see cref="PackageReachability.NodeIds" />/<c>EdgeIds</c> and
+    ///         <see cref="DangerousApiReachability.NodeIds" /> are pruned to the retained ids
+    ///         (entries left with no id evidence of any kind are dropped), weakness candidates and
+    ///         exploit chains lose trimmed node refs (<c>SourceId</c>/<c>SinkId</c>,
+    ///         <c>SourceNodeId</c>/<c>SinkNodeId</c> become null - the finding itself stays), and
+    ///         <see cref="SanitizedFlow.SourceIds" /> keeps only retained nodes. Slice ids are
+    ///         never pruned (all slices are kept) and entry-point, weakness and method ids belong
+    ///         to collections trimming does not touch.
+    ///     </para>
+    /// </summary>
+    private static void TrimToReferencedBySlices(DataFlowResult dataFlows)
+    {
+        var referencedNodeIds = new HashSet<string>(StringComparer.Ordinal);
+        var referencedEdgeIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var slice in dataFlows.Slices)
+        {
+            foreach (var nodeId in slice.NodeIds)
+            {
+                referencedNodeIds.Add(nodeId);
+            }
+
+            foreach (var edgeId in slice.EdgeIds)
+            {
+                referencedEdgeIds.Add(edgeId);
+            }
+        }
+
+        dataFlows.Nodes = dataFlows.Nodes.Where(node => referencedNodeIds.Contains(node.Id)).ToList();
+        dataFlows.Edges = dataFlows.Edges.Where(edge => referencedEdgeIds.Contains(edge.Id)).ToList();
+        dataFlows.Statistics.NodeCount = dataFlows.Nodes.Count;
+        dataFlows.Statistics.EdgeCount = dataFlows.Edges.Count;
+        dataFlows.Statistics.SourceCount = dataFlows.Nodes.Count(node => node.IsSource);
+        dataFlows.Statistics.SinkCount = dataFlows.Nodes.Count(node => node.IsSink);
+        foreach (var package in dataFlows.PackageReachability)
+        {
+            package.NodeIds.RemoveAll(id => !referencedNodeIds.Contains(id));
+            package.EdgeIds.RemoveAll(id => !referencedEdgeIds.Contains(id));
+        }
+
+        dataFlows.PackageReachability.RemoveAll(package => package.NodeIds.Count == 0 && package.EdgeIds.Count == 0 && package.SliceIds.Count == 0 && package.EntryPointIds.Count == 0);
+        foreach (var api in dataFlows.DangerousApiReachability)
+        {
+            api.NodeIds.RemoveAll(id => !referencedNodeIds.Contains(id));
+        }
+
+        dataFlows.DangerousApiReachability.RemoveAll(api => api.NodeIds.Count == 0 && api.SliceIds.Count == 0 && api.EntryPointIds.Count == 0);
+        foreach (var weakness in dataFlows.WeaknessCandidates)
+        {
+            if (weakness.SourceId is not null && !referencedNodeIds.Contains(weakness.SourceId)) weakness.SourceId = null;
+            if (weakness.SinkId is not null && !referencedNodeIds.Contains(weakness.SinkId)) weakness.SinkId = null;
+        }
+
+        foreach (var chain in dataFlows.ExploitChains)
+        {
+            if (chain.SourceNodeId is not null && !referencedNodeIds.Contains(chain.SourceNodeId)) chain.SourceNodeId = null;
+            if (chain.SinkNodeId is not null && !referencedNodeIds.Contains(chain.SinkNodeId)) chain.SinkNodeId = null;
+        }
+
+        foreach (var sanitized in dataFlows.SanitizedFlows)
+        {
+            sanitized.SourceIds.RemoveAll(id => !referencedNodeIds.Contains(id));
         }
     }
 
@@ -332,7 +498,9 @@ public static class CryptoAnalyzer
         var partition = ReferenceSources.Partition(csharpTrees);
         csharpTrees = partition.Kept;
         result.Diagnostics.AddRange(ReferenceSources.Diagnostics(partition, TargetFrameworkDetection.ProjectContextRoot(Path.GetFullPath(basePath))));
-        var implicitUsingsTree = CSharpSourceParser.TryCreateImplicitUsingsTree(basePath);
+        var globalUsings = GlobalUsings.Resolve(basePath);
+        result.Diagnostics.AddRange(globalUsings.Diagnostics.Where(diagnostic => !result.Diagnostics.Contains(diagnostic, StringComparer.Ordinal)));
+        var implicitUsingsTree = globalUsings.Tree;
         if (implicitUsingsTree is not null)
         {
             csharpTrees.Insert(0, implicitUsingsTree);
@@ -1037,7 +1205,7 @@ public static class CryptoAnalyzer
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or BadImageFormatException) { diagnostics.Add($"Could not add metadata reference {referencePath}: {ex.Message}"); }
         }
 
-        var frameworkReferences = FrameworkReferences.Current;
+        var frameworkReferences = FrameworkReferences.ForTree(path);
         foreach (var (key, reference) in frameworkReferences.References)
         {
             references.TryAdd(key, reference);
@@ -1052,11 +1220,12 @@ public static class CryptoAnalyzer
         var root = Directory.Exists(path) ? path : Path.GetDirectoryName(path);
         if (!string.IsNullOrWhiteSpace(root) && Directory.Exists(root))
         {
-            foreach (var assembly in SafeFileRead.EnumerateAllFilesSafe(root, "*.dll")) AddReference(assembly);
+            // Never beside the source they were built from (see Dosai.GetSourceMethods).
+            foreach (var assembly in SafeFileRead.EnumerateAllFilesSafe(root, "*.dll").Where(assembly => !TreeFrameworks.IsBuiltFromSource(path, assembly))) AddReference(assembly);
         }
         // Restored-but-unbuilt trees: resolve the same package assemblies the compiler would
         // reference from the NuGet cache, unpinned from bytes (shared folder, never locked).
-        foreach (var cacheAssembly in NuGetRestoreCache.GetReferencePaths(path, references.Keys))
+        foreach (var cacheAssembly in NuGetRestoreCache.GetReferencePaths(path, references.Keys).Where(cacheAssembly => !TreeFrameworks.IsBuiltFromSource(path, cacheAssembly)))
         {
             if (NuGetRestoreCache.TryCreateUnpinnedReference(cacheAssembly) is { } cacheReference && !references.ContainsKey(cacheAssembly))
             {
@@ -1549,11 +1718,31 @@ public static class CryptoBomExporter
         [property: JsonPropertyName("affects")] object Affects,
         [property: JsonPropertyName("properties")] object? Properties);
 
-    public static string Export(CryptoAnalysisResult result, CryptoOutputFormat format) => format switch
+    public static string Export(CryptoAnalysisResult result, CryptoOutputFormat format)
     {
-        CryptoOutputFormat.CycloneDx => ExportCycloneDx(result),
-        _ => JsonSerializer.Serialize(result, JsonOptions)
-    };
+        using var buffer = new MemoryStream();
+        Export(buffer, result, format);
+        return System.Text.Encoding.UTF8.GetString(buffer.ToArray());
+    }
+
+    /// <summary>
+    ///     Serializes straight to <paramref name="stream" />. Both formats used to be built as
+    ///     one string first; on a large tree that string passed the .NET array limit and the
+    ///     crypto command died with OutOfMemoryException (issue #75). The serializer flushes to
+    ///     the stream as it writes, so memory stays bounded by the serializer's own buffer.
+    /// </summary>
+    public static void Export(Stream stream, CryptoAnalysisResult result, CryptoOutputFormat format)
+    {
+        switch (format)
+        {
+            case CryptoOutputFormat.CycloneDx:
+                ExportCycloneDx(stream, result);
+                break;
+            default:
+                JsonSerializer.Serialize(stream, result, JsonOptions);
+                break;
+        }
+    }
 
     /// <summary>
     ///     Emits a CycloneDX 1.6 CBOM. Every emitted key must exist in the 1.6 JSON schema:
@@ -1561,7 +1750,7 @@ public static class CryptoBomExporter
     ///     <c>cryptographic-asset</c> component carries <c>cryptoProperties.assetType</c>. The
     ///     document also declares <c>$schema</c> so strict validators can locate the spec.
     /// </summary>
-    private static string ExportCycloneDx(CryptoAnalysisResult result)
+    private static void ExportCycloneDx(Stream stream, CryptoAnalysisResult result)
     {
         var components = new List<object>();
         components.AddRange(result.Assets.Select(asset => new CycloneDxComponent(
@@ -1710,7 +1899,7 @@ public static class CryptoBomExporter
             ["dependencies"] = dependencies,
             ["vulnerabilities"] = vulnerabilities
         };
-        return JsonSerializer.Serialize(bom, JsonOptions);
+        JsonSerializer.Serialize(stream, bom, JsonOptions);
     }
 
     /// <summary>

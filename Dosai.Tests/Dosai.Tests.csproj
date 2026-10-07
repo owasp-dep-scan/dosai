@@ -24,6 +24,16 @@
   </ItemGroup>
 
   <ItemGroup>
+  <!-- Golden fixtures are analysis inputs, not test code: keep them out of the compilation and
+       copy them next to the test binary. The graph-exports/* files are bytes produced by the
+       main build at 7292446 (see Dosai.Tests/Goldens/README.md) - do not regenerate them with
+       a branch build. -->
+  <Compile Remove="Goldens/**/*.cs" />
+  <None Include="Goldens/**/*.cs" CopyToOutputDirectory="PreserveNewest" />
+  <None Include="Goldens/graph-exports/*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
   <None Include="./../Dosai.TestData/FooBar.cs" CopyToOutputDirectory="PreserveNewest" />
   <None Include="./../Dosai.TestData/HelloWorld.cs" CopyToOutputDirectory="PreserveNewest" />
   <None Include="./../Dosai.TestData/FooBar.vb" CopyToOutputDirectory="PreserveNewest" />

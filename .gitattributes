@@ -1,0 +1,4 @@
+# Golden graph-export bytes and their source fixture must keep the exact bytes they were
+# generated with: core.autocrlf (on by default in Git for Windows) would rewrite the fixture's
+# line endings, which changes the Code text the exporters render, and the goldens' own bytes.
+Dosai.Tests/Goldens/** -text

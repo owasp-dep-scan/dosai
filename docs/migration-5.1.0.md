@@ -203,3 +203,100 @@ number is byte-identical across locales.
 
 Symbol analysis also runs on one worker per processor (`DOSAI_SYMBOL_ANALYSIS_WORKERS` caps it);
 the output is identical for every worker count.
+
+## Crypto output streaming and `--crypto-dataflows` (issue #75)
+
+The `crypto` command serializes both output formats (`dosai` and `cyclonedx`) straight to the
+output file instead of building the document as one string; graph sidecars and the
+methods/dataflows graph exports are written through a `StreamWriter` the same way. Default
+output is byte-identical to the previous string-based path - only `Metadata.GeneratedAt` (and
+the CycloneDX `serialNumber` GUID, both already per-run values) differ between two runs.
+
+A new `crypto` option bounds the output's size on large trees, where `CryptoDataFlows` is
+roughly 90% of the native JSON and the whole-document string passed the .NET array limit and
+crashed with `OutOfMemoryException`:
+
+- `--crypto-dataflows full` (default): unchanged output.
+- `--crypto-dataflows slices`: `CryptoDataFlows.Nodes` and `.Edges` keep only the nodes and edges
+  the slices reference (in result order), so every `DataFlowSliceIds` value on materials,
+  operations, and findings still resolves. `CryptoDataFlows.Statistics.NodeCount`, `EdgeCount`,
+  `SourceCount`, and `SinkCount` are recomputed over the retained collections; `SliceCount` and
+  `FilesAnalyzed` are unchanged. Referential integrity holds for every other id-carrying
+  collection too: `PackageReachability.NodeIds`/`EdgeIds` and `DangerousApiReachability.NodeIds`
+  are pruned to the retained ids and entries left with no id evidence of any kind (no node, edge,
+  slice, or entry-point ids) are dropped; weakness candidates and exploit chains keep their
+  findings but lose trimmed node references (`SourceId`/`SinkId`, `SourceNodeId`/`SinkNodeId`
+  become null); `SanitizedFlow.SourceIds` keeps only retained nodes. The `Reachable` flag,
+  confidence, categories, and locations on retained reachability entries keep describing the
+  full analysis.
+- `--crypto-dataflows none`: the `CryptoDataFlows` property is omitted entirely. The
+  `DataFlowSliceIds` lists, the `dosai:crypto:dataFlowSliceIds`-style properties, and
+  `Statistics` (including `CryptoDataFlowSliceCount`, which still reflects the analysis) are
+  kept; those slice ids intentionally reference the omitted graph.
+
+The option applies to the JSON only. Crypto graph sidecars (`--graph-format`) always carry the
+full graph: they are written before the detail trim, so `--crypto-dataflows none` plus
+`--graph-format` produces sidecars and a graph-less JSON instead of failing after doing all the
+work.
+
+The MCP `dosai.crypto` tool takes the same value as an optional `crypto_dataflows` argument
+(default `full`); unknown values are rejected in both the CLI (parse error) and the MCP tool
+(JSON-RPC error).
+
+Consumers that read only `Assets`, `Operations`, and `Materials` (cdxgen's crypto path) should
+pass `none`.
+
+## Tree framework references and global usings (issue #74)
+
+Calls into ASP.NET Core, Windows Desktop and package APIs now bind on trees that reference
+them, which changes several outputs additively:
+
+- Semantic binding: a Web/Worker/desktop project's calls (`WebApplication.CreateBuilder`,
+  `ILogger.LogWarning`, `UseSerilog`, ...) resolve instead of reporting `SourceUnresolved`, so
+  `MethodCalls`, the call graph, reachability and `PackageReachability` gain edges they never
+  had. `Methods[].MethodCalls` target ids and the `Semantic binding failed for N call sites`
+  counts change accordingly.
+- New `Diagnostics` entries: reference packs used and their versions when not an exact
+  target-major match, assemblies dropped as duplicates between packs, missing packs (with
+  install-the-SDK guidance instead of restore/build advice when restoring cannot help), global
+  usings that differ between projects, stale or multiple `GlobalUsings.g.cs` files, and
+  condition-carrying `<Using>` items that were applied without evaluating the condition.
+- The synthetic implicit-usings tree now follows the project's SDK (base list plus the Web,
+  Worker and Windows Forms additions, `System.Net.Http.Json` on .NET 11+, no `System.Net.Http`
+  on .NET Framework targets) and the project's `<Using>` items, including `Remove` - a project
+  that removes an implicit using no longer binds calls through it. `<Using>` items apply in
+  MSBuild's order (nearest `Directory.Build.props`, the project, nearest
+  `Directory.Build.targets`), `Include`/`Remove` accept `;`-separated lists, and the
+  `global::` prefix in a generated `GlobalUsings.g.cs` is normalized away, so a built and an
+  unbuilt copy of one project no longer count as disagreeing.
+- A target whose own reference pack is not installed binds against the nearest installed major
+  (above before below) for both the base framework and its shared frameworks, named in a
+  diagnostic. It used to fall through to the newest shared runtime for every framework but the
+  base.
+
+## Assembly inspection load sharing (issue #76)
+
+No output change. The methods command loads the inspected files of each directory through
+one shared collectible load context instead of one per assembly, cutting redundant
+dependency loads (on Windows every in-memory load pays an AMSI scan, which dominated the
+phase on large build-output folders). Loading stays by value with `FileShare.ReadWrite |
+FileShare.Delete`, so inspected files stay deletable and replaceable during and after the
+scan. The methods JSON for assembly inputs is byte-identical to the per-assembly contexts -
+verified field-by-field against a copy of the old loop on missing-dependency fixtures and
+byte-for-byte against the per-assembly build (659b86d) on the full OrchardCore web-app output
+(1.4 GB of JSON) and on Dosai's own Release output, on macOS and Windows.
+
+## Large-tree determinism and framework phase (issue #65)
+
+- A metadata reference whose assembly name the tree also builds from source - a framework
+  pack copy (dotnet/runtime builds `Microsoft.Extensions.*` that the ASP.NET Core pack ships),
+  the tree's own `bin/` output (OrchardCore's `src` holds 3,829 of them), or a NuGet cache
+  copy - is no longer added to the source compilation, and `Diagnostics` reports how many were
+  left out. The duplicate types made some calls ambiguous, and Roslyn resolved those by
+  evaluation timing: `MethodCalls`, the call graph and reachability could differ between runs
+  and between worker counts. Those calls now always bind to the source (`Assembly` is the
+  source compilation, `IsInternal` true). Trees without such duplicates are byte-identical to
+  before apart from that diagnostic.
+- No other output change. The framework phase renders tree texts in parallel and gates
+  providers with one vectorized keyword search per list (10.6 s -> 6.8 s on dotnet/runtime's
+  `src`).

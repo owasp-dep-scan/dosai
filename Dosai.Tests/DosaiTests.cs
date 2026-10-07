@@ -4248,6 +4248,126 @@ class CryptoWorkflow
     }
 
     [Fact]
+    public void CryptoExport_DataFlowDetailModes_KeepSliceReferencesResolvable()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "DetailFlow.cs"), """
+using System.Security.Cryptography;
+using System.Text;
+
+class DetailFlow
+{
+    const string ApiKey = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+    static void Main(string[] args) => Hash(ApiKey + args[0]);
+    static byte[] Hash(string secret)
+    {
+        using var md5 = MD5.Create();
+        return md5.ComputeHash(Encoding.UTF8.GetBytes(secret));
+    }
+}
+""");
+
+        var full = CryptoAnalyzer.Analyze(tempDirectory.Path);
+        Assert.NotNull(full.CryptoDataFlows);
+        var fullGraph = full.CryptoDataFlows!;
+        Assert.True(fullGraph.Slices.Count >= 1);
+        Assert.Contains(full.Operations, operation => operation.DataFlowSliceIds.Count > 0);
+
+        // slices: exactly the nodes and edges the slices reference survive, in result order,
+        // and the nested statistics describe the retained collections.
+        var slices = CryptoAnalyzer.Analyze(tempDirectory.Path, BuildPreparationMode.None, CryptoDataFlowDetail.Slices);
+        var trimmedGraph = Assert.IsType<DataFlowResult>(slices.CryptoDataFlows);
+        var referencedNodeIds = new HashSet<string>(fullGraph.Slices.SelectMany(slice => slice.NodeIds), StringComparer.Ordinal);
+        var referencedEdgeIds = new HashSet<string>(fullGraph.Slices.SelectMany(slice => slice.EdgeIds), StringComparer.Ordinal);
+        Assert.Equal(
+            fullGraph.Nodes.Select(node => node.Id).Where(referencedNodeIds.Contains).ToList(),
+            trimmedGraph.Nodes.Select(node => node.Id).ToList());
+        Assert.Equal(
+            fullGraph.Edges.Select(edge => edge.Id).Where(referencedEdgeIds.Contains).ToList(),
+            trimmedGraph.Edges.Select(edge => edge.Id).ToList());
+        Assert.Equal(fullGraph.Slices.Select(slice => slice.Id).ToList(), trimmedGraph.Slices.Select(slice => slice.Id).ToList());
+        Assert.Equal(trimmedGraph.Nodes.Count, trimmedGraph.Statistics.NodeCount);
+        Assert.Equal(trimmedGraph.Edges.Count, trimmedGraph.Statistics.EdgeCount);
+        // Every slice-id property still resolves to a kept slice.
+        var keptSliceIds = trimmedGraph.Slices.Select(slice => slice.Id).ToHashSet(StringComparer.Ordinal);
+        Assert.All(slices.Operations.SelectMany(operation => operation.DataFlowSliceIds), sliceId => Assert.Contains(sliceId, keptSliceIds));
+
+        // none: the graph is gone, but the slice-id properties and the statistics stay.
+        var none = CryptoAnalyzer.Analyze(tempDirectory.Path, BuildPreparationMode.None, CryptoDataFlowDetail.None);
+        Assert.Null(none.CryptoDataFlows);
+        Assert.Equal(full.Statistics.CryptoDataFlowSliceCount, none.Statistics.CryptoDataFlowSliceCount);
+        Assert.Contains(none.Operations, operation => operation.DataFlowSliceIds.Count > 0 && operation.Properties.ContainsKey("dataFlowSliceIds"));
+    }
+
+    [Fact]
+    public void CryptoCli_CryptoDataFlowsOption_ShapesOutputAndRejectsUnknownValues()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "CliDetail.cs"), """
+using System.Security.Cryptography;
+using System.Text;
+
+class CliDetail
+{
+    const string ApiKey = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+    static void Main(string[] args) => Hash(ApiKey + args[0]);
+    static byte[] Hash(string secret)
+    {
+        using var md5 = MD5.Create();
+        return md5.ComputeHash(Encoding.UTF8.GetBytes(secret));
+    }
+}
+""");
+
+        var fullOutput = Path.Combine(tempDirectory.Path, "full.json");
+        var slicesOutput = Path.Combine(tempDirectory.Path, "slices.json");
+        var noneOutput = Path.Combine(tempDirectory.Path, "none.json");
+        var invalidOutput = Path.Combine(tempDirectory.Path, "invalid.json");
+        Assert.Equal(0, CommandLine.Main(["crypto", "--path", tempDirectory.Path, "--o", fullOutput]));
+        Assert.Equal(0, CommandLine.Main(["crypto", "--path", tempDirectory.Path, "--o", slicesOutput, "--crypto-dataflows", "slices"]));
+        Assert.Equal(0, CommandLine.Main(["crypto", "--path", tempDirectory.Path, "--o", noneOutput, "--crypto-dataflows", "none"]));
+        Assert.Equal(1, CommandLine.Main(["crypto", "--path", tempDirectory.Path, "--o", invalidOutput, "--crypto-dataflows", "half"]));
+
+        using var fullDocument = JsonDocument.Parse(File.ReadAllText(fullOutput));
+        var fullSliceCount = fullDocument.RootElement.GetProperty("Statistics").GetProperty("CryptoDataFlowSliceCount").GetInt32();
+        Assert.True(fullSliceCount >= 1);
+        Assert.True(fullDocument.RootElement.TryGetProperty("CryptoDataFlows", out _));
+
+        using var slicesDocument = JsonDocument.Parse(File.ReadAllText(slicesOutput));
+        var slicesGraph = slicesDocument.RootElement.GetProperty("CryptoDataFlows");
+        var keptNodeIds = slicesGraph.GetProperty("Nodes").EnumerateArray().Select(node => node.GetProperty("Id").GetString()!).ToHashSet(StringComparer.Ordinal);
+        var keptSliceIds = slicesGraph.GetProperty("Slices").EnumerateArray().Select(slice => slice.GetProperty("Id").GetString()!).ToHashSet(StringComparer.Ordinal);
+        // Every kept slice's node references resolve, and every slice-id property on the crypto
+        // evidence still points at a kept slice.
+        foreach (var slice in slicesGraph.GetProperty("Slices").EnumerateArray())
+        {
+            Assert.All(slice.GetProperty("NodeIds").EnumerateArray(), nodeId => Assert.Contains(nodeId.GetString()!, keptNodeIds));
+        }
+
+        AssertAllSliceIdPropertiesResolve(slicesDocument.RootElement, keptSliceIds);
+        Assert.Equal(fullSliceCount, slicesDocument.RootElement.GetProperty("Statistics").GetProperty("CryptoDataFlowSliceCount").GetInt32());
+
+        using var noneDocument = JsonDocument.Parse(File.ReadAllText(noneOutput));
+        Assert.False(noneDocument.RootElement.TryGetProperty("CryptoDataFlows", out _));
+        Assert.Equal(fullSliceCount, noneDocument.RootElement.GetProperty("Statistics").GetProperty("CryptoDataFlowSliceCount").GetInt32());
+        Assert.Contains(noneDocument.RootElement.GetProperty("Operations").EnumerateArray(), operation => operation.TryGetProperty("DataFlowSliceIds", out var sliceIds) && sliceIds.GetArrayLength() > 0);
+
+        static void AssertAllSliceIdPropertiesResolve(JsonElement root, HashSet<string> keptSliceIds)
+        {
+            foreach (var property in new[] { "Operations", "Materials", "Findings" })
+            {
+                foreach (var element in root.GetProperty(property).EnumerateArray())
+                {
+                    if (element.TryGetProperty("DataFlowSliceIds", out var sliceIds) && sliceIds.GetArrayLength() > 0)
+                    {
+                        Assert.All(sliceIds.EnumerateArray(), sliceId => Assert.Contains(sliceId.GetString()!, keptSliceIds));
+                    }
+                }
+            }
+        }
+    }
+
+    [Fact]
     public void GetDataFlows_VisualBasic_CliSourceToProcessStart_ReturnsSlice()
     {
         using var tempDirectory = new TemporaryDirectory();
