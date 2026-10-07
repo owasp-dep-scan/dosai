@@ -765,6 +765,7 @@ public partial class DosaiTests
                 deleter.Start();
                 try
                 {
+                    InspectionPhaseWatcher.OwnScan.Value = true;
                     slice = Depscan.Dosai.GetMethodsSlice(output);
                 }
                 catch (Exception e)
@@ -774,6 +775,7 @@ public partial class DosaiTests
             }
             finally
             {
+                InspectionPhaseWatcher.OwnScan.Value = false;
                 DebugLog.Configure(false);
                 Console.SetError(originalError);
             }
@@ -793,9 +795,17 @@ public partial class DosaiTests
             && method.Name == "Name");
     }
 
-    /// <summary>Flips flags when the inspection phase's debug lines pass through stderr.</summary>
+    /// <summary>
+    ///     Flips flags when this test's inspection-phase debug lines pass through stderr. The
+    ///     debug flag and stderr are process-wide, so a test in another collection that runs the
+    ///     methods pipeline meanwhile (crypto builds its reachability from it) writes the same
+    ///     phase lines; they would start or stop the deleter while this scan is in its source
+    ///     phase. Only lines written from this scan's execution context (the analysis threads
+    ///     inherit <see cref="OwnScan" /> when they start) count.
+    /// </summary>
     private sealed class InspectionPhaseWatcher : TextWriter
     {
+        public static readonly AsyncLocal<bool> OwnScan = new();
         public volatile bool InspectionStarted;
         public volatile bool InspectionEnded;
 
@@ -803,7 +813,7 @@ public partial class DosaiTests
 
         public override void WriteLine(string? value)
         {
-            if (value is null)
+            if (value is null || !OwnScan.Value)
             {
                 return;
             }
