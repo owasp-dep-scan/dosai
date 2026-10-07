@@ -300,7 +300,7 @@ public static partial class DataFlowAnalyzer
             }
             visitCounts[visitKey] = visitCount + 1;
 
-            state = state.Clone();
+            // No copy: the queued state is this step's alone (see EnqueueSuccessors).
             var instruction = instructions[instructionIndex];
             var opCode = instruction.OpCode;
             if (opCode == OpCodes.Nop)
@@ -865,7 +865,7 @@ public static partial class DataFlowAnalyzer
             if (visitCount >= 2 || visits.Count > 10000) continue;
             visits[visitKey] = visitCount + 1;
 
-            state = state.Clone();
+            // No copy: the queued state is this step's alone (see EnqueueSummarySuccessors).
             var instruction = instructions[instructionIndex];
             var opCode = instruction.OpCode;
 
@@ -1426,17 +1426,35 @@ public static partial class DataFlowAnalyzer
         return targets;
     }
 
+    /// <summary>
+    ///     Queues the successors of a processed instruction. The dequeued state belongs to this step
+    ///     alone (every queued state is a distinct object), so each successor but the last gets a
+    ///     copy and the last one takes the state over, so straight-line code copies nothing. The
+    ///     queued states and their order are exactly the copy-per-successor ones.
+    /// </summary>
     private static void EnqueueSuccessors(int instructionIndex, AssemblyInstruction instruction, IReadOnlyList<AssemblyInstruction> instructions, IReadOnlyDictionary<int, int> instructionIndexByOffset, IReadOnlyList<ExceptionRegion> exceptionRegions, AssemblyMethodState state, Queue<(int Index, AssemblyMethodState State)> worklist)
     {
+        AssemblySuccessor? pending = null;
         foreach (var successor in GetSuccessorIndexes(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions))
         {
-            var successorState = state.Clone();
-            if (successor.IsExceptionHandler)
-            {
-                PrepareExceptionHandlerState(successorState, successor.RegionKind, CombineAssemblyTaints(state.Stack.Where(taint => taint is not null).Cast<AssemblyTaint>()));
-            }
-            worklist.Enqueue((successor.Index, successorState));
+            if (pending is not null) EnqueueSuccessor(pending, state, state.Clone(), worklist);
+            pending = successor;
         }
+
+        if (pending is not null) EnqueueSuccessor(pending, state, state, worklist);
+    }
+
+    /// <summary>
+    ///     Queues one successor. The handler taint is read from <paramref name="state" /> before
+    ///     <paramref name="successorState" /> (possibly the same object) is prepared.
+    /// </summary>
+    private static void EnqueueSuccessor(AssemblySuccessor successor, AssemblyMethodState state, AssemblyMethodState successorState, Queue<(int Index, AssemblyMethodState State)> worklist)
+    {
+        if (successor.IsExceptionHandler)
+        {
+            PrepareExceptionHandlerState(successorState, successor.RegionKind, CombineAssemblyTaints(state.Stack.Where(taint => taint is not null).Cast<AssemblyTaint>()));
+        }
+        worklist.Enqueue((successor.Index, successorState));
     }
 
 
@@ -1586,34 +1604,60 @@ public static partial class DataFlowAnalyzer
         }
     }
 
+    /// <summary>Like <see cref="EnqueueSuccessors" />, the last handler takes the dequeued state over.</summary>
     private static void EnqueueExceptionSuccessors(AssemblyInstruction instruction, IReadOnlyDictionary<int, int> instructionIndexByOffset, IReadOnlyList<ExceptionRegion> exceptionRegions, AssemblyMethodState state, Queue<(int Index, AssemblyMethodState State)> worklist, AssemblyTaint? thrownTaint)
     {
+        AssemblySuccessor? pending = null;
         foreach (var successor in GetExceptionSuccessorIndexes(instruction, instructionIndexByOffset, exceptionRegions))
         {
-            var successorState = state.Clone();
+            if (pending is not null) EnqueueHandler(pending, state.Clone());
+            pending = successor;
+        }
+
+        if (pending is not null) EnqueueHandler(pending, state);
+
+        void EnqueueHandler(AssemblySuccessor successor, AssemblyMethodState successorState)
+        {
             PrepareExceptionHandlerState(successorState, successor.RegionKind, thrownTaint);
             worklist.Enqueue((successor.Index, successorState));
         }
     }
 
+    /// <summary>The summary interpreter's <see cref="EnqueueSuccessors" />: copies for all successors but the last.</summary>
     private static void EnqueueSummarySuccessors(int instructionIndex, AssemblyInstruction instruction, IReadOnlyList<AssemblyInstruction> instructions, IReadOnlyDictionary<int, int> instructionIndexByOffset, IReadOnlyList<ExceptionRegion> exceptionRegions, AssemblySummaryState state, Queue<(int Index, AssemblySummaryState State)> worklist)
     {
+        AssemblySuccessor? pending = null;
         foreach (var successor in GetSuccessorIndexes(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions))
         {
-            var successorState = state.Clone();
-            if (successor.IsExceptionHandler)
-            {
-                PrepareSummaryExceptionHandlerState(successorState, successor.RegionKind, CombineSummaryTaints(state.Stack.Where(taint => taint is not null).Cast<AssemblySummaryTaint>()));
-            }
-            worklist.Enqueue((successor.Index, successorState));
+            if (pending is not null) EnqueueSummarySuccessor(pending, state, state.Clone(), worklist);
+            pending = successor;
         }
+
+        if (pending is not null) EnqueueSummarySuccessor(pending, state, state, worklist);
+    }
+
+    private static void EnqueueSummarySuccessor(AssemblySuccessor successor, AssemblySummaryState state, AssemblySummaryState successorState, Queue<(int Index, AssemblySummaryState State)> worklist)
+    {
+        if (successor.IsExceptionHandler)
+        {
+            PrepareSummaryExceptionHandlerState(successorState, successor.RegionKind, CombineSummaryTaints(state.Stack.Where(taint => taint is not null).Cast<AssemblySummaryTaint>()));
+        }
+        worklist.Enqueue((successor.Index, successorState));
     }
 
     private static void EnqueueSummaryExceptionSuccessors(AssemblyInstruction instruction, IReadOnlyDictionary<int, int> instructionIndexByOffset, IReadOnlyList<ExceptionRegion> exceptionRegions, AssemblySummaryState state, Queue<(int Index, AssemblySummaryState State)> worklist, AssemblySummaryTaint? thrownTaint)
     {
+        AssemblySuccessor? pending = null;
         foreach (var successor in GetExceptionSuccessorIndexes(instruction, instructionIndexByOffset, exceptionRegions))
         {
-            var successorState = state.Clone();
+            if (pending is not null) EnqueueHandler(pending, state.Clone());
+            pending = successor;
+        }
+
+        if (pending is not null) EnqueueHandler(pending, state);
+
+        void EnqueueHandler(AssemblySuccessor successor, AssemblySummaryState successorState)
+        {
             PrepareSummaryExceptionHandlerState(successorState, successor.RegionKind, thrownTaint);
             worklist.Enqueue((successor.Index, successorState));
         }

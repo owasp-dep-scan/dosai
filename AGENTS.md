@@ -154,7 +154,8 @@ dotnet test ./Dosai.sln
   `GetStackEffect` (`OpCode.StackBehaviourPop`/`Push`, the call-site signature for `calli`).
   A pop count that is too low is not a local error: the abstract stack drifts on every pass
   round a loop, each pass is a new visit key, and the method runs into its state budget with
-  a truncated result.
+  a truncated result. A dequeued worklist state belongs to that step alone - successors get
+  copies except the last, which takes it over - so never enqueue a state and keep mutating it.
 - The methods and data-flow outputs are written by `ParallelJsonWriter`, byte-identical to
   `JsonSerializer.Serialize(stream, value, options)`: the root object and its object-valued
   properties are written from the serializer's contract, and every large `List<T>` is cut into
