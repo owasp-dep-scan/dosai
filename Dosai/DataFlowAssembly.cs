@@ -243,7 +243,7 @@ public static partial class DataFlowAnalyzer
                         continue;
                     }
 
-                    ApplyDefaultListStackBehaviour(instruction.OpCode, stack);
+                    ApplyDefaultListStackBehaviour(reader, instruction, stack);
                 }
             }
             catch
@@ -410,7 +410,7 @@ public static partial class DataFlowAnalyzer
                 continue;
             }
 
-            if (opCode == OpCodes.Stelem || opCode == OpCodes.Stelem_I || opCode == OpCodes.Stelem_I1 || opCode == OpCodes.Stelem_I2 || opCode == OpCodes.Stelem_I4 || opCode == OpCodes.Stelem_I8 || opCode == OpCodes.Stelem_R4 || opCode == OpCodes.Stelem_R8 || opCode == OpCodes.Stelem_Ref)
+            if (IsArrayElementStore(opCode))
             {
                 _ = state.Pop(); // value
                 _ = state.Pop(); // index
@@ -556,7 +556,7 @@ public static partial class DataFlowAnalyzer
                 continue;
             }
 
-            ApplyDefaultStackBehaviour(opCode, state);
+            ApplyDefaultStackBehaviour(reader, instruction, state);
             EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
         }
     }
@@ -617,6 +617,12 @@ public static partial class DataFlowAnalyzer
         opCode == OpCodes.Ldelem_Ref || opCode == OpCodes.Ldelem_U1 || opCode == OpCodes.Ldelem_U2 || opCode == OpCodes.Ldelem_U4 ||
         opCode == OpCodes.Ldelema;
 
+    /// <summary>Array element stores, all of which pop (array, index, value) and push nothing.</summary>
+    private static bool IsArrayElementStore(OpCode opCode) =>
+        opCode == OpCodes.Stelem || opCode == OpCodes.Stelem_I || opCode == OpCodes.Stelem_I1 || opCode == OpCodes.Stelem_I2 ||
+        opCode == OpCodes.Stelem_I4 || opCode == OpCodes.Stelem_I8 || opCode == OpCodes.Stelem_R4 || opCode == OpCodes.Stelem_R8 ||
+        opCode == OpCodes.Stelem_Ref;
+
     /// <summary>Loads through a managed pointer: pops one address, pushes the pointee's value.</summary>
     private static bool IsIndirectLoad(OpCode opCode) =>
         opCode == OpCodes.Ldind_I || opCode == OpCodes.Ldind_I1 || opCode == OpCodes.Ldind_I2 || opCode == OpCodes.Ldind_I4 ||
@@ -645,7 +651,7 @@ public static partial class DataFlowAnalyzer
     {
         if (instruction.Operand is not int token || ResolveMember(reader, token) is not { } member)
         {
-            ApplyDefaultStackBehaviour(opCode, state);
+            ApplyDefaultStackBehaviour(reader, instruction, state);
             return;
         }
 
@@ -906,6 +912,32 @@ public static partial class DataFlowAnalyzer
                 continue;
             }
 
+            // A new array gets an identity of its own (an untainted taint object) so that a store
+            // into one copy of the reference - the dup of an array initializer, a local - reaches
+            // every copy: `return new[] { arg }` returns the argument's taint. Until issue #78
+            // fixed the generic `stelem` stack effect, the operands a store left on the stack made
+            // such returns come out tainted by accident.
+            if (opCode == OpCodes.Newarr)
+            {
+                _ = state.Pop(); // length
+                state.Push(new AssemblySummaryTaint([]));
+                EnqueueSummarySuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
+                continue;
+            }
+
+            if (IsArrayElementStore(opCode))
+            {
+                var value = state.Pop();
+                _ = state.Pop(); // index
+                var array = state.Pop();
+                if (array is not null && value is { ParameterIndexes.Count: > 0 } && CombineSummaryTaints([array, value]) is { } stored)
+                {
+                    state.Replace(array, stored);
+                }
+                EnqueueSummarySuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
+                continue;
+            }
+
             if (opCode == OpCodes.Call || opCode == OpCodes.Callvirt || opCode == OpCodes.Newobj)
             {
                 ProcessAssemblySummaryCall(reader, instruction, opCode, context, state, summaries, summary);
@@ -956,7 +988,7 @@ public static partial class DataFlowAnalyzer
                 continue;
             }
 
-            ApplyDefaultSummaryStackBehaviour(opCode, state);
+            ApplyDefaultSummaryStackBehaviour(reader, instruction, state);
             EnqueueSummarySuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
         }
 
@@ -967,7 +999,7 @@ public static partial class DataFlowAnalyzer
     {
         if (instruction.Operand is not int token || ResolveMember(reader, token) is not { } member)
         {
-            ApplyDefaultSummaryStackBehaviour(opCode, state);
+            ApplyDefaultSummaryStackBehaviour(reader, instruction, state);
             return;
         }
 
@@ -1738,42 +1770,72 @@ public static partial class DataFlowAnalyzer
         }
     }
 
-    private static void ApplyDefaultStackBehaviour(OpCode opCode, AssemblyMethodState state)
+    private static void ApplyDefaultStackBehaviour(MetadataReader reader, AssemblyInstruction instruction, AssemblyMethodState state)
     {
-        var popCount = GetPopCount(opCode.StackBehaviourPop);
+        var (popCount, pushCount) = GetStackEffect(reader, instruction);
         for (var i = 0; i < popCount; i++)
         {
             _ = state.Pop();
         }
 
-        var pushCount = GetPushCount(opCode.StackBehaviourPush);
         for (var i = 0; i < pushCount; i++)
         {
             state.Push(null);
         }
     }
 
-    private static void ApplyDefaultSummaryStackBehaviour(OpCode opCode, AssemblySummaryState state)
+    private static void ApplyDefaultSummaryStackBehaviour(MetadataReader reader, AssemblyInstruction instruction, AssemblySummaryState state)
     {
-        var popCount = GetPopCount(opCode.StackBehaviourPop);
+        var (popCount, pushCount) = GetStackEffect(reader, instruction);
         for (var i = 0; i < popCount; i++)
         {
             _ = state.Pop();
         }
 
-        var pushCount = GetPushCount(opCode.StackBehaviourPush);
         for (var i = 0; i < pushCount; i++)
         {
             state.Push(null);
         }
     }
 
-    private static void ApplyDefaultListStackBehaviour(OpCode opCode, List<AssemblyTaint?> stack)
+    private static void ApplyDefaultListStackBehaviour(MetadataReader reader, AssemblyInstruction instruction, List<AssemblyTaint?> stack)
     {
-        var popCount = GetPopCount(opCode.StackBehaviourPop);
+        var (popCount, pushCount) = GetStackEffect(reader, instruction);
         for (var i = 0; i < popCount && stack.Count > 0; i++) stack.RemoveAt(stack.Count - 1);
-        var pushCount = GetPushCount(opCode.StackBehaviourPush);
         for (var i = 0; i < pushCount; i++) stack.Add(null);
+    }
+
+    /// <summary>
+    ///     How many values an instruction the interpreters do not model pops and pushes. A wrong
+    ///     count is not local: the abstract stack drifts by that much on every pass round a loop,
+    ///     each pass looks like a new state, and the method runs into its state budget with a
+    ///     truncated result (issue #78: a generic <c>stelem</c> left three values per store, so
+    ///     every typed-array loop in a package exhausted the budget). <c>calli</c> pops its
+    ///     call-site signature's arguments (and receiver) plus the function pointer.
+    /// </summary>
+    private static (int Pop, int Push) GetStackEffect(MetadataReader reader, AssemblyInstruction instruction)
+    {
+        if (instruction.OpCode == OpCodes.Calli && instruction.Operand is int token && TryReadStandaloneSignature(reader, token) is { } signature)
+        {
+            return (signature.ParameterCount + (signature.HasThis ? 1 : 0) + 1, signature.ReturnsVoid ? 0 : 1);
+        }
+
+        return (GetPopCount(instruction.OpCode.StackBehaviourPop), GetPushCount(instruction.OpCode.StackBehaviourPush));
+    }
+
+    private static AssemblySignatureInfo? TryReadStandaloneSignature(MetadataReader reader, int token)
+    {
+        try
+        {
+            var handle = MetadataTokens.EntityHandle(token);
+            return handle.Kind == HandleKind.StandaloneSignature
+                ? ReadSignatureInfo(reader, reader.GetStandaloneSignature((StandaloneSignatureHandle)handle).Signature, null)
+                : null;
+        }
+        catch (Exception ex) when (ex is BadImageFormatException or ArgumentException or InvalidCastException)
+        {
+            return null;
+        }
     }
 
     private static int GetPopCount(StackBehaviour behaviour) => behaviour switch
@@ -1781,7 +1843,8 @@ public static partial class DataFlowAnalyzer
         StackBehaviour.Pop0 => 0,
         StackBehaviour.Pop1 or StackBehaviour.Popi or StackBehaviour.Popref => 1,
         StackBehaviour.Pop1_pop1 or StackBehaviour.Popi_pop1 or StackBehaviour.Popi_popi or StackBehaviour.Popi_popi8 or StackBehaviour.Popi_popr4 or StackBehaviour.Popi_popr8 or StackBehaviour.Popref_pop1 or StackBehaviour.Popref_popi => 2,
-        StackBehaviour.Popi_popi_popi or StackBehaviour.Popref_popi_popi or StackBehaviour.Popref_popi_popi8 or StackBehaviour.Popref_popi_popr4 or StackBehaviour.Popref_popi_popr8 or StackBehaviour.Popref_popi_popref => 3,
+        StackBehaviour.Popi_popi_popi or StackBehaviour.Popref_popi_popi or StackBehaviour.Popref_popi_popi8 or StackBehaviour.Popref_popi_popr4 or StackBehaviour.Popref_popi_popr8 or StackBehaviour.Popref_popi_popref or StackBehaviour.Popref_popi_pop1 => 3,
+        // Varpop (call, callvirt, newobj, ret, calli) is decided by the call site, never here.
         _ => 0
     };
 
@@ -2287,6 +2350,17 @@ public static partial class DataFlowAnalyzer
             return value;
         }
         public AssemblySummaryState Clone() => new([.. Stack], new Dictionary<int, AssemblySummaryTaint?>(Locals), new Dictionary<int, AssemblySummaryTaint?>(Arguments));
+
+        /// <summary>Points every copy of <paramref name="value" /> (by reference: one array object) at <paramref name="replacement" />.</summary>
+        public void Replace(AssemblySummaryTaint value, AssemblySummaryTaint replacement)
+        {
+            for (var index = 0; index < Stack.Count; index++)
+            {
+                if (ReferenceEquals(Stack[index], value)) Stack[index] = replacement;
+            }
+            foreach (var slot in Locals.Where(pair => ReferenceEquals(pair.Value, value)).Select(pair => pair.Key).ToList()) Locals[slot] = replacement;
+            foreach (var slot in Arguments.Where(pair => ReferenceEquals(pair.Value, value)).Select(pair => pair.Key).ToList()) Arguments[slot] = replacement;
+        }
         public string Signature() => string.Join('|', Stack.Select(SummaryTaintSignature)) + ";L=" + string.Join(',', Locals.OrderBy(kvp => kvp.Key).Select(kvp => $"{kvp.Key}:{SummaryTaintSignature(kvp.Value)}")) + ";A=" + string.Join(',', Arguments.OrderBy(kvp => kvp.Key).Select(kvp => $"{kvp.Key}:{SummaryTaintSignature(kvp.Value)}"));
     }
 

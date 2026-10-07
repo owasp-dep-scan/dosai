@@ -300,3 +300,16 @@ byte-for-byte against the per-assembly build (659b86d) on the full OrchardCore w
 - No other output change. The framework phase renders tree texts in parallel and gates
   providers with one vectorized keyword search per list (10.6 s -> 6.8 s on dotnet/runtime's
   `src`).
+
+## IL interpreter stack model (issue #78, fix)
+
+A generic `stelem <T>` and `calli` were modelled as popping nothing, so the abstract stack
+grew on every pass round a loop, every pass looked like a new state, and those methods ran
+into the state budget with truncated results (87 summary and 36 interpreter budget hits on the issue's MailKit tree, with
+stacks of up to 4,990 entries). The summary interpreter also models array stores now - a value
+stored into an array taints every copy of the array reference - so `return new[] { arg }`
+summarizes as returning `arg` by design rather than through the leaked stack entries, and
+`void` methods no longer get a spurious return summary. On the issue's tree every slice of the
+earlier output is still produced and one more is found inside MailKit's NTLM code;
+`MethodSummaries` gains 122 entries, refines 17 and drops 5 bogus ones. eShopOnWeb's slices
+are unchanged.

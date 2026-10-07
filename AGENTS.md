@@ -150,6 +150,11 @@ dotnet test ./Dosai.sln
   arrays). Resolve members through `AssemblyScan.Resolve` (memoized per token, so call sites
   share one id string) and source locations through the per-assembly source map (binary search,
   one path and file-name string per document) - never per instruction.
+- The IL interpreters model every opcode they do not handle explicitly through
+  `GetStackEffect` (`OpCode.StackBehaviourPop`/`Push`, the call-site signature for `calli`).
+  A pop count that is too low is not a local error: the abstract stack drifts on every pass
+  round a loop, each pass is a new visit key, and the method runs into its state budget with
+  a truncated result.
 - The methods and data-flow outputs are written by `ParallelJsonWriter`, byte-identical to
   `JsonSerializer.Serialize(stream, value, options)`: the root object and its object-valued
   properties are written from the serializer's contract, and every large `List<T>` is cut into
