@@ -169,13 +169,26 @@ internal static class FrameworkReferences
         var packOrigins = new List<string>();
         var corePackOwnsCorlib = false;
 
-        void AddDirectory(string directory, string origin)
+        var sourceAssemblyNames = TreeFrameworks.SourceAssemblyNames(root);
+        var builtFromSource = new List<string>();
+
+        void AddDirectory(string directory, string origin, bool isBasePack = false)
         {
             var added = 0;
             var dropped = 0;
             foreach (var assemblyPath in Directory.EnumerateFiles(directory, "*" + Constants.AssemblyExtension).Order(StringComparer.Ordinal))
             {
                 var name = Path.GetFileNameWithoutExtension(assemblyPath);
+                // The tree compiles this assembly from source: a pack copy would duplicate its
+                // types in metadata. The base pack is exempt, because the process-wide set fills
+                // the same names anyway and has always stood beside source copies of them.
+                if (!isBasePack && sourceAssemblyNames.Contains(name))
+                {
+                    dropped++;
+                    builtFromSource.Add(name);
+                    continue;
+                }
+
                 if (originByName.TryGetValue(name, out var existing))
                 {
                     dropped++;
@@ -234,6 +247,12 @@ internal static class FrameworkReferences
             {
                 notes.Add($"No reference pack for '{framework.Name}' ({framework.Evidence}) matching '{monikerName}' was found in the installed dotnet packs, the NuGet cache, or the shared frameworks; calls into {framework.Name} do not bind. Installing the SDK or runtime that ships the pack fixes it - restoring or building the tree does not.");
             }
+        }
+
+        if (builtFromSource.Count > 0)
+        {
+            var distinct = builtFromSource.Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.Ordinal).ToList();
+            notes.Add($"{distinct.Count} framework pack assembl{(distinct.Count == 1 ? "y was" : "ies were")} left out because the tree builds {(distinct.Count == 1 ? "it" : "them")} from source ({string.Join(", ", distinct.Take(10))}{(distinct.Count > 10 ? ", ..." : string.Empty)}): a metadata copy beside the source makes their extension methods ambiguous.");
         }
 
         // 3. The process-wide set fills every name the packs did not supply; its dropped

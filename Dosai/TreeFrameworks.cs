@@ -103,6 +103,81 @@ internal static partial class TreeFrameworks
         return frameworks.OrderBy(pair => pair.Key, StringComparer.Ordinal).Select(pair => (pair.Key, pair.Value)).ToList();
     }
 
+    /// <summary>
+    ///     The assembly names the tree builds from source: every project's <c>&lt;AssemblyName&gt;</c>,
+    ///     else its file name (MSBuild's default), for projects outside build output. A
+    ///     framework pack must not supply one of these: the source is already in the
+    ///     compilation, and a second copy in metadata makes every extension method of it
+    ///     ambiguous - which Roslyn then resolves by evaluation timing, so the call graph
+    ///     changed with the worker count (dotnet/runtime builds the Microsoft.Extensions.*
+    ///     assemblies the ASP.NET Core pack also ships).
+    /// </summary>
+    public static IReadOnlySet<string> SourceAssemblyNames(string root)
+    {
+        string key;
+        try
+        {
+            key = TargetFrameworkDetection.ProjectContextRoot(Path.GetFullPath(root));
+        }
+        catch (ArgumentException)
+        {
+            return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        return SourceAssemblyNamesByRoot.GetOrAdd(key, ComputeSourceAssemblyNames);
+    }
+
+    /// <summary>
+    ///     Whether <paramref name="assemblyPath" /> is a metadata copy of an assembly the tree at
+    ///     <paramref name="root" /> builds from source (judged by file name, which is the
+    ///     assembly name for build output and NuGet packages): such a reference must stay out of
+    ///     the source compilation. The tree's own build output under <c>bin/</c> is the common
+    ///     case - OrchardCore's src holds both <c>OrchardCore.AuditTrail.Abstractions.csproj</c>
+    ///     and its built dll, and calls into it bound to one copy or the other from run to run.
+    /// </summary>
+    public static bool IsBuiltFromSource(string root, string assemblyPath) =>
+        SourceAssemblyNames(root).Contains(Path.GetFileNameWithoutExtension(assemblyPath));
+
+    /// <summary>Forgets every per-root answer; the MCP server calls it before each tool call.</summary>
+    internal static void ResetCache() => SourceAssemblyNamesByRoot.Clear();
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, IReadOnlySet<string>> SourceAssemblyNamesByRoot = new(SafeFileRead.PathComparer);
+
+    private static IReadOnlySet<string> ComputeSourceAssemblyNames(string root)
+    {
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (!Directory.Exists(root))
+        {
+            return names;
+        }
+
+        try
+        {
+            foreach (var project in SafeFileRead.EnumerateAllFilesSafe(root, "*.csproj")
+                         .Concat(SafeFileRead.EnumerateAllFilesSafe(root, "*.vbproj"))
+                         .Concat(SafeFileRead.EnumerateAllFilesSafe(root, "*.fsproj"))
+                         .Where(file => !IsUnderBuildDirectory(root, file)))
+            {
+                var name = Path.GetFileNameWithoutExtension(project);
+                if (SafeFileRead.TryReadAllText(project, out var content)
+                    && AssemblyNameRegex().Match(GlobalUsings.WithoutXmlComments(content)) is { Success: true } declared
+                    && declared.Groups[1].Value.Trim() is { Length: > 0 } value
+                    && !value.Contains("$(", StringComparison.Ordinal))
+                {
+                    name = value;
+                }
+
+                names.Add(name);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            // Best effort: an unreadable tree keeps every pack assembly.
+        }
+
+        return names;
+    }
+
     /// <summary>project.assets.json records the frameworks restore resolved per target, including framework references NuGet downloaded.</summary>
     private static void CollectFromAssetsFiles(string root, Dictionary<string, string> frameworks)
     {
@@ -284,4 +359,7 @@ internal static partial class TreeFrameworks
 
     [GeneratedRegex(@"([\w]+)\s*=\s*""([^""]*)""", RegexOptions.CultureInvariant)]
     private static partial Regex AttributeRegex();
+
+    [GeneratedRegex(@"<AssemblyName\b[^>]*>([^<]*)</AssemblyName\s*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex AssemblyNameRegex();
 }

@@ -165,7 +165,9 @@ dotnet test ./Dosai.sln
   `ctx.InvocationsNamed(tree, mayMatch)` when the loop acts only on invocations whose
   `ProviderHelpers.InvocationName` passes `mayMatch` (a tree without such a name is skipped;
   the predicate must admit every name the loop acts on), and gate any other walk on the file
-  text (`TextContainsAny`). Never cache syntax nodes across trees: a node list pins the Roslyn
+  text (`TextContainsAny`: tree texts are rendered once on the worker team and each distinct
+  keyword list is one vectorized ordinal `SearchValues` search; keep its answers exactly the
+  per-keyword `Contains` loop's). Never cache syntax nodes across trees: a node list pins the Roslyn
   red trees the walks let the collector reclaim (2.4 GB on dotnet/runtime).
 - `PackageUrlResolver.Resolve` runs for every method, call, node and edge: keep it free of
   per-call splits, concatenations, substrings, regexes and scans over every known package (it
@@ -247,8 +249,13 @@ dotnet test ./Dosai.sln
   pack of version N carries only `ref/netN.0`: read another major's pack from its own moniker,
   never the analyzed one. A base pack of Dosai's own major is skipped (the process-wide set is
   that major). Per-root caches (`TargetFrameworkDetection`, `GlobalUsings`,
-  `FrameworkReferences.ForTree`) are reset before each MCP tool call; keep any new per-root
-  cache in that reset. Exactly one reference per assembly simple name survives, claimed in a
+  `FrameworkReferences.ForTree`, `TreeFrameworks.SourceAssemblyNames`) are reset before each
+  MCP tool call; keep any new per-root cache in that reset. Never reference a metadata copy of
+  an assembly the tree builds from source (`TreeFrameworks.IsBuiltFromSource`: a project's
+  `<AssemblyName>`, else its file name): not from a pack (the base pack excepted), the tree's
+  own `bin/` output, or the NuGet cache. The duplicate types made calls ambiguous, and Roslyn
+  settled them by evaluation timing, so output changed with the worker count (issue #65 on
+  dotnet/runtime and OrchardCore); the skipped count is a slice diagnostic. Exactly one reference per assembly simple name survives, claimed in a
   fixed order - target-matched `Microsoft.NETCore.App.Ref` (only when its major differs from
   Dosai's own runtime), the tree's other packs sorted by name, then the process-wide set
   filling. When a base reference pack owns the corlib, the fallback must not add its

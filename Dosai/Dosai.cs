@@ -2399,8 +2399,19 @@ public static class Dosai
         }
 
         DebugLog.Count($"framework metadata references ({frameworkReferences.Source})", frameworkReferences.References.Count);
+        // A metadata copy of an assembly the tree builds from source (its own bin/ output, a
+        // NuGet package of the same name) duplicates the source's types: extension calls into
+        // it became ambiguous and bound to either copy depending on evaluation timing, so the
+        // call graph changed between runs (issue #65). The source is the copy analyzed.
+        var builtFromSourceSkipped = 0;
         foreach (var externalAssembly in assembliesToInspect.Where(IsManagedAssembly))
         {
+            if (TreeFrameworks.IsBuiltFromSource(path, externalAssembly))
+            {
+                builtFromSourceSkipped++;
+                continue;
+            }
+
             metadataReferences.TryAdd(externalAssembly, MetadataReference.CreateFromFile(externalAssembly));
         }
         // Restored-but-unbuilt trees: packageFolders plus the per-target compile entries in
@@ -2409,10 +2420,21 @@ public static class Dosai
         // shared packages folder is never locked for the process lifetime.
         foreach (var cacheAssembly in NuGetRestoreCache.GetReferencePaths(path, metadataReferences.Keys))
         {
+            if (TreeFrameworks.IsBuiltFromSource(path, cacheAssembly))
+            {
+                builtFromSourceSkipped++;
+                continue;
+            }
+
             if (NuGetRestoreCache.TryCreateUnpinnedReference(cacheAssembly) is { } cacheReference)
             {
                 metadataReferences.TryAdd(cacheAssembly, cacheReference);
             }
+        }
+
+        if (builtFromSourceSkipped > 0)
+        {
+            mergedDiagnostics.Add(string.Create(CultureInfo.InvariantCulture, $"{builtFromSourceSkipped} assembly reference(s) were left out of the source compilation because the tree builds an assembly of the same name from source; calls into those assemblies bind to the source."));
         }
 
         var referenceList = metadataReferences.Values.ToList();

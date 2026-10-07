@@ -124,6 +124,7 @@ public static class McpServer
         TargetFrameworkDetection.ResetCaches();
         GlobalUsings.ResetCache();
         FrameworkReferences.ResetTreeCache();
+        TreeFrameworks.ResetCache();
         var arguments = GetProperty(parameters.Value, "arguments") ?? default;
         var path = GetString(arguments, "path") ?? defaultPath;
         var localPatterns = GetString(arguments, "patterns") ?? patternsPath;

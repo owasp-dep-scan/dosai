@@ -1220,11 +1220,12 @@ public static class CryptoAnalyzer
         var root = Directory.Exists(path) ? path : Path.GetDirectoryName(path);
         if (!string.IsNullOrWhiteSpace(root) && Directory.Exists(root))
         {
-            foreach (var assembly in SafeFileRead.EnumerateAllFilesSafe(root, "*.dll")) AddReference(assembly);
+            // Never beside the source they were built from (see Dosai.GetSourceMethods).
+            foreach (var assembly in SafeFileRead.EnumerateAllFilesSafe(root, "*.dll").Where(assembly => !TreeFrameworks.IsBuiltFromSource(path, assembly))) AddReference(assembly);
         }
         // Restored-but-unbuilt trees: resolve the same package assemblies the compiler would
         // reference from the NuGet cache, unpinned from bytes (shared folder, never locked).
-        foreach (var cacheAssembly in NuGetRestoreCache.GetReferencePaths(path, references.Keys))
+        foreach (var cacheAssembly in NuGetRestoreCache.GetReferencePaths(path, references.Keys).Where(cacheAssembly => !TreeFrameworks.IsBuiltFromSource(path, cacheAssembly)))
         {
             if (NuGetRestoreCache.TryCreateUnpinnedReference(cacheAssembly) is { } cacheReference && !references.ContainsKey(cacheAssembly))
             {

@@ -285,3 +285,18 @@ scan. The methods JSON for assembly inputs is byte-identical to the per-assembly
 verified field-by-field against a copy of the old loop on missing-dependency fixtures and
 byte-for-byte against the per-assembly build (659b86d) on the full OrchardCore web-app output
 (1.4 GB of JSON) and on Dosai's own Release output, on macOS and Windows.
+
+## Large-tree determinism and framework phase (issue #65)
+
+- A metadata reference whose assembly name the tree also builds from source - a framework
+  pack copy (dotnet/runtime builds `Microsoft.Extensions.*` that the ASP.NET Core pack ships),
+  the tree's own `bin/` output (OrchardCore's `src` holds 3,829 of them), or a NuGet cache
+  copy - is no longer added to the source compilation, and `Diagnostics` reports how many were
+  left out. The duplicate types made some calls ambiguous, and Roslyn resolved those by
+  evaluation timing: `MethodCalls`, the call graph and reachability could differ between runs
+  and between worker counts. Those calls now always bind to the source (`Assembly` is the
+  source compilation, `IsInternal` true). Trees without such duplicates are byte-identical to
+  before apart from that diagnostic.
+- No other output change. The framework phase renders tree texts in parallel and gates
+  providers with one vectorized keyword search per list (10.6 s -> 6.8 s on dotnet/runtime's
+  `src`).
