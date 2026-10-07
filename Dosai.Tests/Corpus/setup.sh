@@ -48,4 +48,74 @@ clone_at_commit \
     "${CORPUS_ROOT}/grpc-dotnet"
 dotnet build "${CORPUS_ROOT}/grpc-dotnet/src/Grpc.Net.Client/Grpc.Net.Client.csproj" -v quiet
 
+echo "==> issue78-mailkit (issue #78 repro: a console app whose only package is MailKit, built into bin/)"
+ISSUE78="${CORPUS_ROOT}/issue78-mailkit"
+mkdir -p "${ISSUE78}"
+cat > "${ISSUE78}/Repro.csproj" <<'CSPROJ'
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MailKit" Version="4.17.0" />
+  </ItemGroup>
+
+</Project>
+CSPROJ
+cat > "${ISSUE78}/Program.cs" <<'PROGRAM'
+using MailKit.Net.Smtp;
+using MimeKit;
+
+var message = new MimeMessage();
+message.From.Add(MailboxAddress.Parse("sender@example.com"));
+message.To.Add(MailboxAddress.Parse(args.Length > 0 ? args[0] : "someone@example.com"));
+message.Subject = "Code " + new Random().Next(1000, 9999);
+message.Body = new TextPart("plain") { Text = "Hello" };
+
+using var client = new SmtpClient();
+client.Connect("localhost", 25);
+client.Send(message);
+client.Disconnect(true);
+PROGRAM
+dotnet build "${ISSUE78}/Repro.csproj" -c Release -v quiet
+
+echo "==> issue79-newtonsoft (issue #79 repro: a console app built into out/, locally and with a /_/ path map)"
+for variant in local pathmap; do
+    ISSUE79="${CORPUS_ROOT}/issue79-newtonsoft/${variant}"
+    mkdir -p "${ISSUE79}"
+    cat > "${ISSUE79}/Repro.csproj" <<'CSPROJ'
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+  </ItemGroup>
+
+</Project>
+CSPROJ
+    cat > "${ISSUE79}/Program.cs" <<'PROGRAM'
+using Newtonsoft.Json;
+
+var json = JsonConvert.SerializeObject(new { Name = args.Length > 0 ? args[0] : "world" });
+Console.WriteLine(json);
+PROGRAM
+    if [ "${variant}" = pathmap ]; then
+        # What ContinuousIntegrationBuild does for a git checkout: the PDB names /_/Program.cs.
+        dotnet build "${ISSUE79}/Repro.csproj" -c Release -o "${ISSUE79}/out" "-p:PathMap=${ISSUE79}/=/_/" -v quiet
+    else
+        dotnet build "${ISSUE79}/Repro.csproj" -c Release -o "${ISSUE79}/out" -v quiet
+    fi
+done
+
 echo "==> Corpus ready at ${CORPUS_ROOT}"

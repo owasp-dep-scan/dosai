@@ -154,6 +154,8 @@ public sealed class CryptoStatistics
     public int FindingCount { get; set; }
     public int ReachableFindingCount { get; set; }
     public int CryptoDataFlowSliceCount { get; set; }
+    /// <summary>Crypto data-flow slices confined to dependency code (issue #78), included in <see cref="CryptoDataFlowSliceCount" />.</summary>
+    public int CryptoDependencyDataFlowSliceCount { get; set; }
 }
 
 public static class CryptoAnalyzer
@@ -312,6 +314,7 @@ public static class CryptoAnalyzer
         {
             cryptoDataFlowSliceCount = AttachCryptoDataFlows(path, result);
         }
+        var cryptoDependencyDataFlowSliceCount = result.CryptoDataFlows?.Statistics.DependencySliceCount ?? 0;
 
         result.Assets = result.Assets.OrderBy(a => a.Location.FileName, StringComparer.Ordinal).ThenBy(a => a.Location.LineNumber).ThenBy(a => a.Id, StringComparer.Ordinal).ToList();
         result.Operations = result.Operations.OrderBy(o => o.Location.FileName, StringComparer.Ordinal).ThenBy(o => o.Location.LineNumber).ThenBy(o => o.Id, StringComparer.Ordinal).ToList();
@@ -327,6 +330,7 @@ public static class CryptoAnalyzer
         // Captured while the data flows were still attached: `none` detail drops them from the
         // result, but the slice count is a fact of the analysis and stays in the statistics.
         result.Statistics.CryptoDataFlowSliceCount = cryptoDataFlowSliceCount;
+        result.Statistics.CryptoDependencyDataFlowSliceCount = cryptoDependencyDataFlowSliceCount;
         if (DebugLog.Enabled)
         {
             DebugLog.Count("crypto assets", result.Statistics.AssetCount);
@@ -336,6 +340,7 @@ public static class CryptoAnalyzer
             DebugLog.Count("crypto findings", result.Statistics.FindingCount);
             DebugLog.Count("crypto findings reachable from an entry point", result.Statistics.ReachableFindingCount);
             DebugLog.Count("crypto data-flow slices", result.Statistics.CryptoDataFlowSliceCount);
+            DebugLog.Count("crypto data-flow slices inside dependency code", result.Statistics.CryptoDependencyDataFlowSliceCount);
         }
 
         // Trimming runs last, after the statistics and debug counts were taken from the full
@@ -1892,7 +1897,8 @@ public static class CryptoBomExporter
                     ["dosai:crypto:materialCount"] = result.Statistics.MaterialCount.ToString(CultureInfo.InvariantCulture),
                     ["dosai:crypto:protocolCount"] = result.Statistics.ProtocolCount.ToString(CultureInfo.InvariantCulture),
                     ["dosai:crypto:findingCount"] = result.Statistics.FindingCount.ToString(CultureInfo.InvariantCulture),
-                    ["dosai:crypto:dataFlowSliceCount"] = result.Statistics.CryptoDataFlowSliceCount.ToString(CultureInfo.InvariantCulture)
+                    ["dosai:crypto:dataFlowSliceCount"] = result.Statistics.CryptoDataFlowSliceCount.ToString(CultureInfo.InvariantCulture),
+                    ["dosai:crypto:dependencyDataFlowSliceCount"] = result.Statistics.CryptoDependencyDataFlowSliceCount > 0 ? result.Statistics.CryptoDependencyDataFlowSliceCount.ToString(CultureInfo.InvariantCulture) : null
                 })
             },
             ["components"] = components,

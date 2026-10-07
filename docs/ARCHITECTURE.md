@@ -108,7 +108,7 @@ Dosai accepts four broad input shapes and normalizes them into one model.
 | `.nupkg` archives       | Temporary extraction        | Relevant entries unpacked to a temp directory, then analyzed as usual     |
 | F#, R, VC++/C/C++       | Dedicated frontends         | Conservative evidence that tolerates missing project metadata             |
 
-The frontends degrade gracefully. When a legacy project cannot compile cleanly because framework assemblies are missing, Roslyn still produces `IInvalidOperation` trees and Dosai matches sinks on syntax as a fallback, so high-value flows survive. Assembly analysis prefers project assemblies over framework internals by reading adjacent `.deps.json` files.
+The frontends degrade gracefully. When a legacy project cannot compile cleanly because framework assemblies are missing, Roslyn still produces `IInvalidOperation` trees and Dosai matches sinks on syntax as a fallback, so high-value flows survive. Assembly analysis tells the scanned application's own assemblies from its dependencies with `.deps.json`: a directory scan keeps the project libraries the root `.deps.json` lists, the methods call graph leaves a source tree's `bin/` to the source, and the data-flow pass reads `bin/` whole so flows through packages stay in the graph. There the nearest `.deps.json` above each assembly decides: its `project` libraries are application code, everything else is a dependency, and a flow confined to dependency code is kept as `Scope: dependency` with its severity capped at low (issue #78).
 
 ```mermaid
 flowchart LR
@@ -116,7 +116,7 @@ flowchart LR
     IL --> Branch["Branch, switch, exception successors"]
     Branch --> Taint["Taint propagation over locals and stack"]
     PDB["Portable PDB"] -->|"sequence points and local scopes"| Taint
-    Deps[".deps.json"] -->|"application scoping"| IL
+    Deps[".deps.json"] -->|"application vs dependency scope"| IL
     Taint --> Slice["Assembly data-flow slices"]
     Taint --> Identity["MethodIdentity with metadata tokens"]
 ```
@@ -233,7 +233,7 @@ The data-flow path is expected to run against whole source trees in CI, so the h
 patterns ──▶ DataFlowPatternIndex ──▶ pre-split by role and hot lookup kind
 syntax   ──▶ cached text per node  ──▶ materialized only for code-like matches
 edges    ──▶ de-duplicated set     ──▶ indexed by source node for slices
-assembly ──▶ .deps.json scoping    ──▶ project assemblies preferred
+assembly ──▶ .deps.json scoping    ──▶ project vs dependency assemblies
 ```
 
 Slice construction walks trace nodes and pulls in-slice edges from the outgoing-edge index, keeping it near-linear in trace size rather than scanning every graph edge per slice. Repository CI runs `dataflows --path ./Dosai` as a scaling regression guard, and the harness documented in `scripts/README.md` measures precision and runtime when the pipeline changes.

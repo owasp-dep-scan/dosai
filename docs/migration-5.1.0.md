@@ -300,3 +300,75 @@ byte-for-byte against the per-assembly build (659b86d) on the full OrchardCore w
 - No other output change. The framework phase renders tree texts in parallel and gates
   providers with one vectorized keyword search per list (10.6 s -> 6.8 s on dotnet/runtime's
   `src`).
+
+## Flows confined to dependency code (issue #78, additive)
+
+In a built source tree the data-flow IL pass reads every assembly under `bin/`, the packages
+included, so flows that pass through package code stay in the graph. A flow whose every node
+lies in a dependency assembly is the package's own behaviour rather than an application
+finding, and is now marked and ranked as such. No slice is dropped.
+
+- An assembly is the application's when the tree builds it from source, or when the nearest
+  `*.deps.json` at or above it (within the scan root) lists it as a `project` library. Every
+  other assembly in that build output is a dependency: packages, runtime packs,
+  `<Reference>` copies, and tools a package drops in a subdirectory. Without a `*.deps.json`
+  (.NET Framework output, loose copies) an assembly is a dependency only when the tree's
+  restore metadata names a package that ships it, by whole name. A scan of a single assembly
+  file treats that file as the application.
+- `DataFlowNode.Properties["scope"]` is `dependency` on IL nodes from a dependency assembly.
+- `DataFlowSlice.Scope` is `dependency` when every node of the slice has that property, and
+  absent otherwise. Such a slice keeps its path, categories and confidence; its `Severity` is
+  capped at `low` and its `Summary` ends with "the flow stays inside dependency code".
+- `WeaknessCandidate.Scope` copies the slice's, with a confidence reason naming the cap.
+- `DataFlowStatistics.DependencySliceCount` counts those slices (included in `SliceCount`);
+  the text tree and the Markdown report show it when it is non-zero, and the report lists
+  application weaknesses before dependency ones.
+- `PackageReachability` from `dataflows`: a package whose every node, edge and slice lies in
+  dependency code is `Low` confidence with the reason "All evidence lies inside dependency
+  code". It used to be `High` from the package's own IL alone.
+- `DangerousApiReachability`: a sink inside dependency IL is `Low` confidence with the
+  evidence line "Sink lies inside dependency code".
+- `agent-context` leaves dependency-scoped weaknesses and slices out of `HighRiskWeaknesses`
+  and `HighRiskSlices`.
+- `diff` keys slices by category pair, and a key now carries the highest severity among its
+  slices, so a dependency slice capped at low cannot mask an application slice of the same
+  shape in `RiskDelta`.
+- Crypto: `Statistics.CryptoDependencyDataFlowSliceCount` (and the CycloneDX metadata property
+  `dosai:crypto:dependencyDataFlowSliceCount` when non-zero) counts the crypto data-flow slices
+  confined to dependency code.
+
+## IL interpreter stack model (issue #78, fix)
+
+A generic `stelem <T>` and `calli` were modelled as popping nothing, so the abstract stack
+grew on every pass round a loop, every pass looked like a new state, and those methods ran
+into the state budget with truncated results (87 summary and 36 interpreter budget hits on the issue's MailKit tree, with
+stacks of up to 4,990 entries). The summary interpreter also models array stores now - a value
+stored into an array taints every copy of the array reference - so `return new[] { arg }`
+summarizes as returning `arg` by design rather than through the leaked stack entries, and
+`void` methods no longer get a spurious return summary. On the issue's tree every slice of the
+earlier output is still produced and one more is found inside MailKit's NTLM code;
+`MethodSummaries` gains 122 entries, refines 17 and drops 5 bogus ones. eShopOnWeb's slices
+are unchanged.
+
+## Call-site paths from assembly IL (issue #79, fix)
+
+A call site found in assembly IL names its source file through the assembly's portable PDB, and
+the PDB records the path the compiler saw. `MethodCalls[].Path` carried that path as it was,
+while the call graph edge beside it and the source analysis row for the same call carried it
+relative to `--path`, so a tree holding a build of its own project listed each call twice, once
+under the build machine's absolute path. Both now carry the same path:
+
+- A file under the scan root is relative to it, as source rows are (`Program.cs`, `out/App.dll`
+  for a call no sequence point covers).
+- A file of an assembly the tree builds from source that lies elsewhere - a deterministic CI
+  build's `/_/src/App/Program.cs`, a build on another machine (`D:\a\repo\src\App\Program.cs` on
+  Linux too) or in another copy of the tree - is placed by the longest tail of its path that
+  names a file under the root. Edges used to drop such paths.
+- Anything else, such as a package's own sources, has no place in the tree: `Path` is omitted on
+  `MethodCalls` as it already was on edges, and `FileName` still names the file.
+- `FileName` of a document recorded in the other file system's form is the file name, not the
+  whole path.
+
+`dataflows` follows the same rule for IL nodes and edges. Their `Path` falls back to the file
+name as edges already did; nodes used to climb out of the root (`../../../_/Program.cs`).
+Consumers that read `MethodCalls[].Path` should fall back to `FileName` when it is absent.

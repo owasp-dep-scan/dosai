@@ -148,6 +148,118 @@ public class CorpusTests
         Assert.Contains(result.AttackSurface, group => group.Exposure.EndsWith("-http", StringComparison.Ordinal));
     }
 
+    // Issue #78: Web's build output holds the projects (Web, Infrastructure, ApplicationCore,
+    // BlazorShared) beside two dozen packages and a Blazor debug-proxy tool that no deps.json
+    // names. Every flow is kept; those confined to dependency code are scoped and capped at low.
+    [SkippableFact]
+    public void Corpus_EShopOnWeb_DependencyFlowsScopedApplicationFlowsKept()
+    {
+        var path = CorpusPathOrSkip("eShopOnWeb/src/Web");
+        var result = DataFlowAnalyzer.Analyze(path);
+
+        // 149 slices at the calibration run, the same set as before the scope existed: 146 inside
+        // packages and the debug proxy, 3 in the app (one source, two Web.dll) at high.
+        Assert.True(result.Slices.Count >= 140, $"expected the full slice set, got {result.Slices.Count}");
+        var applicationSlices = result.Slices.Where(slice => slice.Scope is null).ToList();
+        Assert.True(applicationSlices.Count >= 3, $"expected the app's own slices, got {applicationSlices.Count}");
+        Assert.Contains(applicationSlices, slice => slice.Severity == "high");
+        var dependencySlices = result.Slices.Where(TransparencyBuilder.IsDependencySlice).ToList();
+        Assert.Equal(dependencySlices.Count, result.Statistics.DependencySliceCount);
+        Assert.True(dependencySlices.Count >= 140, $"expected package slices, got {dependencySlices.Count}");
+        Assert.All(dependencySlices, slice => Assert.Contains(slice.Severity, new[] { "info", "low" }));
+
+        // Only the projects' assemblies are application code; the debug-proxy tool (copied by a
+        // package, absent from Web.deps.json) is a dependency.
+        var scopedAssemblies = result.Nodes.Where(TransparencyBuilder.IsDependencyNode).Select(node => node.Properties["assembly"]).ToHashSet(StringComparer.Ordinal);
+        Assert.Contains("NuGet.Packaging.dll", scopedAssemblies);
+        Assert.Contains("BrowserDebugHost.dll", scopedAssemblies);
+        Assert.DoesNotContain("Web.dll", scopedAssemblies);
+        Assert.DoesNotContain("Infrastructure.dll", scopedAssemblies);
+
+        // A package seen only from inside its own IL is Low; one the app's code reaches is not
+        // (12 High and 26 Low at the calibration run).
+        Assert.Equal("Low", Assert.Single(result.PackageReachability, package => package.Purl.StartsWith("pkg:nuget/NuGet.Packaging@", StringComparison.Ordinal)).Confidence);
+        Assert.Equal("High", Assert.Single(result.PackageReachability, package => package.Purl.StartsWith("pkg:nuget/Microsoft.EntityFrameworkCore@", StringComparison.Ordinal)).Confidence);
+    }
+
+    // Issue #78 repro, built by setup.sh: a console app whose only package is MailKit. Every
+    // data-flow slice starts and ends inside BouncyCastle, MailKit or MimeKit.
+    [SkippableFact]
+    public void Corpus_Issue78MailKit_DependencyFlowsKeptAtLowSeverity()
+    {
+        var path = CorpusPathOrSkip("issue78-mailkit");
+        var result = DataFlowAnalyzer.Analyze(path);
+
+        // 174 slices at the calibration run: the 173 of the report plus one inside MailKit's NTLM
+        // code that the summaries find now that array stores are modelled.
+        Assert.True(result.Slices.Count >= 173, $"expected every package flow to be kept, got {result.Slices.Count}");
+        Assert.Equal(result.Slices.Count, result.Statistics.DependencySliceCount);
+        Assert.All(result.Slices, slice =>
+        {
+            Assert.Equal(TransparencyBuilder.DependencyScope, slice.Scope);
+            Assert.Contains(slice.Severity, new[] { "info", "low" });
+        });
+        Assert.All(result.WeaknessCandidates, weakness => Assert.Equal(TransparencyBuilder.DependencyScope, weakness.Scope));
+        Assert.All(result.DangerousApiReachability, api => Assert.Equal("Low", api.Confidence));
+        foreach (var name in new[] { "BouncyCastle.Cryptography", "MailKit", "MimeKit" })
+        {
+            var package = Assert.Single(result.PackageReachability, package => package.Purl.StartsWith($"pkg:nuget/{name}@", StringComparison.Ordinal));
+            Assert.Equal("Low", package.Confidence);
+        }
+
+        // The generic `stelem` drift sent every typed-array loop into the state budget
+        // (87 summary and 36 interpreter budget hits before; 55 and 36 at the calibration run).
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Contains("Org.BouncyCastle.Utilities.Arrays.Reverse", StringComparison.Ordinal));
+        var summaryBudgetHits = result.Diagnostics.Count(diagnostic => diagnostic.StartsWith("IL summary interpreter hit", StringComparison.Ordinal));
+        Assert.True(summaryBudgetHits <= 60, $"expected the drift-free budget profile, got {summaryBudgetHits} summary budget hits");
+    }
+
+    [SkippableFact]
+    public void Corpus_Issue78MailKit_CryptoEvidenceMatchesTheBinExcludedRun()
+    {
+        var path = CorpusPathOrSkip("issue78-mailkit");
+        var full = CryptoAnalyzer.Analyze(path);
+        CryptoAnalysisResult excluded;
+        using (PathExclusions.Apply(path, ["**/bin/**"]))
+        {
+            excluded = CryptoAnalyzer.Analyze(path);
+        }
+
+        // The crypto evidence comes from Program.cs either way; the package flows only add
+        // dependency-scoped slices.
+        Assert.Equal(excluded.Statistics.AssetCount, full.Statistics.AssetCount);
+        Assert.Equal(excluded.Statistics.OperationCount, full.Statistics.OperationCount);
+        Assert.Equal(excluded.Statistics.FindingCount, full.Statistics.FindingCount);
+        Assert.Equal(excluded.Findings.Select(finding => (finding.RuleId, finding.Severity)), full.Findings.Select(finding => (finding.RuleId, finding.Severity)));
+        Assert.True(full.Statistics.CryptoDataFlowSliceCount > 0);
+        Assert.Equal(full.Statistics.CryptoDataFlowSliceCount, full.Statistics.CryptoDependencyDataFlowSliceCount);
+        Assert.Equal(0, excluded.Statistics.CryptoDataFlowSliceCount);
+    }
+
+    // Issue #79 repro, built by setup.sh into out/ twice: a local build, whose PDB names the
+    // absolute source path, and a path-mapped one, whose PDB names /_/Program.cs. The call into
+    // Newtonsoft.Json is found in source and in IL; both rows and the IL edge name Program.cs.
+    [SkippableTheory]
+    [InlineData("local")]
+    [InlineData("pathmap")]
+    public void Corpus_Issue79Newtonsoft_IlCallSitesNameTheSourceRowsFile(string variant)
+    {
+        var path = CorpusPathOrSkip(Path.Combine("issue79-newtonsoft", variant));
+        var slice = JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(path), JsonOptions)!;
+
+        var serializeCalls = slice.MethodCalls!.Where(call => call.ClassName == "JsonConvert" && call.LineNumber == 3).ToList();
+        Assert.Contains(serializeCalls, call => call.EvidenceKind == AnalysisEvidenceKind.SourceRoslynDirect);
+        Assert.Contains(serializeCalls, call => call.EvidenceKind == AnalysisEvidenceKind.AssemblyIlDirect);
+        Assert.All(serializeCalls, call => Assert.Equal("Program.cs", call.Path));
+        Assert.Contains(slice.CallGraph!.Edges, edge => edge.CalledMethodName == "SerializeObject" && edge.EvidenceKind == AnalysisEvidenceKind.AssemblyIlDirect && edge.Path == "Program.cs");
+
+        // No record of the scan names the build machine's path (calls no sequence point covers
+        // name the assembly under out/).
+        Assert.All(slice.MethodCalls!, call => Assert.False(call.Path is not null && (Path.IsPathFullyQualified(call.Path) || call.Path.StartsWith("/_/", StringComparison.Ordinal)), call.Path));
+        Assert.All(slice.CallGraph.Edges, edge => Assert.False(edge.Path is not null && Path.IsPathFullyQualified(edge.Path), edge.Path));
+        Assert.Contains(slice.MethodCalls!, call => call.Path == Path.Combine("out", "Repro.dll"));
+    }
+
     // Added with the target-framework-aware analysis (schema 5.1.0): the corpus previously
     // exercised only net10/net11-era apps, which is how a net8-crashing defect shipped unseen.
     // This is a real .NET 8 LTS app whose TFM comes from src/Directory.Build.props.

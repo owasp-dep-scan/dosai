@@ -243,7 +243,7 @@ public static partial class DataFlowAnalyzer
                         continue;
                     }
 
-                    ApplyDefaultListStackBehaviour(instruction.OpCode, stack);
+                    ApplyDefaultListStackBehaviour(reader, instruction, stack);
                 }
             }
             catch
@@ -300,7 +300,7 @@ public static partial class DataFlowAnalyzer
             }
             visitCounts[visitKey] = visitCount + 1;
 
-            state = state.Clone();
+            // No copy: the queued state is this step's alone (see EnqueueSuccessors).
             var instruction = instructions[instructionIndex];
             var opCode = instruction.OpCode;
             if (opCode == OpCodes.Nop)
@@ -410,7 +410,7 @@ public static partial class DataFlowAnalyzer
                 continue;
             }
 
-            if (opCode == OpCodes.Stelem || opCode == OpCodes.Stelem_I || opCode == OpCodes.Stelem_I1 || opCode == OpCodes.Stelem_I2 || opCode == OpCodes.Stelem_I4 || opCode == OpCodes.Stelem_I8 || opCode == OpCodes.Stelem_R4 || opCode == OpCodes.Stelem_R8 || opCode == OpCodes.Stelem_Ref)
+            if (IsArrayElementStore(opCode))
             {
                 _ = state.Pop(); // value
                 _ = state.Pop(); // index
@@ -556,7 +556,7 @@ public static partial class DataFlowAnalyzer
                 continue;
             }
 
-            ApplyDefaultStackBehaviour(opCode, state);
+            ApplyDefaultStackBehaviour(reader, instruction, state);
             EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
         }
     }
@@ -617,6 +617,12 @@ public static partial class DataFlowAnalyzer
         opCode == OpCodes.Ldelem_Ref || opCode == OpCodes.Ldelem_U1 || opCode == OpCodes.Ldelem_U2 || opCode == OpCodes.Ldelem_U4 ||
         opCode == OpCodes.Ldelema;
 
+    /// <summary>Array element stores, all of which pop (array, index, value) and push nothing.</summary>
+    private static bool IsArrayElementStore(OpCode opCode) =>
+        opCode == OpCodes.Stelem || opCode == OpCodes.Stelem_I || opCode == OpCodes.Stelem_I1 || opCode == OpCodes.Stelem_I2 ||
+        opCode == OpCodes.Stelem_I4 || opCode == OpCodes.Stelem_I8 || opCode == OpCodes.Stelem_R4 || opCode == OpCodes.Stelem_R8 ||
+        opCode == OpCodes.Stelem_Ref;
+
     /// <summary>Loads through a managed pointer: pops one address, pushes the pointee's value.</summary>
     private static bool IsIndirectLoad(OpCode opCode) =>
         opCode == OpCodes.Ldind_I || opCode == OpCodes.Ldind_I1 || opCode == OpCodes.Ldind_I2 || opCode == OpCodes.Ldind_I4 ||
@@ -645,7 +651,7 @@ public static partial class DataFlowAnalyzer
     {
         if (instruction.Operand is not int token || ResolveMember(reader, token) is not { } member)
         {
-            ApplyDefaultStackBehaviour(opCode, state);
+            ApplyDefaultStackBehaviour(reader, instruction, state);
             return;
         }
 
@@ -859,7 +865,7 @@ public static partial class DataFlowAnalyzer
             if (visitCount >= 2 || visits.Count > 10000) continue;
             visits[visitKey] = visitCount + 1;
 
-            state = state.Clone();
+            // No copy: the queued state is this step's alone (see EnqueueSummarySuccessors).
             var instruction = instructions[instructionIndex];
             var opCode = instruction.OpCode;
 
@@ -902,6 +908,32 @@ public static partial class DataFlowAnalyzer
             {
                 _ = state.Pop();
                 state.Push(state.Pop());
+                EnqueueSummarySuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
+                continue;
+            }
+
+            // A new array gets an identity of its own (an untainted taint object) so that a store
+            // into one copy of the reference - the dup of an array initializer, a local - reaches
+            // every copy: `return new[] { arg }` returns the argument's taint. Until issue #78
+            // fixed the generic `stelem` stack effect, the operands a store left on the stack made
+            // such returns come out tainted by accident.
+            if (opCode == OpCodes.Newarr)
+            {
+                _ = state.Pop(); // length
+                state.Push(new AssemblySummaryTaint([]));
+                EnqueueSummarySuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
+                continue;
+            }
+
+            if (IsArrayElementStore(opCode))
+            {
+                var value = state.Pop();
+                _ = state.Pop(); // index
+                var array = state.Pop();
+                if (array is not null && value is { ParameterIndexes.Count: > 0 } && CombineSummaryTaints([array, value]) is { } stored)
+                {
+                    state.Replace(array, stored);
+                }
                 EnqueueSummarySuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
                 continue;
             }
@@ -956,7 +988,7 @@ public static partial class DataFlowAnalyzer
                 continue;
             }
 
-            ApplyDefaultSummaryStackBehaviour(opCode, state);
+            ApplyDefaultSummaryStackBehaviour(reader, instruction, state);
             EnqueueSummarySuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
         }
 
@@ -967,7 +999,7 @@ public static partial class DataFlowAnalyzer
     {
         if (instruction.Operand is not int token || ResolveMember(reader, token) is not { } member)
         {
-            ApplyDefaultSummaryStackBehaviour(opCode, state);
+            ApplyDefaultSummaryStackBehaviour(reader, instruction, state);
             return;
         }
 
@@ -1394,17 +1426,35 @@ public static partial class DataFlowAnalyzer
         return targets;
     }
 
+    /// <summary>
+    ///     Queues the successors of a processed instruction. The dequeued state belongs to this step
+    ///     alone (every queued state is a distinct object), so each successor but the last gets a
+    ///     copy and the last one takes the state over, so straight-line code copies nothing. The
+    ///     queued states and their order are exactly the copy-per-successor ones.
+    /// </summary>
     private static void EnqueueSuccessors(int instructionIndex, AssemblyInstruction instruction, IReadOnlyList<AssemblyInstruction> instructions, IReadOnlyDictionary<int, int> instructionIndexByOffset, IReadOnlyList<ExceptionRegion> exceptionRegions, AssemblyMethodState state, Queue<(int Index, AssemblyMethodState State)> worklist)
     {
+        AssemblySuccessor? pending = null;
         foreach (var successor in GetSuccessorIndexes(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions))
         {
-            var successorState = state.Clone();
-            if (successor.IsExceptionHandler)
-            {
-                PrepareExceptionHandlerState(successorState, successor.RegionKind, CombineAssemblyTaints(state.Stack.Where(taint => taint is not null).Cast<AssemblyTaint>()));
-            }
-            worklist.Enqueue((successor.Index, successorState));
+            if (pending is not null) EnqueueSuccessor(pending, state, state.Clone(), worklist);
+            pending = successor;
         }
+
+        if (pending is not null) EnqueueSuccessor(pending, state, state, worklist);
+    }
+
+    /// <summary>
+    ///     Queues one successor. The handler taint is read from <paramref name="state" /> before
+    ///     <paramref name="successorState" /> (possibly the same object) is prepared.
+    /// </summary>
+    private static void EnqueueSuccessor(AssemblySuccessor successor, AssemblyMethodState state, AssemblyMethodState successorState, Queue<(int Index, AssemblyMethodState State)> worklist)
+    {
+        if (successor.IsExceptionHandler)
+        {
+            PrepareExceptionHandlerState(successorState, successor.RegionKind, CombineAssemblyTaints(state.Stack.Where(taint => taint is not null).Cast<AssemblyTaint>()));
+        }
+        worklist.Enqueue((successor.Index, successorState));
     }
 
 
@@ -1554,34 +1604,60 @@ public static partial class DataFlowAnalyzer
         }
     }
 
+    /// <summary>Like <see cref="EnqueueSuccessors" />, the last handler takes the dequeued state over.</summary>
     private static void EnqueueExceptionSuccessors(AssemblyInstruction instruction, IReadOnlyDictionary<int, int> instructionIndexByOffset, IReadOnlyList<ExceptionRegion> exceptionRegions, AssemblyMethodState state, Queue<(int Index, AssemblyMethodState State)> worklist, AssemblyTaint? thrownTaint)
     {
+        AssemblySuccessor? pending = null;
         foreach (var successor in GetExceptionSuccessorIndexes(instruction, instructionIndexByOffset, exceptionRegions))
         {
-            var successorState = state.Clone();
+            if (pending is not null) EnqueueHandler(pending, state.Clone());
+            pending = successor;
+        }
+
+        if (pending is not null) EnqueueHandler(pending, state);
+
+        void EnqueueHandler(AssemblySuccessor successor, AssemblyMethodState successorState)
+        {
             PrepareExceptionHandlerState(successorState, successor.RegionKind, thrownTaint);
             worklist.Enqueue((successor.Index, successorState));
         }
     }
 
+    /// <summary>The summary interpreter's <see cref="EnqueueSuccessors" />: copies for all successors but the last.</summary>
     private static void EnqueueSummarySuccessors(int instructionIndex, AssemblyInstruction instruction, IReadOnlyList<AssemblyInstruction> instructions, IReadOnlyDictionary<int, int> instructionIndexByOffset, IReadOnlyList<ExceptionRegion> exceptionRegions, AssemblySummaryState state, Queue<(int Index, AssemblySummaryState State)> worklist)
     {
+        AssemblySuccessor? pending = null;
         foreach (var successor in GetSuccessorIndexes(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions))
         {
-            var successorState = state.Clone();
-            if (successor.IsExceptionHandler)
-            {
-                PrepareSummaryExceptionHandlerState(successorState, successor.RegionKind, CombineSummaryTaints(state.Stack.Where(taint => taint is not null).Cast<AssemblySummaryTaint>()));
-            }
-            worklist.Enqueue((successor.Index, successorState));
+            if (pending is not null) EnqueueSummarySuccessor(pending, state, state.Clone(), worklist);
+            pending = successor;
         }
+
+        if (pending is not null) EnqueueSummarySuccessor(pending, state, state, worklist);
+    }
+
+    private static void EnqueueSummarySuccessor(AssemblySuccessor successor, AssemblySummaryState state, AssemblySummaryState successorState, Queue<(int Index, AssemblySummaryState State)> worklist)
+    {
+        if (successor.IsExceptionHandler)
+        {
+            PrepareSummaryExceptionHandlerState(successorState, successor.RegionKind, CombineSummaryTaints(state.Stack.Where(taint => taint is not null).Cast<AssemblySummaryTaint>()));
+        }
+        worklist.Enqueue((successor.Index, successorState));
     }
 
     private static void EnqueueSummaryExceptionSuccessors(AssemblyInstruction instruction, IReadOnlyDictionary<int, int> instructionIndexByOffset, IReadOnlyList<ExceptionRegion> exceptionRegions, AssemblySummaryState state, Queue<(int Index, AssemblySummaryState State)> worklist, AssemblySummaryTaint? thrownTaint)
     {
+        AssemblySuccessor? pending = null;
         foreach (var successor in GetExceptionSuccessorIndexes(instruction, instructionIndexByOffset, exceptionRegions))
         {
-            var successorState = state.Clone();
+            if (pending is not null) EnqueueHandler(pending, state.Clone());
+            pending = successor;
+        }
+
+        if (pending is not null) EnqueueHandler(pending, state);
+
+        void EnqueueHandler(AssemblySuccessor successor, AssemblySummaryState successorState)
+        {
             PrepareSummaryExceptionHandlerState(successorState, successor.RegionKind, thrownTaint);
             worklist.Enqueue((successor.Index, successorState));
         }
@@ -1738,42 +1814,72 @@ public static partial class DataFlowAnalyzer
         }
     }
 
-    private static void ApplyDefaultStackBehaviour(OpCode opCode, AssemblyMethodState state)
+    private static void ApplyDefaultStackBehaviour(MetadataReader reader, AssemblyInstruction instruction, AssemblyMethodState state)
     {
-        var popCount = GetPopCount(opCode.StackBehaviourPop);
+        var (popCount, pushCount) = GetStackEffect(reader, instruction);
         for (var i = 0; i < popCount; i++)
         {
             _ = state.Pop();
         }
 
-        var pushCount = GetPushCount(opCode.StackBehaviourPush);
         for (var i = 0; i < pushCount; i++)
         {
             state.Push(null);
         }
     }
 
-    private static void ApplyDefaultSummaryStackBehaviour(OpCode opCode, AssemblySummaryState state)
+    private static void ApplyDefaultSummaryStackBehaviour(MetadataReader reader, AssemblyInstruction instruction, AssemblySummaryState state)
     {
-        var popCount = GetPopCount(opCode.StackBehaviourPop);
+        var (popCount, pushCount) = GetStackEffect(reader, instruction);
         for (var i = 0; i < popCount; i++)
         {
             _ = state.Pop();
         }
 
-        var pushCount = GetPushCount(opCode.StackBehaviourPush);
         for (var i = 0; i < pushCount; i++)
         {
             state.Push(null);
         }
     }
 
-    private static void ApplyDefaultListStackBehaviour(OpCode opCode, List<AssemblyTaint?> stack)
+    private static void ApplyDefaultListStackBehaviour(MetadataReader reader, AssemblyInstruction instruction, List<AssemblyTaint?> stack)
     {
-        var popCount = GetPopCount(opCode.StackBehaviourPop);
+        var (popCount, pushCount) = GetStackEffect(reader, instruction);
         for (var i = 0; i < popCount && stack.Count > 0; i++) stack.RemoveAt(stack.Count - 1);
-        var pushCount = GetPushCount(opCode.StackBehaviourPush);
         for (var i = 0; i < pushCount; i++) stack.Add(null);
+    }
+
+    /// <summary>
+    ///     How many values an instruction the interpreters do not model pops and pushes. A wrong
+    ///     count is not local: the abstract stack drifts by that much on every pass round a loop,
+    ///     each pass looks like a new state, and the method runs into its state budget with a
+    ///     truncated result (issue #78: a generic <c>stelem</c> left three values per store, so
+    ///     every typed-array loop in a package exhausted the budget). <c>calli</c> pops its
+    ///     call-site signature's arguments (and receiver) plus the function pointer.
+    /// </summary>
+    private static (int Pop, int Push) GetStackEffect(MetadataReader reader, AssemblyInstruction instruction)
+    {
+        if (instruction.OpCode == OpCodes.Calli && instruction.Operand is int token && TryReadStandaloneSignature(reader, token) is { } signature)
+        {
+            return (signature.ParameterCount + (signature.HasThis ? 1 : 0) + 1, signature.ReturnsVoid ? 0 : 1);
+        }
+
+        return (GetPopCount(instruction.OpCode.StackBehaviourPop), GetPushCount(instruction.OpCode.StackBehaviourPush));
+    }
+
+    private static AssemblySignatureInfo? TryReadStandaloneSignature(MetadataReader reader, int token)
+    {
+        try
+        {
+            var handle = MetadataTokens.EntityHandle(token);
+            return handle.Kind == HandleKind.StandaloneSignature
+                ? ReadSignatureInfo(reader, reader.GetStandaloneSignature((StandaloneSignatureHandle)handle).Signature, null)
+                : null;
+        }
+        catch (Exception ex) when (ex is BadImageFormatException or ArgumentException or InvalidCastException)
+        {
+            return null;
+        }
     }
 
     private static int GetPopCount(StackBehaviour behaviour) => behaviour switch
@@ -1781,7 +1887,8 @@ public static partial class DataFlowAnalyzer
         StackBehaviour.Pop0 => 0,
         StackBehaviour.Pop1 or StackBehaviour.Popi or StackBehaviour.Popref => 1,
         StackBehaviour.Pop1_pop1 or StackBehaviour.Popi_pop1 or StackBehaviour.Popi_popi or StackBehaviour.Popi_popi8 or StackBehaviour.Popi_popr4 or StackBehaviour.Popi_popr8 or StackBehaviour.Popref_pop1 or StackBehaviour.Popref_popi => 2,
-        StackBehaviour.Popi_popi_popi or StackBehaviour.Popref_popi_popi or StackBehaviour.Popref_popi_popi8 or StackBehaviour.Popref_popi_popr4 or StackBehaviour.Popref_popi_popr8 or StackBehaviour.Popref_popi_popref => 3,
+        StackBehaviour.Popi_popi_popi or StackBehaviour.Popref_popi_popi or StackBehaviour.Popref_popi_popi8 or StackBehaviour.Popref_popi_popr4 or StackBehaviour.Popref_popi_popr8 or StackBehaviour.Popref_popi_popref or StackBehaviour.Popref_popi_pop1 => 3,
+        // Varpop (call, callvirt, newobj, ret, calli) is decided by the call site, never here.
         _ => 0
     };
 
@@ -1932,6 +2039,28 @@ public static partial class DataFlowAnalyzer
         private readonly DataFlowPatternIndex _patternIndex = new(patterns);
         private readonly PackageUrlResolver _purlResolver = PackageUrlResolver.Create(basePath);
         private readonly Dictionary<string, AssemblyTaint> _fieldTaints = new(StringComparer.Ordinal);
+        private DependencyAssemblies? _dependencies;
+        private readonly string? _treeRoot = SourceDocumentPaths.Root(basePath);
+        private readonly Dictionary<(string Document, string Assembly), string> _treePaths = [];
+
+        private DependencyAssemblies Dependencies => _dependencies ??= new DependencyAssemblies(basePath, _purlResolver);
+
+        /// <summary>
+        ///     A node's or edge's file (a PDB document, or the assembly where no sequence point
+        ///     covers the offset) relative to the scan root, else its file name: the same answer for
+        ///     a node and the edges beside it (issue #79).
+        /// </summary>
+        private string TreePath(string filePath, string assemblyPath)
+        {
+            if (!_treePaths.TryGetValue((filePath, assemblyPath), out var path))
+            {
+                var builtFromSource = _treeRoot is not null && TreeFrameworks.IsBuiltFromSource(_treeRoot, assemblyPath);
+                path = SourceDocumentPaths.InTree(_treeRoot, filePath, builtFromSource) ?? SourceDocumentPaths.FileName(filePath);
+                _treePaths.Add((filePath, assemblyPath), path);
+            }
+
+            return path;
+        }
 
         public IEnumerable<DataFlowPattern> MatchParameterSource(string parameterName, AssemblyMethodInfo method)
         {
@@ -2015,7 +2144,7 @@ public static partial class DataFlowAnalyzer
                 return existingNode;
             }
 
-            var path = Directory.Exists(basePath) ? Path.GetRelativePath(basePath, location.FilePath) : Path.GetFileName(location.FilePath);
+            var path = TreePath(location.FilePath, assemblyKey);
             var purl = matchedPatterns.Select(pattern => pattern.Purl).FirstOrDefault(purl => !string.IsNullOrWhiteSpace(purl)) ??
                        _purlResolver.Resolve(method.AssemblyName, Path.GetFileName(assemblyPath), symbol, method.Namespace, typeName, assemblyPath);
             var node = new DataFlowNode
@@ -2028,7 +2157,7 @@ public static partial class DataFlowAnalyzer
                 Purl = purl,
                 Code = TrimAssemblyCode(code ?? symbol ?? name),
                 Path = path,
-                FileName = Path.GetFileName(location.FilePath),
+                FileName = SourceDocumentPaths.FileName(location.FilePath),
                 Namespace = method.Namespace,
                 ClassName = method.ContainingType.Split('.').LastOrDefault() ?? method.ContainingType,
                 MethodName = method.Name,
@@ -2046,7 +2175,7 @@ public static partial class DataFlowAnalyzer
                         Kind = AnalysisEvidenceKind.AssemblyIlDirect,
                         Source = "assembly-il",
                         Description = "Data-flow node discovered from assembly IL analysis.",
-                        FileName = Path.GetFileName(location.FilePath),
+                        FileName = SourceDocumentPaths.FileName(location.FilePath),
                         LineNumber = location.LineNumber,
                         ColumnNumber = location.ColumnNumber
                     }
@@ -2060,6 +2189,10 @@ public static partial class DataFlowAnalyzer
                     ["metadataToken"] = $"0x{method.MetadataToken:x8}"
                 }
             };
+            if (Dependencies.IsDependency(assemblyKey))
+            {
+                node.Properties[TransparencyBuilder.ScopeProperty] = TransparencyBuilder.DependencyScope;
+            }
             result.Nodes.Add(node);
             _nodesById[node.Id] = node;
             _nodesByKey[nodeKey] = node;
@@ -2086,8 +2219,8 @@ public static partial class DataFlowAnalyzer
                     Label = label,
                     SourcePurl = _nodesById.TryGetValue(sourceId, out var sourceNode) ? sourceNode.Purl : null,
                     TargetPurl = _nodesById.TryGetValue(targetId, out var targetNode) ? targetNode.Purl : null,
-                    Path = SafeRelativeSourcePath(basePath, location.FilePath),
-                    FileName = Path.GetFileName(location.FilePath),
+                    Path = TreePath(location.FilePath, string.IsNullOrWhiteSpace(method.AssemblyPath) ? assemblyPath : method.AssemblyPath),
+                    FileName = SourceDocumentPaths.FileName(location.FilePath),
                     LineNumber = location.LineNumber,
                     ColumnNumber = location.ColumnNumber
                 };
@@ -2133,6 +2266,12 @@ public static partial class DataFlowAnalyzer
             var guardDependentNote = guardDependent
                 ? "; parser hardening is not observable in IL, so this flow is unconfirmed"
                 : string.Empty;
+
+            // A flow whose every node lies in a dependency assembly is the package's own
+            // behaviour (issue #78): it stays in the graph, scoped and capped at low severity.
+            var dependencyScoped = sliceNodes.Count > 0 && sliceNodes.All(node => TransparencyBuilder.IsDependencyNode(node!));
+            var severity = TransparencyBuilder.SeverityForPattern(sliceCategory, sinkPattern?.Severity, effectiveConfidence);
+            var dependencyNote = dependencyScoped ? "; the flow stays inside dependency code" : string.Empty;
             result.Slices.Add(new DataFlowSlice
             {
                 Id = $"dfs{++_sliceCounter}",
@@ -2150,10 +2289,11 @@ public static partial class DataFlowAnalyzer
                 TaintKinds = trace.TaintKinds.Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
                 FieldPaths = trace.FieldPaths.Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
                 Confidence = effectiveConfidence,
-                Severity = TransparencyBuilder.SeverityForPattern(sliceCategory, sinkPattern?.Severity, effectiveConfidence),
+                Severity = dependencyScoped ? TransparencyBuilder.DependencySeverity(severity) : severity,
                 // Invariant culture, matching the source-mode summaries: a negative argument
                 // index must not pick up a locale minus sign (issue #63).
-                Summary = string.Create(CultureInfo.InvariantCulture, $"Assembly IL data flows from {firstSource} to {sinkNode.Name} argument {sinkArgumentIndex}{guardDependentNote}.")
+                Summary = string.Create(CultureInfo.InvariantCulture, $"Assembly IL data flows from {firstSource} to {sinkNode.Name} argument {sinkArgumentIndex}{guardDependentNote}{dependencyNote}."),
+                Scope = dependencyScoped ? TransparencyBuilder.DependencyScope : null
             });
         }
 
@@ -2161,22 +2301,6 @@ public static partial class DataFlowAnalyzer
         {
             code = code.Replace("\r", " ", StringComparison.Ordinal).Replace("\n", " ", StringComparison.Ordinal).Trim();
             return code.Length <= 240 ? code : code[..240] + "…";
-        }
-
-        private static string SafeRelativeSourcePath(string inspectedPath, string sourcePath)
-        {
-            var root = Directory.Exists(inspectedPath) ? inspectedPath : Path.GetDirectoryName(inspectedPath);
-            if (string.IsNullOrWhiteSpace(root)) return Path.GetFileName(sourcePath);
-            try
-            {
-                var relative = Path.GetRelativePath(Path.GetFullPath(root), Path.GetFullPath(sourcePath));
-                if (string.IsNullOrWhiteSpace(relative) || Path.IsPathFullyQualified(relative) || relative == ".." || relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal) || relative.StartsWith($"..{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal)) return Path.GetFileName(sourcePath);
-                return relative;
-            }
-            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
-            {
-                return Path.GetFileName(sourcePath);
-            }
         }
     }
 
@@ -2287,6 +2411,17 @@ public static partial class DataFlowAnalyzer
             return value;
         }
         public AssemblySummaryState Clone() => new([.. Stack], new Dictionary<int, AssemblySummaryTaint?>(Locals), new Dictionary<int, AssemblySummaryTaint?>(Arguments));
+
+        /// <summary>Points every copy of <paramref name="value" /> (by reference: one array object) at <paramref name="replacement" />.</summary>
+        public void Replace(AssemblySummaryTaint value, AssemblySummaryTaint replacement)
+        {
+            for (var index = 0; index < Stack.Count; index++)
+            {
+                if (ReferenceEquals(Stack[index], value)) Stack[index] = replacement;
+            }
+            foreach (var slot in Locals.Where(pair => ReferenceEquals(pair.Value, value)).Select(pair => pair.Key).ToList()) Locals[slot] = replacement;
+            foreach (var slot in Arguments.Where(pair => ReferenceEquals(pair.Value, value)).Select(pair => pair.Key).ToList()) Arguments[slot] = replacement;
+        }
         public string Signature() => string.Join('|', Stack.Select(SummaryTaintSignature)) + ";L=" + string.Join(',', Locals.OrderBy(kvp => kvp.Key).Select(kvp => $"{kvp.Key}:{SummaryTaintSignature(kvp.Value)}")) + ";A=" + string.Join(',', Arguments.OrderBy(kvp => kvp.Key).Select(kvp => $"{kvp.Key}:{SummaryTaintSignature(kvp.Value)}"));
     }
 

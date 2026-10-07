@@ -435,6 +435,16 @@ public sealed partial class PackageUrlResolver
     }
 
     /// <summary>
+    ///     The purl of the package that ships the assembly at <paramref name="assemblyPath" />, by its
+    ///     whole simple name (an asset a restore output lists, else a package of that name), its
+    ///     own project's tables first; null when no restore metadata of the tree names it. Unlike
+    ///     <see cref="Resolve" /> there is no qualified-name fallback: <c>Contoso.Serilog.Tools.dll</c>
+    ///     is not Serilog's.
+    /// </summary>
+    public string? ResolvePackagedAssembly(string assemblyPath) =>
+        TryResolveAssembly(TablesForLocation(assemblyPath), AssemblyCandidate(assemblyPath), out var purl) ? purl : null;
+
+    /// <summary>
     ///     Candidates are spans into the caller's strings and probe the tables through their span
     ///     lookups: <see cref="Resolve" /> runs for every method, call, node and edge, and a
     ///     substring per probe was most of its allocation. An empty span is no candidate. The
