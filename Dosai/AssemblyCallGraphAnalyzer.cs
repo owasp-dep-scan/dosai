@@ -1077,6 +1077,7 @@ internal static class AssemblyCallGraphAnalyzer
             // of the assembly shares them instead of holding its own copies.
             var documents = new Dictionary<DocumentHandle, (string Path, string FileName)>();
             var points = new List<AssemblyCallSequencePoint>();
+            var kickoffEntries = new List<(int KickoffToken, AssemblyCallSequencePoint Start)>();
             foreach (var methodDebugHandle in reader.MethodDebugInformation)
             {
                 var rowNumber = MetadataTokens.GetRowNumber(methodDebugHandle);
@@ -1095,8 +1096,25 @@ internal static class AssemblyCallGraphAnalyzer
                     var location = new AssemblyCallSourceLocation(document.Path, Math.Max(1, sequencePoint.StartLine), Math.Max(1, sequencePoint.StartColumn)) { FileName = document.FileName };
                     points.Add(new AssemblyCallSequencePoint(sequencePoint.Offset, location));
                 }
-                if (points.Count > 0) locations[MetadataTokens.GetToken(MetadataTokens.MethodDefinitionHandle(rowNumber))] = [.. points.OrderBy(point => point.Offset)];
+                if (points.Count > 0)
+                {
+                    AssemblyCallSequencePoint[] ordered = [.. points.OrderBy(point => point.Offset)];
+                    locations[MetadataTokens.GetToken(MetadataTokens.MethodDefinitionHandle(rowNumber))] = ordered;
+                    if (methodDebugInfo.GetStateMachineKickoffMethod() is { IsNil: false } kickoff)
+                    {
+                        kickoffEntries.Add((MetadataTokens.GetToken(kickoff), ordered[0]));
+                    }
+                }
             }
+
+            // An async or iterator stub has no sequence point of its own; it resolves to its
+            // state machine's MoveNext entry (issue #84, same rule as the data-flow IL pass), so
+            // the call-graph node it owns is placed in the source, not at the assembly's line 1.
+            foreach (var (kickoffToken, start) in kickoffEntries)
+            {
+                locations.TryAdd(kickoffToken, [start with { Offset = 0 }]);
+            }
+
             return new AssemblyCallSourceMap(locations, assemblyPath);
         }
         catch

@@ -1767,6 +1767,7 @@ public static partial class DataFlowAnalyzer
             var reader = provider.GetMetadataReader();
             var locations = new Dictionary<int, List<AssemblySequencePoint>>();
             var locals = new Dictionary<int, List<AssemblyLocalScope>>();
+            var kickoffEntries = new List<(int KickoffToken, AssemblySequencePoint Start)>();
             foreach (var methodDebugHandle in reader.MethodDebugInformation)
             {
                 var rowNumber = MetadataTokens.GetRowNumber(methodDebugHandle);
@@ -1781,8 +1782,26 @@ public static partial class DataFlowAnalyzer
                 }
                 if (points.Count > 0)
                 {
-                    locations[MetadataTokens.GetToken(MetadataTokens.MethodDefinitionHandle(rowNumber))] = points.OrderBy(point => point.Offset).ToList();
+                    var methodToken = MetadataTokens.GetToken(MetadataTokens.MethodDefinitionHandle(rowNumber));
+                    var ordered = points.OrderBy(point => point.Offset).ToList();
+                    locations[methodToken] = ordered;
+                    if (methodDebugInfo.GetStateMachineKickoffMethod() is { IsNil: false } kickoff)
+                    {
+                        kickoffEntries.Add((MetadataTokens.GetToken(kickoff), ordered[0]));
+                    }
                 }
+            }
+
+            // An async or iterator method is a stub that starts its state machine and has no
+            // sequence point of its own: its code is the state machine's MoveNext. The PDB names
+            // each MoveNext's kickoff method (async lambdas and local functions included), so
+            // every record of the stub - its parameter sources at the method entry, above all -
+            // resolves to MoveNext's first point, where the method body starts, instead of the
+            // assembly file at the IL offset (issue #84).
+            foreach (var (kickoffToken, start) in kickoffEntries)
+            {
+                // A stub with sequence points of its own (none today) keeps them.
+                locations.TryAdd(kickoffToken, [start with { Offset = 0 }]);
             }
 
             foreach (var localScopeHandle in reader.LocalScopes)

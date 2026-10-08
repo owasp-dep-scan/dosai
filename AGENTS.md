@@ -150,6 +150,10 @@ dotnet test ./Dosai.sln
   arrays). Resolve members through `AssemblyScan.Resolve` (memoized per token, so call sites
   share one id string) and source locations through the per-assembly source map (binary search,
   one path and file-name string per document) - never per instruction.
+- An async or iterator method's IL is a stub with no sequence points; both PDB source maps
+  (`DataFlowAssembly`, `AssemblyCallGraphAnalyzer`) resolve it to its `MoveNext`'s first point
+  through `MethodDebugInformation.GetStateMachineKickoffMethod` (issue #84). Never fall back to
+  the assembly path for such a stub when its PDB is present.
 - A PDB document path is the build's, not the scan's: absolute, `/_/`-mapped, or in the other
   file system's form. Every path an IL record writes goes through `SourceDocumentPaths`
   (`InTree` relative to the scan root, a tree-built assembly's foreign documents placed by
