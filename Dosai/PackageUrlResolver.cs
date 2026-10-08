@@ -79,6 +79,15 @@ public sealed partial class PackageUrlResolver
         /// <summary>The project directory relative to the scan root, or null for the tree-wide and outside-every-project tables.</summary>
         public string? Label { get; }
 
+        /// <summary>
+        ///     The scope read a source that lists the project's whole package closure - restore
+        ///     output (<c>project.assets.json</c>, <c>*.deps.json</c>), a <c>packages.lock.json</c>
+        ///     or a <c>packages.config</c> - so a package missing from these tables is not one the
+        ///     project uses, and its records never borrow another project's (issue #82). Project
+        ///     file references alone are only the direct ones and keep the tree-wide fallback.
+        /// </summary>
+        public bool HasPackageClosure { get; set; }
+
         /// <summary>The version each package resolves to in this scope, and the source that gave it.</summary>
         public Dictionary<string, (string Version, string Source)> PackageVersions { get; } = new(StringComparer.OrdinalIgnoreCase);
 
@@ -341,6 +350,12 @@ public sealed partial class PackageUrlResolver
     public bool IsProjectScoped(string? location) => TablesForLocation(location) is not null;
 
     /// <summary>
+    ///     Whether a record at <paramref name="location" /> resolves in its own project alone: the
+    ///     project's package closure is known, so the tree-wide tables never answer for it.
+    /// </summary>
+    public bool IsClosedProjectScope(string? location) => TablesForLocation(location) is { HasPackageClosure: true };
+
+    /// <summary>
     ///     The project tables for a record's file (a path relative to the scan root, or absolute),
     ///     memoized per path: null when the tree has no project-scoped sources, the record has no
     ///     file, or its project has no package sources of its own.
@@ -453,7 +468,19 @@ public sealed partial class PackageUrlResolver
     private bool TryResolveAssembly(PackageTables? project, ReadOnlySpan<char> candidate, out string? purl)
     {
         purl = null;
-        return !candidate.IsEmpty && (project is not null && project.TryGetAssembly(candidate, out purl) || _tree.TryGetAssembly(candidate, out purl));
+        if (candidate.IsEmpty)
+        {
+            return false;
+        }
+
+        if (project is not null && project.TryGetAssembly(candidate, out purl))
+        {
+            return true;
+        }
+
+        // A project whose package closure is known does not use what it lacks: the tree's
+        // answer would be another project's package (issue #82).
+        return project is not { HasPackageClosure: true } && _tree.TryGetAssembly(candidate, out purl);
     }
 
     /// <summary>The longest package or packaged-assembly name <paramref name="name" /> equals or continues with a dot.</summary>
@@ -467,10 +494,12 @@ public sealed partial class PackageUrlResolver
 
         var normalized = NormalizeSymbol(name);
         firstNormalized ??= normalized;
+        // The tree answers only for a record without a closed project (see TryResolveAssembly).
+        var tree = project is { HasPackageClosure: true } ? null : _tree;
         for (var end = normalized.Length; end > 0; end = normalized.LastIndexOf('.', end - 1))
         {
             var prefix = normalized.AsSpan(0, end);
-            if (project is not null && project.TryGetPrefix(prefix, out purl) || _tree.TryGetPrefix(prefix, out purl))
+            if (project is not null && project.TryGetPrefix(prefix, out purl) || tree is not null && tree.TryGetPrefix(prefix, out purl))
             {
                 return true;
             }
@@ -543,6 +572,8 @@ public sealed partial class PackageUrlResolver
                 _tablesByAssetsDirectory.TryAdd(assetsDirectory, tables);
             }
 
+            MarkPackageClosure(tables);
+
             var packagePurls = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             foreach (var library in libraries.EnumerateObject())
             {
@@ -604,6 +635,8 @@ public sealed partial class PackageUrlResolver
                 tables = restored;
             }
 
+            MarkPackageClosure(tables);
+
             var packagePurls = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             foreach (var library in libraries.EnumerateObject())
             {
@@ -664,6 +697,7 @@ public sealed partial class PackageUrlResolver
             }
 
             var tables = TablesForSource(filePath);
+            MarkPackageClosure(tables);
             var count = 0;
             foreach (var framework in frameworks.EnumerateObject())
             {
@@ -752,6 +786,11 @@ public sealed partial class PackageUrlResolver
         {
             var document = XDocument.Load(filePath);
             var tables = TablesForSource(filePath);
+            if (document.Root?.Name.LocalName == "packages")
+            {
+                MarkPackageClosure(tables);
+            }
+
             var count = 0;
             foreach (var package in document.Descendants("package"))
             {
@@ -843,6 +882,15 @@ public sealed partial class PackageUrlResolver
                 _tree.AddAssembly(assemblyName, purl);
                 tables.AddAssembly(assemblyName, purl);
             }
+        }
+    }
+
+    /// <summary>A project's tables have read its whole package closure; the tree-wide and outside-every-project tables never are one project's.</summary>
+    private void MarkPackageClosure(PackageTables tables)
+    {
+        if (tables != _outsideProjects && tables != _tree)
+        {
+            tables.HasPackageClosure = true;
         }
     }
 

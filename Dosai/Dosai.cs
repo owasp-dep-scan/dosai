@@ -1041,6 +1041,7 @@ public static class Dosai
             edge.SourcePurl = source is null ? null : scoped ? NodePurl(source, edge.Path) : source.Purl;
             edge.TargetPurl = (target is null ? null : scoped ? NodePurl(target, edge.Path) : target.Purl) ?? resolver.Resolve(null, null, edge.TargetId, null, edge.TargetName, edge.Path);
         });
+        ScopeNodesToTheirCallers(resolver, callGraph, nodesById);
         ForEachItem(sourceAssemblyMappings, mapping => mapping.Purl = resolver.Resolve(mapping.AssemblyName, mapping.ModuleName, mapping.AssemblyId ?? mapping.SourceId, mapping.Namespace, mapping.ClassName, mapping.SourcePath));
 
         string? NodePurl(MethodNode node, string? location) =>
@@ -1060,6 +1061,64 @@ public static class Dosai
                     enrich(items[item]);
                 }
             });
+        }
+    }
+
+    /// <summary>
+    ///     A node every call site of which sits in a project whose package closure is known
+    ///     carries those sites' answer instead of the tree-wide one, when they all agree (issue
+    ///     #82). The tree-wide tables hold every project's packages: a framework call in a project
+    ///     that restores nothing of that name took another project's old package of the same
+    ///     assembly name, and the node put it in <c>PackageReachability</c>. A node with no call
+    ///     site, a site outside such a project, or sites that disagree keeps the tree-wide answer.
+    /// </summary>
+    /// <remarks>
+    ///     One sequential pass over the edges after their purls are set, one id lookup per edge and
+    ///     a per-location memo lookup; the answers depend on edge content only, never on order
+    ///     beyond the first-seen value that every agreeing edge repeats.
+    /// </remarks>
+    private static void ScopeNodesToTheirCallers(PackageUrlResolver resolver, CallGraph callGraph, Dictionary<string, MethodNode> nodesById)
+    {
+        if (callGraph.Edges.Count == 0)
+        {
+            return;
+        }
+
+        // Per target node: the agreed call-site purl, or Disagreed once any site cannot decide it.
+        var sites = new Dictionary<MethodNode, (string? Purl, bool Disagreed)>(ReferenceEqualityComparer.Instance);
+        foreach (var edge in callGraph.Edges)
+        {
+            if (!nodesById.TryGetValue(edge.TargetId, out var target))
+            {
+                continue;
+            }
+
+            ref var state = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(sites, target, out var seen);
+            if (state.Disagreed)
+            {
+                continue;
+            }
+
+            if (!resolver.IsClosedProjectScope(edge.Path))
+            {
+                state = (null, true);
+            }
+            else if (!seen)
+            {
+                state = (edge.TargetPurl, false);
+            }
+            else if (!string.Equals(state.Purl, edge.TargetPurl, StringComparison.Ordinal))
+            {
+                state = (null, true);
+            }
+        }
+
+        foreach (var (node, state) in sites)
+        {
+            if (!state.Disagreed)
+            {
+                node.Purl = state.Purl;
+            }
         }
     }
 
@@ -2387,16 +2446,15 @@ public static class Dosai
         // surface in MethodsSlice.Diagnostics instead of aborting the scan.
         var mergedDiagnostics = new List<string>();
         var dispatchIndexes = new Dictionary<Compilation, DispatchResolver.SourceIndex>();
-        var metadataReferences = new Dictionary<string, PortableExecutableReference>(StringComparer.OrdinalIgnoreCase);
         // Framework references: the tree's reference packs (AspNetCore/WindowsDesktop for a web
         // or desktop tree, a target-matched base pack) on top of the process-wide set - the
         // host's trusted platform assemblies, a self-contained bundle's own runtime, or the
-        // newest installed shared framework (issues #67 and #74).
+        // newest installed shared framework (issues #67 and #74). The tree's own assemblies and
+        // restore output join them one reference per assembly name, highest version first: a
+        // package's newer copy of a framework assembly in bin/ beside the pack's made every call
+        // into it ambiguous (issue #81).
         var frameworkReferences = FrameworkReferences.ForTree(path);
-        foreach (var (key, reference) in frameworkReferences.References)
-        {
-            metadataReferences.TryAdd(key, reference);
-        }
+        var metadataReferences = new CompilationReferenceSet(frameworkReferences.References);
 
         DebugLog.Count($"framework metadata references ({frameworkReferences.Source})", frameworkReferences.References.Count);
         // A metadata copy of an assembly the tree builds from source (its own bin/ output, a
@@ -2412,13 +2470,13 @@ public static class Dosai
                 continue;
             }
 
-            metadataReferences.TryAdd(externalAssembly, MetadataReference.CreateFromFile(externalAssembly));
+            metadataReferences.AddBuildOutput(externalAssembly, static assembly => MetadataReference.CreateFromFile(assembly));
         }
         // Restored-but-unbuilt trees: packageFolders plus the per-target compile entries in
         // project.assets.json name the package DLLs inside the NuGet cache, so semantic
         // binding no longer depends on bin/ output. Cache references load from bytes so the
         // shared packages folder is never locked for the process lifetime.
-        foreach (var cacheAssembly in NuGetRestoreCache.GetReferencePaths(path, metadataReferences.Keys))
+        foreach (var cacheAssembly in NuGetRestoreCache.GetReferencePaths(path))
         {
             if (TreeFrameworks.IsBuiltFromSource(path, cacheAssembly))
             {
@@ -2426,10 +2484,7 @@ public static class Dosai
                 continue;
             }
 
-            if (NuGetRestoreCache.TryCreateUnpinnedReference(cacheAssembly) is { } cacheReference)
-            {
-                metadataReferences.TryAdd(cacheAssembly, cacheReference);
-            }
+            metadataReferences.AddRestoreCache(cacheAssembly, NuGetRestoreCache.TryCreateUnpinnedReference);
         }
 
         if (builtFromSourceSkipped > 0)
@@ -2437,7 +2492,8 @@ public static class Dosai
             mergedDiagnostics.Add(string.Create(CultureInfo.InvariantCulture, $"{builtFromSourceSkipped} assembly reference(s) were left out of the source compilation because the tree builds an assembly of the same name from source; calls into those assemblies bind to the source."));
         }
 
-        var referenceList = metadataReferences.Values.ToList();
+        mergedDiagnostics.AddRange(metadataReferences.Diagnostics());
+        var referenceList = metadataReferences.References();
         DebugLog.Count("roslyn metadata references", referenceList.Count);
         // Parsing dominates wall time on large trees and is embarrassingly parallel - one
         // tree per file, no shared state - so the read+parse pair runs on the same worker

@@ -1202,19 +1202,17 @@ public static class CryptoAnalyzer
 
     private static List<PortableExecutableReference> GetMetadataReferences(string path, List<string> diagnostics)
     {
-        var references = new Dictionary<string, PortableExecutableReference>(StringComparer.OrdinalIgnoreCase);
-        void AddReference(string referencePath)
+        PortableExecutableReference? CreateReference(string referencePath)
         {
-            if (!File.Exists(referencePath) || references.ContainsKey(referencePath)) return;
-            try { references.Add(referencePath, MetadataReference.CreateFromFile(referencePath)); }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or BadImageFormatException) { diagnostics.Add($"Could not add metadata reference {referencePath}: {ex.Message}"); }
+            if (!File.Exists(referencePath)) return null;
+            try { return MetadataReference.CreateFromFile(referencePath); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or BadImageFormatException) { diagnostics.Add($"Could not add metadata reference {referencePath}: {ex.Message}"); return null; }
         }
 
+        // One reference per assembly name, highest version first (issue #81; see
+        // CompilationReferenceSet and Dosai.GetSourceMethods).
         var frameworkReferences = FrameworkReferences.ForTree(path);
-        foreach (var (key, reference) in frameworkReferences.References)
-        {
-            references.TryAdd(key, reference);
-        }
+        var references = new CompilationReferenceSet(frameworkReferences.References);
 
         DebugLog.Count($"framework metadata references ({frameworkReferences.Source})", frameworkReferences.References.Count);
 
@@ -1226,25 +1224,22 @@ public static class CryptoAnalyzer
         if (!string.IsNullOrWhiteSpace(root) && Directory.Exists(root))
         {
             // Never beside the source they were built from (see Dosai.GetSourceMethods).
-            foreach (var assembly in SafeFileRead.EnumerateAllFilesSafe(root, "*.dll").Where(assembly => !TreeFrameworks.IsBuiltFromSource(path, assembly))) AddReference(assembly);
+            foreach (var assembly in SafeFileRead.EnumerateAllFilesSafe(root, "*.dll").Where(assembly => !TreeFrameworks.IsBuiltFromSource(path, assembly))) references.AddBuildOutput(assembly, CreateReference);
         }
         // Restored-but-unbuilt trees: resolve the same package assemblies the compiler would
         // reference from the NuGet cache, unpinned from bytes (shared folder, never locked).
-        foreach (var cacheAssembly in NuGetRestoreCache.GetReferencePaths(path, references.Keys).Where(cacheAssembly => !TreeFrameworks.IsBuiltFromSource(path, cacheAssembly)))
+        foreach (var cacheAssembly in NuGetRestoreCache.GetReferencePaths(path).Where(cacheAssembly => !TreeFrameworks.IsBuiltFromSource(path, cacheAssembly)))
         {
-            if (NuGetRestoreCache.TryCreateUnpinnedReference(cacheAssembly) is { } cacheReference && !references.ContainsKey(cacheAssembly))
-            {
-                references.Add(cacheAssembly, cacheReference);
-            }
+            references.AddRestoreCache(cacheAssembly, NuGetRestoreCache.TryCreateUnpinnedReference);
         }
-        foreach (var diagnostic in NuGetRestoreCache.GetDiagnostics(path))
+        foreach (var diagnostic in NuGetRestoreCache.GetDiagnostics(path).Concat(references.Diagnostics()))
         {
             if (!diagnostics.Contains(diagnostic, StringComparer.Ordinal))
             {
                 diagnostics.Add(diagnostic);
             }
         }
-        return references.Values.ToList();
+        return references.References();
     }
 
     private static CryptoReachability BuildReachability(string path, List<string> diagnostics)

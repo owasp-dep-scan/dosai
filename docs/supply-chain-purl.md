@@ -33,7 +33,7 @@ Lock files are reproducible, so they outrank everything else. Restore and build 
 
 ### One version per project
 
-Every source belongs to a project: the project its restore output names (`project.restore.projectPath`, which also covers artifacts layouts that move `obj/` out of the project, and their `bin/<project>/` build output beside it), otherwise the nearest directory at or above the source that holds a `.csproj`, `.vbproj` or `.fsproj`. A `paket.lock`, and any source outside every project, applies to the whole tree. A record with a file - a method, call site, `using` directive, member, call-graph edge or data-flow node - resolves against its own project's packages first, at every resolution step, so two projects that restore two versions of one package each report their own version (issue #72). Records without a project of their own, and call-graph nodes, which are shared by every project that calls them, carry the tree-wide answer: the first source read. Call-graph edges sit at one call site and resolve both endpoints in that site's project, so `PackageReachability` lists one entry per version, each with only its own project's locations.
+Every source belongs to a project: the project its restore output names (`project.restore.projectPath`, which also covers artifacts layouts that move `obj/` out of the project, and their `bin/<project>/` build output beside it), otherwise the nearest directory at or above the source that holds a `.csproj`, `.vbproj` or `.fsproj`. A `paket.lock`, and any source outside every project, applies to the whole tree. A record with a file - a method, call site, `using` directive, member, call-graph edge or data-flow node - resolves against its own project's packages first, at every resolution step, so two projects that restore two versions of one package each report their own version (issue #72). Records without a project of their own, and call-graph nodes, which are shared by every project that calls them, carry the tree-wide answer: the first source read. A project whose package closure is known - it has restore output (`project.assets.json`, `*.deps.json`), a `packages.lock.json` or a `packages.config` - never falls through to the tree-wide answer: a package missing from that closure is not one the project uses, and taking another project's would give a framework call the purl of an old package of the same assembly name (issue #82: `Microsoft.AspNetCore.Http.Abstractions` 2.1.1, or `System.Runtime` 4.3.1, restored by a sibling library). Such a record resolves in its project alone and then takes the versionless `System.*` fallback, the same answer the project gets scanned on its own. A project with only `<PackageReference>` items lists its direct references, not its closure, so it keeps the tree-wide fallback. A call-graph node whose every call site sits in such a project, and whose sites agree, carries their answer instead of the tree-wide one. Call-graph edges sit at one call site and resolve both endpoints in that site's project, so `PackageReachability` lists one entry per version, each with only its own project's locations.
 
 Both reports (`methods` and `dataflows`) say where versions split, in `Diagnostics`:
 
@@ -70,7 +70,7 @@ flowchart LR
 
 ## Resolution order
 
-Given an assembly/module/symbol/type, Dosai tries, in the record's own project first and then across the tree:
+Given an assembly/module/symbol/type, Dosai tries, in the record's own project first and then across the tree (the tree step is skipped for a project whose package closure is known; see above):
 
 1. assembly name, e.g. `Microsoft.Data.SqlClient` from `Microsoft.Data.SqlClient, Version=5.2.0.0, ...`, matched against the assemblies packages ship, then against package names
 2. module/DLL name, e.g. `Microsoft.Data.SqlClient.dll` (only an assembly file extension is dropped; `Castle.Core` stays `Castle.Core`)
@@ -221,6 +221,6 @@ packages.config / csproj references      (fallbacks)
 
 - Dependencies that appear in none of the readable sources (for example transitives in an unrestored tree with no lock file) may not resolve.
 - Multiple packages can expose the same namespace prefix; Dosai chooses the longest prefix and the first source read. Version splits across projects and disagreements inside one project are reported as diagnostics.
-- A call-graph node is shared by every project that calls it, so it carries one version (the tree-wide answer) even when projects restore different ones; the edges into it carry each call site's own version.
+- A call-graph node is shared by every project that calls it, so it carries one version (the tree-wide answer) even when projects restore different ones; the edges into it carry each call site's own version. Only a node whose call sites all sit in projects with a known closure and agree carries their answer instead.
 - Runtime binding redirects and assembly unification are not modeled.
 - PURL enrichment is not a vulnerability verdict; it is correlation metadata.

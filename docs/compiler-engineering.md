@@ -73,6 +73,20 @@ process-wide fallback then skips its `System.Private.*` companions, because a se
 Missing packs degrade to diagnostics, never failures, and the reference resolution is cached per
 scan root so it is deterministic across the run.
 
+The tree's own assemblies (build output under the scan root) and the restore output's package
+assemblies join those framework references through `CompilationReferenceSet`, still one reference
+per simple name (issue #81). A built tree routinely holds a second copy of a name: a package that
+ships a newer copy of a framework assembly (`Microsoft.Extensions.Logging.Abstractions` 9.0.10 in
+a net8.0 web app's `bin/`) beside the reference pack's, or two projects' outputs at two versions of
+one package. Two references of one name leave every call into it unbound, so the highest assembly
+version wins - what the SDK's conflict resolution compiles the project against - and equal
+versions keep the earlier claim (framework, then build output, then restore output; the ordinally
+smaller path between two build-output copies). Versions are read from the assembly header only
+when a name is claimed twice, and a losing candidate never becomes a reference. A framework
+reference a newer tree copy replaced, and an older build-output copy that was left out, each get a
+slice diagnostic. The methods, data-flow, crypto and standalone framework compilations all build
+their references this way.
+
 `GlobalUsings` resolves the synthetic implicit-usings tree per scan root: the SDK lists verified
 from the SDKs' own .props files (base C#, Web's nine, Worker's four, Windows Forms' two; the
 11 SDKs add `System.Net.Http.Json` for .NET 11+ targets, and .NET Framework targets drop

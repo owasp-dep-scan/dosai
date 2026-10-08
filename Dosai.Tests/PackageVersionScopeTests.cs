@@ -69,8 +69,11 @@ public partial class DosaiTests
         Assert.Equal("pkg:nuget/Moq@4.15.1", resolver.Resolve(assembly: "Moq"));
         Assert.Equal("pkg:nuget/Moq@4.15.1", resolver.Resolve(assembly: "Moq", location: "tools/script.cs"));
         Assert.Equal("pkg:nuget/Moq@4.15.1", resolver.Resolve(assembly: "Moq", location: "ProjB/Inner/Class1.cs"));
-        // A package only one project restores still resolves for the others, as before.
-        Assert.Equal("pkg:nuget/Castle.Core@4.4.0", resolver.Resolve(module: "Castle.Core.dll", location: "src/ProjC/Class1.cs"));
+        // A package only one project restores never resolves for another project with restore
+        // output of its own: that project's closure does not have it (issue #82). A project
+        // without one still takes the tree-wide answer.
+        Assert.Null(resolver.Resolve(module: "Castle.Core.dll", location: "src/ProjC/Class1.cs"));
+        Assert.Equal("pkg:nuget/Castle.Core@4.4.0", resolver.Resolve(module: "Castle.Core.dll", location: "ProjB/Inner/Class1.cs"));
 
         Assert.Contains("Package Moq resolves to 3 versions across projects: 4.15.1 (ProjA), 4.18.0 (ProjB), 4.20.72 (src/ProjC). Each project's records carry its own version; records outside those projects, and call-graph nodes shared by them, carry 4.15.1.", resolver.VersionDiagnostics);
         Assert.Contains(resolver.VersionDiagnostics, line => line.StartsWith("Package Castle.Core resolves to 2 versions across projects: 4.4.0 (ProjA), 5.0.0 (ProjB).", StringComparison.Ordinal));

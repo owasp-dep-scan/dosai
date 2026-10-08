@@ -439,28 +439,23 @@ public sealed class FrameworkContext
 
     private static List<MetadataReference> BuildMetadataReferences(string basePath)
     {
-        var frameworkReferences = FrameworkReferences.Current.References;
-        var referencePaths = frameworkReferences.Select(framework => framework.Key).ToList();
-        var references = frameworkReferences.Select(framework => (MetadataReference)framework.Reference).ToList();
+        // One reference per assembly name, highest version first, as in Dosai's source pipeline
+        // (issue #81): a second copy of a name - a package's copy of a framework assembly, two
+        // projects' outputs, a cache copy of a framework facade - makes calls into it ambiguous.
+        var references = new CompilationReferenceSet(FrameworkReferences.Current.References);
         foreach (var assemblyPath in EnumerateFilesSafe(basePath, Constants.AssemblyExtension))
         {
-            referencePaths.Add(assemblyPath);
-            references.Add(MetadataReference.CreateFromFile(assemblyPath));
+            references.AddBuildOutput(assemblyPath, static assembly => MetadataReference.CreateFromFile(assembly));
         }
 
         // Restored-but-unbuilt trees: package DLLs from the NuGet cache, unpinned from bytes so
-        // the shared packages folder is never locked. Deduped against the FULL reference set -
-        // runtime assemblies included - so cache copies of framework facades (System.Memory,
-        // netstandard shims) never land beside the runtime's at a different version.
-        foreach (var cacheAssembly in NuGetRestoreCache.GetReferencePaths(basePath, referencePaths))
+        // the shared packages folder is never locked.
+        foreach (var cacheAssembly in NuGetRestoreCache.GetReferencePaths(basePath))
         {
-            if (NuGetRestoreCache.TryCreateUnpinnedReference(cacheAssembly) is { } cacheReference)
-            {
-                references.Add(cacheReference);
-            }
+            references.AddRestoreCache(cacheAssembly, NuGetRestoreCache.TryCreateUnpinnedReference);
         }
 
-        return references;
+        return [.. references.References()];
     }
 
     private void DiscoverFiles()

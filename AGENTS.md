@@ -200,8 +200,11 @@ dotnet test ./Dosai.sln
   (the per-location project memo is a concurrent cache of a pure function). Pass every record's
   file as `location`: each project has its own package tables and a record resolves in its own
   project first, so two projects on two versions of a package each keep theirs (issue #72).
-  Call-graph nodes are shared across projects and resolve tree-wide; edges resolve both
-  endpoints at their call site. Sources are read in path order so the tree-wide answer never
+  A project whose package closure is known (restore output, `packages.lock.json`,
+  `packages.config`) never falls through to the tree-wide tables: another project's package of
+  a framework assembly's name is not its own (issue #82). Call-graph nodes are shared across
+  projects and resolve tree-wide unless every call site sits in such a project and agrees
+  (`ScopeNodesToTheirCallers`); edges resolve both endpoints at their call site. Sources are read in path order so the tree-wide answer never
   depends on the file system, and `VersionDiagnostics` belong in every report's `Diagnostics`.
 - Phase order in `BuildMethodsSlice` is a memory contract: framework analysis and the security
   analyzer run immediately after source analysis (they are the only compilation consumers),
@@ -276,7 +279,12 @@ dotnet test ./Dosai.sln
   `<AssemblyName>`, else its file name): not from a pack (the base pack excepted), the tree's
   own `bin/` output, or the NuGet cache. The duplicate types made calls ambiguous, and Roslyn
   settled them by evaluation timing, so output changed with the worker count (issue #65 on
-  dotnet/runtime and OrchardCore); the skipped count is a slice diagnostic. Exactly one reference per assembly simple name survives, claimed in a
+  dotnet/runtime and OrchardCore); the skipped count is a slice diagnostic. Build output and restore-cache assemblies join the
+  framework set through `CompilationReferenceSet` (every source compilation does): still one
+  reference per simple name, the highest assembly version winning, equal versions keeping the
+  earlier claim (framework, build output, restore output, then ordinal path), so a package's
+  newer copy of a framework assembly in `bin/` never sits beside the pack's (issue #81). Within the
+  framework set, exactly one reference per assembly simple name survives, claimed in a
   fixed order - target-matched `Microsoft.NETCore.App.Ref` (only when its major differs from
   Dosai's own runtime), the tree's other packs sorted by name, then the process-wide set
   filling. When a base reference pack owns the corlib, the fallback must not add its
