@@ -75,7 +75,7 @@ public partial class DosaiTests
         Assert.Null(resolver.Resolve(module: "Castle.Core.dll", location: "src/ProjC/Class1.cs"));
         Assert.Equal("pkg:nuget/Castle.Core@4.4.0", resolver.Resolve(module: "Castle.Core.dll", location: "ProjB/Inner/Class1.cs"));
 
-        Assert.Contains("Package Moq resolves to 3 versions across projects: 4.15.1 (ProjA), 4.18.0 (ProjB), 4.20.72 (src/ProjC). Each project's records carry its own version; records outside those projects, and call-graph nodes shared by them, carry 4.15.1.", resolver.VersionDiagnostics);
+        Assert.Contains("Package Moq resolves to 3 versions across projects: 4.15.1 (ProjA), 4.18.0 (ProjB), 4.20.72 (src/ProjC). Each project's records carry its own version; records outside those projects carry 4.15.1, and so does a call-graph node shared by them, unless every call site of the node sits in a project with a known package closure and those sites agree (the node then carries their answer).", resolver.VersionDiagnostics);
         Assert.Contains(resolver.VersionDiagnostics, line => line.StartsWith("Package Castle.Core resolves to 2 versions across projects: 4.4.0 (ProjA), 5.0.0 (ProjB).", StringComparison.Ordinal));
         Assert.Contains("PURL version ambiguity for Moq in ProjB: csproj says 4.17.6; keeping 4.18.0 from project.assets.json.", resolver.VersionDiagnostics);
         Assert.Equal(3, resolver.VersionDiagnostics.Count);

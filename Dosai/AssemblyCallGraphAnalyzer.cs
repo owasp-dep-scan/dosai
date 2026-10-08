@@ -22,10 +22,19 @@ internal static class AssemblyCallGraphAnalyzer
         .Select(field => (OpCode)field.GetValue(null)!)
         .ToDictionary(opCode => unchecked((short)(ushort)opCode.Value));
 
-    public static (List<MethodCalls> Calls, CallGraph Graph) Analyze(string path, IReadOnlyList<Method> knownMethods)
+    public static (List<MethodCalls> Calls, CallGraph Graph) Analyze(string path, IReadOnlyList<Method> knownMethods, ICollection<string> diagnostics)
     {
-        var assemblyPaths = GetAssemblyFiles(path);
-        var context = new AnalysisContext(path, knownMethods);
+        // A built tree holds a copy of each referenced assembly in every referencing project's
+        // output, and each copy gave every call in it once more (issue #83, the same pass
+        // shape as the data-flow one): each distinct file is analyzed once.
+        var copies = AssemblyCopies.Collapse(path, GetAssemblyFiles(path));
+        if (copies.Diagnostic(path, "each call in them is reported once") is { } copiesDiagnostic)
+        {
+            diagnostics.Add(copiesDiagnostic);
+        }
+
+        var assemblyPaths = copies.Distinct;
+        var context = new AnalysisContext(path, knownMethods, copies.AnalyzedByFullPath());
         var calls = new List<MethodCalls>();
         var nodes = new Dictionary<string, MethodNode>(StringComparer.Ordinal);
         var edges = new List<MethodCallEdge>();
@@ -59,12 +68,8 @@ internal static class AssemblyCallGraphAnalyzer
     /// </summary>
     private static AssemblyFragment AnalyzeAssembly(string assemblyPath, AnalysisContext context)
     {
+        // Only managed assemblies reach here: the copy collapse drops every other file.
         var fragment = new AssemblyFragment();
-        if (!IsManagedAssembly(assemblyPath))
-        {
-            return fragment;
-        }
-
         try
         {
             using var stream = new FileStream(assemblyPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
@@ -1128,20 +1133,6 @@ internal static class AssemblyCallGraphAnalyzer
         return AssemblyScope.GetAssemblyFiles(path, includeBuildArtifacts: false, excludeBinWhenSourceFilesPresent: true);
     }
 
-    private static bool IsManagedAssembly(string filePath)
-    {
-        try
-        {
-            using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            using var peReader = new PEReader(stream);
-            return peReader is { HasMetadata: true, PEHeaders.CorHeader: not null };
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
     private sealed record AssemblyCallInstruction(int Offset, OpCode OpCode, object? Operand);
     private sealed record AssemblyCallSignature(List<string> ParameterTypes, string ReturnType, bool ReturnsVoid, bool HasThis, int ParameterCount);
     private sealed record AssemblyCallType(string FullName, string Name, string Namespace, string AssemblyName);
@@ -1242,10 +1233,18 @@ internal static class AssemblyCallGraphAnalyzer
     {
         private readonly Dictionary<string, List<Method>> _methodsByAssembly = new(StringComparer.OrdinalIgnoreCase);
 
-        public AnalysisContext(string inspectedPath, IReadOnlyList<Method> knownMethods)
+        /// <param name="analyzedByFullPath">
+        ///     <see cref="AssemblyCopies.AnalyzedByFullPath" />: a known method the inventory read
+        ///     from a copy the pass leaves out belongs to the copy it analyzes, so its bodies keep
+        ///     their known identities (issue #83).
+        /// </param>
+        public AnalysisContext(string inspectedPath, IReadOnlyList<Method> knownMethods, IReadOnlyDictionary<string, string> analyzedByFullPath)
         {
             RelativeRoot = SourceDocumentPaths.Root(inspectedPath);
             var methodLookup = new Dictionary<(string Path, int Token), Method>();
+            // The file whose methods each analyzed copy took: the inventory reads one copy per
+            // assembly identity, and methods of a second copy of the same file would repeat them.
+            var inventoriedCopyByAnalyzed = new Dictionary<string, string>(SafeFileRead.PathComparer);
             // One full-path resolution per known method (issue #65: the dispatch index used to
             // re-resolve every known method's path once per assembly). Grouping keeps the known
             // methods' order, which is the order the per-assembly filter produced. A path that
@@ -1260,6 +1259,17 @@ internal static class AssemblyCallGraphAnalyzer
                 catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
                 {
                     continue;
+                }
+
+                if (analyzedByFullPath.TryGetValue(fullPath, out var analyzed))
+                {
+                    if (inventoriedCopyByAnalyzed.TryGetValue(analyzed, out var inventoried) && !SafeFileRead.PathComparer.Equals(inventoried, fullPath))
+                    {
+                        continue;
+                    }
+
+                    inventoriedCopyByAnalyzed[analyzed] = fullPath;
+                    fullPath = analyzed;
                 }
 
                 if (!_methodsByAssembly.TryGetValue(fullPath, out var methods))

@@ -169,14 +169,25 @@ dotnet test ./Dosai.sln
   whose every node does is `Scope: dependency` with severity capped at low
   (`TransparencyBuilder.DependencySeverity`), and every derived fact that ranks findings
   (weaknesses, dangerous-API and package reachability, agent context, diff) must honour it.
-- The IL data-flow pass analyzes each distinct file once (issue #83): a build copies every
-  referenced project's assembly (and, in test and executable outputs, every package's) into each
-  referencing project's output. `AssemblyCopies.Collapse` groups candidates by length and module
-  version id, then confirms a copy by SHA-256 - never collapse on the id or the assembly identity
-  alone (a patched file keeps both, and Debug/Release or per-target builds are distinct code that
-  is all analyzed). The analyzed copy is ranked by a PDB beside it, then a place inside the
-  directory of a project that builds it, then tree order (`AssemblyCopies.TreeOrder`), never the
-  enumeration order; `DependencyAssemblies.TreatAsOneAssembly` classifies the copies together.
+- Both IL passes (data flow, and the `methods` call graph) analyze each distinct file once (issue
+  #83): a build copies every referenced project's assembly (and, in test and executable outputs,
+  every package's) into each referencing project's output. `AssemblyCopies.Collapse` groups
+  candidates by length and module version id, then confirms a copy by SHA-256 - never collapse on
+  the id or the assembly identity alone (a patched file keeps both, and Debug/Release or
+  per-target builds are distinct code that is all analyzed). A ReadyToRun image of a build keeps
+  its metadata and IL in other bytes, so files sharing an id that are IL-only or ReadyToRun
+  compare by `IlContentHash` (RVA columns zeroed, bodies, field data, resources); keep every part
+  the IL passes read in that hash. The analyzed copy is ranked by a PDB beside it, then a place
+  inside the directory of a project that builds it, then IL-only over ReadyToRun, then tree order
+  (`AssemblyCopies.TreeOrder`), never the enumeration order;
+  `DependencyAssemblies.TreatAsOneAssembly` classifies the copies together, and the call graph
+  maps inventory methods of any copy onto the analyzed one (`AssemblyCopies.AnalyzedByFullPath`).
+- The data-flow IL pass must give the same flows in every file and method order (a second copy
+  used to hide the order dependence as an accidental second pass). Build every assembly's method
+  summaries before any body, callee assemblies first (`CalleesFirst`), and re-analyze bodies whose
+  recorded field reads went stale (`AssemblyDataFlowContext.IsStale`, bounded rounds). Key stored
+  field taints through `FieldTaintKey` (declaring assembly plus symbol): compiler-generated field
+  names repeat in every assembly.
 - The IL interpreters model every opcode they do not handle explicitly through
   `GetStackEffect` (`OpCode.StackBehaviourPop`/`Push`, the call-site signature for `calli`).
   A pop count that is too low is not a local error: the abstract stack drifts on every pass
@@ -214,7 +225,9 @@ dotnet test ./Dosai.sln
   project first, so two projects on two versions of a package each keep theirs (issue #72).
   A project whose package closure is known (restore output, `packages.lock.json`,
   `packages.config`) never falls through to the tree-wide tables: another project's package of
-  a framework assembly's name is not its own (issue #82). Call-graph nodes are shared across
+  a framework assembly's name is not its own (issue #82). The exception is a name the project
+  references by file (`<Reference>` with a hint path outside a `packages.config` folder), which no
+  closure lists; a hint path into a `packages.config` folder names its package exactly. Call-graph nodes are shared across
   projects and resolve tree-wide unless every call site sits in such a project and agrees
   (`ScopeNodesToTheirCallers`); edges resolve both endpoints at their call site. Sources are read in path order so the tree-wide answer never
   depends on the file system, and `VersionDiagnostics` belong in every report's `Diagnostics`.
@@ -295,7 +308,10 @@ dotnet test ./Dosai.sln
   framework set through `CompilationReferenceSet` (every source compilation does): still one
   reference per simple name, the highest assembly version winning, equal versions keeping the
   earlier claim (framework, build output, restore output, then ordinal path), so a package's
-  newer copy of a framework assembly in `bin/` never sits beside the pack's (issue #81). Within the
+  newer copy of a framework assembly in `bin/` never sits beside the pack's (issue #81). One set
+  serves the whole tree, so name the projects whose own closure has another version than the
+  bound copy (`PackageUrlResolver.UnionBindingDiagnostic` over `TreeBindings`), and report
+  equal-version build-output files of other content: both are choices, not copies. Within the
   framework set, exactly one reference per assembly simple name survives, claimed in a
   fixed order - target-matched `Microsoft.NETCore.App.Ref` (only when its major differs from
   Dosai's own runtime), the tree's other packs sorted by name, then the process-wide set

@@ -561,7 +561,7 @@ public static class Dosai
         CallGraph assemblyCallGraph;
         using (DebugLog.Phase("methods.assembly-call-graph"))
         {
-            (assemblyMethodCalls, assemblyCallGraph) = AssemblyCallGraphAnalyzer.Analyze(path, methods);
+            (assemblyMethodCalls, assemblyCallGraph) = AssemblyCallGraphAnalyzer.Analyze(path, methods, assemblyDiagnostics);
         }
         DebugLog.Count("call graph (assembly IL) nodes", assemblyCallGraph.Nodes.Count);
         DebugLog.Count("call graph (assembly IL) edges", assemblyCallGraph.Edges.Count);
@@ -800,7 +800,7 @@ public static class Dosai
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private static SourceStage AnalyzeSourcesAndFrameworks(string path, List<Method> assemblyMethods, PackageUrlResolver purlResolver, Frameworks.FrameworkAnalysisOptions? frameworkOptions)
     {
-        var (sourceMethods, usings, methodCalls, properties, fields, events, constructors, callGraph, sourceAssemblyMapping, sourceMode, compilations, sourceDiagnostics) = AnalyzeSourcesWithDebugLogging(path, assemblyMethods);
+        var (sourceMethods, usings, methodCalls, properties, fields, events, constructors, callGraph, sourceAssemblyMapping, sourceMode, compilations, sourceDiagnostics) = AnalyzeSourcesWithDebugLogging(path, assemblyMethods, purlResolver);
         CompilationReleaseProbe.Value?.Observe(compilations);
         DebugLog.Count("source methods", sourceMethods.Count);
         DebugLog.Count("call graph (source) nodes", callGraph.Nodes.Count);
@@ -836,10 +836,10 @@ public static class Dosai
     ///     tuple stays inside this helper instead of forcing GetMethodsSlice to pre-declare every
     ///     element just to scope a phase around the call.
     /// </summary>
-    private static (List<Method> SourceMethods, List<Dependency> UsingDirectives, List<MethodCalls> MethodCalls, List<PropertyInfo> Properties, List<FieldInfo> Fields, List<EventInfo> Events, List<ConstructorInfo> Constructors, CallGraph CallGraph, List<SourceAssemblyMapping> SourceAssemblyMappings, bool SourceMode, Frameworks.SourceCompilations Compilations, List<string> Diagnostics) AnalyzeSourcesWithDebugLogging(string path, List<Method> assemblyMethods)
+    private static (List<Method> SourceMethods, List<Dependency> UsingDirectives, List<MethodCalls> MethodCalls, List<PropertyInfo> Properties, List<FieldInfo> Fields, List<EventInfo> Events, List<ConstructorInfo> Constructors, CallGraph CallGraph, List<SourceAssemblyMapping> SourceAssemblyMappings, bool SourceMode, Frameworks.SourceCompilations Compilations, List<string> Diagnostics) AnalyzeSourcesWithDebugLogging(string path, List<Method> assemblyMethods, PackageUrlResolver purlResolver)
     {
         using var phase = DebugLog.Phase("methods.source-analysis");
-        return GetSourceMethods(path, assemblyMethods);
+        return GetSourceMethods(path, assemblyMethods, purlResolver);
     }
 
     /// <summary>
@@ -2425,7 +2425,7 @@ public static class Dosai
     /// <param name="path">Filesystem path to C# source file or directory containing C# source files</param>
     /// <param name="assemblyMethods">List of assembly methods</param>
     /// <returns>Tuple with List of source methods and using directives</returns>
-    private static (List<Method> SourceMethods, List<Dependency> UsingDirectives, List<MethodCalls> MethodCalls, List<PropertyInfo> Properties, List<FieldInfo> Fields, List<EventInfo> Events, List<ConstructorInfo> Constructors, CallGraph CallGraph, List<SourceAssemblyMapping> SourceAssemblyMappings, bool SourceMode, Frameworks.SourceCompilations Compilations, List<string> Diagnostics) GetSourceMethods(string path, List<Method> assemblyMethods)
+    private static (List<Method> SourceMethods, List<Dependency> UsingDirectives, List<MethodCalls> MethodCalls, List<PropertyInfo> Properties, List<FieldInfo> Fields, List<EventInfo> Events, List<ConstructorInfo> Constructors, CallGraph CallGraph, List<SourceAssemblyMapping> SourceAssemblyMappings, bool SourceMode, Frameworks.SourceCompilations Compilations, List<string> Diagnostics) GetSourceMethods(string path, List<Method> assemblyMethods, PackageUrlResolver purlResolver)
     {
         var assembliesToInspect = GetFilesToInspect(path, Constants.AssemblyExtension, Constants.ExeExtension);
         var sourcesToInspect = GetFilesToInspect(path, Constants.CSharpSourceExtension);
@@ -2493,6 +2493,11 @@ public static class Dosai
         }
 
         mergedDiagnostics.AddRange(metadataReferences.Diagnostics());
+        if (purlResolver.UnionBindingDiagnostic(metadataReferences.TreeBindings()) is { } unionBinding)
+        {
+            mergedDiagnostics.Add(unionBinding);
+        }
+
         var referenceList = metadataReferences.References();
         DebugLog.Count("roslyn metadata references", referenceList.Count);
         // Parsing dominates wall time on large trees and is embarrassingly parallel - one

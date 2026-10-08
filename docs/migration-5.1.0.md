@@ -387,7 +387,14 @@ crypto) referenced both, and calls into the assembly did not bind (`SourceUnreso
 - Such calls now bind (`SourceRoslynDirect`) to the version the build uses and carry that
   package's purl (`pkg:nuget/Microsoft.Extensions.Logging.Abstractions@9.0.10` in the example).
 - `Diagnostics` names framework references a newer copy replaced ("framework reference(s) were
-  replaced by a higher-version copy ...") and older build-output copies that were left out.
+  replaced by a higher-version copy ...") and older build-output copies that were left out. Two
+  build-output files of one name and assembly version with other content are two assemblies, not
+  copies of one: the first in path order is still kept, and a line names both files.
+- One reference per name holds for the whole tree, so a project that restores an older version of
+  a package than another project's output holds binds against the newer API surface while its
+  calls keep its own version's purl. `methods` and `dataflows` name each such assembly, the copy
+  bound and the projects whose own version differs ("The source compilation references one copy
+  of each assembly for the whole tree ..."). Per-project reference sets would remove the mismatch.
 
 ## Purls of framework calls in multi-project trees (issue #82, fix)
 
@@ -402,30 +409,53 @@ by a sibling library, and `PackageReachability` listed that package.
   versionless `System.*` fallback: the answer the project gets when scanned on its own. A project
   with only `<PackageReference>` items, and records outside every project, keep the tree-wide
   fallback.
+- An assembly such a project references by file (a `<Reference>` with a `<HintPath>`, or a path
+  as the item: a checked-in or vendored DLL) is outside every closure, so its name keeps the
+  tree-wide fallback in that project, and a `Diagnostics` line names the reference and the purl it
+  took from another project. A hint path into a `packages.config` repository folder
+  (`packages/<id>.<version>/lib/...`) names its package and version exactly and resolves to that
+  purl. A `<Reference>` with no file is the framework's and keeps the closure rule.
 - A call-graph node whose every call site lies in such projects, and whose sites agree, carries
-  their answer instead of the tree-wide one; other nodes are unchanged.
+  their answer instead of the tree-wide one; other nodes are unchanged. The cross-project version
+  line says so ("... and so does a call-graph node shared by them, unless every call site of the
+  node sits in a project with a known package closure and those sites agree").
 
 ## Assembly copies in built trees (issue #83, fix)
 
-The `dataflows` IL pass (which `crypto`'s data flows also run) analyzed every copy of an assembly
-that a build leaves in the output of each referencing project, and reported every flow through it
-once per copy, with nodes that differed only in their id.
+The IL passes analyzed every copy of an assembly that a build leaves in the output of each
+referencing project: `dataflows` (and `crypto`'s data flows) reported every flow through it once
+per copy, with nodes that differed only in their id, and `methods` repeated every IL call record
+of a binaries-only scan once per copy.
 
-- Each distinct file is analyzed once: byte-identical copies (same length, module version id and
-  SHA-256) are one assembly. Distinct builds of one project (Debug and Release, two target
-  frameworks) are still each analyzed.
-- `Slices`, `Nodes`, `Edges` and their `Statistics` counts drop to what a tree holding one copy
-  produces, and `Statistics.FilesAnalyzed` counts the files analyzed, copies excluded. That
-  includes flows the old output only found by analyzing a second copy after the first had
-  recorded a field taint or a method summary (a field read by a method that is analyzed before
-  the method writing it): a tree with one copy never reported those either.
+- Each distinct file is analyzed once, in `dataflows`, `crypto` and the `methods` IL call graph.
+  Byte-identical copies (same length, module version id and SHA-256) are one assembly, and so is
+  a ReadyToRun image of a build (`PublishReadyToRun`, the default of a self-contained publish),
+  which carries the build's metadata and IL in a file of other bytes: files sharing a module
+  version id are compared by metadata, method bodies, static data and resources. Distinct builds
+  of one project (Debug and Release, two target frameworks) are still each analyzed.
+- `Slices`, `Nodes`, `Edges`, `MethodCalls` and their counts drop to what a tree holding one copy
+  produces, and `Statistics.FilesAnalyzed` counts the files analyzed, copies excluded.
 - The analyzed copy is the one with a PDB beside it, then the one in its own project's output, then
-  the first in path order. A `Diagnostics` line lists, per assembly, the copy analyzed and the
-  copies left out.
+  an IL-only file over a ReadyToRun image, then the first in path order. A `Diagnostics` line
+  lists, per assembly, the copy analyzed, the byte-identical copies and the same-IL copies left
+  out. A methods inventory entry read from another copy keeps its path; its call records belong
+  to the analyzed copy.
 - Copies are classified together for `Scope`: the application's when any copy is, else a
   dependency when any copy's build output or the restore metadata names it one. A loose copy
   that nothing names, beside a `<Reference>` copy in a build output, is now a dependency, as the
   build output says.
+- The `dataflows` IL pass no longer depends on the order it reads assemblies and methods in. A
+  second copy used to act as an accidental second pass that saw what the first had recorded; with
+  copies collapsed, those flows come from the pass itself. Every assembly's method summaries are
+  built before any body is analyzed, callees' assemblies first, so a call into an assembly read
+  later uses its summary (more `MethodSummaries`, and interprocedural slices into other
+  assemblies). A method that read a field before the method storing taint into it was analyzed is
+  analyzed again (at most three rounds), so a field written after its reader in metadata order
+  carries the taint (new slices, also in trees without copies).
+- Stored field taints are kept per declaring assembly: a field symbol alone named the same
+  compiler-generated field (`<>c.<>9__0_0`) in every assembly, and a taint stored in one package's
+  field reached readers in unrelated packages. Slices that crossed packages only through such a
+  field are gone.
 
 ## Source locations of async and iterator methods in IL (issue #84, fix)
 
@@ -436,3 +466,10 @@ stub fell back to the assembly file at line 1: the parameter sources of such met
 - They now carry the source location of the state machine's first sequence point, from the PDB:
   the method's opening brace in a Debug build, its first statement in Release. Records of methods
   without a PDB are unchanged.
+- This needs the kickoff record the C# and VB compilers write (`StateMachineMethod`). F# writes
+  none, but its `task { }` and `seq { }` methods keep a sequence point of their own; a parameter
+  source on an F# closure's constructor (`lines@15..ctor`) still falls back to the assembly file.
+- Only a portable PDB beside the assembly is read. An embedded PDB (`DebugType` `embedded`) is not
+  read and leaves every record of the assembly at the assembly file, and a Windows PDB
+  (`DebugType` `full` or `pdbonly` on .NET Framework) gives a "Could not read portable PDB"
+  diagnostic, as before.

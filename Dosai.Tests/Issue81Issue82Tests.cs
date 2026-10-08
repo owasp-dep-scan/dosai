@@ -170,6 +170,45 @@ public partial class DosaiTests
     }
 
     [Fact]
+    public void CompilationReferenceSet_EqualVersionsOfOtherContent_AreReportedAndCopiesStayQuiet()
+    {
+        // Review of #81: two build-output files of one name and assembly version with other
+        // content are two assemblies, and the ordinal tie-break chose one silently.
+        using var tempDirectory = new TemporaryDirectory();
+        string Emit(string directory, string extra)
+        {
+            var output = Path.Combine(tempDirectory.Path, directory);
+            Directory.CreateDirectory(output);
+            return Issue76AssemblyLoadingTests.EmitAssembly(output, "Issue81.Logging", string.Format(System.Globalization.CultureInfo.InvariantCulture, Issue81LibrarySource, "9.0.0.0") + extra);
+        }
+
+        var vendorA = Emit("a/bin", string.Empty);
+        var copyOfA = Path.Combine(tempDirectory.Path, "b", "bin", "Issue81.Logging.dll");
+        Directory.CreateDirectory(Path.GetDirectoryName(copyOfA)!);
+        File.Copy(vendorA, copyOfA);
+        var vendorB = Emit("c/bin", "public static class VendorB { }");
+
+        List<string> Diagnostics(params string[] offers)
+        {
+            var set = new CompilationReferenceSet([]);
+            foreach (var offer in offers)
+            {
+                set.AddBuildOutput(offer, path => MetadataReference.CreateFromFile(path));
+            }
+
+            Assert.Equal(vendorA, Assert.Single(set.References()).FilePath);
+            return set.Diagnostics();
+        }
+
+        Assert.Empty(Diagnostics(vendorA, copyOfA));
+        Assert.Empty(Diagnostics(copyOfA, vendorA));
+        var expected = $"1 build-output assembly reference(s) of the same name and assembly version as a kept one, but other content, were left out of the source compilation (Issue81.Logging 9.0.0.0: kept {vendorA}, left out {vendorB}): calls into that assembly bind against the kept file.";
+        // Whichever is met first: the winner and the note do not depend on the order.
+        Assert.Equal([expected], Diagnostics(vendorA, vendorB));
+        Assert.Equal([expected], Diagnostics(vendorB, vendorA));
+    }
+
+    [Fact]
     public void PackageUrlResolver_ProjectWithItsOwnRestoreOutputNeverBorrowsAnotherProjectsPackage()
     {
         using var tempDirectory = new TemporaryDirectory();
@@ -213,6 +252,118 @@ public partial class DosaiTests
         Assert.Equal("pkg:nuget/Microsoft.AspNetCore.Http.Abstractions@2.1.1", resolver.Resolve(assembly: "Microsoft.AspNetCore.Http.Abstractions", location: "Unrestored/Program.cs"));
         Assert.False(resolver.IsClosedProjectScope("tools/script.cs"));
         Assert.False(resolver.IsClosedProjectScope(null));
+    }
+
+    [Fact]
+    public void PackageUrlResolver_FileReferenceInARestoredProject_KeepsItsPurlAndFrameworkNamesStayClosed()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var root = tempDirectory.Path;
+        WriteRestoredProject(root, "OldLib", packages: [("Serilog", "3.1.1"), ("System.Net.Http", "4.3.4"), ("System.Runtime", "4.3.1")]);
+        // Restored with nothing in its closure, and a vendored DLL by hint path (review of #82:
+        // the call bound to libs/Serilog.dll and lost the purl main gave it).
+        WriteRestoredProject(root, "LegacyApp", packages: []);
+        File.WriteAllText(Path.Combine(root, "LegacyApp", "LegacyApp.csproj"), """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework></PropertyGroup>
+              <ItemGroup>
+                <Reference Include="Serilog"><HintPath>libs\Serilog.dll</HintPath></Reference>
+                <Reference Include="System.Net.Http" />
+              </ItemGroup>
+            </Project>
+            """);
+        // A classic project: the MSBuild namespace, a packages.config closure, a hint path into
+        // its package folder (an assembly named unlike its package), a framework reference
+        // with no file and one into the framework's reference assemblies.
+        Directory.CreateDirectory(Path.Combine(root, "Classic"));
+        File.WriteAllText(Path.Combine(root, "Classic", "packages.config"), """<?xml version="1.0" encoding="utf-8"?><packages><package id="Microsoft.AspNet.Mvc" version="5.2.3" targetFramework="net472" /></packages>""");
+        File.WriteAllText(Path.Combine(root, "Classic", "Classic.csproj"), """
+            <?xml version="1.0" encoding="utf-8"?>
+            <Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+              <ItemGroup>
+                <Reference Include="System.Net.Http" />
+                <Reference Include="System.Runtime"><HintPath>$(MSBuildProgramFiles32)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.7.2\Facades\System.Runtime.dll</HintPath></Reference>
+                <Reference Include="System.Web.Mvc, Version=5.2.3.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35, processorArchitecture=MSIL">
+                  <HintPath>..\packages\Microsoft.AspNet.Mvc.5.2.3\lib\net45\System.Web.Mvc.dll</HintPath>
+                </Reference>
+              </ItemGroup>
+            </Project>
+            """);
+
+        var resolver = PackageUrlResolver.Create(root);
+
+        const string legacy = "LegacyApp/Program.cs";
+        Assert.True(resolver.IsClosedProjectScope(legacy));
+        Assert.Equal("pkg:nuget/Serilog@3.1.1", resolver.Resolve(assembly: "Serilog, Version=2.0.0.0, Culture=neutral, PublicKeyToken=24c2f752a8e58a10", symbol: "Serilog.Log.Information(string)", location: legacy));
+        Assert.Equal("pkg:nuget/Serilog@3.1.1", resolver.Resolve(symbol: "Serilog.Log.Information(string)", location: legacy));
+        // The closure still decides every name the project does not reference by file: the
+        // versionless framework fallback, not OldLib's 4.3.4.
+        Assert.Null(resolver.Resolve(assembly: "System.Net.Http", location: legacy));
+        Assert.Equal("pkg:nuget/System.Net.Http", resolver.Resolve(namespaceName: "System.Net.Http", location: legacy));
+
+        const string classic = "Classic/HomeController.cs";
+        Assert.True(resolver.IsClosedProjectScope(classic));
+        Assert.Equal("pkg:nuget/Microsoft.AspNet.Mvc@5.2.3", resolver.Resolve(assembly: "System.Web.Mvc, Version=5.2.3.0", symbol: "System.Web.Mvc.Controller.View()", location: classic));
+        Assert.Null(resolver.Resolve(assembly: "System.Net.Http", location: classic));
+        Assert.Null(resolver.Resolve(assembly: "System.Runtime", location: classic));
+
+        var borrowed = Assert.Single(resolver.VersionDiagnostics, line => line.StartsWith("Project ", StringComparison.Ordinal));
+        Assert.Equal(@"Project LegacyApp references assemblies by file outside its package closure, and their records take the purl other projects restore for that name; the version is not read from the file: Serilog (libs\Serilog.dll) as pkg:nuget/Serilog@3.1.1.", borrowed);
+        Assert.Contains(borrowed, resolver.Diagnostics);
+    }
+
+    [Fact]
+    public void PackageUrlResolver_UnionBinding_NamesProjectsWhoseClosureHasAnotherVersion()
+    {
+        // Review of #81: the compilation binds every project's calls to the highest copy in the
+        // tree, so P1 (9.0.10) binds against P2's 11.0.0.0 copy and still reports 9.0.10.
+        using var tempDirectory = new TemporaryDirectory();
+        var root = tempDirectory.Path;
+        WriteRestoredProject(root, "P1", packages: [("Issue81.Logging", "9.0.10")]);
+        WriteRestoredProject(root, "P2", packages: [("Issue81.Logging", "11.0.0-rc.1")]);
+        WriteRestoredProject(root, "P3", packages: [("Issue81.Logging", "11.0.0-rc.1"), ("Serilog", "3.1.1")]);
+        var bin = Path.Combine(root, "P2", "bin", "Debug", "net10.0");
+        Directory.CreateDirectory(bin);
+        var bound = Issue76AssemblyLoadingTests.EmitAssembly(bin, "Issue81.Logging", string.Format(System.Globalization.CultureInfo.InvariantCulture, Issue81LibrarySource, "11.0.0.0"));
+
+        var resolver = PackageUrlResolver.Create(root);
+
+        const string prefix = "The source compilation references one copy of each assembly for the whole tree, so calls in some projects bind against another project's version of a package while keeping their own project's purl: ";
+        // A name no project's packages ship has nothing to disagree with.
+        Assert.Equal(prefix + "Issue81.Logging 11.0.0.0 from P2/bin/Debug/net10.0 (pkg:nuget/Issue81.Logging@11.0.0-rc.1) for P1 (pkg:nuget/Issue81.Logging@9.0.10).",
+            resolver.UnionBindingDiagnostic([("Issue81.Logging", bound), ("Unrelated", Path.Combine(bin, "Unrelated.dll"))]));
+        // A restore-cache copy names its package by its folders, in the casing a project restores.
+        var cache = Path.Combine(Path.GetTempPath(), "dosai-issue81-cache", "issue81.logging", "9.0.10", "lib", "net8.0", "Issue81.Logging.dll");
+        Assert.Equal(prefix + "Issue81.Logging from the restore cache (pkg:nuget/Issue81.Logging@9.0.10) for P2 (pkg:nuget/Issue81.Logging@11.0.0-rc.1), P3 (pkg:nuget/Issue81.Logging@11.0.0-rc.1).",
+            resolver.UnionBindingDiagnostic([("Issue81.Logging", cache)]));
+        // Every project that restores the name agrees with the bound copy.
+        var serilog = Path.Combine(Path.GetTempPath(), "dosai-issue81-cache", "serilog", "3.1.1", "lib", "net8.0", "Serilog.dll");
+        Assert.Null(resolver.UnionBindingDiagnostic([("Serilog", serilog)]));
+        // A file whose own project says nothing is not guessed from the tree.
+        Assert.Null(resolver.UnionBindingDiagnostic([("Issue81.Logging", Path.Combine(root, "libs", "Issue81.Logging.dll"))]));
+    }
+
+    [Fact]
+    public void GetMethodsAndDataFlows_UnionBindingAcrossProjects_IsReported()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var root = tempDirectory.Path;
+        WriteRestoredProject(root, "P1", packages: [("Issue81.Logging", "9.0.10")]);
+        WriteRestoredProject(root, "P2", packages: [("Issue81.Logging", "11.0.0-rc.1")]);
+        File.WriteAllText(Path.Combine(root, "P1", "Program.cs"), Issue81ProgramSource);
+        var bin = Path.Combine(root, "P2", "bin", "Debug", "net10.0");
+        Directory.CreateDirectory(bin);
+        Issue76AssemblyLoadingTests.EmitAssembly(bin, "Issue81.Logging", string.Format(System.Globalization.CultureInfo.InvariantCulture, Issue81LibrarySource, "11.0.0.0"));
+        const string expected = "Issue81.Logging 11.0.0.0 from P2/bin/Debug/net10.0 (pkg:nuget/Issue81.Logging@11.0.0-rc.1) for P1 (pkg:nuget/Issue81.Logging@9.0.10).";
+
+        var slice = Depscan.Dosai.GetMethodsSlice(root);
+        var dataFlows = DataFlowAnalyzer.Analyze(root);
+
+        var call = Assert.Single(slice.MethodCalls ?? [], call => call.CalledMethod?.Contains("LogInformation", StringComparison.Ordinal) == true);
+        Assert.Equal(AnalysisEvidenceKind.SourceRoslynDirect, call.EvidenceKind);
+        Assert.Equal("pkg:nuget/Issue81.Logging@9.0.10", call.Purl);
+        Assert.Single(slice.Diagnostics ?? [], line => line.EndsWith(expected, StringComparison.Ordinal));
+        Assert.Single(dataFlows.Diagnostics, line => line.EndsWith(expected, StringComparison.Ordinal));
     }
 
     // System.Text.Json is a framework assembly in every host this runs on (an implementation

@@ -314,7 +314,7 @@ public static partial class DataFlowAnalyzer
         result.Statistics.FilesAnalyzed = sourcesToInspect.Count;
         DebugLog.Count("source files discovered", sourcesToInspect.Count);
 
-        var references = GetMetadataReferences(path, result.Diagnostics);
+        var references = GetMetadataReferences(path, result.Diagnostics, purlResolver);
         DebugLog.Count("roslyn metadata references", references.Count);
         List<CSharpSyntaxTree> csharpTrees;
         List<VisualBasicSyntaxTree> vbTrees;
@@ -1297,7 +1297,7 @@ public static partial class DataFlowAnalyzer
         };
     }
 
-    private static List<PortableExecutableReference> GetMetadataReferences(string path, List<string> diagnostics)
+    private static List<PortableExecutableReference> GetMetadataReferences(string path, List<string> diagnostics, PackageUrlResolver purlResolver)
     {
         PortableExecutableReference? CreateReference(string referencePath)
         {
@@ -1358,7 +1358,7 @@ public static partial class DataFlowAnalyzer
             }
         }
 
-        foreach (var diagnostic in references.Diagnostics())
+        foreach (var diagnostic in references.Diagnostics().Append(purlResolver.UnionBindingDiagnostic(references.TreeBindings())).OfType<string>())
         {
             if (!diagnostics.Contains(diagnostic, StringComparer.Ordinal))
             {

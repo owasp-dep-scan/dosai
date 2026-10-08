@@ -63,10 +63,14 @@ public sealed partial class PackageUrlResolver
         private readonly Dictionary<string, string> _assemblyToPurl = new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, string> _packageToPurl = new(StringComparer.OrdinalIgnoreCase);
 
+        // Assemblies the project references by file, by simple name, with the path as written.
+        private readonly Dictionary<string, string> _directReferences = new(StringComparer.OrdinalIgnoreCase);
+
         // The tables probed by span, so a probe never cuts a substring; and the longest name
         // registered, past which no dotted prefix can match one.
         private readonly Dictionary<string, string>.AlternateLookup<ReadOnlySpan<char>> _assembliesBySpan;
         private readonly Dictionary<string, string>.AlternateLookup<ReadOnlySpan<char>> _packagesBySpan;
+        private readonly Dictionary<string, string>.AlternateLookup<ReadOnlySpan<char>> _directReferencesBySpan;
         private int _longestName;
 
         public PackageTables(string? label)
@@ -74,6 +78,7 @@ public sealed partial class PackageUrlResolver
             Label = label;
             _assembliesBySpan = _assemblyToPurl.GetAlternateLookup<ReadOnlySpan<char>>();
             _packagesBySpan = _packageToPurl.GetAlternateLookup<ReadOnlySpan<char>>();
+            _directReferencesBySpan = _directReferences.GetAlternateLookup<ReadOnlySpan<char>>();
         }
 
         /// <summary>The project directory relative to the scan root, or null for the tree-wide and outside-every-project tables.</summary>
@@ -84,9 +89,26 @@ public sealed partial class PackageUrlResolver
         ///     output (<c>project.assets.json</c>, <c>*.deps.json</c>), a <c>packages.lock.json</c>
         ///     or a <c>packages.config</c> - so a package missing from these tables is not one the
         ///     project uses, and its records never borrow another project's (issue #82). Project
-        ///     file references alone are only the direct ones and keep the tree-wide fallback.
+        ///     file references alone are only the direct ones and keep the tree-wide fallback, and
+        ///     so does an assembly the project references by file (<see cref="IsDirectReference" />).
         /// </summary>
         public bool HasPackageClosure { get; set; }
+
+        /// <summary>
+        ///     Assemblies the project file references by file (<c>&lt;Reference&gt;</c> with a hint
+        ///     path), by simple name, each with its path as written: a checked-in or vendored DLL
+        ///     the compiler resolves outside the package closure.
+        /// </summary>
+        public IReadOnlyDictionary<string, string> DirectReferences => _directReferences;
+
+        public void AddDirectReference(string assemblyName, string path) => _directReferences.TryAdd(assemblyName, path);
+
+        /// <summary>
+        ///     Whether <paramref name="name" /> is an assembly the project references by file. Its
+        ///     package closure says nothing about such an assembly, so it still resolves through
+        ///     the tree's packages, as a project without a known closure does.
+        /// </summary>
+        public bool IsDirectReference(ReadOnlySpan<char> name) => _directReferences.Count > 0 && _directReferencesBySpan.ContainsKey(name);
 
         /// <summary>The version each package resolves to in this scope, and the source that gave it.</summary>
         public Dictionary<string, (string Version, string Source)> PackageVersions { get; } = new(StringComparer.OrdinalIgnoreCase);
@@ -254,7 +276,7 @@ public sealed partial class PackageUrlResolver
                     ? string.Create(CultureInfo.InvariantCulture, $"{group.Key} ({named} and {labels.Count - MaxProjectsPerVersion} more)")
                     : $"{group.Key} ({named})";
             }));
-            VersionDiagnostics.Add($"Package {packageName} resolves to {versions.Count.ToString(CultureInfo.InvariantCulture)} versions across projects: {detail}. Each project's records carry its own version; records outside those projects, and call-graph nodes shared by them, carry {_tree.PackageVersions.GetValueOrDefault(packageName).Version}.");
+            VersionDiagnostics.Add($"Package {packageName} resolves to {versions.Count.ToString(CultureInfo.InvariantCulture)} versions across projects: {detail}. Each project's records carry its own version; records outside those projects carry {_tree.PackageVersions.GetValueOrDefault(packageName).Version}, and so does a call-graph node shared by them, unless every call site of the node sits in a project with a known package closure and those sites agree (the node then carries their answer).");
         }
 
         foreach (var tables in scopes)
@@ -266,9 +288,135 @@ public sealed partial class PackageUrlResolver
                 VersionDiagnostics.Add($"PURL version ambiguity for {packageName} in {tables.Label ?? "sources outside any project"}: {detail}; keeping {kept.Version} from {kept.Source}.");
             }
         }
+
+        // A file reference in a project with a known closure takes the tree's purl for its name:
+        // the package is evidenced by another project, its version is not by the file.
+        foreach (var tables in scopes.Where(tables => tables.HasPackageClosure && tables.DirectReferences.Count > 0))
+        {
+            var borrowed = tables.DirectReferences
+                .OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase)
+                .Where(pair => !tables.TryGetAssembly(pair.Key, out _))
+                .Select(pair => _tree.TryGetAssembly(pair.Key, out var purl) ? $"{pair.Key} ({pair.Value}) as {purl}" : null)
+                .OfType<string>()
+                .ToList();
+            if (borrowed.Count > 0)
+            {
+                VersionDiagnostics.Add($"Project {tables.Label} references assemblies by file outside its package closure, and their records take the purl other projects restore for that name; the version is not read from the file: {string.Join(", ", borrowed)}.");
+            }
+        }
     }
 
     private const int MaxProjectsPerVersion = 10;
+
+    /// <summary>
+    ///     One line naming the projects whose calls a source compilation binds against another
+    ///     project's version of a package, or null when there are none. A compilation references one
+    ///     copy of each assembly for the whole tree, the highest version (issue #81), and a call keeps
+    ///     the purl of its own project's closure: a project that restores 9.0.10 of a package whose
+    ///     11.0.0 copy another project's output holds binds against the 11.0.0 API surface and
+    ///     reports 9.0.10. Per-project reference sets would remove the mismatch; this names it.
+    /// </summary>
+    /// <param name="treeBindings">The tree's copies the compilation kept (<see cref="CompilationReferenceSet.TreeBindings" />).</param>
+    public string? UnionBindingDiagnostic(IEnumerable<(string Name, string Path)> treeBindings)
+    {
+        if (_projectTables.Count < 2)
+        {
+            return null;
+        }
+
+        var details = new List<string>();
+        var mismatched = 0;
+        foreach (var (name, path) in treeBindings.OrderBy(binding => binding.Name, StringComparer.OrdinalIgnoreCase))
+        {
+            // Cheap first: a name no project's packages ship has nothing to disagree with.
+            if (!_tree.TryGetAssembly(name, out _) || BoundPurl(name, path) is not { } bound)
+            {
+                continue;
+            }
+
+            var projects = _projectTables.Values
+                .Select(tables => (tables.Label, Own: tables.TryGetAssembly(name, out var own) ? own : null))
+                .Where(project => project.Own is not null && !string.Equals(project.Own, bound.Purl, StringComparison.OrdinalIgnoreCase))
+                .OrderBy(project => project.Label, StringComparer.Ordinal)
+                .Select(project => $"{project.Label} ({project.Own})")
+                .ToList();
+            if (projects.Count == 0)
+            {
+                continue;
+            }
+
+            mismatched++;
+            if (details.Count < MaxProjectsPerVersion)
+            {
+                var named = string.Join(", ", projects.Take(MaxProjectsPerVersion));
+                var more = projects.Count > MaxProjectsPerVersion ? string.Create(CultureInfo.InvariantCulture, $" and {projects.Count - MaxProjectsPerVersion} more") : string.Empty;
+                var version = CompilationReferenceSet.ReadVersion(path) is { } assemblyVersion ? $" {assemblyVersion}" : string.Empty;
+                details.Add($"{name}{version} from {bound.Where} ({bound.Purl}) for {named}{more}");
+            }
+        }
+
+        if (mismatched == 0)
+        {
+            return null;
+        }
+
+        var moreNames = mismatched > details.Count ? string.Create(CultureInfo.InvariantCulture, $"; and {mismatched - details.Count} more assemblies") : string.Empty;
+        return $"The source compilation references one copy of each assembly for the whole tree, so calls in some projects bind against another project's version of a package while keeping their own project's purl: {string.Join("; ", details)}{moreNames}.";
+    }
+
+    /// <summary>
+    ///     The purl of the package a kept reference's file belongs to, and where the file is: a
+    ///     restore-cache file by its folders (<c>&lt;id&gt;/&lt;version&gt;/lib/...</c>), a file in the
+    ///     tree by its own project's tables alone (the tree-wide answer would be a guess). Null when
+    ///     neither says.
+    /// </summary>
+    private (string Purl, string Where)? BoundPurl(string name, string path)
+    {
+        string fullPath;
+        try
+        {
+            fullPath = Path.GetFullPath(path);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return null;
+        }
+
+        if (!fullPath.StartsWith(_root + Path.DirectorySeparatorChar, SafeFileRead.PathComparison))
+        {
+            if (GlobalPackagesFolderOf(fullPath) is not var (id, version))
+            {
+                return null;
+            }
+
+            // The folders are lowercased; a project that restores that version has the package's casing.
+            var fromFolders = BuildNuGetPurl(id, version);
+            var cased = _projectTables.Values
+                .Select(tables => tables.TryGetAssembly(name, out var own) ? own : null)
+                .FirstOrDefault(own => string.Equals(own, fromFolders, StringComparison.OrdinalIgnoreCase));
+            return (cased ?? fromFolders, "the restore cache");
+        }
+
+        return TablesForLocation(fullPath) is { } tables && tables.TryGetAssembly(name, out var purl) && purl is not null
+            ? (purl, Path.GetRelativePath(_root, Path.GetDirectoryName(fullPath) ?? fullPath).Replace('\\', '/'))
+            : null;
+    }
+
+    /// <summary>The package and version of a file in a global packages folder: <c>&lt;id&gt;/&lt;version&gt;/</c> above its <c>lib</c>, <c>ref</c> or <c>runtimes</c> directory.</summary>
+    private static (string Id, string Version)? GlobalPackagesFolderOf(string path)
+    {
+        var segments = path.Split(['/', '\\'], StringSplitOptions.RemoveEmptyEntries);
+        for (var index = segments.Length - 2; index >= 2; index--)
+        {
+            if ((segments[index].Equals("lib", StringComparison.OrdinalIgnoreCase) || segments[index].Equals("ref", StringComparison.OrdinalIgnoreCase) || segments[index].Equals("runtimes", StringComparison.OrdinalIgnoreCase))
+                && PackageFolderVersionRegex().IsMatch(segments[index - 1]))
+            {
+                return (segments[index - 2], segments[index - 1]);
+            }
+        }
+
+        return null;
+    }
 
     /// <summary>
     ///     The tables of the project a source file belongs to: the project its restore output names
@@ -479,8 +627,9 @@ public sealed partial class PackageUrlResolver
         }
 
         // A project whose package closure is known does not use what it lacks: the tree's
-        // answer would be another project's package (issue #82).
-        return project is not { HasPackageClosure: true } && _tree.TryGetAssembly(candidate, out purl);
+        // answer would be another project's package (issue #82). An assembly it references by
+        // file is the exception: the closure does not list it.
+        return (project is not { HasPackageClosure: true } || project.IsDirectReference(candidate)) && _tree.TryGetAssembly(candidate, out purl);
     }
 
     /// <summary>The longest package or packaged-assembly name <paramref name="name" /> equals or continues with a dot.</summary>
@@ -494,12 +643,13 @@ public sealed partial class PackageUrlResolver
 
         var normalized = NormalizeSymbol(name);
         firstNormalized ??= normalized;
-        // The tree answers only for a record without a closed project (see TryResolveAssembly).
-        var tree = project is { HasPackageClosure: true } ? null : _tree;
+        // The tree answers only for a record without a closed project, or for a name the closed
+        // project references by file (see TryResolveAssembly).
+        var closed = project is { HasPackageClosure: true };
         for (var end = normalized.Length; end > 0; end = normalized.LastIndexOf('.', end - 1))
         {
             var prefix = normalized.AsSpan(0, end);
-            if (project is not null && project.TryGetPrefix(prefix, out purl) || tree is not null && tree.TryGetPrefix(prefix, out purl))
+            if (project is not null && project.TryGetPrefix(prefix, out purl) || (!closed || project!.IsDirectReference(prefix)) && _tree.TryGetPrefix(prefix, out purl))
             {
                 return true;
             }
@@ -849,6 +999,7 @@ public sealed partial class PackageUrlResolver
                 count++;
             }
 
+            count += ReadFileReferences(document, tables);
             if (count > 0)
             {
                 Diagnostics.Add($"Resolved {count} package purl(s) from project references in {Path.GetFileName(filePath)}.");
@@ -858,6 +1009,89 @@ public sealed partial class PackageUrlResolver
         {
             // Resolver is best-effort and should never fail analysis.
         }
+    }
+
+    /// <summary>
+    ///     A project's <c>&lt;Reference&gt;</c> items that name a file - a hint path, or a path as
+    ///     the item itself - and so reach the compiler outside the package closure. A file in a
+    ///     <c>packages.config</c> repository folder (<c>packages/Newtonsoft.Json.13.0.3/lib/...</c>)
+    ///     names its package and version exactly; any other file (a checked-in or vendored DLL) is
+    ///     recorded as a direct reference, which keeps the tree-wide fallback for its name in a
+    ///     project whose closure is known (issue #82 must not drop its purl). A reference with
+    ///     no file - <c>System.Net.Http</c> in a legacy project - is the framework's, and the
+    ///     framework's reference assemblies are not a package either.
+    /// </summary>
+    /// <returns>How many package purls the hint paths named.</returns>
+    private int ReadFileReferences(XDocument document, PackageTables tables)
+    {
+        var count = 0;
+        // By local name: a legacy project file puts every element in the MSBuild namespace.
+        foreach (var reference in document.Descendants().Where(element => element.Name.LocalName == "Reference"))
+        {
+            var include = reference.Attribute("Include")?.Value.Trim();
+            var hintPath = (reference.Attribute("HintPath")?.Value ?? reference.Elements().FirstOrDefault(element => element.Name.LocalName == "HintPath")?.Value)?.Trim();
+            var includeIsFile = include is not null && IsAssemblyFile(include);
+            var file = !string.IsNullOrEmpty(hintPath) ? hintPath : includeIsFile ? include : null;
+            if (string.IsNullOrEmpty(file) || IsFrameworkReferenceAssemblyPath(file))
+            {
+                continue;
+            }
+
+            // The assembly's simple name: the item's identity (`Serilog, Version=2.0.0.0, ...`),
+            // else the file's name.
+            var name = !string.IsNullOrEmpty(include) && !includeIsFile ? include.Split(',', 2)[0].Trim() : WithoutAssemblyExtension(Path.GetFileName(file.Replace('\\', '/').AsSpan())).ToString();
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                continue;
+            }
+
+            if (PackageFolderOf(file) is var (packageName, version))
+            {
+                var purl = BuildNuGetPurl(packageName, version);
+                AddPackage(tables, packageName, version, "HintPath", purl, "medium");
+                _tree.AddAssembly(name, purl);
+                tables.AddAssembly(name, purl);
+                count++;
+            }
+            else
+            {
+                tables.AddDirectReference(name, file);
+            }
+        }
+
+        return count;
+    }
+
+    /// <summary>A hint path into the .NET Framework reference assemblies (<c>Reference Assemblies/Microsoft/Framework</c>).</summary>
+    private static bool IsFrameworkReferenceAssemblyPath(string path) =>
+        path.Contains("Reference Assemblies", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    ///     The package and version a file in a <c>packages.config</c> repository folder belongs to:
+    ///     the folder above its <c>lib</c>, <c>ref</c> or <c>runtimes</c> directory, split at the
+    ///     first dot whose remainder is a version (<c>AWSSDK.S3.3.7.0</c> is AWSSDK.S3 3.7.0).
+    /// </summary>
+    private static (string Name, string Version)? PackageFolderOf(string path)
+    {
+        var segments = path.Split(['/', '\\'], StringSplitOptions.RemoveEmptyEntries);
+        for (var index = 1; index < segments.Length - 1; index++)
+        {
+            if (!segments[index].Equals("lib", StringComparison.OrdinalIgnoreCase) && !segments[index].Equals("ref", StringComparison.OrdinalIgnoreCase) && !segments[index].Equals("runtimes", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var folder = segments[index - 1];
+            for (var dot = folder.IndexOf('.', StringComparison.Ordinal); dot > 0; dot = folder.IndexOf('.', dot + 1))
+            {
+                if (PackageFolderVersionRegex().IsMatch(folder.AsSpan(dot + 1)))
+                {
+                    return (folder[..dot], folder[(dot + 1)..]);
+                }
+            }
+        }
+
+        return null;
     }
 
     private void AddAssets(PackageTables tables, JsonElement libraryElement, string propertyName, string purl)
@@ -943,4 +1177,9 @@ public sealed partial class PackageUrlResolver
 
     [GeneratedRegex(@"^\s+(?<name>[A-Za-z0-9_.\-]+)\s+\((?<version>[^)\s]+)")]
     private static partial Regex PaketPackageLineRegex();
+
+    // A NuGet version as a packages.config folder name carries it: two to four numeric parts and
+    // an optional prerelease label.
+    [GeneratedRegex(@"^[0-9]+(\.[0-9]+){1,3}(-[0-9A-Za-z][0-9A-Za-z.\-]*)?$")]
+    private static partial Regex PackageFolderVersionRegex();
 }
