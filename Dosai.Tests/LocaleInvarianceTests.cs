@@ -83,7 +83,7 @@ internal class Sample
         Assert.NotNull(result);
         var receiverSlice = Assert.Single(result.Slices!, slice => slice.SinkArgumentIndex == -1);
         Assert.EndsWith("argument -1.", receiverSlice.Summary);
-        Assert.DoesNotContain(result.Slices!, slice => slice.Summary.Contains('−'));
+        Assert.DoesNotContain(result.Slices!, slice => slice.Summary?.Contains('−') == true);
     }
 
     [Fact]

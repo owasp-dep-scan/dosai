@@ -108,7 +108,7 @@ public partial class DosaiTests
                 Assert.StartsWith("Dosai.SourceAnalysis.CSharp", call.Assembly, StringComparison.Ordinal);
                 Assert.True(call.IsInternal);
             });
-            Assert.Contains(slice.Diagnostics, diagnostic => diagnostic.StartsWith("1 assembly reference(s) were left out of the source compilation", StringComparison.Ordinal));
+            Assert.Contains(slice.Diagnostics ?? [], diagnostic => diagnostic.StartsWith("1 assembly reference(s) were left out of the source compilation", StringComparison.Ordinal));
         }
 
         Assert.Equal(

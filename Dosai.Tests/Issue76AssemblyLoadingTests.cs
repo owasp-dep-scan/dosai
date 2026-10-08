@@ -381,21 +381,21 @@ public sealed class Issue76AssemblyLoadingTests
             });
         Assert.Empty(everything.NamedArguments!);
 
-        var ctor = slice.Methods.Single(method => method.FileName == "Issue76AttrShapes.dll"
+        var ctor = slice.Methods!.Single(method => method.FileName == "Issue76AttrShapes.dll"
             && method.ClassName == "Decorated" && method.Name == ".ctor");
         var nullArgument = ctor.CustomAttributes!.Single(attribute => attribute.Name == "EverythingAttribute").ConstructorArguments!.Single();
         Assert.True(nullArgument.IsNull);
         Assert.False(nullArgument.IsArray);
         Assert.Equal("System.String", nullArgument.Type);
 
-        var field = slice.Methods.Single(method => method.FileName == "Issue76AttrShapes.dll"
+        var field = slice.Methods!.Single(method => method.FileName == "Issue76AttrShapes.dll"
             && method.ClassName == "Decorated" && method.Name == "Field");
         var nullArray = field.CustomAttributes!.Single(attribute => attribute.Name == "EverythingAttribute").ConstructorArguments!.Single();
         Assert.True(nullArray.IsNull);
         Assert.True(nullArray.IsArray);
         Assert.Equal("System.String[]", nullArray.Type);
 
-        var genericMethod = slice.Methods.Single(method => method.FileName == "Issue76AttrShapes.dll"
+        var genericMethod = slice.Methods!.Single(method => method.FileName == "Issue76AttrShapes.dll"
             && method.ClassName == "Decorated" && method.Name == "Method" && method.GenericParameters!.Count == 1);
         var methodAttribute = genericMethod.CustomAttributes!.Single(attribute => attribute.Name == "EverythingAttribute");
         Assert.Collection(methodAttribute.ConstructorArguments!,
@@ -405,7 +405,7 @@ public sealed class Issue76AssemblyLoadingTests
             argument => { Assert.Equal("System.Type", argument.Type); Assert.Equal("Issue76AttrShapes.Decorated", argument.Value); });
         // Named arguments keep the scalar string shape, arrays flatten comma-joined, and an
         // unset member is simply absent.
-        var named = methodAttribute.NamedArguments!.ToDictionary(argument => argument.Name, argument => argument.Value);
+        var named = methodAttribute.NamedArguments!.ToDictionary(argument => argument.Name ?? string.Empty, argument => argument.Value);
         Assert.Equal("n", named["NamedText"]);
         Assert.Equal("-7", named["NamedNumber"]);
         // A named enum argument renders its numeric value: CustomAttributeTypedArgument boxes
