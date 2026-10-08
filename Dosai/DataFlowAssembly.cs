@@ -32,16 +32,22 @@ public static partial class DataFlowAnalyzer
             return 0;
         }
 
+        // A built tree holds a copy of each referenced project's (and, in test and executable
+        // outputs, each package's) assembly in the output of every project that references it.
+        // Each distinct file is analyzed once, so a flow is reported once, not once per copy
+        // (issue #83); the copies are classified with it and named in a diagnostic.
+        var copies = AssemblyCopies.Collapse(path, assemblyPaths);
+        if (copies.Diagnostic(path) is { } copiesDiagnostic)
+        {
+            result.Diagnostics.Add(copiesDiagnostic);
+        }
+
         var context = new AssemblyDataFlowContext(result, patterns, path);
+        context.TreatAsOneAssembly(copies);
         var summaries = new Dictionary<string, AssemblyMethodSummary>(StringComparer.Ordinal);
         var analyzedAssemblies = 0;
-        foreach (var assemblyPath in assemblyPaths)
+        foreach (var assemblyPath in copies.Distinct)
         {
-            if (!IsManagedAssemblyFile(assemblyPath))
-            {
-                continue;
-            }
-
             try
             {
                 using var stream = new FileStream(assemblyPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
@@ -2005,20 +2011,6 @@ public static partial class DataFlowAnalyzer
         return AssemblyScope.GetAssemblyFiles(path, includeBuildArtifacts, excludeBinWhenSourceFilesPresent: false, diagnostics.Add);
     }
 
-    private static bool IsManagedAssemblyFile(string filePath)
-    {
-        try
-        {
-            using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            using var peReader = new PEReader(stream);
-            return peReader is { HasMetadata: true, PEHeaders.CorHeader: not null };
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
     private static string GetNamespace(string typeName)
     {
         var index = typeName.LastIndexOf('.');
@@ -2063,6 +2055,15 @@ public static partial class DataFlowAnalyzer
         private readonly Dictionary<(string Document, string Assembly), string> _treePaths = [];
 
         private DependencyAssemblies Dependencies => _dependencies ??= new DependencyAssemblies(basePath, _purlResolver);
+
+        /// <summary>Each analyzed file is classified together with its byte-identical copies (issue #83).</summary>
+        public void TreatAsOneAssembly(AssemblyCopies copies)
+        {
+            foreach (var group in copies.Groups)
+            {
+                Dependencies.TreatAsOneAssembly(group.Analyzed, group.Copies);
+            }
+        }
 
         /// <summary>
         ///     A node's or edge's file (a PDB document, or the assembly where no sequence point

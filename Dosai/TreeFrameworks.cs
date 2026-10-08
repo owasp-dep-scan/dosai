@@ -112,7 +112,17 @@ internal static partial class TreeFrameworks
     ///     changed with the worker count (dotnet/runtime builds the Microsoft.Extensions.*
     ///     assemblies the ASP.NET Core pack also ships).
     /// </summary>
-    public static IReadOnlySet<string> SourceAssemblyNames(string root)
+    public static IReadOnlySet<string> SourceAssemblyNames(string root) => SourceProjects(root).Names;
+
+    /// <summary>
+    ///     The directories of the tree's projects that build <paramref name="assemblyName" /> from
+    ///     source (the same projects <see cref="SourceAssemblyNames" /> reads), in path order; empty
+    ///     when the tree does not build it.
+    /// </summary>
+    public static IReadOnlyList<string> ProjectDirectoriesBuilding(string root, string assemblyName) =>
+        SourceProjects(root).DirectoriesByName.TryGetValue(assemblyName, out var directories) ? directories : [];
+
+    private static SourceProjectSet SourceProjects(string root)
     {
         string key;
         try
@@ -121,10 +131,10 @@ internal static partial class TreeFrameworks
         }
         catch (ArgumentException)
         {
-            return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            return SourceProjectSet.Empty;
         }
 
-        return SourceAssemblyNamesByRoot.GetOrAdd(key, ComputeSourceAssemblyNames);
+        return SourceProjectsByRoot.GetOrAdd(key, ComputeSourceProjects);
     }
 
     /// <summary>
@@ -139,16 +149,23 @@ internal static partial class TreeFrameworks
         SourceAssemblyNames(root).Contains(Path.GetFileNameWithoutExtension(assemblyPath));
 
     /// <summary>Forgets every per-root answer; the MCP server calls it before each tool call.</summary>
-    internal static void ResetCache() => SourceAssemblyNamesByRoot.Clear();
+    internal static void ResetCache() => SourceProjectsByRoot.Clear();
 
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, IReadOnlySet<string>> SourceAssemblyNamesByRoot = new(SafeFileRead.PathComparer);
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, SourceProjectSet> SourceProjectsByRoot = new(SafeFileRead.PathComparer);
 
-    private static IReadOnlySet<string> ComputeSourceAssemblyNames(string root)
+    /// <summary>The assembly names a tree builds from source, and the project directories building each.</summary>
+    private sealed record SourceProjectSet(IReadOnlySet<string> Names, IReadOnlyDictionary<string, string[]> DirectoriesByName)
+    {
+        public static SourceProjectSet Empty { get; } = new(new HashSet<string>(StringComparer.OrdinalIgnoreCase), new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase));
+    }
+
+    private static SourceProjectSet ComputeSourceProjects(string root)
     {
         var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var directories = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
         if (!Directory.Exists(root))
         {
-            return names;
+            return SourceProjectSet.Empty;
         }
 
         try
@@ -168,6 +185,16 @@ internal static partial class TreeFrameworks
                 }
 
                 names.Add(name);
+                if (Path.GetDirectoryName(Path.GetFullPath(project)) is { } projectDirectory)
+                {
+                    if (!directories.TryGetValue(name, out var list))
+                    {
+                        list = [];
+                        directories.Add(name, list);
+                    }
+
+                    list.Add(projectDirectory);
+                }
             }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
@@ -175,7 +202,7 @@ internal static partial class TreeFrameworks
             // Best effort: an unreadable tree keeps every pack assembly.
         }
 
-        return names;
+        return new SourceProjectSet(names, directories.ToDictionary(pair => pair.Key, pair => pair.Value.Distinct(SafeFileRead.PathComparer).Order(StringComparer.Ordinal).ToArray(), StringComparer.OrdinalIgnoreCase));
     }
 
     /// <summary>project.assets.json records the frameworks restore resolved per target, including framework references NuGet downloaded.</summary>

@@ -169,6 +169,14 @@ dotnet test ./Dosai.sln
   whose every node does is `Scope: dependency` with severity capped at low
   (`TransparencyBuilder.DependencySeverity`), and every derived fact that ranks findings
   (weaknesses, dangerous-API and package reachability, agent context, diff) must honour it.
+- The IL data-flow pass analyzes each distinct file once (issue #83): a build copies every
+  referenced project's assembly (and, in test and executable outputs, every package's) into each
+  referencing project's output. `AssemblyCopies.Collapse` groups candidates by length and module
+  version id, then confirms a copy by SHA-256 - never collapse on the id or the assembly identity
+  alone (a patched file keeps both, and Debug/Release or per-target builds are distinct code that
+  is all analyzed). The analyzed copy is ranked by a PDB beside it, then a place inside the
+  directory of a project that builds it, then tree order (`AssemblyCopies.TreeOrder`), never the
+  enumeration order; `DependencyAssemblies.TreatAsOneAssembly` classifies the copies together.
 - The IL interpreters model every opcode they do not handle explicitly through
   `GetStackEffect` (`OpCode.StackBehaviourPop`/`Push`, the call-site signature for `calli`).
   A pop count that is too low is not a local error: the abstract stack drifts on every pass

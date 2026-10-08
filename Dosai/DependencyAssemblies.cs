@@ -17,6 +17,14 @@ namespace Depscan;
 ///         name. An assembly the tree builds from source is always the application's, and so is
 ///         every assembly when the scan targets a single file: the caller asked about that file.
 ///     </para>
+///     <para>
+///         The IL pass analyzes one file of each set of byte-identical copies (issue #83), and the
+///         copies of one assembly are classified together, so the answer does not depend on which
+///         copy was analyzed: the application's when any copy is (built from source, or a
+///         <c>project</c> library of its output), else a dependency when any copy is named one by
+///         its output or the restore metadata, else the application's (the default for a file
+///         nothing names, unchanged).
+///     </para>
 /// </summary>
 internal sealed class DependencyAssemblies
 {
@@ -24,6 +32,15 @@ internal sealed class DependencyAssemblies
     private readonly PackageUrlResolver _resolver;
     private readonly Dictionary<string, bool> _isDependencyByPath = new(SafeFileRead.PathComparer);
     private readonly Dictionary<string, BuildOutput?> _outputByDirectory = new(SafeFileRead.PathComparer);
+    private readonly Dictionary<string, string[]> _copiesByAnalyzedPath = new(SafeFileRead.PathComparer);
+
+    /// <summary>What a location says about an assembly: named the application's, named a dependency, or nothing.</summary>
+    private enum Evidence
+    {
+        Unknown,
+        Application,
+        Dependency
+    }
 
     public DependencyAssemblies(string analysisPath, PackageUrlResolver resolver)
     {
@@ -34,6 +51,30 @@ internal sealed class DependencyAssemblies
         }
     }
 
+    /// <summary>
+    ///     Classifies <paramref name="analyzedPath" /> together with the byte-identical
+    ///     <paramref name="copies" /> the IL pass left out (see the class remarks).
+    /// </summary>
+    public void TreatAsOneAssembly(string analyzedPath, IEnumerable<string> copies)
+    {
+        if (_root is null || !TryGetFullPath(analyzedPath, out var analyzed))
+        {
+            return;
+        }
+
+        var fullCopies = new List<string>();
+        foreach (var copy in copies)
+        {
+            if (TryGetFullPath(copy, out var fullCopy))
+            {
+                fullCopies.Add(fullCopy);
+            }
+        }
+
+        _copiesByAnalyzedPath[analyzed] = [.. fullCopies];
+        _isDependencyByPath.Remove(analyzed);
+    }
+
     /// <summary>Whether <paramref name="assemblyPath" /> is a dependency of the scanned application rather than its own code.</summary>
     public bool IsDependency(string assemblyPath)
     {
@@ -42,38 +83,62 @@ internal sealed class DependencyAssemblies
             return false;
         }
 
-        string fullPath;
-        try
-        {
-            fullPath = Path.GetFullPath(assemblyPath);
-        }
-        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        if (!TryGetFullPath(assemblyPath, out var fullPath))
         {
             return false;
         }
 
         if (!_isDependencyByPath.TryGetValue(fullPath, out var isDependency))
         {
-            isDependency = Classify(fullPath);
+            var evidence = Classify(fullPath);
+            if (_copiesByAnalyzedPath.TryGetValue(fullPath, out var copies))
+            {
+                foreach (var copy in copies)
+                {
+                    if (evidence == Evidence.Application)
+                    {
+                        break;
+                    }
+
+                    var copyEvidence = Classify(copy);
+                    evidence = copyEvidence == Evidence.Unknown ? evidence : copyEvidence == Evidence.Application ? Evidence.Application : Evidence.Dependency;
+                }
+            }
+
+            isDependency = evidence == Evidence.Dependency;
             _isDependencyByPath[fullPath] = isDependency;
         }
 
         return isDependency;
     }
 
-    private bool Classify(string fullPath)
+    private static bool TryGetFullPath(string path, out string fullPath)
+    {
+        try
+        {
+            fullPath = Path.GetFullPath(path);
+            return true;
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            fullPath = string.Empty;
+            return false;
+        }
+    }
+
+    private Evidence Classify(string fullPath)
     {
         if (TreeFrameworks.IsBuiltFromSource(_root!, fullPath))
         {
-            return false;
+            return Evidence.Application;
         }
 
         if (OutputFor(Path.GetDirectoryName(fullPath)) is { } output)
         {
-            return !output.IsProjectAssembly(fullPath);
+            return output.IsProjectAssembly(fullPath) ? Evidence.Application : Evidence.Dependency;
         }
 
-        return _resolver.ResolvePackagedAssembly(fullPath) is not null;
+        return _resolver.ResolvePackagedAssembly(fullPath) is not null ? Evidence.Dependency : Evidence.Unknown;
     }
 
     /// <summary>The build output (a directory holding <c>*.deps.json</c>) at or above <paramref name="directory" /> within the scan root.</summary>

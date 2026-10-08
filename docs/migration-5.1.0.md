@@ -372,3 +372,67 @@ under the build machine's absolute path. Both now carry the same path:
 `dataflows` follows the same rule for IL nodes and edges. Their `Path` falls back to the file
 name as edges already did; nodes used to climb out of the root (`../../../_/Program.cs`).
 Consumers that read `MethodCalls[].Path` should fall back to `FileName` when it is absent.
+
+## Package copies of framework assemblies in `bin/` (issue #81, fix)
+
+A package that ships a newer copy of a shared-framework assembly
+(`Microsoft.Extensions.Logging.Abstractions` 9.0.10 in a net8.0 web app) is copied to `bin/`
+beside the reference pack that already has one. Every source compilation (methods, dataflows,
+crypto) referenced both, and calls into the assembly did not bind (`SourceUnresolved`, with the
+"Semantic binding failed" diagnostic).
+
+- A compilation keeps one reference per assembly simple name: the highest assembly version, which
+  is what the SDK compiles the project against. Equal versions keep the framework copy, then build
+  output, then restore output; two build-output copies keep the first in path order.
+- Such calls now bind (`SourceRoslynDirect`) to the version the build uses and carry that
+  package's purl (`pkg:nuget/Microsoft.Extensions.Logging.Abstractions@9.0.10` in the example).
+- `Diagnostics` names framework references a newer copy replaced ("framework reference(s) were
+  replaced by a higher-version copy ...") and older build-output copies that were left out.
+
+## Purls of framework calls in multi-project trees (issue #82, fix)
+
+A record in a project with its own restore output used to fall back to the whole tree's package
+tables when its project had no match, and took another project's package of a framework
+assembly's name: a framework call in a web app carried
+`pkg:nuget/Microsoft.AspNetCore.Http.Abstractions@2.1.1` (or `pkg:nuget/System.Runtime@4.3.1`) restored
+by a sibling library, and `PackageReachability` listed that package.
+
+- A project whose package closure is known - `project.assets.json`, `*.deps.json`,
+  `packages.lock.json` or `packages.config` - resolves in its own packages only, then takes the
+  versionless `System.*` fallback: the answer the project gets when scanned on its own. A project
+  with only `<PackageReference>` items, and records outside every project, keep the tree-wide
+  fallback.
+- A call-graph node whose every call site lies in such projects, and whose sites agree, carries
+  their answer instead of the tree-wide one; other nodes are unchanged.
+
+## Assembly copies in built trees (issue #83, fix)
+
+The `dataflows` IL pass (which `crypto`'s data flows also run) analyzed every copy of an assembly
+that a build leaves in the output of each referencing project, and reported every flow through it
+once per copy, with nodes that differed only in their id.
+
+- Each distinct file is analyzed once: byte-identical copies (same length, module version id and
+  SHA-256) are one assembly. Distinct builds of one project (Debug and Release, two target
+  frameworks) are still each analyzed.
+- `Slices`, `Nodes`, `Edges` and their `Statistics` counts drop to what a tree holding one copy
+  produces, and `Statistics.FilesAnalyzed` counts the files analyzed, copies excluded. That
+  includes flows the old output only found by analyzing a second copy after the first had
+  recorded a field taint or a method summary (a field read by a method that is analyzed before
+  the method writing it): a tree with one copy never reported those either.
+- The analyzed copy is the one with a PDB beside it, then the one in its own project's output, then
+  the first in path order. A `Diagnostics` line lists, per assembly, the copy analyzed and the
+  copies left out.
+- Copies are classified together for `Scope`: the application's when any copy is, else a
+  dependency when any copy's build output or the restore metadata names it one. A loose copy
+  that nothing names, beside a `<Reference>` copy in a build output, is now a dependency, as the
+  build output says.
+
+## Source locations of async and iterator methods in IL (issue #84, fix)
+
+An async or iterator method compiles to a stub with no sequence points of its own. Records of the
+stub fell back to the assembly file at line 1: the parameter sources of such methods in
+`dataflows`, and the call-graph node of the method in `methods`.
+
+- They now carry the source location of the state machine's first sequence point, from the PDB:
+  the method's opening brace in a Debug build, its first statement in Release. Records of methods
+  without a PDB are unchanged.
