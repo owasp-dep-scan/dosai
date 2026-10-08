@@ -245,8 +245,8 @@ public class Issue74BindingTests
         Write(console, "Program.cs", "class P { static void Main() { System.Console.WriteLine(System.Text.Encoding.UTF8); } }");
 
         var result = Depscan.Dosai.GetMethodsSlice(fixture.Path);
-        Assert.Contains(result.MethodCalls, call => call.CalledMethod.Contains("Console.WriteLine", StringComparison.Ordinal));
-        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Contains("differ between projects", StringComparison.Ordinal));
+        Assert.Contains(result.MethodCalls ?? [], call => call.CalledMethod?.Contains("Console.WriteLine", StringComparison.Ordinal) == true);
+        Assert.Contains(result.Diagnostics ?? [], diagnostic => diagnostic.Contains("differ between projects", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -328,13 +328,13 @@ public class Issue74BindingTests
         Assert.Contains(notes, note => note.Contains("No 9.x reference pack", StringComparison.Ordinal) && note.Contains("10.0.10", StringComparison.Ordinal));
 
         // Exact 11: the release beats the prerelease of the same version, and the label keeps it.
-        Assert.Equal("11.0.0", Resolve(11, []).Value.Version);
+        Assert.Equal("11.0.0", Resolve(11, [])?.Version);
 
         // Above every installed major: the nearest below.
-        Assert.Equal("11.0.0", Resolve(12, []).Value.Version);
+        Assert.Equal("11.0.0", Resolve(12, [])?.Version);
 
         // Below every installed major: the nearest above, never the newest.
-        Assert.Equal("8.0.31", Resolve(7, []).Value.Version);
+        Assert.Equal("8.0.31", Resolve(7, [])?.Version);
 
         Assert.Null(FrameworkReferences.ResolvePackDirectory("Missing.Framework", "net8.0", 8, [], [dotnetPacks], [nugetCache], []));
     }
@@ -524,8 +524,8 @@ app.Run();
 """);
 
         var result = Depscan.Dosai.GetMethodsSlice(fixture.Path);
-        Skip.If(result.Diagnostics.Any(diagnostic => diagnostic.Contains("No reference pack for 'Microsoft.AspNetCore.App'", StringComparison.Ordinal)), "no ASP.NET Core pack for the target");
-        var targets = string.Join("\n", result.MethodCalls.Select(call => (call.TargetId ?? string.Empty) + "|" + call.CalledMethod));
+        Skip.If((result.Diagnostics ?? []).Any(diagnostic => diagnostic.Contains("No reference pack for 'Microsoft.AspNetCore.App'", StringComparison.Ordinal)), "no ASP.NET Core pack for the target");
+        var targets = string.Join("\n", (result.MethodCalls ?? []).Select(call => (call.TargetId ?? string.Empty) + "|" + call.CalledMethod));
         Assert.Contains("WebApplication.CreateBuilder(string[])", targets, StringComparison.Ordinal);
         Assert.Contains("LoggerExtensions.LogWarning", targets, StringComparison.Ordinal);
         Assert.Contains("TypedResults.Ok<string>", targets, StringComparison.Ordinal);
@@ -554,7 +554,7 @@ namespace Forms
         var result = Depscan.Dosai.GetMethodsSlice(fixture.Path);
         // Either the pack binds the calls, or the missing pack is named - never a crash, and
         // the diagnostic never advises restoring the tree for a pack problem.
-        var packDiagnostic = result.Diagnostics.FirstOrDefault(diagnostic => diagnostic.Contains("Microsoft.WindowsDesktop.App", StringComparison.Ordinal));
+        var packDiagnostic = (result.Diagnostics ?? []).FirstOrDefault(diagnostic => diagnostic.Contains("Microsoft.WindowsDesktop.App", StringComparison.Ordinal));
         Assert.True(packDiagnostic is null || !packDiagnostic.Contains("Restore or build the tree", StringComparison.Ordinal),
             $"pack diagnostic must not advise restore/build: {packDiagnostic}");
         Skip.If(packDiagnostic is null && OperatingSystem.IsMacOS(), "this machine has a WindowsDesktop pack installed");

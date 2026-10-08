@@ -32,51 +32,69 @@ public static partial class DataFlowAnalyzer
             return 0;
         }
 
-        var context = new AssemblyDataFlowContext(result, patterns, path);
-        var summaries = new Dictionary<string, AssemblyMethodSummary>(StringComparer.Ordinal);
-        var analyzedAssemblies = 0;
-        foreach (var assemblyPath in assemblyPaths)
+        // A built tree holds a copy of each referenced project's (and, in test and executable
+        // outputs, each package's) assembly in the output of every project that references it.
+        // Each distinct file is analyzed once, so a flow is reported once, not once per copy
+        // (issue #83); the copies are classified with it and named in a diagnostic.
+        var copies = AssemblyCopies.Collapse(path, assemblyPaths);
+        if (copies.Diagnostic(path, "each flow through them is reported once") is { } copiesDiagnostic)
         {
-            if (!IsManagedAssemblyFile(assemblyPath))
+            result.Diagnostics.Add(copiesDiagnostic);
+        }
+
+        var context = new AssemblyDataFlowContext(result, patterns, path);
+        context.TreatAsOneAssembly(copies);
+        var summaries = new Dictionary<string, AssemblyMethodSummary>(StringComparer.Ordinal);
+
+        // Each distinct file once (issue #83), and nothing taken from an earlier copy's pass: a
+        // second copy used to act as an accidental second pass, seeing the summaries and field
+        // taints the first had recorded. The pass now reaches those flows on purpose, and the
+        // same flows in every analysis order: every assembly's summaries before any body, and
+        // methods re-analyzed when a field they read gains taint after they read it.
+        var assemblies = new List<AnalyzedAssembly>();
+        try
+        {
+            foreach (var assemblyPath in copies.Distinct)
             {
-                continue;
-            }
-
-            try
-            {
-                using var stream = new FileStream(assemblyPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-                using var peReader = new PEReader(stream);
-                if (!peReader.HasMetadata)
+                if (OpenAnalyzedAssembly(assemblyPath, result) is { } assembly)
                 {
-                    continue;
-                }
-
-                analyzedAssemblies++;
-                var reader = peReader.GetMetadataReader();
-                var sourceMap = LoadPortablePdbSourceMap(assemblyPath, result.Diagnostics);
-                CollectAssemblyMethodSummaries(peReader, reader, sourceMap, assemblyPath, context, summaries);
-                PreseedAssemblyFieldTaints(peReader, reader, sourceMap, assemblyPath, context);
-                foreach (var methodHandle in reader.MethodDefinitions)
-                {
-                    var method = reader.GetMethodDefinition(methodHandle);
-                    if (method.RelativeVirtualAddress == 0)
-                    {
-                        continue;
-                    }
-
-                    try
-                    {
-                        AnalyzeAssemblyMethod(peReader, reader, methodHandle, method, assemblyPath, context, sourceMap, summaries);
-                    }
-                    catch (Exception ex) when (ex is BadImageFormatException or IOException or InvalidOperationException or ArgumentOutOfRangeException)
-                    {
-                        result.Diagnostics.Add($"Could not analyze IL body {DescribeMethod(reader, methodHandle, method)} in {assemblyPath}: {ex.Message}");
-                    }
+                    assemblies.Add(assembly);
                 }
             }
-            catch (Exception ex) when (ex is BadImageFormatException or IOException or UnauthorizedAccessException)
+
+            CollectMethodSummaries(assemblies, context, summaries);
+            var readsByMethod = new Dictionary<(int Assembly, MethodDefinitionHandle Method), Dictionary<string, int>>();
+            for (var index = 0; index < assemblies.Count; index++)
             {
-                result.Diagnostics.Add($"Could not inspect assembly {assemblyPath}: {ex.Message}");
+                var assembly = assemblies[index];
+                PreseedAssemblyFieldTaints(assembly.PeReader, assembly.Reader, assembly.SourceMap, assembly.Path, context);
+                foreach (var methodHandle in assembly.Reader.MethodDefinitions)
+                {
+                    AnalyzeMethodBody(assembly, index, methodHandle, context, summaries, readsByMethod, result);
+                }
+            }
+
+            // Bounded, in assembly and metadata order: a method is analyzed again only when a field
+            // it read has taken a store since, and its nodes, edges and slices de-duplicate by key.
+            for (var round = 0; round < MaxFieldTaintRounds; round++)
+            {
+                var stale = readsByMethod.Where(pair => context.IsStale(pair.Value)).Select(pair => pair.Key).OrderBy(key => key.Assembly).ThenBy(key => MetadataTokens.GetToken(key.Method)).ToList();
+                if (stale.Count == 0)
+                {
+                    break;
+                }
+
+                foreach (var (index, methodHandle) in stale)
+                {
+                    AnalyzeMethodBody(assemblies[index], index, methodHandle, context, summaries, readsByMethod, result);
+                }
+            }
+        }
+        finally
+        {
+            foreach (var assembly in assemblies)
+            {
+                assembly.Dispose();
             }
         }
 
@@ -109,7 +127,7 @@ public static partial class DataFlowAnalyzer
             });
         }
 
-        return analyzedAssemblies;
+        return assemblies.Count;
     }
 
     private static AssemblyMethodSymbolParts ParseAssemblyMethodSymbol(string methodSymbol)
@@ -159,21 +177,114 @@ public static partial class DataFlowAnalyzer
         return index < 0 ? plainType : plainType[(index + 1)..];
     }
 
-    private static void CollectAssemblyMethodSummaries(PEReader peReader, MetadataReader reader, AssemblySourceMap sourceMap, string assemblyPath, AssemblyDataFlowContext context, Dictionary<string, AssemblyMethodSummary> summaries)
-    {
-        var methodDefinitions = reader.MethodDefinitions
-            .Select(handle => (Handle: handle, Definition: reader.GetMethodDefinition(handle)))
-            .Where(item => item.Definition.RelativeVirtualAddress != 0)
-            .ToList();
+    /// <summary>Re-analysis rounds for methods whose field reads went stale; the per-assembly summary loop's bound.</summary>
+    private const int MaxFieldTaintRounds = 3;
 
-        for (var iteration = 0; iteration < 3; iteration++)
+    /// <summary>One analyzed file, open for the whole pass: its readers and source map are read once.</summary>
+    private sealed class AnalyzedAssembly(string path, FileStream stream, PEReader peReader, MetadataReader reader, AssemblySourceMap sourceMap) : IDisposable
+    {
+        public string Path { get; } = path;
+        public PEReader PeReader { get; } = peReader;
+        public MetadataReader Reader { get; } = reader;
+        public AssemblySourceMap SourceMap { get; } = sourceMap;
+
+        public void Dispose()
+        {
+            PeReader.Dispose();
+            stream.Dispose();
+        }
+    }
+
+    /// <summary>The file opened for the pass, or null (with the diagnostic the loop always gave) when it cannot be.</summary>
+    private static AnalyzedAssembly? OpenAnalyzedAssembly(string assemblyPath, DataFlowResult result)
+    {
+        FileStream? stream = null;
+        PEReader? peReader = null;
+        try
+        {
+            stream = new FileStream(assemblyPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            peReader = new PEReader(stream);
+            if (!peReader.HasMetadata)
+            {
+                peReader.Dispose();
+                stream.Dispose();
+                return null;
+            }
+
+            var reader = peReader.GetMetadataReader();
+            return new AnalyzedAssembly(assemblyPath, stream, peReader, reader, LoadPortablePdbSourceMap(assemblyPath, result.Diagnostics));
+        }
+        catch (Exception ex) when (ex is BadImageFormatException or IOException or UnauthorizedAccessException)
+        {
+            peReader?.Dispose();
+            stream?.Dispose();
+            result.Diagnostics.Add($"Could not inspect assembly {assemblyPath}: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    ///     Every assembly's method summaries, before any body is analyzed, callees first: a caller
+    ///     analyzed before its callee's assembly saw no summary for it, so a flow into another
+    ///     assembly depended on the order the files were listed in. Each assembly settles on its
+    ///     own (at most <see cref="MaxFieldTaintRounds" /> rounds, as before), in the order of
+    ///     <see cref="CalleesFirst" />; an assembly is settled again only when an assembly it
+    ///     references gained a summary after its own rounds, which only a reference cycle allows.
+    /// </summary>
+    private static void CollectMethodSummaries(List<AnalyzedAssembly> assemblies, AssemblyDataFlowContext context, Dictionary<string, AssemblyMethodSummary> summaries)
+    {
+        var order = CalleesFirst(assemblies);
+        // When each assembly last settled, and when its summaries last changed, in settle steps.
+        var settledAt = new int[assemblies.Count];
+        var changedAt = new int[assemblies.Count];
+        Array.Fill(settledAt, -1);
+        Array.Fill(changedAt, -1);
+        var step = 0;
+        for (var sweep = 0; sweep < MaxFieldTaintRounds; sweep++)
+        {
+            var settledAny = false;
+            foreach (var index in order.Order)
+            {
+                var stale = settledAt[index] < 0 || order.References[index].Any(callee => changedAt[callee] > settledAt[index]);
+                if (!stale)
+                {
+                    continue;
+                }
+
+                settledAny = true;
+                if (SettleAssemblySummaries(assemblies[index], context, summaries))
+                {
+                    changedAt[index] = step;
+                }
+
+                settledAt[index] = step++;
+            }
+
+            if (!settledAny)
+            {
+                break;
+            }
+        }
+    }
+
+    /// <summary>One assembly's summaries until they stop changing (at most <see cref="MaxFieldTaintRounds" /> rounds); whether any changed.</summary>
+    private static bool SettleAssemblySummaries(AnalyzedAssembly assembly, AssemblyDataFlowContext context, Dictionary<string, AssemblyMethodSummary> summaries)
+    {
+        var anyChange = false;
+        for (var round = 0; round < MaxFieldTaintRounds; round++)
         {
             var changed = false;
-            foreach (var (methodHandle, method) in methodDefinitions)
+            foreach (var methodHandle in assembly.Reader.MethodDefinitions)
             {
+                var method = assembly.Reader.GetMethodDefinition(methodHandle);
+                if (method.RelativeVirtualAddress == 0)
+                {
+                    continue;
+                }
+
                 try
                 {
-                    var summary = BuildAssemblyMethodSummary(peReader, reader, methodHandle, method, assemblyPath, sourceMap, context, summaries);
+                    var summary = BuildAssemblyMethodSummary(assembly.PeReader, assembly.Reader, methodHandle, method, assembly.Path, assembly.SourceMap, context, summaries);
                     if (!summaries.TryGetValue(summary.Method, out var existing) || existing.Merge(summary))
                     {
                         summaries[summary.Method] = existing ?? summary;
@@ -186,9 +297,113 @@ public static partial class DataFlowAnalyzer
                 }
             }
 
+            anyChange |= changed;
             if (!changed)
             {
                 break;
+            }
+        }
+
+        return anyChange;
+    }
+
+    /// <summary>
+    ///     The assemblies in an order where each comes after the ones it references (by simple
+    ///     name; every analyzed file of a name counts), ties and cycles broken by the input order,
+    ///     with each assembly's references among them. Depends on the files' metadata alone.
+    /// </summary>
+    private static (List<int> Order, List<int>[] References) CalleesFirst(List<AnalyzedAssembly> assemblies)
+    {
+        var byName = new Dictionary<string, List<int>>(StringComparer.OrdinalIgnoreCase);
+        for (var index = 0; index < assemblies.Count; index++)
+        {
+            var reader = assemblies[index].Reader;
+            var name = reader.IsAssembly ? reader.GetString(reader.GetAssemblyDefinition().Name) : Path.GetFileNameWithoutExtension(assemblies[index].Path);
+            ref var named = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(byName, name, out _);
+            (named ??= []).Add(index);
+        }
+
+        var references = new List<int>[assemblies.Count];
+        for (var index = 0; index < assemblies.Count; index++)
+        {
+            var reader = assemblies[index].Reader;
+            var callees = new SortedSet<int>();
+            foreach (var handle in reader.AssemblyReferences)
+            {
+                if (byName.TryGetValue(reader.GetString(reader.GetAssemblyReference(handle).Name), out var named))
+                {
+                    callees.UnionWith(named.Where(callee => callee != index));
+                }
+            }
+
+            references[index] = [.. callees];
+        }
+
+        // Depth-first post-order from each assembly in input order: callees are emitted before
+        // their callers, and a cycle is cut where the walk meets an assembly already on its path.
+        var order = new List<int>(assemblies.Count);
+        var state = new byte[assemblies.Count];
+        var stack = new Stack<(int Index, int Next)>();
+        for (var root = 0; root < assemblies.Count; root++)
+        {
+            if (state[root] != 0)
+            {
+                continue;
+            }
+
+            state[root] = 1;
+            stack.Push((root, 0));
+            while (stack.Count > 0)
+            {
+                var (index, next) = stack.Pop();
+                if (next < references[index].Count)
+                {
+                    stack.Push((index, next + 1));
+                    var callee = references[index][next];
+                    if (state[callee] == 0)
+                    {
+                        state[callee] = 1;
+                        stack.Push((callee, 0));
+                    }
+
+                    continue;
+                }
+
+                state[index] = 2;
+                order.Add(index);
+            }
+        }
+
+        return (order, references);
+    }
+
+    /// <summary>One method body's flows, recording the stored field taints it read for the re-analysis rounds.</summary>
+    private static void AnalyzeMethodBody(AnalyzedAssembly assembly, int index, MethodDefinitionHandle methodHandle, AssemblyDataFlowContext context, IReadOnlyDictionary<string, AssemblyMethodSummary> summaries, Dictionary<(int Assembly, MethodDefinitionHandle Method), Dictionary<string, int>> readsByMethod, DataFlowResult result)
+    {
+        var method = assembly.Reader.GetMethodDefinition(methodHandle);
+        if (method.RelativeVirtualAddress == 0)
+        {
+            return;
+        }
+
+        context.BeginMethodReads();
+        try
+        {
+            AnalyzeAssemblyMethod(assembly.PeReader, assembly.Reader, methodHandle, method, assembly.Path, context, assembly.SourceMap, summaries);
+        }
+        catch (Exception ex) when (ex is BadImageFormatException or IOException or InvalidOperationException or ArgumentOutOfRangeException)
+        {
+            context.RecordDiagnostic($"Could not analyze IL body {DescribeMethod(assembly.Reader, methodHandle, method)} in {assembly.Path}: {ex.Message}");
+        }
+        finally
+        {
+            if (context.EndMethodReads() is { } reads)
+            {
+                readsByMethod[(index, methodHandle)] = reads;
+            }
+            else
+            {
+                readsByMethod.Remove((index, methodHandle));
             }
         }
     }
@@ -238,7 +453,7 @@ public static partial class DataFlowAnalyzer
                         if (instruction.OpCode == OpCodes.Stfld && stack.Count > 0) stack.RemoveAt(stack.Count - 1);
                         if (valueTaint is not null && instruction.Operand is int fieldToken && ResolveMember(reader, fieldToken) is { } field)
                         {
-                            context.RecordFieldTaint(field.Symbol, valueTaint);
+                            context.RecordFieldTaint(FieldTaintKey(reader, fieldToken, field.Symbol), valueTaint);
                         }
                         continue;
                     }
@@ -372,10 +587,11 @@ public static partial class DataFlowAnalyzer
             if (opCode == OpCodes.Ldfld || opCode == OpCodes.Ldsfld)
             {
                 var instanceTaint = opCode == OpCodes.Ldfld ? state.Pop() : null;
-                var member = instruction.Operand is int fieldToken ? ResolveMember(reader, fieldToken) : null;
+                var fieldToken = instruction.Operand is int token ? token : 0;
+                var member = fieldToken != 0 ? ResolveMember(reader, fieldToken) : null;
                 var fieldTaint = member is not null && state.Fields.TryGetValue(member.Symbol, out var taint)
                     ? taint
-                    : member is not null && context.TryGetFieldTaint(member.Symbol, out var storedTaint)
+                    : member is not null && context.TryGetFieldTaint(FieldTaintKey(reader, fieldToken, member.Symbol), out var storedTaint)
                         ? storedTaint
                         : instanceTaint;
                 state.Push(fieldTaint);
@@ -395,7 +611,7 @@ public static partial class DataFlowAnalyzer
                     state.Fields[member.Symbol] = valueTaint;
                     if (valueTaint is not null)
                     {
-                        context.RecordFieldTaint(member.Symbol, valueTaint);
+                        context.RecordFieldTaint(FieldTaintKey(reader, fieldToken, member.Symbol), valueTaint);
                     }
                 }
                 EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
@@ -1113,6 +1329,73 @@ public static partial class DataFlowAnalyzer
         return new AssemblyMemberInfo(symbol, name, containingType, signature.ParameterCount, signature.HasThis, signature.ReturnsVoid, signature.ReturnType);
     }
 
+    /// <summary>
+    ///     The key a stored field taint is kept under: the simple name of the assembly that declares
+    ///     the field, then its symbol. A symbol alone (<c>&lt;&gt;c.&lt;&gt;9__0_0</c>, the cached
+    ///     lambda field every C# assembly declares) named one field in every assembly of the tree,
+    ///     so a taint stored in one package's lambda cache flowed into an unrelated package's. A
+    ///     field of another assembly is keyed by the assembly its type reference resolves to, so
+    ///     the writer's and the reader's keys still meet (<c>Lib.Settings.Template</c>).
+    /// </summary>
+    private static string FieldTaintKey(MetadataReader reader, int fieldToken, string symbol)
+    {
+        var handle = MetadataTokens.EntityHandle(fieldToken);
+        var scope = handle.Kind switch
+        {
+            HandleKind.FieldDefinition => OwnAssemblyName(reader),
+            HandleKind.MemberReference => DeclaringAssemblyName(reader, reader.GetMemberReference((MemberReferenceHandle)handle).Parent),
+            _ => null
+        };
+        return $"{scope}\u001f{symbol}";
+    }
+
+    private static string OwnAssemblyName(MetadataReader reader) =>
+        reader.IsAssembly ? reader.GetString(reader.GetAssemblyDefinition().Name) : reader.GetString(reader.GetModuleDefinition().Name);
+
+    /// <summary>The assembly a member reference's parent type lives in; the analyzed assembly for its own types.</summary>
+    private static string? DeclaringAssemblyName(MetadataReader reader, EntityHandle parent)
+    {
+        for (var depth = 0; depth < 64; depth++)
+        {
+            switch (parent.Kind)
+            {
+                case HandleKind.TypeDefinition:
+                    return OwnAssemblyName(reader);
+                case HandleKind.TypeSpecification:
+                    // A generic instance: the scope of the generic type it instantiates.
+                    var blob = reader.GetBlobReader(reader.GetTypeSpecification((TypeSpecificationHandle)parent).Signature);
+                    if (blob.ReadSignatureTypeCode() != SignatureTypeCode.GenericTypeInstance)
+                    {
+                        return null;
+                    }
+
+                    blob.ReadSignatureTypeCode();
+                    parent = blob.ReadTypeHandle();
+                    continue;
+                case HandleKind.TypeReference:
+                    var scope = reader.GetTypeReference((TypeReferenceHandle)parent).ResolutionScope;
+                    switch (scope.Kind)
+                    {
+                        case HandleKind.AssemblyReference:
+                            return reader.GetString(reader.GetAssemblyReference((AssemblyReferenceHandle)scope).Name);
+                        case HandleKind.TypeReference:
+                            // A nested type: its enclosing type's scope.
+                            parent = scope;
+                            continue;
+                        case HandleKind.ModuleDefinition:
+                        case HandleKind.ModuleReference:
+                            return OwnAssemblyName(reader);
+                        default:
+                            return null;
+                    }
+                default:
+                    return null;
+            }
+        }
+
+        return null;
+    }
+
     private static string BuildAssemblyMethodSymbol(string containingType, string methodName, IReadOnlyList<string> parameterTypes, bool returnsVoid, string returnType, string originalMethodName)
     {
         var symbol = $"{containingType}.{methodName}({string.Join(',', parameterTypes)})";
@@ -1767,6 +2050,7 @@ public static partial class DataFlowAnalyzer
             var reader = provider.GetMetadataReader();
             var locations = new Dictionary<int, List<AssemblySequencePoint>>();
             var locals = new Dictionary<int, List<AssemblyLocalScope>>();
+            var kickoffEntries = new List<(int KickoffToken, AssemblySequencePoint Start)>();
             foreach (var methodDebugHandle in reader.MethodDebugInformation)
             {
                 var rowNumber = MetadataTokens.GetRowNumber(methodDebugHandle);
@@ -1781,8 +2065,26 @@ public static partial class DataFlowAnalyzer
                 }
                 if (points.Count > 0)
                 {
-                    locations[MetadataTokens.GetToken(MetadataTokens.MethodDefinitionHandle(rowNumber))] = points.OrderBy(point => point.Offset).ToList();
+                    var methodToken = MetadataTokens.GetToken(MetadataTokens.MethodDefinitionHandle(rowNumber));
+                    var ordered = points.OrderBy(point => point.Offset).ToList();
+                    locations[methodToken] = ordered;
+                    if (methodDebugInfo.GetStateMachineKickoffMethod() is { IsNil: false } kickoff)
+                    {
+                        kickoffEntries.Add((MetadataTokens.GetToken(kickoff), ordered[0]));
+                    }
                 }
+            }
+
+            // An async or iterator method is a stub that starts its state machine and has no
+            // sequence point of its own: its code is the state machine's MoveNext. The PDB names
+            // each MoveNext's kickoff method (async lambdas and local functions included), so
+            // every record of the stub - its parameter sources at the method entry, above all -
+            // resolves to MoveNext's first point, where the method body starts, instead of the
+            // assembly file at the IL offset (issue #84).
+            foreach (var (kickoffToken, start) in kickoffEntries)
+            {
+                // A stub with sequence points of its own (none today) keeps them.
+                locations.TryAdd(kickoffToken, [start with { Offset = 0 }]);
             }
 
             foreach (var localScopeHandle in reader.LocalScopes)
@@ -1986,20 +2288,6 @@ public static partial class DataFlowAnalyzer
         return AssemblyScope.GetAssemblyFiles(path, includeBuildArtifacts, excludeBinWhenSourceFilesPresent: false, diagnostics.Add);
     }
 
-    private static bool IsManagedAssemblyFile(string filePath)
-    {
-        try
-        {
-            using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            using var peReader = new PEReader(stream);
-            return peReader is { HasMetadata: true, PEHeaders.CorHeader: not null };
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
     private static string GetNamespace(string typeName)
     {
         var index = typeName.LastIndexOf('.');
@@ -2039,11 +2327,23 @@ public static partial class DataFlowAnalyzer
         private readonly DataFlowPatternIndex _patternIndex = new(patterns);
         private readonly PackageUrlResolver _purlResolver = PackageUrlResolver.Create(basePath);
         private readonly Dictionary<string, AssemblyTaint> _fieldTaints = new(StringComparer.Ordinal);
+        // Per field, how many times its stored taint grew; and the reads of the method under analysis.
+        private readonly Dictionary<string, int> _fieldVersions = new(StringComparer.Ordinal);
+        private Dictionary<string, int>? _currentReads;
         private DependencyAssemblies? _dependencies;
         private readonly string? _treeRoot = SourceDocumentPaths.Root(basePath);
         private readonly Dictionary<(string Document, string Assembly), string> _treePaths = [];
 
         private DependencyAssemblies Dependencies => _dependencies ??= new DependencyAssemblies(basePath, _purlResolver);
+
+        /// <summary>Each analyzed file is classified together with its byte-identical copies (issue #83).</summary>
+        public void TreatAsOneAssembly(AssemblyCopies copies)
+        {
+            foreach (var group in copies.Groups)
+            {
+                Dependencies.TreatAsOneAssembly(group.Analyzed, group.Copies);
+            }
+        }
 
         /// <summary>
         ///     A node's or edge's file (a PDB document, or the assembly where no sequence point
@@ -2096,15 +2396,62 @@ public static partial class DataFlowAnalyzer
 
         public void RecordFieldTaint(string fieldSymbol, AssemblyTaint taint)
         {
-            if (_fieldTaints.TryGetValue(fieldSymbol, out var existing) && CombineAssemblyTaints([existing, taint]) is { } combined)
+            if (_fieldTaints.TryGetValue(fieldSymbol, out var existing))
             {
+                if (CombineAssemblyTaints([existing, taint]) is not { } combined || !Grows(existing, combined))
+                {
+                    return;
+                }
+
                 _fieldTaints[fieldSymbol] = combined;
-                return;
             }
-            _fieldTaints[fieldSymbol] = taint;
+            else
+            {
+                _fieldTaints[fieldSymbol] = taint;
+            }
+
+            // A method that read the field before this store saw less than a later reader does
+            // (issue #83 review): the version tells the re-analysis rounds who is stale.
+            _fieldVersions[fieldSymbol] = _fieldVersions.GetValueOrDefault(fieldSymbol) + 1;
         }
 
-        public bool TryGetFieldTaint(string fieldSymbol, out AssemblyTaint taint) => _fieldTaints.TryGetValue(fieldSymbol, out taint!);
+        public bool TryGetFieldTaint(string fieldSymbol, out AssemblyTaint taint)
+        {
+            // Reads are recorded only while a method body is analyzed (not during summaries), and
+            // a read of a field with no taint yet counts: a store analyzed after it is what makes
+            // the reader stale.
+            _currentReads?.TryAdd(fieldSymbol, _fieldVersions.GetValueOrDefault(fieldSymbol));
+            return _fieldTaints.TryGetValue(fieldSymbol, out taint!);
+        }
+
+        /// <summary>Starts recording the stored field taints the method about to be analyzed reads.</summary>
+        public void BeginMethodReads() => _currentReads = new Dictionary<string, int>(StringComparer.Ordinal);
+
+        /// <summary>The fields (with the version seen) the method just analyzed read; null when it read none.</summary>
+        public Dictionary<string, int>? EndMethodReads()
+        {
+            var reads = _currentReads;
+            _currentReads = null;
+            return reads is { Count: > 0 } ? reads : null;
+        }
+
+        /// <summary>Whether any field in <paramref name="reads" /> has taken a store since that read.</summary>
+        public bool IsStale(Dictionary<string, int> reads)
+        {
+            foreach (var (field, version) in reads)
+            {
+                if (_fieldVersions.GetValueOrDefault(field) != version)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>A combined taint grows when it holds a node id, taint kind or field path the stored one lacks.</summary>
+        private static bool Grows(AssemblyTaint existing, AssemblyTaint combined) =>
+            combined.NodeIds.Count != existing.NodeIds.Count || combined.TaintKinds.Count != existing.TaintKinds.Count || combined.FieldPaths.Count != existing.FieldPaths.Count;
 
         private static bool IsAssemblySourceMemberPattern(DataFlowPattern pattern) => pattern.Kind switch
         {

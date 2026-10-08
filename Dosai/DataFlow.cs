@@ -314,7 +314,7 @@ public static partial class DataFlowAnalyzer
         result.Statistics.FilesAnalyzed = sourcesToInspect.Count;
         DebugLog.Count("source files discovered", sourcesToInspect.Count);
 
-        var references = GetMetadataReferences(path, result.Diagnostics);
+        var references = GetMetadataReferences(path, result.Diagnostics, purlResolver);
         DebugLog.Count("roslyn metadata references", references.Count);
         List<CSharpSyntaxTree> csharpTrees;
         List<VisualBasicSyntaxTree> vbTrees;
@@ -1297,30 +1297,29 @@ public static partial class DataFlowAnalyzer
         };
     }
 
-    private static List<PortableExecutableReference> GetMetadataReferences(string path, List<string> diagnostics)
+    private static List<PortableExecutableReference> GetMetadataReferences(string path, List<string> diagnostics, PackageUrlResolver purlResolver)
     {
-        var references = new Dictionary<string, PortableExecutableReference>(StringComparer.OrdinalIgnoreCase);
-        void AddReference(string referencePath)
+        PortableExecutableReference? CreateReference(string referencePath)
         {
-            if (!File.Exists(referencePath) || references.ContainsKey(referencePath))
+            if (!File.Exists(referencePath))
             {
-                return;
+                return null;
             }
             try
             {
-                references.Add(referencePath, MetadataReference.CreateFromFile(referencePath));
+                return MetadataReference.CreateFromFile(referencePath);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or BadImageFormatException)
             {
                 diagnostics.Add($"Could not add metadata reference {referencePath}: {ex.Message}");
+                return null;
             }
         }
 
+        // One reference per assembly name, highest version first (issue #81; see
+        // CompilationReferenceSet and Dosai.GetSourceMethods).
         var frameworkReferences = FrameworkReferences.ForTree(path);
-        foreach (var (key, reference) in frameworkReferences.References)
-        {
-            references.TryAdd(key, reference);
-        }
+        var references = new CompilationReferenceSet(frameworkReferences.References);
 
         DebugLog.Count($"framework metadata references ({frameworkReferences.Source})", frameworkReferences.References.Count);
 
@@ -1340,22 +1339,16 @@ public static partial class DataFlowAnalyzer
             foreach (var assemblyPath in SafeFileRead.EnumerateAllFilesSafe(rootDirectory, "*.dll", diagnostics.Add).Where(IsManagedAssembly)
                          .Where(assemblyPath => !TreeFrameworks.IsBuiltFromSource(path, assemblyPath)))
             {
-                AddReference(assemblyPath);
+                references.AddBuildOutput(assemblyPath, CreateReference);
             }
         }
 
         // Restored-but-unbuilt trees: the NuGet cache carries the same assemblies the compiler
         // would reference (project.assets.json packageFolders + compile entries), unpinned from
         // bytes so the shared packages folder is never locked.
-        foreach (var cacheAssembly in NuGetRestoreCache.GetReferencePaths(path, references.Keys).Where(cacheAssembly => !TreeFrameworks.IsBuiltFromSource(path, cacheAssembly)))
+        foreach (var cacheAssembly in NuGetRestoreCache.GetReferencePaths(path).Where(cacheAssembly => !TreeFrameworks.IsBuiltFromSource(path, cacheAssembly)))
         {
-            if (NuGetRestoreCache.TryCreateUnpinnedReference(cacheAssembly) is { } cacheReference)
-            {
-                if (!references.ContainsKey(cacheAssembly))
-                {
-                    references.Add(cacheAssembly, cacheReference);
-                }
-            }
+            references.AddRestoreCache(cacheAssembly, NuGetRestoreCache.TryCreateUnpinnedReference);
         }
         foreach (var diagnostic in NuGetRestoreCache.GetDiagnostics(path))
         {
@@ -1365,7 +1358,15 @@ public static partial class DataFlowAnalyzer
             }
         }
 
-        return references.Values.ToList();
+        foreach (var diagnostic in references.Diagnostics().Append(purlResolver.UnionBindingDiagnostic(references.TreeBindings())).OfType<string>())
+        {
+            if (!diagnostics.Contains(diagnostic, StringComparer.Ordinal))
+            {
+                diagnostics.Add(diagnostic);
+            }
+        }
+
+        return references.References();
     }
 
     private static bool IsManagedAssembly(string filePath)

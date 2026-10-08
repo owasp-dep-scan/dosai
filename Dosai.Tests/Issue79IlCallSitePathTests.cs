@@ -66,14 +66,14 @@ public sealed class Issue79IlCallSitePathTests
         var slice = Depscan.Dosai.GetMethodsSlice(fixture.Path);
         var expected = Path.Combine("src", "App", "Program.cs");
 
-        var ilCalls = slice.MethodCalls.Where(IsIlCall).ToList();
+        var ilCalls = (slice.MethodCalls ?? []).Where(IsIlCall).ToList();
         Assert.NotEmpty(ilCalls);
         Assert.All(ilCalls, call => Assert.False(call.Path is not null && Path.IsPathFullyQualified(call.Path), $"{build}: {call.Path}"));
 
         // The direct and the delegate call sites name the file as the source rows do.
         var serialize = Assert.Single(ilCalls, call => call is { CalledMethod: "Serialize", EvidenceKind: AnalysisEvidenceKind.AssemblyIlDirect });
         Assert.Equal((expected, "Program.cs", SerializeLine), (serialize.Path, serialize.FileName, serialize.LineNumber));
-        Assert.Contains(slice.MethodCalls, call => call.EvidenceKind == AnalysisEvidenceKind.SourceRoslynDirect && call.CalledMethod == "Vendor.Json.Serialize(object)" && call.Path == expected && call.LineNumber == SerializeLine);
+        Assert.Contains(slice.MethodCalls ?? [], call => call.EvidenceKind == AnalysisEvidenceKind.SourceRoslynDirect && call.CalledMethod == "Vendor.Json.Serialize(object)" && call.Path == expected && call.LineNumber == SerializeLine);
         var delegateTarget = Assert.Single(ilCalls, call => call.EvidenceKind == AnalysisEvidenceKind.AssemblyIlDelegateTarget && call.LineNumber == DelegateLine);
         Assert.Equal(expected, delegateTarget.Path);
 
@@ -107,7 +107,7 @@ public sealed class Issue79IlCallSitePathTests
     {
         using var fixture = BuildFixture("{root}/src/App/Program.cs");
         var slice = Depscan.Dosai.GetMethodsSlice(Path.Combine(fixture.Path, "out", "App.dll"));
-        var ilCalls = slice.MethodCalls.Where(IsIlCall).ToList();
+        var ilCalls = (slice.MethodCalls ?? []).Where(IsIlCall).ToList();
 
         // The source file lies outside out/, which builds nothing from source: no path, as on the edge.
         var serialize = Assert.Single(ilCalls, call => call is { CalledMethod: "Serialize", EvidenceKind: AnalysisEvidenceKind.AssemblyIlDirect });

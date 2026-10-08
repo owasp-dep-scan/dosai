@@ -150,6 +150,10 @@ dotnet test ./Dosai.sln
   arrays). Resolve members through `AssemblyScan.Resolve` (memoized per token, so call sites
   share one id string) and source locations through the per-assembly source map (binary search,
   one path and file-name string per document) - never per instruction.
+- An async or iterator method's IL is a stub with no sequence points; both PDB source maps
+  (`DataFlowAssembly`, `AssemblyCallGraphAnalyzer`) resolve it to its `MoveNext`'s first point
+  through `MethodDebugInformation.GetStateMachineKickoffMethod` (issue #84). Never fall back to
+  the assembly path for such a stub when its PDB is present.
 - A PDB document path is the build's, not the scan's: absolute, `/_/`-mapped, or in the other
   file system's form. Every path an IL record writes goes through `SourceDocumentPaths`
   (`InTree` relative to the scan root, a tree-built assembly's foreign documents placed by
@@ -165,6 +169,25 @@ dotnet test ./Dosai.sln
   whose every node does is `Scope: dependency` with severity capped at low
   (`TransparencyBuilder.DependencySeverity`), and every derived fact that ranks findings
   (weaknesses, dangerous-API and package reachability, agent context, diff) must honour it.
+- Both IL passes (data flow, and the `methods` call graph) analyze each distinct file once (issue
+  #83): a build copies every referenced project's assembly (and, in test and executable outputs,
+  every package's) into each referencing project's output. `AssemblyCopies.Collapse` groups
+  candidates by length and module version id, then confirms a copy by SHA-256 - never collapse on
+  the id or the assembly identity alone (a patched file keeps both, and Debug/Release or
+  per-target builds are distinct code that is all analyzed). A ReadyToRun image of a build keeps
+  its metadata and IL in other bytes, so files sharing an id that are IL-only or ReadyToRun
+  compare by `IlContentHash` (RVA columns zeroed, bodies, field data, resources); keep every part
+  the IL passes read in that hash. The analyzed copy is ranked by a PDB beside it, then a place
+  inside the directory of a project that builds it, then IL-only over ReadyToRun, then tree order
+  (`AssemblyCopies.TreeOrder`), never the enumeration order;
+  `DependencyAssemblies.TreatAsOneAssembly` classifies the copies together, and the call graph
+  maps inventory methods of any copy onto the analyzed one (`AssemblyCopies.AnalyzedByFullPath`).
+- The data-flow IL pass must give the same flows in every file and method order (a second copy
+  used to hide the order dependence as an accidental second pass). Build every assembly's method
+  summaries before any body, callee assemblies first (`CalleesFirst`), and re-analyze bodies whose
+  recorded field reads went stale (`AssemblyDataFlowContext.IsStale`, bounded rounds). Key stored
+  field taints through `FieldTaintKey` (declaring assembly plus symbol): compiler-generated field
+  names repeat in every assembly.
 - The IL interpreters model every opcode they do not handle explicitly through
   `GetStackEffect` (`OpCode.StackBehaviourPop`/`Push`, the call-site signature for `calli`).
   A pop count that is too low is not a local error: the abstract stack drifts on every pass
@@ -200,8 +223,13 @@ dotnet test ./Dosai.sln
   (the per-location project memo is a concurrent cache of a pure function). Pass every record's
   file as `location`: each project has its own package tables and a record resolves in its own
   project first, so two projects on two versions of a package each keep theirs (issue #72).
-  Call-graph nodes are shared across projects and resolve tree-wide; edges resolve both
-  endpoints at their call site. Sources are read in path order so the tree-wide answer never
+  A project whose package closure is known (restore output, `packages.lock.json`,
+  `packages.config`) never falls through to the tree-wide tables: another project's package of
+  a framework assembly's name is not its own (issue #82). The exception is a name the project
+  references by file (`<Reference>` with a hint path outside a `packages.config` folder), which no
+  closure lists; a hint path into a `packages.config` folder names its package exactly. Call-graph nodes are shared across
+  projects and resolve tree-wide unless every call site sits in such a project and agrees
+  (`ScopeNodesToTheirCallers`); edges resolve both endpoints at their call site. Sources are read in path order so the tree-wide answer never
   depends on the file system, and `VersionDiagnostics` belong in every report's `Diagnostics`.
 - Phase order in `BuildMethodsSlice` is a memory contract: framework analysis and the security
   analyzer run immediately after source analysis (they are the only compilation consumers),
@@ -276,7 +304,15 @@ dotnet test ./Dosai.sln
   `<AssemblyName>`, else its file name): not from a pack (the base pack excepted), the tree's
   own `bin/` output, or the NuGet cache. The duplicate types made calls ambiguous, and Roslyn
   settled them by evaluation timing, so output changed with the worker count (issue #65 on
-  dotnet/runtime and OrchardCore); the skipped count is a slice diagnostic. Exactly one reference per assembly simple name survives, claimed in a
+  dotnet/runtime and OrchardCore); the skipped count is a slice diagnostic. Build output and restore-cache assemblies join the
+  framework set through `CompilationReferenceSet` (every source compilation does): still one
+  reference per simple name, the highest assembly version winning, equal versions keeping the
+  earlier claim (framework, build output, restore output, then ordinal path), so a package's
+  newer copy of a framework assembly in `bin/` never sits beside the pack's (issue #81). One set
+  serves the whole tree, so name the projects whose own closure has another version than the
+  bound copy (`PackageUrlResolver.UnionBindingDiagnostic` over `TreeBindings`), and report
+  equal-version build-output files of other content: both are choices, not copies. Within the
+  framework set, exactly one reference per assembly simple name survives, claimed in a
   fixed order - target-matched `Microsoft.NETCore.App.Ref` (only when its major differs from
   Dosai's own runtime), the tree's other packs sorted by name, then the process-wide set
   filling. When a base reference pack owns the corlib, the fallback must not add its

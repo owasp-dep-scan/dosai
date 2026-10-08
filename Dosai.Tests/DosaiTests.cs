@@ -1334,7 +1334,7 @@ class IsPatternFlow
         Assert.Null(failure);
         var controls = slice!.Methods!.Where(method => method.FileName == "Vendor.UI.Controls.dll").ToList();
         Assert.Contains(controls, method => method.ClassName == "Theme" && method.Name == "Apply");
-        Assert.DoesNotContain(controls, method => method.ClassName.StartsWith("Level", StringComparison.Ordinal));
+        Assert.DoesNotContain(controls, method => method.ClassName?.StartsWith("Level", StringComparison.Ordinal) == true);
     }
 
     // owasp-dep-scan/dosai#60: the Roslyn operation factory recurses roughly one frame set per
