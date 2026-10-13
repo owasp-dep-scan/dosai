@@ -1,0 +1,22 @@
+AGENTS.md
+  h_6a4cc5cdf68def 65-71
+Dosai.Tests/Issue76AssemblyLoadingTests.cs
+  h_6a4cc5cdf68def 1-725
+Dosai/Dosai.cs
+  h_6a4cc5cdf68def 65-70,1746-1760,1772,1778-1784,1897-1901,1904-1934
+docs/compiler-engineering.md
+  h_6a4cc5cdf68def 316-317
+docs/migration-5.1.0.md
+  h_6a4cc5cdf68def 276-287
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "85cd896ace8f4bfe60922155d668152b009b9979",
+  "prompts": {},
+  "humans": {
+    "h_6a4cc5cdf68def": {
+      "author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}
