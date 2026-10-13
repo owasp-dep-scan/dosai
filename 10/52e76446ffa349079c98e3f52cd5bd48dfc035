@@ -1,0 +1,34 @@
+AGENTS.md
+  h_6a4cc5cdf68def 203-207,282-287
+Dosai.Tests/Issue81Issue82Tests.cs
+  h_6a4cc5cdf68def 1-271
+Dosai.Tests/PackageVersionScopeTests.cs
+  h_6a4cc5cdf68def 72-76
+Dosai/CompilationReferenceSet.cs
+  h_6a4cc5cdf68def 1-262
+Dosai/CryptoAnalysis.cs
+  h_6a4cc5cdf68def 1205,1207-1209,1212-1213,1215,1227,1231,1233,1235,1242
+Dosai/DataFlow.cs
+  h_6a4cc5cdf68def 1302,1304,1306,1310,1315,1319-1320,1322,1342,1349-1353,1355,1357,1360-1361,1369
+Dosai/Dosai.cs
+  h_6a4cc5cdf68def 1044,1067-1124,2452-2455,2457,2473,2479,2487,2495-2496
+Dosai/Frameworks/FrameworkContext.cs
+  h_6a4cc5cdf68def 442-445,448,452-453,455,458
+Dosai/PackageUrlResolver.cs
+  h_6a4cc5cdf68def 82-90,352-357,471-483,497-498,502,575-576,638-639,700,789-793,888-896
+docs/compiler-engineering.md
+  h_6a4cc5cdf68def 76-89
+docs/supply-chain-purl.md
+  h_6a4cc5cdf68def 36,73,224
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1052e76446ffa349079c98e3f52cd5bd48dfc035",
+  "prompts": {},
+  "humans": {
+    "h_6a4cc5cdf68def": {
+      "author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}
