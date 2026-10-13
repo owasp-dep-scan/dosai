@@ -1,0 +1,14 @@
+AGENTS.md
+  h_6a4cc5cdf68def 107-119
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "95cb90af0f9829881cb5a7303b51afc1350995ef",
+  "prompts": {},
+  "humans": {
+    "h_6a4cc5cdf68def": {
+      "author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}
