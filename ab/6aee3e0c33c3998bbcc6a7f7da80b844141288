@@ -1,0 +1,18 @@
+AGENTS.md
+  h_6a4cc5cdf68def 52-56
+Dosai.Tests/DosaiTests.cs
+  h_6a4cc5cdf68def 4,118-195
+Dosai/Dosai.cs
+  h_6a4cc5cdf68def 51-53,56-64,66-67,72,75-76,79-80,83-86,89,96,1031,1039,1066,1069,1071,1073-1102,1104-1115,1118-1122,1124
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ab6aee3e0c33c3998bbcc6a7f7da80b844141288",
+  "prompts": {},
+  "humans": {
+    "h_6a4cc5cdf68def": {
+      "author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}
