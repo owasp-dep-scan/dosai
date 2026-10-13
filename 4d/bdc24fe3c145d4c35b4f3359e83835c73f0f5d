@@ -1,0 +1,28 @@
+AGENTS.md
+  h_6a4cc5cdf68def 172-179
+Dosai.Tests/Issue83AssemblyCopyTests.cs
+  h_6a4cc5cdf68def 1-224
+Dosai/AssemblyCopies.cs
+  h_6a4cc5cdf68def 1-260
+Dosai/DataFlowAssembly.cs
+  h_6a4cc5cdf68def 35-44,46,49,2059-2067
+Dosai/DependencyAssemblies.cs
+  h_6a4cc5cdf68def 20-27,35-43,54-77,86,93-108,115,117,119-124,127-134,138,141
+Dosai/TreeFrameworks.cs
+  h_6a4cc5cdf68def 115-125,134,137,152-154,156-160,162,165,168,188-197,205
+docs/compiler-engineering.md
+  h_6a4cc5cdf68def 330-331
+docs/migration-5.1.0.md
+  h_6a4cc5cdf68def 375-438
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4dbdc24fe3c145d4c35b4f3359e83835c73f0f5d",
+  "prompts": {},
+  "humans": {
+    "h_6a4cc5cdf68def": {
+      "author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}
