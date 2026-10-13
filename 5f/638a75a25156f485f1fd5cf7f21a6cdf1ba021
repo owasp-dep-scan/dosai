@@ -1,0 +1,36 @@
+AGENTS.md
+  h_6a4cc5cdf68def 73-88
+Dosai.Tests/IssueRegressionTests.cs
+  h_6a4cc5cdf68def 1-503
+Dosai/BuildPreparation.cs
+  h_6a4cc5cdf68def 2,158,168
+Dosai/DataFlow.cs
+  h_6a4cc5cdf68def 1,3784-3786
+Dosai/DataFlowAssembly.cs
+  h_6a4cc5cdf68def 1,2154-2156
+Dosai/DebugLog.cs
+  h_6a4cc5cdf68def 2,42-47,110,151,207,213-215,246
+Dosai/DedicatedStack.cs
+  h_6a4cc5cdf68def 36-37,85-165
+Dosai/DispatchResolver.cs
+  h_6a4cc5cdf68def 1,11-12,14-21,24-26,29-37,65-96,105-108,114,117-132,140-142,145-148,150,162,164,166,168,175-178,180-196,198,200-201,204-205,210,214-236,284-294,307-325
+Dosai/Dosai.cs
+  h_6a4cc5cdf68def 1436,1679-1719,1775,1811-1819,1823,1925-1929,1931-1958,1969-1970,1979,1986,2045,2053,2095,2136,2143,2186,2244,2305,2366,2422,2470,2525,2575,2585,2632,2639,2782,2802-2855,2858,2871-2873,2875,2883,2898,2912,2973,2977
+Dosai/Reachability.cs
+  h_6a4cc5cdf68def 2,592,671
+docs/ARCHITECTURE.md
+  h_6a4cc5cdf68def 241-242
+docs/commands.md
+  h_6a4cc5cdf68def 7,125-128,143
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5f638a75a25156f485f1fd5cf7f21a6cdf1ba021",
+  "prompts": {},
+  "humans": {
+    "h_6a4cc5cdf68def": {
+      "author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}
