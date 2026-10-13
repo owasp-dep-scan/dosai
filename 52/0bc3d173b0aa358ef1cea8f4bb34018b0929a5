@@ -1,0 +1,32 @@
+AGENTS.md
+  h_6a4cc5cdf68def 73-80,82-106,110-113,132-136
+Dosai.Tests/ScalabilityTests.cs
+  h_6a4cc5cdf68def 1-202
+Dosai/AssemblyCallGraphAnalyzer.cs
+  h_6a4cc5cdf68def 35,123,151,206-210,295,324
+Dosai/DebugLog.cs
+  h_6a4cc5cdf68def 42-48,253-257
+Dosai/DispatchResolver.cs
+  h_6a4cc5cdf68def 55,57-59,61,63,71-78,279,281,285-288,290,294,343,345-349
+Dosai/Dosai.cs
+  h_6a4cc5cdf68def 138-139,143,383-416,429-431,775-782,796-803,806,812-814,1012-1014,1750-1751,1784-1785,1788,1794-1796,1895-1902,1905-1908,1910-1911,1924-1927,1930-1933,1935-1936,1962-1967,1999-2001,2071,2081,2083-2085,2103,2123,2125-2127,2144,2164,2172,2174-2176,2192,2214,2222,2224-2226,2244,2249,2272,2280,2282-2284,2302,2308,2341,2402,2450,2458,2460-2462,2498,2506,2553,2561,2563-2565,2598,2611,2613-2615,2660,2668,2670-2672,2724,2766,2808,2824,2879-2885,2900,2950-2962,2964-2994,3300,3438,3448,3451,3605-3606,3612,3620,3624,3626-3628,3639,3890-3891,3898,3905,3907-3909,3911
+Dosai/Dosai.csproj
+  h_6a4cc5cdf68def 7-12
+Dosai/GraphAssembly.cs
+  h_6a4cc5cdf68def 1-178
+Dosai/SourceRenderCache.cs
+  h_6a4cc5cdf68def 1-73
+docs/compiler-engineering.md
+  h_6a4cc5cdf68def 87-95,141-154,159,320-354
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "520bc3d173b0aa358ef1cea8f4bb34018b0929a5",
+  "prompts": {},
+  "humans": {
+    "h_6a4cc5cdf68def": {
+      "author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}
