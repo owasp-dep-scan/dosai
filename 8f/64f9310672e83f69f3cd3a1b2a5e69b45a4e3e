@@ -1,0 +1,24 @@
+Dosai.Tests/DosaiTests.cs
+  h_6a4cc5cdf68def 1337
+Dosai.Tests/Issue65ScalingTests.cs
+  h_6a4cc5cdf68def 111
+Dosai.Tests/Issue74BindingTests.cs
+  h_6a4cc5cdf68def 248-249,331,334,337,527-528,557
+Dosai.Tests/Issue76AssemblyLoadingTests.cs
+  h_6a4cc5cdf68def 384,391,398,408
+Dosai.Tests/Issue79IlCallSitePathTests.cs
+  h_6a4cc5cdf68def 69,76,110
+Dosai.Tests/LocaleInvarianceTests.cs
+  h_6a4cc5cdf68def 86
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8f64f9310672e83f69f3cd3a1b2a5e69b45a4e3e",
+  "prompts": {},
+  "humans": {
+    "h_6a4cc5cdf68def": {
+      "author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}
