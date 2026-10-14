@@ -25,10 +25,12 @@ dnx Dosai methods --path ./src     # run once without installing
 
 To pin Dosai per repository, install it into a local tool manifest (`dotnet new tool-manifest`, then `dotnet tool install Dosai`) and run it as `dotnet dosai`.
 
-On macOS and Linux, Homebrew installs the same self-contained build:
+On macOS and Linux, Homebrew installs the same self-contained build from the [OWASP dep-scan tap](https://github.com/owasp-dep-scan/homebrew-tap). `brew trust` accepts the tap, which Homebrew requires before loading formulae from a third-party tap when `HOMEBREW_REQUIRE_TAP_TRUST` is set:
 
 ```bash
-brew install owasp-dep-scan/tap/dosai
+brew tap owasp-dep-scan/tap
+brew trust --tap owasp-dep-scan/tap
+brew install dosai
 ```
 
 Every [GitHub release](https://github.com/owasp-dep-scan/dosai/releases) also has standalone binaries: the `-full` builds are self-contained, and the others need a matching .NET runtime.
