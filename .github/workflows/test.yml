@@ -377,7 +377,7 @@ jobs:
     needs: [unit-tests, smoke-methods, smoke-dataflows, smoke-crypto, smoke-r, smoke-self-contained]
     permissions:
       contents: write
-      packages: write
+      packages: read
       id-token: write
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -417,15 +417,10 @@ jobs:
         dotnet publish ./Dosai/ -r linux-musl-arm64 --property:PublishDir=dosai-linux-musl-arm64-full -p:PublishSingleFile=true --self-contained true /p:UseAppHost=true /p:AssemblyName=Dosai-linux-musl-arm64-full
     # The .NET tool: a `Dosai` package pointing at one self-contained `Dosai.<rid>` package per RID
     # (see Dosai.csproj), so `dotnet tool install -g Dosai` and `dnx Dosai` need a .NET 10+ SDK but
-    # no .NET 11 runtime.
+    # no .NET 11 runtime. It ships to nuget.org only: GitHub Packages could not take the 54-57 MB
+    # RID packages within the push timeout, and needs a login to install even public packages.
     - name: Pack the .NET tool
       run: dotnet pack --configuration Release Dosai --output nupkgs
-    - name: Publish the package
-      run: |
-        dotnet nuget push --skip-duplicate "nupkgs/*.nupkg"
-      if: startsWith(github.ref, 'refs/tags/')
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     - name: Create Release
       id: create_release
       if: startsWith(github.ref, 'refs/tags/')
