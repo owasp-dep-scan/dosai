@@ -18,7 +18,7 @@
     <Version>5.0.0</Version>
     <Title>OWASP Dosai</Title>
     <Authors>Team AppThreat &lt;cloud@appthreat.com&gt;</Authors>
-    <Description>Dotnet Source and Assembly Inspector (Dosai) is a tool to list details about the namespaces and methods from sources and assemblies.</Description>
+    <Description>OWASP Dosai (Dotnet Source and Assembly Inspector) inspects .NET source code, assemblies, and NuGet packages to extract methods, dependencies, API endpoints, call graphs, data-flow slices, crypto evidence, and severity-tagged security findings for review.</Description>
     <PackageProjectUrl>https://github.com/owasp-dep-scan/dosai</PackageProjectUrl>
     <PackageLicense>MIT</PackageLicense>
     <RepositoryUrl>https://github.com/owasp-dep-scan/dosai</RepositoryUrl>
