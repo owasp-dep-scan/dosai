@@ -374,7 +374,7 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [unit-tests, smoke-methods, smoke-dataflows, smoke-crypto, smoke-r]
+    needs: [unit-tests, smoke-methods, smoke-dataflows, smoke-crypto, smoke-r, smoke-self-contained]
     permissions:
       contents: write
       packages: write
@@ -415,10 +415,14 @@ jobs:
         dotnet publish ./Dosai/ -r linux-arm64 --property:PublishDir=dosai-linux-arm64-full -p:PublishSingleFile=true --self-contained true /p:UseAppHost=true /p:AssemblyName=Dosai-linux-arm64-full
         dotnet publish ./Dosai/ -r linux-musl-x64 --property:PublishDir=dosai-linux-musl-x64-full -p:PublishSingleFile=true --self-contained true /p:UseAppHost=true /p:AssemblyName=Dosai-linux-musl-x64-full
         dotnet publish ./Dosai/ -r linux-musl-arm64 --property:PublishDir=dosai-linux-musl-arm64-full -p:PublishSingleFile=true --self-contained true /p:UseAppHost=true /p:AssemblyName=Dosai-linux-musl-arm64-full
+    # The .NET tool: a `Dosai` package pointing at one self-contained `Dosai.<rid>` package per RID
+    # (see Dosai.csproj), so `dotnet tool install -g Dosai` and `dnx Dosai` need a .NET 10+ SDK but
+    # no .NET 11 runtime.
+    - name: Pack the .NET tool
+      run: dotnet pack --configuration Release Dosai --output nupkgs
     - name: Publish the package
       run: |
-        dotnet pack --configuration Release Dosai
-        dotnet nuget push --skip-duplicate Dosai/bin/x64/Release/*.nupkg
+        dotnet nuget push --skip-duplicate "nupkgs/*.nupkg"
       if: startsWith(github.ref, 'refs/tags/')
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -426,6 +430,9 @@ jobs:
       id: create_release
       if: startsWith(github.ref, 'refs/tags/')
       with:
+        # A v5.0.0-rc.1 style tag is a GitHub prerelease, so it never becomes "Latest" for
+        # consumers that download the latest release.
+        prerelease: ${{ contains(github.ref_name, '-') }}
         files: |
           Dosai/dosai-linux/Dosai
           Dosai/dosai-linux/Dosai.pdb
@@ -458,3 +465,22 @@ jobs:
       uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228  # v3.0.2
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    # nuget.org trusted publishing: the OIDC token is exchanged for a short-lived API key, so no
+    # long-lived key is stored. Needs a trusted publishing policy on nuget.org for this repository
+    # and workflow file, and the policy owner's nuget.org user name in the NUGET_USER variable;
+    # the steps are skipped until that variable exists, after the GitHub release is out.
+    - name: Log in to nuget.org
+      id: nuget-login
+      if: startsWith(github.ref, 'refs/tags/') && vars.NUGET_USER != ''
+      uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841  # v1.2.0
+      with:
+        user: ${{ vars.NUGET_USER }}
+    - name: Publish the .NET tool to nuget.org
+      if: startsWith(github.ref, 'refs/tags/') && vars.NUGET_USER != ''
+      run: |
+        # The per-RID packages go first, so the `Dosai` package never points at one nuget.org lacks.
+        for package in nupkgs/Dosai.[a-z]*.nupkg nupkgs/Dosai.[0-9]*.nupkg; do
+          dotnet nuget push "$package" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
+        done
+      env:
+        NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
