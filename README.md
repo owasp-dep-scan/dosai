@@ -16,7 +16,7 @@ The [command reference](./docs/commands.md) documents every command with inputs,
 
 ## Installation
 
-With a .NET 10 or later SDK, install Dosai as a .NET tool from NuGet. The package carries its own .NET runtime for each platform, so no .NET 11 runtime is needed:
+With the .NET 11 SDK, install Dosai as a .NET tool from NuGet. The tool runs on the SDK's .NET 11 runtime; add `--prerelease` to the install for a release candidate:
 
 ```bash
 dotnet tool install -g Dosai       # then run `dosai`
@@ -25,7 +25,7 @@ dnx Dosai methods --path ./src     # run once without installing
 
 To pin Dosai per repository, install it into a local tool manifest (`dotnet new tool-manifest`, then `dotnet tool install Dosai`) and run it as `dotnet dosai`.
 
-On macOS and Linux, Homebrew installs the same self-contained build from the [OWASP dep-scan tap](https://github.com/owasp-dep-scan/homebrew-tap). `brew trust` accepts the tap, which Homebrew requires before loading formulae from a third-party tap when `HOMEBREW_REQUIRE_TAP_TRUST` is set:
+On macOS and Linux, Homebrew installs a self-contained build, which needs no .NET installation, from the [OWASP dep-scan tap](https://github.com/owasp-dep-scan/homebrew-tap). `brew trust` accepts the tap, which Homebrew requires before loading formulae from a third-party tap when `HOMEBREW_REQUIRE_TAP_TRUST` is set:
 
 ```bash
 brew tap owasp-dep-scan/tap
