@@ -95,6 +95,31 @@ public sealed class DataFlowMethodSummary
     public MethodIdentity? Identity { get; set; }
     public AnalysisEvidenceKind EvidenceKind { get; set; } = AnalysisEvidenceKind.Unknown;
     public List<AnalysisEvidence> Evidence { get; set; } = [];
+
+    /// <summary>Source categories the method returns (a wrapper over a request, environment or console read), so a call site is a source.</summary>
+    internal List<string> ReturnSourceCategories { get; } = [];
+
+    /// <summary>Receiver members (<c>this</c> fields, properties and captured primary-constructor parameters) the method returns.</summary>
+    internal List<string> ReturnMembers { get; } = [];
+
+    /// <summary>Receiver members whose value reaches a sink inside the method, so a call on a receiver holding taint in one of them reaches the sink.</summary>
+    internal List<string> ReceiverSinkMembers { get; } = [];
+
+    /// <summary>Receiver members each parameter is stored into (a constructor, a setter, a <c>Set(value)</c> method), keyed by parameter index.</summary>
+    internal Dictionary<int, List<string>> MemberWrites { get; } = [];
+
+    /// <summary>Members the method assigns from a source, with the source categories.</summary>
+    internal Dictionary<string, List<string>> MemberSources { get; } = [];
+}
+
+/// <summary>
+///     Facts about fields and properties that hold across methods. A member assigned from a
+///     source anywhere in the tree (a constructor storing an environment variable) is a source
+///     wherever it is read, because the method that reads it cannot see the assignment.
+/// </summary>
+internal sealed class DataFlowMemberFacts
+{
+    public Dictionary<string, List<string>> SourceCategories { get; } = new(StringComparer.Ordinal);
 }
 
 public sealed class DataFlowNode
@@ -376,6 +401,7 @@ public static partial class DataFlowAnalyzer
         DebugLog.Count("framework ai components", frameworkResult.AiComponents.Count);
 
         var summaries = new Dictionary<string, DataFlowMethodSummary>(StringComparer.Ordinal);
+        var memberFacts = new DataFlowMemberFacts();
         var summaryCallerIndex = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
         var summaryMethodRoots = new Dictionary<string, (IOperation Root, SemanticModel Model)>(StringComparer.Ordinal);
 
@@ -391,14 +417,14 @@ public static partial class DataFlowAnalyzer
             {
                 var model = csharpCompilation.GetSemanticModel(tree);
                 var root = tree.GetCompilationUnitRoot();
-                CollectCompilationUnitSummaries(model, root, summaries, patterns, summaryCallerIndex, summaryMethodRoots);
+                CollectCompilationUnitSummaries(model, root, summaries, patterns, summaryCallerIndex, summaryMethodRoots, memberFacts);
             }
 
             foreach (var tree in vbTrees)
             {
                 var model = vbCompilation.GetSemanticModel(tree);
                 var root = tree.GetCompilationUnitRoot();
-                CollectCompilationUnitSummaries(model, root, summaries, patterns, summaryCallerIndex, summaryMethodRoots);
+                CollectCompilationUnitSummaries(model, root, summaries, patterns, summaryCallerIndex, summaryMethodRoots, memberFacts);
             }
 
             // The worklist is seeded with every key round one produced, then narrowed each round to the
@@ -426,7 +452,7 @@ public static partial class DataFlowAnalyzer
                 foreach (var caller in callers)
                 {
                     var (root, model) = summaryMethodRoots[caller];
-                    new DataFlowSummaryCollector(model, summaries, patterns, summaryCallerIndex, summaryMethodRoots).Visit(root);
+                    new DataFlowSummaryCollector(model, summaries, patterns, summaryCallerIndex, summaryMethodRoots, memberFacts).Visit(root);
                 }
 
                 var cellCountsAfter = SummaryCellCounts(summaries);
@@ -448,7 +474,7 @@ public static partial class DataFlowAnalyzer
             {
                 var model = csharpCompilation.GetSemanticModel(tree);
                 var root = tree.GetCompilationUnitRoot();
-                AnalyzeCompilationUnit(model, root, graph, patterns, summaries, path, tree.FilePath, frameworkSeeds);
+                AnalyzeCompilationUnit(model, root, graph, patterns, summaries, path, tree.FilePath, frameworkSeeds, memberFacts);
                 if (OperationDepthGuard.Describe(tree) is { } depthDiagnostic) graph.RecordDiagnostic(depthDiagnostic);
             }
 
@@ -456,7 +482,7 @@ public static partial class DataFlowAnalyzer
             {
                 var model = vbCompilation.GetSemanticModel(tree);
                 var root = tree.GetCompilationUnitRoot();
-                AnalyzeCompilationUnit(model, root, graph, patterns, summaries, path, tree.FilePath, frameworkSeeds);
+                AnalyzeCompilationUnit(model, root, graph, patterns, summaries, path, tree.FilePath, frameworkSeeds, memberFacts);
                 if (OperationDepthGuard.Describe(tree) is { } depthDiagnostic) graph.RecordDiagnostic(depthDiagnostic);
             }
 
@@ -545,11 +571,11 @@ public static partial class DataFlowAnalyzer
         }
     }
 
-    private static void CollectCompilationUnitSummaries(SemanticModel model, CSharpCompilationUnitSyntax root, Dictionary<string, DataFlowMethodSummary> summaries, DataFlowPatternSet patterns, Dictionary<string, HashSet<string>>? callerIndex = null, Dictionary<string, (IOperation Root, SemanticModel Model)>? methodRoots = null)
+    private static void CollectCompilationUnitSummaries(SemanticModel model, CSharpCompilationUnitSyntax root, Dictionary<string, DataFlowMethodSummary> summaries, DataFlowPatternSet patterns, Dictionary<string, HashSet<string>>? callerIndex = null, Dictionary<string, (IOperation Root, SemanticModel Model)>? methodRoots = null, DataFlowMemberFacts? memberFacts = null)
     {
         var operationNodes = root.DescendantNodes()
             .Where(node => node is Microsoft.CodeAnalysis.CSharp.Syntax.BaseMethodDeclarationSyntax or Microsoft.CodeAnalysis.CSharp.Syntax.AccessorDeclarationSyntax or Microsoft.CodeAnalysis.CSharp.Syntax.LocalFunctionStatementSyntax);
-        var collector = new DataFlowSummaryCollector(model, summaries, patterns, callerIndex, methodRoots);
+        var collector = new DataFlowSummaryCollector(model, summaries, patterns, callerIndex, methodRoots, memberFacts);
         foreach (var node in operationNodes)
         {
             var operation = OperationDepthGuard.GetOperation(model, node);
@@ -563,7 +589,7 @@ public static partial class DataFlowAnalyzer
         collector.VisitGlobalStatements(root.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.GlobalStatementSyntax>().Select(statement => statement.Statement));
     }
 
-    private static void CollectCompilationUnitSummaries(SemanticModel model, VisualBasicCompilationUnitSyntax root, Dictionary<string, DataFlowMethodSummary> summaries, DataFlowPatternSet patterns, Dictionary<string, HashSet<string>>? callerIndex = null, Dictionary<string, (IOperation Root, SemanticModel Model)>? methodRoots = null)
+    private static void CollectCompilationUnitSummaries(SemanticModel model, VisualBasicCompilationUnitSyntax root, Dictionary<string, DataFlowMethodSummary> summaries, DataFlowPatternSet patterns, Dictionary<string, HashSet<string>>? callerIndex = null, Dictionary<string, (IOperation Root, SemanticModel Model)>? methodRoots = null, DataFlowMemberFacts? memberFacts = null)
     {
         var operationNodes = root.DescendantNodes()
             .Where(node => node is Microsoft.CodeAnalysis.VisualBasic.Syntax.MethodBlockSyntax or Microsoft.CodeAnalysis.VisualBasic.Syntax.AccessorBlockSyntax);
@@ -572,12 +598,12 @@ public static partial class DataFlowAnalyzer
             var operation = OperationDepthGuard.GetOperation(model, node);
             if (operation is not null)
             {
-                new DataFlowSummaryCollector(model, summaries, patterns, callerIndex, methodRoots).Visit(operation);
+                new DataFlowSummaryCollector(model, summaries, patterns, callerIndex, methodRoots, memberFacts).Visit(operation);
             }
         }
     }
 
-    private static void AnalyzeCompilationUnit(SemanticModel model, CSharpCompilationUnitSyntax root, DataFlowGraphBuilder graph, DataFlowPatternSet patterns, Dictionary<string, DataFlowMethodSummary> summaries, string basePath, string sourceFilePath, FrameworkTaintSeedIndex? frameworkSeeds = null)
+    private static void AnalyzeCompilationUnit(SemanticModel model, CSharpCompilationUnitSyntax root, DataFlowGraphBuilder graph, DataFlowPatternSet patterns, Dictionary<string, DataFlowMethodSummary> summaries, string basePath, string sourceFilePath, FrameworkTaintSeedIndex? frameworkSeeds = null, DataFlowMemberFacts? memberFacts = null)
     {
         var operationNodes = root.DescendantNodes()
             .Where(node => node is Microsoft.CodeAnalysis.CSharp.Syntax.BaseMethodDeclarationSyntax or Microsoft.CodeAnalysis.CSharp.Syntax.AccessorDeclarationSyntax or Microsoft.CodeAnalysis.CSharp.Syntax.LocalFunctionStatementSyntax);
@@ -586,18 +612,18 @@ public static partial class DataFlowAnalyzer
             var operation = OperationDepthGuard.GetOperation(model, node);
             if (operation is not null)
             {
-                new DataFlowOperationWalker(model, graph, patterns, summaries, basePath, sourceFilePath, frameworkSeeds).Visit(operation);
+                new DataFlowOperationWalker(model, graph, patterns, summaries, basePath, sourceFilePath, frameworkSeeds, memberFacts).Visit(operation);
             }
         }
 
         // Top-level statements (the default console template) never appear inside a method-body
         // operation, so they need an explicit pass, one walker for the whole file so taint carries
         // across statements exactly as it does within a method body.
-        new DataFlowOperationWalker(model, graph, patterns, summaries, basePath, sourceFilePath, frameworkSeeds)
+        new DataFlowOperationWalker(model, graph, patterns, summaries, basePath, sourceFilePath, frameworkSeeds, memberFacts)
             .VisitGlobalStatements(root.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.GlobalStatementSyntax>().Select(statement => statement.Statement));
     }
 
-    private static void AnalyzeCompilationUnit(SemanticModel model, VisualBasicCompilationUnitSyntax root, DataFlowGraphBuilder graph, DataFlowPatternSet patterns, Dictionary<string, DataFlowMethodSummary> summaries, string basePath, string sourceFilePath, FrameworkTaintSeedIndex? frameworkSeeds = null)
+    private static void AnalyzeCompilationUnit(SemanticModel model, VisualBasicCompilationUnitSyntax root, DataFlowGraphBuilder graph, DataFlowPatternSet patterns, Dictionary<string, DataFlowMethodSummary> summaries, string basePath, string sourceFilePath, FrameworkTaintSeedIndex? frameworkSeeds = null, DataFlowMemberFacts? memberFacts = null)
     {
         var operationNodes = root.DescendantNodes()
             .Where(node => node is Microsoft.CodeAnalysis.VisualBasic.Syntax.MethodBlockSyntax or Microsoft.CodeAnalysis.VisualBasic.Syntax.AccessorBlockSyntax);
@@ -606,7 +632,7 @@ public static partial class DataFlowAnalyzer
             var operation = OperationDepthGuard.GetOperation(model, node);
             if (operation is not null)
             {
-                new DataFlowOperationWalker(model, graph, patterns, summaries, basePath, sourceFilePath, frameworkSeeds).Visit(operation);
+                new DataFlowOperationWalker(model, graph, patterns, summaries, basePath, sourceFilePath, frameworkSeeds, memberFacts).Visit(operation);
             }
         }
     }
@@ -967,6 +993,7 @@ public static partial class DataFlowAnalyzer
             new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Type, Pattern = "Microsoft.AspNetCore.Http.HttpContext", Match = DataFlowMatchKind.Contains, Category = "http", Description = "ASP.NET HttpContext" },
             new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Type, Pattern = "Microsoft.AspNetCore.Http.IFormFile", Match = DataFlowMatchKind.Contains, Category = "http", Description = "Uploaded file" },
             new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Method, Pattern = "System.Console.ReadLine", Match = DataFlowMatchKind.Contains, Category = "cli", Description = "Console input" },
+            new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Method, Pattern = @"^System\.Console\.(In|OpenStandardInput)\b", Match = DataFlowMatchKind.Regex, Category = "cli", Description = "Console standard input reader" },
             new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Symbol, Pattern = ".Request.Query", Match = DataFlowMatchKind.Contains, Category = "http", Description = "HTTP query string" },
             new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Symbol, Pattern = ".Request.Form", Match = DataFlowMatchKind.Contains, Category = "http", Description = "HTTP form data" },
             new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Symbol, Pattern = ".Request.Body", Match = DataFlowMatchKind.Contains, Category = "http", Description = "HTTP request body" },
@@ -974,7 +1001,12 @@ public static partial class DataFlowAnalyzer
             new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Symbol, Pattern = ".Request.Cookies", Match = DataFlowMatchKind.Contains, Category = "http", Description = "HTTP cookies" },
             new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Code, Pattern = "Request[", Match = DataFlowMatchKind.Contains, Category = "http", Description = "ASP.NET request collection" },
             new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Code, Pattern = "Request.QueryString", Match = DataFlowMatchKind.Contains, Category = "http", Description = "ASP.NET query string" },
-            new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Code, Pattern = ".Text", Match = DataFlowMatchKind.Contains, Category = "webforms", Description = "ASP.NET WebForms text control value" },
+            // WebForms control values. Bound, the control's property symbol names the type; unbound
+            // (a legacy project without its references), only the control's conventional name is
+            // left. A bare ".Text" substring matched System.Text, StringBuilder and every Roslyn
+            // `syntax.Text` in the tree.
+            new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Method, Pattern = @"^System\.Web\.UI\.(WebControls|HtmlControls)\.\w+\.(Text|Value|SelectedValue)$", Match = DataFlowMatchKind.Regex, Category = "webforms", Description = "ASP.NET WebForms control value" },
+            new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Code, Pattern = @"^(?i:(txt|tbx?|textbox|ddl|dropdown|hdn|hidden|input)[A-Za-z0-9_]*)\.(Text|Value|SelectedValue)$", Match = DataFlowMatchKind.Regex, Category = "webforms", Description = "ASP.NET WebForms control value (by control name)", Confidence = "Low" },
             new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Code, Pattern = ".SelectedItem.Value", Match = DataFlowMatchKind.Contains, Category = "webforms", Description = "ASP.NET WebForms selected value" },
             new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Type, Pattern = "Grpc.Core.ServerCallContext", Match = DataFlowMatchKind.Contains, Category = "rpc", Description = "gRPC server call context" }
         ],
@@ -1451,12 +1483,34 @@ public static partial class DataFlowAnalyzer
     ///     index of callee summary key → enclosing caller methods and each visited method's root
     ///     operation, so subsequent rounds only re-walk callers of summaries that changed.
     /// </summary>
-    private sealed class DataFlowSummaryCollector(SemanticModel model, Dictionary<string, DataFlowMethodSummary> summaries, DataFlowPatternSet patterns, Dictionary<string, HashSet<string>>? callerIndex = null, Dictionary<string, (IOperation Root, SemanticModel Model)>? methodRoots = null) : DepthBoundedOperationWalker
+    private sealed class DataFlowSummaryCollector(SemanticModel model, Dictionary<string, DataFlowMethodSummary> summaries, DataFlowPatternSet patterns, Dictionary<string, HashSet<string>>? callerIndex = null, Dictionary<string, (IOperation Root, SemanticModel Model)>? methodRoots = null, DataFlowMemberFacts? memberFacts = null) : DepthBoundedOperationWalker
     {
         private IMethodSymbol? _currentMethod;
 
+        // What each local of the current method was assigned from, flow-insensitively: a summary
+        // has to see through `var cmd = "run " + c; Process.Start(cmd);`, which names no
+        // parameter at the sink. Union over every assignment, so a loop or a branch only adds.
+        private Dictionary<ISymbol, Derivation> _locals = new(SymbolEqualityComparer.Default);
+
+        /// <summary>The parameters, source categories and receiver members a value derives from.</summary>
+        private sealed class Derivation
+        {
+            public HashSet<int> Parameters { get; } = [];
+            public HashSet<string> Sources { get; } = new(StringComparer.Ordinal);
+            public HashSet<string> Members { get; } = new(StringComparer.Ordinal);
+
+            public void UnionWith(Derivation other)
+            {
+                Parameters.UnionWith(other.Parameters);
+                Sources.UnionWith(other.Sources);
+                Members.UnionWith(other.Members);
+            }
+        }
+
         public override void VisitMethodBodyOperation(IMethodBodyOperation operation)
         {
+            var previousLocals = _locals;
+            _locals = new Dictionary<ISymbol, Derivation>(SymbolEqualityComparer.Default);
             var previousMethod = _currentMethod;
             // The method-body operation's syntax is the whole declaration, whose span start sits
             // before the method name, GetEnclosingSymbol there returns the CONTAINING TYPE. Start
@@ -1470,6 +1524,7 @@ public static partial class DataFlowAnalyzer
             }
             base.VisitMethodBodyOperation(operation);
             _currentMethod = previousMethod;
+            _locals = previousLocals;
         }
 
         public override void VisitBlock(IBlockOperation operation)
@@ -1528,17 +1583,273 @@ public static partial class DataFlowAnalyzer
         {
             if (_currentMethod is not null && operation.ReturnedValue is not null)
             {
-                foreach (var parameterIndex in FindParameterIndexes(operation.ReturnedValue, _currentMethod))
+                var derivation = Derive(operation.ReturnedValue);
+                var summary = GetSummary(_currentMethod);
+                foreach (var parameterIndex in derivation.Parameters)
                 {
-                    AddUnique(GetSummary(_currentMethod).ReturnParameterIndexes, parameterIndex);
+                    AddUnique(summary.ReturnParameterIndexes, parameterIndex);
+                }
+
+                AddAll(summary.ReturnMembers, derivation.Members);
+                // A bool carries a decision about the source, not the source (the walker's rule).
+                if (_currentMethod.ReturnType.SpecialType != SpecialType.System_Boolean)
+                {
+                    AddAll(summary.ReturnSourceCategories, derivation.Sources);
                 }
             }
             base.VisitReturn(operation);
         }
 
+        public override void VisitVariableDeclarator(IVariableDeclaratorOperation operation)
+        {
+            if (operation.GetVariableInitializer()?.Value is { } initializer)
+            {
+                DeriveLocal(operation.Symbol, Derive(initializer));
+            }
+
+            base.VisitVariableDeclarator(operation);
+        }
+
+        public override void VisitCompoundAssignment(ICompoundAssignmentOperation operation)
+        {
+            RecordWrite(operation.Target, operation.Value);
+            base.VisitCompoundAssignment(operation);
+        }
+
+        public override void VisitDeconstructionAssignment(IDeconstructionAssignmentOperation operation)
+        {
+            // Every target may take any element: flow-insensitive, like the locals map itself.
+            var derivation = Derive(operation.Value);
+            foreach (var local in DeclaredOrReferencedLocals(operation.Target))
+            {
+                DeriveLocal(local, derivation);
+            }
+
+            base.VisitDeconstructionAssignment(operation);
+        }
+
+        public override void VisitForEachLoop(IForEachLoopOperation operation)
+        {
+            var derivation = Derive(operation.Collection);
+            foreach (var local in DeclaredOrReferencedLocals(operation.LoopControlVariable))
+            {
+                DeriveLocal(local, derivation);
+            }
+
+            base.VisitForEachLoop(operation);
+        }
+
+        public override void VisitIsPattern(IIsPatternOperation operation)
+        {
+            DerivePatternLocals(operation.Value, [operation.Pattern]);
+            base.VisitIsPattern(operation);
+        }
+
+        public override void VisitSwitch(ISwitchOperation operation)
+        {
+            DerivePatternLocals(operation.Value, operation.Cases.SelectMany(@case => @case.Clauses.OfType<IPatternCaseClauseOperation>()).Select(clause => clause.Pattern));
+            base.VisitSwitch(operation);
+        }
+
+        public override void VisitSwitchExpression(ISwitchExpressionOperation operation)
+        {
+            DerivePatternLocals(operation.Value, operation.Arms.Select(arm => arm.Pattern));
+            base.VisitSwitchExpression(operation);
+        }
+
+        private void DerivePatternLocals(IOperation operand, IEnumerable<IOperation?> patterns)
+        {
+            var derivation = Derive(operand);
+            foreach (var local in patterns.SelectMany(PatternDeclaredSymbols))
+            {
+                DeriveLocal(local, derivation);
+            }
+        }
+
+        private void DeriveLocal(ISymbol local, Derivation derivation)
+        {
+            if (!_locals.TryGetValue(local, out var existing))
+            {
+                _locals[local] = existing = new Derivation();
+            }
+
+            existing.UnionWith(derivation);
+        }
+
+        /// <summary>The locals a deconstruction target or loop variable declares or names, through nested tuples.</summary>
+        private static IEnumerable<ILocalSymbol> DeclaredOrReferencedLocals(IOperation? operation)
+        {
+            switch (operation is null ? null : Strip(operation))
+            {
+                case ILocalReferenceOperation local:
+                    yield return local.Local;
+                    break;
+                case IVariableDeclaratorOperation declarator:
+                    yield return declarator.Symbol;
+                    break;
+                case IDeclarationExpressionOperation declaration:
+                    foreach (var nested in DeclaredOrReferencedLocals(declaration.Expression)) yield return nested;
+                    break;
+                case ITupleOperation tuple:
+                    foreach (var nested in tuple.Elements.SelectMany(DeclaredOrReferencedLocals)) yield return nested;
+                    break;
+                case IVariableDeclarationOperation declarationOperation:
+                    foreach (var declarator in declarationOperation.Declarators) yield return declarator.Symbol;
+                    break;
+                case IVariableDeclarationGroupOperation group:
+                    foreach (var declarator in group.Declarations.SelectMany(declaration => declaration.Declarators)) yield return declarator.Symbol;
+                    break;
+            }
+        }
+
+        /// <summary>
+        ///     What a value is computed from: parameters of the current method, sources, and
+        ///     receiver members, followed through the locals map, through calls to summarized
+        ///     methods that return a source or a receiver member, and through member reads that
+        ///     another method assigned from a source. Like the parameter search it replaces, any
+        ///     operand counts: a summary over-approximates rather than miss a flow.
+        /// </summary>
+        private Derivation Derive(IOperation? operation)
+        {
+            var derivation = new Derivation();
+            if (operation is null || _currentMethod is null)
+            {
+                return derivation;
+            }
+
+            var pending = new Stack<IOperation>();
+            pending.Push(operation);
+            while (pending.Count > 0)
+            {
+                var current = Strip(pending.Pop());
+                switch (current)
+                {
+                    case IParameterReferenceOperation parameterReference:
+                        var index = _currentMethod.Parameters.IndexOf(parameterReference.Parameter);
+                        if (index >= 0)
+                        {
+                            derivation.Parameters.Add(index);
+                        }
+                        else if (ReceiverMemberKey(current, _currentMethod) is { } capturedKey)
+                        {
+                            derivation.Members.Add(capturedKey);
+                        }
+
+                        break;
+                    case ILocalReferenceOperation localReference when _locals.TryGetValue(localReference.Local, out var localDerivation):
+                        derivation.UnionWith(localDerivation);
+                        break;
+                    case IFieldReferenceOperation or IPropertyReferenceOperation when ReceiverMemberKey(current, _currentMethod) is { } memberKey:
+                        derivation.Members.Add(memberKey);
+                        if (memberFacts is not null && memberFacts.SourceCategories.TryGetValue(memberKey, out var memberSources))
+                        {
+                            derivation.Sources.UnionWith(memberSources);
+                        }
+
+                        if (current is IPropertyReferenceOperation { Property.GetMethod: { } getter } && TryGetCalleeSummary(getter, out var getterSummary))
+                        {
+                            derivation.Members.UnionWith(getterSummary.ReturnMembers);
+                            derivation.Sources.UnionWith(getterSummary.ReturnSourceCategories);
+                        }
+
+                        break;
+                    case IInvocationOperation invocation when TryGetCalleeSummary(invocation.TargetMethod, out var calleeSummary):
+                        derivation.Sources.UnionWith(calleeSummary.ReturnSourceCategories);
+                        if (IsOwnReceiver(invocation.Instance))
+                        {
+                            derivation.Members.UnionWith(calleeSummary.ReturnMembers);
+                        }
+
+                        break;
+                }
+
+                foreach (var pattern in MatchSourceExpression(current).Where(pattern => pattern.Kind is not (DataFlowPatternKind.Parameter or DataFlowPatternKind.Attribute) && !string.IsNullOrWhiteSpace(pattern.Category)))
+                {
+                    derivation.Sources.Add(pattern.Category!);
+                }
+
+                var children = current.ChildOperations.ToList();
+                for (var i = children.Count - 1; i >= 0; i--)
+                {
+                    pending.Push(children[i]);
+                }
+            }
+
+            return derivation;
+        }
+
+        private bool TryGetCalleeSummary(IMethodSymbol method, out DataFlowMethodSummary summary) =>
+            summaries.TryGetValue(DescribeSymbol(method), out summary!) || summaries.TryGetValue(DescribeSymbol(method.OriginalDefinition), out summary!);
+
+        /// <summary>
+        ///     Records what an assignment writes: a local takes the value's derivation, and a
+        ///     receiver member (<c>this.field</c>, a static, an auto property) records which
+        ///     parameters are stored into it and which sources it is assigned from.
+        /// </summary>
+        private void RecordWrite(IOperation target, IOperation value)
+        {
+            if (_currentMethod is null)
+            {
+                return;
+            }
+
+            var stripped = Strip(target);
+            if (stripped is ILocalReferenceOperation local)
+            {
+                DeriveLocal(local.Local, Derive(value));
+                return;
+            }
+
+            if (stripped is IDeclarationExpressionOperation or ITupleOperation)
+            {
+                var derivation = Derive(value);
+                foreach (var tupleLocal in DeclaredOrReferencedLocals(stripped))
+                {
+                    DeriveLocal(tupleLocal, derivation);
+                }
+
+                return;
+            }
+
+            if (ReceiverMemberKey(stripped, _currentMethod) is not { } memberKey)
+            {
+                return;
+            }
+
+            var written = Derive(value);
+            var summary = GetSummary(_currentMethod);
+            foreach (var parameterIndex in written.Parameters)
+            {
+                var members = summary.MemberWrites.TryGetValue(parameterIndex, out var existing) ? existing : summary.MemberWrites[parameterIndex] = [];
+                AddAll(members, [memberKey]);
+            }
+
+            if (written.Sources.Count > 0)
+            {
+                var categories = summary.MemberSources.TryGetValue(memberKey, out var existingCategories) ? existingCategories : summary.MemberSources[memberKey] = [];
+                AddAll(categories, written.Sources);
+                if (memberFacts is not null)
+                {
+                    var facts = memberFacts.SourceCategories.TryGetValue(memberKey, out var existingFacts) ? existingFacts : memberFacts.SourceCategories[memberKey] = [];
+                    AddAll(facts, written.Sources);
+                }
+            }
+        }
+
+        private static void AddAll(List<string> target, IEnumerable<string> values)
+        {
+            foreach (var value in values)
+            {
+                if (!target.Contains(value, StringComparer.Ordinal))
+                {
+                    target.Add(value);
+                }
+            }
+        }
+
         public override void VisitInvocation(IInvocationOperation operation)
         {
-            RecordSinkSummary(operation, operation.TargetMethod, operation.Arguments);
+            RecordSinkSummary(operation, operation.TargetMethod, operation.Arguments, operation.Instance);
             PropagateCalleeSummary(operation, operation.TargetMethod, operation.Arguments);
             IndexCaller(operation.TargetMethod);
             base.VisitInvocation(operation);
@@ -1578,7 +1889,8 @@ public static partial class DataFlowAnalyzer
 
         public override void VisitObjectCreation(IObjectCreationOperation operation)
         {
-            RecordSinkSummary(operation, operation.Constructor, operation.Arguments);
+            RecordSinkSummary(operation, operation.Constructor, operation.Arguments, null);
+            IndexCaller(operation.Constructor);
             base.VisitObjectCreation(operation);
         }
 
@@ -1593,6 +1905,7 @@ public static partial class DataFlowAnalyzer
         /// </summary>
         public override void VisitSimpleAssignment(ISimpleAssignmentOperation operation)
         {
+            RecordWrite(operation.Target, operation.Value);
             if (_currentMethod is not null &&
                 Strip(operation.Target) is IParameterReferenceOperation { Parameter.RefKind: RefKind.Out or RefKind.Ref } parameterReference)
             {
@@ -1664,9 +1977,31 @@ public static partial class DataFlowAnalyzer
 
             var argumentList = arguments.ToList();
             var callerSummary = GetSummary(_currentMethod);
+            var onOwnReceiver = IsOwnReceiver(operation.Instance);
+            if (onOwnReceiver)
+            {
+                // `this.Go()` from another method: the callee's receiver facts are the caller's.
+                AddAll(callerSummary.ReceiverSinkMembers, calleeSummary.ReceiverSinkMembers);
+            }
+
             foreach (var (parameterIndex, argument) in argumentList.Select((argument, index) => (index, argument)))
             {
-                var indexes = FindParameterIndexes(argument.Value, _currentMethod).ToList();
+                var derivation = Derive(argument.Value);
+                if (calleeSummary.SinkParameterIndexes.Contains(parameterIndex))
+                {
+                    AddAll(callerSummary.ReceiverSinkMembers, derivation.Members);
+                }
+
+                if (onOwnReceiver && calleeSummary.MemberWrites.TryGetValue(parameterIndex, out var calleeMembers))
+                {
+                    foreach (var callerParameter in derivation.Parameters)
+                    {
+                        var members = callerSummary.MemberWrites.TryGetValue(callerParameter, out var existing) ? existing : callerSummary.MemberWrites[callerParameter] = [];
+                        AddAll(members, calleeMembers);
+                    }
+                }
+
+                var indexes = derivation.Parameters.ToList();
                 if (indexes.Count == 0)
                 {
                     continue;
@@ -1703,7 +2038,7 @@ public static partial class DataFlowAnalyzer
             }
         }
 
-        private void RecordSinkSummary(IOperation operation, IMethodSymbol? targetMethod, IEnumerable<IArgumentOperation> arguments)
+        private void RecordSinkSummary(IOperation operation, IMethodSymbol? targetMethod, IEnumerable<IArgumentOperation> arguments, IOperation? instance)
         {
             if (_currentMethod is null || targetMethod is null)
             {
@@ -1717,9 +2052,14 @@ public static partial class DataFlowAnalyzer
             }
 
             var summary = GetSummary(_currentMethod);
+            // A receiver member reaching the sink, as an argument or as the sink's own receiver
+            // (`_command.ExecuteReader()`), makes calls on a receiver holding taint there a flow.
+            AddAll(summary.ReceiverSinkMembers, Derive(instance).Members);
             foreach (var argument in arguments)
             {
-                foreach (var parameterIndex in FindParameterIndexes(argument.Value, _currentMethod))
+                var derivation = Derive(argument.Value);
+                AddAll(summary.ReceiverSinkMembers, derivation.Members);
+                foreach (var parameterIndex in derivation.Parameters)
                 {
                     AddUnique(summary.SinkParameterIndexes, parameterIndex);
                     foreach (var category in sinkPatterns.Select(pattern => pattern.Category).Where(category => !string.IsNullOrWhiteSpace(category)).Distinct(StringComparer.Ordinal))
@@ -1771,32 +2111,6 @@ public static partial class DataFlowAnalyzer
             return summary;
         }
 
-        private static IEnumerable<int> FindParameterIndexes(IOperation operation, IMethodSymbol method)
-        {
-            var indexes = new List<int>();
-            var pending = new Stack<IOperation>();
-            pending.Push(operation);
-            while (pending.Count > 0)
-            {
-                var current = Strip(pending.Pop());
-                if (current is IParameterReferenceOperation parameterReference)
-                {
-                    var index = method.Parameters.IndexOf(parameterReference.Parameter);
-                    if (index >= 0)
-                    {
-                        indexes.Add(index);
-                    }
-                }
-
-                var children = current.ChildOperations.ToList();
-                for (var i = children.Count - 1; i >= 0; i--)
-                {
-                    pending.Push(children[i]);
-                }
-            }
-
-            return indexes;
-        }
 
         private static void AddUnique(List<int> values, int value)
         {
@@ -1885,7 +2199,7 @@ public static partial class DataFlowAnalyzer
         }
     }
 
-    private sealed class DataFlowOperationWalker(SemanticModel model, DataFlowGraphBuilder graph, DataFlowPatternSet patterns, Dictionary<string, DataFlowMethodSummary> summaries, string basePath, string sourceFilePath, FrameworkTaintSeedIndex? frameworkSeeds = null) : DepthBoundedOperationWalker
+    private sealed class DataFlowOperationWalker(SemanticModel model, DataFlowGraphBuilder graph, DataFlowPatternSet patterns, Dictionary<string, DataFlowMethodSummary> summaries, string basePath, string sourceFilePath, FrameworkTaintSeedIndex? frameworkSeeds = null, DataFlowMemberFacts? memberFacts = null) : DepthBoundedOperationWalker
     {
         private readonly Dictionary<string, TaintTrace> _taintedSymbols = new(StringComparer.Ordinal);
         private readonly DataFlowPatternIndex _patternIndex = new(patterns);
@@ -1899,6 +2213,15 @@ public static partial class DataFlowAnalyzer
         private readonly HashSet<string> _hardenedSymbols = new(StringComparer.Ordinal);
         private bool _depthBudgetReported;
         private IMethodSymbol? _currentMethod;
+
+        // Members of a receiver last assigned a clean value (`o.Safe = "x"`, or an object
+        // initializer's clean member): reading them is clean even when the receiver as a whole
+        // carries taint from another member or a constructor argument.
+        private readonly HashSet<string> _cleanMembers = new(StringComparer.Ordinal);
+
+        // Member keys (`member@receiver`) by receiver, so reassigning the receiver drops the
+        // state of the object it used to hold without scanning every key.
+        private readonly Dictionary<string, HashSet<string>> _memberKeysByReceiver = new(StringComparer.Ordinal);
 
         /// <summary>Spacing-tolerant hardening marker, shared by the declarator and assignment hooks.</summary>
         private static readonly Regex HardeningMarkerRegex = new(@"XmlResolver\s*=\s*null|DtdProcessing\s*=\s*(DtdProcessing\s*\.\s*)?(Prohibit|Ignore)", RegexOptions.Compiled);
@@ -2047,8 +2370,73 @@ public static partial class DataFlowAnalyzer
 
         public override void VisitSimpleAssignment(ISimpleAssignmentOperation operation)
         {
-            AssignTarget(operation.Target, operation.Value, operation.Syntax, "Assignment");
+            // An object initializer's own member stores are written to the created object's
+            // receiver by PropagateConstruction; its implicit receiver names no variable.
+            if (!IsInitializerStore(operation))
+            {
+                AssignTarget(operation.Target, operation.Value, operation.Syntax, "Assignment");
+            }
+
             base.VisitSimpleAssignment(operation);
+        }
+
+        private static bool IsInitializerStore(ISimpleAssignmentOperation operation) =>
+            operation.Parent is IObjectOrCollectionInitializerOperation &&
+            Strip(operation.Target) is IMemberReferenceOperation { Instance: IInstanceReferenceOperation { ReferenceKind: InstanceReferenceKind.ImplicitReceiver } };
+
+        /// <summary>
+        ///     Deconstruction (<c>var (a, b) = (x, 1)</c>, <c>(a, b) = (b, a)</c>,
+        ///     <c>var (name, _) = record</c>) writes each target from its own element when the
+        ///     value is a tuple literal; any other value (a <c>Deconstruct</c> call, a tuple-typed
+        ///     variable) gives every target its taint, as the IL pass does for Deconstruct's out
+        ///     parameters. Every element is read before any target is written, so a swap reads the
+        ///     old values.
+        /// </summary>
+        public override void VisitDeconstructionAssignment(IDeconstructionAssignmentOperation operation)
+        {
+            var writes = new List<(IOperation Target, TaintTrace? Taint)>();
+            CollectDeconstructionWrites(operation.Target, operation.Value, null, writes);
+            foreach (var (target, taint) in writes)
+            {
+                AssignTargetTaint(target, taint, operation.Syntax, "Deconstruction");
+            }
+
+            base.VisitDeconstructionAssignment(operation);
+        }
+
+        private void CollectDeconstructionWrites(IOperation target, IOperation? value, TaintTrace? inherited, List<(IOperation Target, TaintTrace? Taint)> writes)
+        {
+            target = Strip(target);
+            if (target is IDeclarationExpressionOperation declaration)
+            {
+                target = Strip(declaration.Expression);
+            }
+
+            if (target is not ITupleOperation targetTuple)
+            {
+                if (target is not IDiscardOperation)
+                {
+                    writes.Add((target, value is null ? inherited : GetTaint(value)));
+                }
+
+                return;
+            }
+
+            if (value is not null && Strip(value) is ITupleOperation valueTuple && valueTuple.Elements.Length == targetTuple.Elements.Length)
+            {
+                for (var index = 0; index < targetTuple.Elements.Length; index++)
+                {
+                    CollectDeconstructionWrites(targetTuple.Elements[index], valueTuple.Elements[index], null, writes);
+                }
+
+                return;
+            }
+
+            var whole = value is null ? inherited : GetTaint(value);
+            foreach (var element in targetTuple.Elements)
+            {
+                CollectDeconstructionWrites(element, null, whole, writes);
+            }
         }
 
         public override void VisitCompoundAssignment(ICompoundAssignmentOperation operation)
@@ -2129,7 +2517,13 @@ public static partial class DataFlowAnalyzer
             PropagateCollectionMutation(operation);
             PropagateOutArgumentTaint(operation);
             ProcessSink(operation, operation.TargetMethod, operation.Arguments);
+            ProcessReceiverMemberSink(operation);
             ProcessCodeSink(operation, operation.Arguments);
+            if (operation.Instance is not null)
+            {
+                ApplyMemberWrites(operation.TargetMethod, ReceiverKeyFor(operation.Instance), TaintsByOrdinal(operation.TargetMethod, operation.Arguments), operation.Syntax, operation);
+            }
+
             base.VisitInvocation(operation);
         }
 
@@ -2423,6 +2817,8 @@ public static partial class DataFlowAnalyzer
 
         private void AssignSymbol(ISymbol symbol, IOperation value, SyntaxNode syntax, string edgeKind)
         {
+            ForgetReceiver(SymbolKey(symbol));
+            PropagateConstruction(SymbolKey(symbol), value);
             if (GetTaint(value) is not { } taint)
             {
                 _taintedSymbols.Remove(SymbolKey(symbol));
@@ -2453,11 +2849,27 @@ public static partial class DataFlowAnalyzer
         private void AssignTarget(IOperation target, IOperation value, SyntaxNode syntax, string edgeKind)
         {
             MarkHardenedAssignment(target, value);
+            if (GetReferencedSymbol(Strip(target)) is { } receiverSymbol && Strip(target) is not IPropertyReferenceOperation { Property.IsIndexer: true })
+            {
+                ForgetReceiver(SymbolKey(receiverSymbol));
+                PropagateConstruction(SymbolKey(receiverSymbol), value);
+            }
 
+            var taint = GetTaint(value);
+            AssignTargetTaint(target, taint, syntax, edgeKind);
+            // A setter with a body stores `value` into backing members a later call may read.
+            if (taint is not null && Strip(target) is IPropertyReferenceOperation { Property: { IsIndexer: false, SetMethod: { } setter } } property)
+            {
+                ApplyMemberWrites(setter, ReceiverKeyFor(property.Instance), [taint], syntax);
+            }
+        }
+
+        private void AssignTargetTaint(IOperation target, TaintTrace? valueTaint, SyntaxNode syntax, string edgeKind)
+        {
             // Element/indexer stores (`arr[i] = tainted`, `dict[key] = tainted`) taint the
             // container so later reads stay tainted. Ordinary property stores do NOT, member
             // taint keys keep field sensitivity (obj.Safe = x must not taint obj.Secret).
-            if (ContainerOf(target) is { } container && GetReferencedSymbol(container) is { } containerSymbol && GetTaint(value) is { } containerTaint && TaintKey(container) is { } containerKey)
+            if (ContainerOf(target) is { } container && GetReferencedSymbol(container) is { } containerSymbol && valueTaint is { } containerTaint && TaintKey(container) is { } containerKey)
             {
                 var elementStoreNode = graph.AddNode("Assignment", containerSymbol.Name, syntax, model, basePath, sourceFilePath, _currentMethod, isSource: false, isSink: false, matchedPatterns: [], category: null, symbol: containerSymbol.ToDisplayString(), typeName: GetSymbolType(containerSymbol), code: SyntaxText(syntax));
                 graph.AddEdges(containerTaint.NodeIds, elementStoreNode.Id, "ElementStore", syntax, sourceFilePath, containerSymbol.Name);
@@ -2471,11 +2883,22 @@ public static partial class DataFlowAnalyzer
             }
 
             var taintKey = TaintKey(target) ?? SymbolKey(symbol);
-            if (GetTaint(value) is not { } taint)
+            var isMemberStore = Strip(target) is IFieldReferenceOperation or IPropertyReferenceOperation { Property.IsIndexer: false };
+            if (valueTaint is not { } taint)
             {
                 _taintedSymbols.Remove(taintKey);
                 if (taintKey != SymbolKey(symbol)) _taintedSymbols.Remove(SymbolKey(symbol));
+                if (isMemberStore && taintKey.Contains('@', StringComparison.Ordinal))
+                {
+                    MarkMember(taintKey, clean: true);
+                }
+
                 return;
+            }
+
+            if (isMemberStore && taintKey.Contains('@', StringComparison.Ordinal))
+            {
+                MarkMember(taintKey, clean: false);
             }
 
             var assignmentNode = graph.AddNode("Assignment", symbol.Name, syntax, model, basePath, sourceFilePath, _currentMethod, isSource: false, isSink: false, matchedPatterns: [], category: null, symbol: symbol.ToDisplayString(), typeName: GetSymbolType(symbol), code: SyntaxText(syntax));
@@ -2483,6 +2906,411 @@ public static partial class DataFlowAnalyzer
             if (taint.FieldPaths.Count > 0) assignmentNode.Properties["fieldPaths"] = string.Join(',', taint.FieldPaths);
             graph.AddEdges(taint.NodeIds, assignmentNode.Id, edgeKind, syntax, sourceFilePath, symbol.Name);
             _taintedSymbols[taintKey] = taint.Append(assignmentNode.Id).WithFieldPath(TaintKey(target));
+        }
+
+        /// <summary>Records that a member key now holds taint (or a clean value), indexed by its receiver.</summary>
+        private void MarkMember(string memberKey, bool clean)
+        {
+            if (clean)
+            {
+                _cleanMembers.Add(memberKey);
+            }
+            else
+            {
+                _cleanMembers.Remove(memberKey);
+            }
+
+            var at = memberKey.IndexOf('@', StringComparison.Ordinal);
+            if (at < 0)
+            {
+                return;
+            }
+
+            var receiver = memberKey[(at + 1)..];
+            if (!_memberKeysByReceiver.TryGetValue(receiver, out var keys))
+            {
+                _memberKeysByReceiver[receiver] = keys = new HashSet<string>(StringComparer.Ordinal);
+            }
+
+            keys.Add(memberKey);
+        }
+
+        /// <summary>A receiver that is assigned a new object loses what was known about the members of the old one.</summary>
+        private void ForgetReceiver(string receiverKey)
+        {
+            if (!_memberKeysByReceiver.Remove(receiverKey, out var keys))
+            {
+                return;
+            }
+
+            foreach (var key in keys)
+            {
+                _taintedSymbols.Remove(key);
+                _cleanMembers.Remove(key);
+            }
+        }
+
+        private void SetMemberTaint(string memberKey, TaintTrace taint, string name, IOperation at, SyntaxNode syntax, string edgeKind)
+        {
+            var node = graph.AddNode("Assignment", name, at, model, basePath, sourceFilePath, _currentMethod, isSource: false, isSink: false, matchedPatterns: [], category: null, symbol: memberKey, code: SyntaxText(syntax));
+            graph.AddEdges(taint.NodeIds, node.Id, edgeKind, syntax, sourceFilePath, name);
+            _taintedSymbols[memberKey] = taint.Append(node.Id).WithFieldPath(memberKey);
+            MarkMember(memberKey, clean: false);
+        }
+
+        /// <summary>
+        ///     The receiver key member taint keys use: <c>this</c> for the containing instance, the
+        ///     symbol of a variable, field or property, and for an object created inline
+        ///     (<c>new Runner(input).Go()</c>) a key of its own, filled from its constructor and
+        ///     initializer first.
+        /// </summary>
+        private string? ReceiverKeyFor(IOperation? instance)
+        {
+            if (instance is null)
+            {
+                return null;
+            }
+
+            var stripped = Strip(instance);
+            switch (stripped)
+            {
+                case IInstanceReferenceOperation { ReferenceKind: InstanceReferenceKind.ContainingTypeInstance }:
+                    return "this";
+                case IObjectCreationOperation creation:
+                    var inlineKey = $"new@{creation.Syntax.SpanStart}";
+                    PropagateConstruction(inlineKey, creation);
+                    return inlineKey;
+                default:
+                    return GetReferencedSymbol(stripped) is { } symbol ? SymbolKey(symbol) : null;
+            }
+        }
+
+        /// <summary>The taint key of a summarized member on a receiver; a static member needs none.</summary>
+        private static string? MemberKeyAt(string member, string? receiverKey) =>
+            member.StartsWith(GlobalMemberPrefix, StringComparison.Ordinal) ? member[GlobalMemberPrefix.Length..]
+            : receiverKey is null ? null
+            : $"{member}@{receiverKey}";
+
+        private static string MemberDisplayName(string member)
+        {
+            var name = member.StartsWith(GlobalMemberPrefix, StringComparison.Ordinal) ? member[GlobalMemberPrefix.Length..] : member;
+            var space = name.LastIndexOf(' ');
+            if (space >= 0)
+            {
+                name = name[(space + 1)..];
+            }
+
+            var dot = name.LastIndexOf('.');
+            return dot >= 0 ? name[(dot + 1)..] : name;
+        }
+
+        /// <summary>
+        ///     A call that stores its arguments into its receiver (a constructor, a setter,
+        ///     <c>runner.Set(input)</c>) taints those members at the call site, so a later call
+        ///     reading them into a sink (<c>runner.Go()</c>) is a flow. The taints are indexed by
+        ///     parameter ordinal, so named and reordered arguments land on the right member.
+        /// </summary>
+        private void ApplyMemberWrites(IMethodSymbol method, string? receiverKey, IReadOnlyList<TaintTrace?> taintsByOrdinal, SyntaxNode syntax, IOperation? at = null)
+        {
+            if (!TryGetSummary(method, out var summary) || summary.MemberWrites.Count == 0)
+            {
+                return;
+            }
+
+            foreach (var (ordinal, members) in summary.MemberWrites)
+            {
+                if (ordinal >= taintsByOrdinal.Count || taintsByOrdinal[ordinal] is not { } taint)
+                {
+                    continue;
+                }
+
+                foreach (var member in members)
+                {
+                    if (MemberKeyAt(member, receiverKey) is { } key && at is not null)
+                    {
+                        SetMemberTaint(key, taint, MemberDisplayName(member), at, syntax, "MemberWrite");
+                    }
+                    else if (MemberKeyAt(member, receiverKey) is { } plainKey)
+                    {
+                        _taintedSymbols[plainKey] = taint.WithFieldPath(plainKey);
+                        MarkMember(plainKey, clean: false);
+                    }
+                }
+            }
+        }
+
+        private List<TaintTrace?> TaintsByOrdinal(IMethodSymbol method, IEnumerable<IArgumentOperation> arguments)
+        {
+            var taints = new List<TaintTrace?>(new TaintTrace?[method.Parameters.Length]);
+            foreach (var argument in arguments)
+            {
+                if (argument.Parameter is { } parameter && parameter.Ordinal < taints.Count)
+                {
+                    taints[parameter.Ordinal] = Combine([taints[parameter.Ordinal], GetTaint(argument.Value)]);
+                }
+            }
+
+            return taints;
+        }
+
+        /// <summary>
+        ///     What constructing an object stores into it, under the receiver it is assigned to:
+        ///     the constructor's member writes, a primary constructor's captured parameters (and a
+        ///     record's positional properties), and the object initializer's members, field by
+        ///     field, so <c>new Options { Name = input, Mode = "x" }</c> taints <c>Name</c> and
+        ///     leaves <c>Mode</c> clean.
+        /// </summary>
+        private void PropagateConstruction(string receiverKey, IOperation value)
+        {
+            if (Strip(value) is not IObjectCreationOperation creation)
+            {
+                return;
+            }
+
+            if (creation.Constructor is { } constructor)
+            {
+                var taints = TaintsByOrdinal(constructor, creation.Arguments);
+                ApplyMemberWrites(constructor, receiverKey, taints, creation.Syntax, creation);
+                if (IsPrimaryConstructor(constructor))
+                {
+                    foreach (var parameter in constructor.Parameters)
+                    {
+                        if (taints[parameter.Ordinal] is not { } taint)
+                        {
+                            continue;
+                        }
+
+                        SetMemberTaint($"{MemberName(parameter)}@{receiverKey}", taint, parameter.Name, creation, creation.Syntax, "PrimaryConstructorCapture");
+                        if (constructor.ContainingType.IsRecord && constructor.ContainingType.GetMembers(parameter.Name).OfType<IPropertySymbol>().FirstOrDefault() is { } positional)
+                        {
+                            SetMemberTaint($"{MemberName(positional)}@{receiverKey}", taint, positional.Name, creation, creation.Syntax, "PrimaryConstructorCapture");
+                        }
+                    }
+                }
+            }
+
+            if (creation.Initializer is { } initializer)
+            {
+                PropagateInitializer(receiverKey, initializer);
+            }
+        }
+
+        private static bool IsPrimaryConstructor(IMethodSymbol constructor) =>
+            constructor.DeclaringSyntaxReferences.Any(reference => reference.GetSyntax() is Microsoft.CodeAnalysis.CSharp.Syntax.TypeDeclarationSyntax);
+
+        private void PropagateInitializer(string receiverKey, IObjectOrCollectionInitializerOperation initializer)
+        {
+            foreach (var element in initializer.Initializers)
+            {
+                switch (element)
+                {
+                    case ISimpleAssignmentOperation assignment when Strip(assignment.Target) is IMemberReferenceOperation member && member is not IPropertyReferenceOperation { Property.IsIndexer: true }:
+                        var memberKey = member.Member.IsStatic ? SymbolKey(member.Member) : $"{SymbolKey(member.Member)}@{receiverKey}";
+                        if (GetTaint(assignment.Value) is { } taint)
+                        {
+                            SetMemberTaint(memberKey, taint, member.Member.Name, assignment, assignment.Syntax, "InitializerStore");
+                            if (member is IPropertyReferenceOperation { Property.SetMethod: { } setter })
+                            {
+                                ApplyMemberWrites(setter, receiverKey, [taint], assignment.Syntax, assignment);
+                            }
+                        }
+                        else
+                        {
+                            _taintedSymbols.Remove(memberKey);
+                            MarkMember(memberKey, clean: true);
+                        }
+
+                        // A nested object is read back as receiver.Member.Inner, keyed by Member.
+                        PropagateConstruction(SymbolKey(member.Member), assignment.Value);
+                        break;
+                    case IMemberInitializerOperation { InitializedMember: IMemberReferenceOperation nestedMember, Initializer: { } nested }:
+                        PropagateInitializer(SymbolKey(nestedMember.Member), nested);
+                        break;
+                }
+            }
+        }
+
+        /// <summary>
+        ///     The values an object or collection initializer puts into the object, for the taint
+        ///     of the object as a whole: <c>Process.Start(new ProcessStartInfo { FileName = input })</c>
+        ///     passes a tainted object even though the constructor took no argument.
+        /// </summary>
+        private IEnumerable<TaintTrace?> InitializerTaints(IObjectOrCollectionInitializerOperation? initializer)
+        {
+            if (initializer is null)
+            {
+                yield break;
+            }
+
+            foreach (var element in initializer.Initializers)
+            {
+                switch (element)
+                {
+                    case ISimpleAssignmentOperation assignment:
+                        yield return GetTaint(assignment.Value);
+                        break;
+                    case IMemberInitializerOperation nested:
+                        foreach (var taint in InitializerTaints(nested.Initializer))
+                        {
+                            yield return taint;
+                        }
+
+                        break;
+                    case IInvocationOperation add:
+                        foreach (var argument in add.Arguments)
+                        {
+                            yield return GetTaint(argument.Value);
+                        }
+
+                        break;
+                    default:
+                        yield return GetTaint(element);
+                        break;
+                }
+            }
+        }
+
+        /// <summary>
+        ///     A call whose callee reads receiver members into a sink (<c>runner.Go()</c> after
+        ///     <c>runner.Set(input)</c>, or <c>new Service(input).Run()</c> over a primary
+        ///     constructor) reaches that sink when the receiver holds taint in one of them.
+        /// </summary>
+        private void ProcessReceiverMemberSink(IInvocationOperation operation)
+        {
+            if (!TryGetSummary(operation.TargetMethod, out var summary) || summary.ReceiverSinkMembers.Count == 0)
+            {
+                return;
+            }
+
+            var receiverKey = ReceiverKeyFor(operation.Instance);
+            var taint = Combine(summary.ReceiverSinkMembers
+                .Select(member => MemberKeyAt(member, receiverKey))
+                .Select(key => key is not null && _taintedSymbols.TryGetValue(key, out var memberTaint) ? memberTaint : null));
+            if (taint is null)
+            {
+                return;
+            }
+
+            var category = summary.SinkCategories.FirstOrDefault() ?? "interprocedural";
+            var summaryPattern = new DataFlowPattern
+            {
+                Target = DataFlowPatternTarget.Sink,
+                Kind = DataFlowPatternKind.Method,
+                Pattern = DescribeSymbol(operation.TargetMethod),
+                Category = category,
+                Description = "Sink reached through a receiver member in a summarized callee"
+            };
+            var sinkNode = graph.AddNode("Sink", operation.TargetMethod.Name, operation, model, basePath, sourceFilePath, _currentMethod,
+                isSource: false,
+                isSink: true,
+                matchedPatterns: [summaryPattern],
+                category: category,
+                symbol: DescribeSymbol(operation.TargetMethod),
+                typeName: Normalize(operation.TargetMethod.ReturnType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)),
+                code: SyntaxText(operation.Syntax));
+            sinkNode.Properties["summaryMethod"] = summary.Method;
+            sinkNode.Properties["sinkMethodId"] = Dosai.FormatMethodSignature(operation.TargetMethod);
+            graph.AddEdges(taint.NodeIds, sinkNode.Id, "InterproceduralSink", operation.Syntax, sourceFilePath, "receiver");
+            graph.AddSlice(taint, sinkNode, summaryPattern, operation.Instance is null ? SyntaxText(operation.Syntax) : SyntaxText(operation.Instance.Syntax), -1);
+        }
+
+        /// <summary>
+        ///     What a call's or property's return carries beyond its arguments: a source the
+        ///     callee returns (a wrapper over <c>Console.ReadLine</c> or a request read), and the
+        ///     receiver members the callee returns, read on this receiver or, for a member another
+        ///     method assigned from a source, minted as that source.
+        /// </summary>
+        private TaintTrace? SummarizedReturnTaint(IMethodSymbol method, IOperation? instance, IOperation at)
+        {
+            if (!TryGetSummary(method, out var summary) || ReturnsDecisionOnly(method))
+            {
+                return null;
+            }
+
+            var traces = new List<TaintTrace?>();
+            if (summary.ReturnSourceCategories.Count > 0)
+            {
+                traces.Add(MintSource(at, summary.Method, summary.ReturnSourceCategories, "Return value of a callee that returns a source"));
+            }
+
+            if (summary.ReturnMembers.Count > 0)
+            {
+                var receiverKey = ReceiverKeyFor(instance);
+                foreach (var member in summary.ReturnMembers)
+                {
+                    if (MemberKeyAt(member, receiverKey) is { } key && _taintedSymbols.TryGetValue(key, out var memberTaint))
+                    {
+                        traces.Add(memberTaint);
+                    }
+                    else if (memberFacts is not null && memberFacts.SourceCategories.TryGetValue(member, out var categories))
+                    {
+                        traces.Add(MintSource(at, member, categories, "Member assigned from a source and returned by the callee"));
+                    }
+                }
+            }
+
+            if (Combine(traces) is not { } combined)
+            {
+                return null;
+            }
+
+            var node = graph.AddNode("CallSummary", method.Name, at, model, basePath, sourceFilePath, _currentMethod, isSource: false, isSink: false, matchedPatterns: [], category: null, symbol: DescribeSymbol(method), typeName: Normalize(at.Type?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty), code: SyntaxText(at.Syntax));
+            graph.AddEdges(combined.NodeIds, node.Id, "InterproceduralReturn", at.Syntax, sourceFilePath, method.Name);
+            return combined.Append(node.Id);
+        }
+
+        private TaintTrace MintSource(IOperation at, string origin, IReadOnlyList<string> categories, string description)
+        {
+            var pattern = new DataFlowPattern
+            {
+                Target = DataFlowPatternTarget.Source,
+                Kind = DataFlowPatternKind.Method,
+                Pattern = origin,
+                Category = categories[0],
+                Description = description
+            };
+            var sourceNode = graph.AddNode("Source", GetOperationName(at), at, model, basePath, sourceFilePath, _currentMethod,
+                isSource: true,
+                isSink: false,
+                matchedPatterns: [pattern],
+                category: categories[0],
+                symbol: GetOperationSymbol(at),
+                typeName: Normalize(at.Type?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty),
+                code: SyntaxText(at.Syntax));
+            return new TaintTrace([sourceNode.Id], categories.Distinct(StringComparer.OrdinalIgnoreCase).ToList(), []);
+        }
+
+        /// <summary>
+        ///     The receiver-independent taint of a member read: a member another method assigned
+        ///     from a source (a constructor storing <c>Environment.GetEnvironmentVariable</c>), and
+        ///     the members a property's getter returns.
+        /// </summary>
+        private TaintTrace? MemberReadTaint(IOperation operation)
+        {
+            var (member, instance) = operation switch
+            {
+                IFieldReferenceOperation field => ((ISymbol?)field.Field, field.Instance),
+                IPropertyReferenceOperation { Property.IsIndexer: false } property => (property.Property, property.Instance),
+                _ => (null, null)
+            };
+            if (member is null)
+            {
+                return null;
+            }
+
+            var traces = new List<TaintTrace?>();
+            var factKey = member.IsStatic ? GlobalMemberPrefix + MemberName(member) : MemberName(member);
+            if (memberFacts is not null && memberFacts.SourceCategories.TryGetValue(factKey, out var categories))
+            {
+                traces.Add(MintSource(operation, factKey, categories, "Member assigned from a source in another method"));
+            }
+
+            if (member is IPropertySymbol { GetMethod: { } getter })
+            {
+                traces.Add(SummarizedReturnTaint(getter, instance, operation));
+            }
+
+            return Combine(traces);
         }
 
         /// <summary>
@@ -2531,9 +3359,24 @@ public static partial class DataFlowAnalyzer
                 IVariableDeclarationGroupOperation group => group.Declarations.SelectMany(declaration => declaration.Declarators).ToArray(),
                 _ => []
             };
+            if (declarators.Length == 0 && loopControlVariable is IDeclarationExpressionOperation or ITupleOperation)
+            {
+                // `foreach (var (key, value) in pairs)`: each deconstructed local takes the
+                // element's taint, as a deconstruction of a non-tuple value does.
+                return TupleLocals(loopControlVariable);
+            }
+
             return declarators
                 .Select(declarator => declarator.Symbol)
                 .OfType<ILocalSymbol>();
+
+            static IEnumerable<ILocalSymbol> TupleLocals(IOperation operation) => Strip(operation) switch
+            {
+                IDeclarationExpressionOperation declaration => TupleLocals(declaration.Expression),
+                ITupleOperation tuple => tuple.Elements.SelectMany(TupleLocals),
+                ILocalReferenceOperation local => [local.Local],
+                _ => []
+            };
         }
 
         /// <summary>
@@ -2575,41 +3418,6 @@ public static partial class DataFlowAnalyzer
                 var bindingNode = graph.AddNode("PatternBinding", symbol.Name, operand, model, basePath, sourceFilePath, _currentMethod, isSource: false, isSink: false, matchedPatterns: [], category: null, symbol: symbol.ToDisplayString(), typeName: GetSymbolType(symbol), code: SyntaxText(operand.Syntax));
                 graph.AddEdges(operandTaint.NodeIds, bindingNode.Id, "PatternBinding", operand.Syntax, sourceFilePath, symbol.Name);
                 _taintedSymbols[SymbolKey(symbol)] = operandTaint.Append(bindingNode.Id);
-            }
-        }
-
-        /// <summary>
-        ///     Locals declared by a pattern, including the payload variables nested in
-        ///     subpatterns and a designation naming the whole match (`case Success(var message)
-        ///     ok:` declares both `message` and `ok`). Nested patterns are reached through
-        ///     ChildOperations, which covers property subpatterns, `and`/`or` patterns, and
-        ///     slice patterns without naming each operation kind. Discards declare nothing.
-        /// </summary>
-        private static IEnumerable<ILocalSymbol> PatternDeclaredSymbols(IOperation? pattern)
-        {
-            if (pattern is null)
-            {
-                yield break;
-            }
-
-            // The three pattern kinds that declare a symbol of their own; every other kind only
-            // nests. DeclaredSymbol is typed as ISymbol and is null for discards.
-            var declared = pattern switch
-            {
-                IDeclarationPatternOperation declaration => declaration.DeclaredSymbol,
-                IRecursivePatternOperation recursive => recursive.DeclaredSymbol,
-                IListPatternOperation list => list.DeclaredSymbol,
-                _ => null
-            };
-
-            if (declared is ILocalSymbol local)
-            {
-                yield return local;
-            }
-
-            foreach (var nested in pattern.ChildOperations.SelectMany(PatternDeclaredSymbols))
-            {
-                yield return nested;
             }
         }
 
@@ -3146,9 +3954,15 @@ public static partial class DataFlowAnalyzer
                 // trace (with its full node chain) is returned.
             }
 
-            if (TaintKey(operation) is { } operationKey && _taintedSymbols.TryGetValue(operationKey, out var operationTaint))
+            var operationKey = TaintKey(operation);
+            if (operationKey is not null && _taintedSymbols.TryGetValue(operationKey, out var operationTaint))
             {
                 return operationTaint;
+            }
+
+            if (operationKey is not null && _cleanMembers.Contains(operationKey))
+            {
+                return null;
             }
 
             if (GetReferencedSymbol(operation) is { } existingSymbol && _taintedSymbols.TryGetValue(SymbolKey(existingSymbol), out var existing))
@@ -3177,7 +3991,40 @@ public static partial class DataFlowAnalyzer
                 return new TaintTrace([sourceNode.Id], matchedSourcePatterns.SelectMany(pattern => pattern.TaintKinds.Count > 0 ? pattern.TaintKinds : [pattern.Category ?? "user-input"]).Distinct(StringComparer.OrdinalIgnoreCase).ToList(), []);
             }
 
+            if (operation is IFieldReferenceOperation or IPropertyReferenceOperation && MemberReadTaint(operation) is { } memberReadTaint)
+            {
+                return Combine([memberReadTaint, Combine(operation.ChildOperations.Select(GetTaint))]);
+            }
+
+            if (operation is IInvocationOperation summarizedInvocation && SummarizedReturnTaint(summarizedInvocation.TargetMethod, summarizedInvocation.Instance, operation) is { } summarizedReturn)
+            {
+                return Combine([summarizedReturn, InvocationTaint(summarizedInvocation)]);
+            }
+
             if (operation is IInvocationOperation invocation)
+            {
+                return InvocationTaint(invocation);
+            }
+
+            if (operation is IObjectCreationOperation objectCreation)
+            {
+                return Combine(objectCreation.Arguments.Select(argument => GetTaint(argument.Value)).Concat(InitializerTaints(objectCreation.Initializer)));
+            }
+
+            var childTaint = Combine(operation.ChildOperations.Select(GetTaint));
+            if (childTaint is not null && CreatesExpressionNode(operation))
+            {
+                var expressionNode = graph.AddNode("Expression", GetOperationName(operation), operation, model, basePath, sourceFilePath, _currentMethod, isSource: false, isSink: false, matchedPatterns: [], category: null, symbol: GetOperationSymbol(operation), typeName: Normalize(operation.Type?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty), code: SyntaxText(operation.Syntax));
+                graph.AddEdges(childTaint.NodeIds, expressionNode.Id, "Expression", operation.Syntax, sourceFilePath, operation.Kind.ToString());
+                return childTaint.Append(expressionNode.Id);
+            }
+
+            return childTaint;
+        }
+
+        private TaintTrace? InvocationTaint(IInvocationOperation invocation)
+        {
+            var operation = (IOperation)invocation;
             {
                 var argumentList = invocation.Arguments.ToList();
                 var argumentTaints = argumentList.Select(argument => GetTaint(argument.Value)).ToList();
@@ -3225,21 +4072,6 @@ public static partial class DataFlowAnalyzer
                 // A boolean result is a decision about the input, not the payload itself.
                 return propagatesPayload ? argTaint : null;
             }
-
-            if (operation is IObjectCreationOperation objectCreation)
-            {
-                return Combine(objectCreation.Arguments.Select(argument => GetTaint(argument.Value)));
-            }
-
-            var childTaint = Combine(operation.ChildOperations.Select(GetTaint));
-            if (childTaint is not null && CreatesExpressionNode(operation))
-            {
-                var expressionNode = graph.AddNode("Expression", GetOperationName(operation), operation, model, basePath, sourceFilePath, _currentMethod, isSource: false, isSink: false, matchedPatterns: [], category: null, symbol: GetOperationSymbol(operation), typeName: Normalize(operation.Type?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty), code: SyntaxText(operation.Syntax));
-                graph.AddEdges(childTaint.NodeIds, expressionNode.Id, "Expression", operation.Syntax, sourceFilePath, operation.Kind.ToString());
-                return childTaint.Append(expressionNode.Id);
-            }
-
-            return childTaint;
         }
 
         private IEnumerable<DataFlowPattern> MatchOperationSource(IOperation operation)
@@ -3317,6 +4149,9 @@ public static partial class DataFlowAnalyzer
             var name = methodSymbol.Name;
             return type.StartsWith("System.Collections", StringComparison.Ordinal) ||
                    type.StartsWith("System.Linq", StringComparison.Ordinal) ||
+                   // A reader over a tainted stream (`new StreamReader(Request.Body).ReadToEndAsync()`,
+                   // `Console.In.ReadLineAsync()`) returns what the stream carried.
+                   (type.StartsWith("System.IO.", StringComparison.Ordinal) && name.StartsWith("Read", StringComparison.Ordinal)) ||
                    type == "string" ||
                    type == "System.String" ||
                    name is "First" or "FirstOrDefault" or "Single" or "SingleOrDefault" or "Last" or "LastOrDefault" or "ElementAt" or "ToList" or "ToArray" or "Select" or "Where" or "Trim" or "Replace" or "Substring" or "ToString";
@@ -3478,6 +4313,12 @@ public static partial class DataFlowAnalyzer
             }
 
             instance = Strip(instance);
+            if (instance is IInstanceReferenceOperation { ReferenceKind: InstanceReferenceKind.ContainingTypeInstance })
+            {
+                // `this.x` and an implicit `x` are one member: key both on the receiver `this`.
+                return $"{SymbolKey(member)}@this";
+            }
+
             if (GetReferencedSymbol(instance) is { } instanceSymbol)
             {
                 return $"{SymbolKey(member)}@{SymbolKey(instanceSymbol)}";
@@ -3843,12 +4684,92 @@ public static partial class DataFlowAnalyzer
         .Replace("Global.", string.Empty, StringComparison.Ordinal);
 
     /// <summary>
+    ///     Locals declared by a pattern, including the payload variables nested in
+    ///     subpatterns and a designation naming the whole match (`case Success(var message)
+    ///     ok:` declares both `message` and `ok`). Nested patterns are reached through
+    ///     ChildOperations, which covers property subpatterns, `and`/`or` patterns, and
+    ///     slice patterns without naming each operation kind. Discards declare nothing.
+    /// </summary>
+    private static IEnumerable<ILocalSymbol> PatternDeclaredSymbols(IOperation? pattern)
+    {
+        if (pattern is null)
+        {
+            yield break;
+        }
+
+        // The three pattern kinds that declare a symbol of their own; every other kind only
+        // nests. DeclaredSymbol is typed as ISymbol and is null for discards.
+        var declared = pattern switch
+        {
+            IDeclarationPatternOperation declaration => declaration.DeclaredSymbol,
+            IRecursivePatternOperation recursive => recursive.DeclaredSymbol,
+            IListPatternOperation list => list.DeclaredSymbol,
+            _ => null
+        };
+
+        if (declared is ILocalSymbol local)
+        {
+            yield return local;
+        }
+
+        foreach (var nested in pattern.ChildOperations.SelectMany(PatternDeclaredSymbols))
+        {
+            yield return nested;
+        }
+    }
+
+    private const string GlobalMemberPrefix = "global:";
+
+    /// <summary>
+    ///     The key of a receiver member a method reads or writes, as the walker's member taint
+    ///     keys spell it once the call site's receiver is attached (<c>{member}@{receiver}</c>):
+    ///     a field or non-indexer property of <c>this</c>, or a primary-constructor parameter a
+    ///     member captured. A static needs no receiver and is keyed <c>global:{member}</c>.
+    /// </summary>
+    private static string? ReceiverMemberKey(IOperation operation, IMethodSymbol currentMethod)
+    {
+        while (operation is IConversionOperation conversion)
+        {
+            operation = conversion.Operand;
+        }
+
+        return operation switch
+        {
+            IFieldReferenceOperation field => MemberKeyOn(field.Field, field.Instance),
+            IPropertyReferenceOperation { Property.IsIndexer: false } property => MemberKeyOn(property.Property, property.Instance),
+            IParameterReferenceOperation { Parameter.ContainingSymbol: IMethodSymbol { MethodKind: MethodKind.Constructor } constructor } parameter
+                when !SymbolEqualityComparer.Default.Equals(constructor, currentMethod) => MemberName(parameter.Parameter),
+            _ => null
+        };
+
+        static string? MemberKeyOn(ISymbol member, IOperation? instance) =>
+            member.IsStatic ? GlobalMemberPrefix + MemberName(member)
+            : IsOwnReceiver(instance) ? MemberName(member)
+            : null;
+    }
+
+    /// <summary>A member's name in taint keys: the walker's <c>SymbolKey</c> for a non-method symbol.</summary>
+    private static string MemberName(ISymbol member) => Normalize(member.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat));
+
+    /// <summary>True for <c>this</c>, explicit or implicit.</summary>
+    private static bool IsOwnReceiver(IOperation? instance)
+    {
+        while (instance is IConversionOperation conversion)
+        {
+            instance = conversion.Operand;
+        }
+
+        return instance is IInstanceReferenceOperation { ReferenceKind: InstanceReferenceKind.ContainingTypeInstance };
+    }
+
+    /// <summary>
     ///     Cheap change signal for the summary fixpoint: total number of tracked cells across all
     ///     summaries. Adding a sink/return/taint-kind entry grows the count; rewriting an identical
     ///     summary does not.
     /// </summary>
     private static int SummaryCellCount(DataFlowMethodSummary summary) =>
-        2 + summary.ReturnParameterIndexes.Count + summary.SinkParameterIndexes.Count + summary.OutParameterIndexes.Count + summary.OutSourceCategories.Sum(entry => 1 + entry.Value.Count) + summary.SinkCategories.Count + summary.TaintKinds.Count + summary.FieldPaths.Count;
+        2 + summary.ReturnParameterIndexes.Count + summary.SinkParameterIndexes.Count + summary.OutParameterIndexes.Count + summary.OutSourceCategories.Sum(entry => 1 + entry.Value.Count) + summary.SinkCategories.Count + summary.TaintKinds.Count + summary.FieldPaths.Count +
+        summary.ReturnSourceCategories.Count + summary.ReturnMembers.Count + summary.ReceiverSinkMembers.Count + summary.MemberWrites.Sum(entry => 1 + entry.Value.Count) + summary.MemberSources.Sum(entry => 1 + entry.Value.Count);
 
     /// <summary>Per-summary cell counts, so a fixpoint round can tell which summaries grew and walk only their callers.</summary>
     private static Dictionary<string, int> SummaryCellCounts(Dictionary<string, DataFlowMethodSummary> summaries) =>
