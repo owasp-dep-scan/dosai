@@ -665,7 +665,7 @@ public static class CryptoAnalyzer
         }
         else
         {
-            names.AddRange(Regex.Matches(line, @"\b(AesGcm|AesCcm|Aes|DES|TripleDES|RC2|MD5|SHA1|SHA256|SHA384|SHA512|RSA|DSA|ECDsa|ECDiffieHellman|X25519DiffieHellman|X25519|HMACSHA256|HMACSHA384|HMACSHA512|Rfc2898DeriveBytes|RandomNumberGenerator|RNGCryptoServiceProvider|X509Certificate2|SslStream|SslProtocols|EncryptKeyWrap|EncryptKeyWrapPadded|DecryptKeyWrap|DecryptKeyWrapPadded|TryDecryptKeyWrap|TryDecryptKeyWrapPadded|GetKeyWrapLength|GetKeyWrapPaddedLength|TlsContext|TlsSession|TlsBufferSession|TlsSocketSession|TlsOperationStatus|MLDsa|MLKem|SlhDsa|System\.Random|Random|CipherMode\.ECB|SecurityAlgorithms\.None)\b").Select(match => match.Value));
+            names.AddRange(Regex.Matches(line, @"\b(AesGcm|AesCcm|Aes|DES|TripleDES|RC2|MD5|SHA1|SHA256|SHA384|SHA512|RSA|DSA|ECDsa|ECDiffieHellman|X25519DiffieHellman|X25519|HMACSHA256|HMACSHA384|HMACSHA512|Rfc2898DeriveBytes|RandomNumberGenerator|RNGCryptoServiceProvider|X509Certificate2|SslStream|SslProtocols|EncryptKeyWrap|EncryptKeyWrapPadded|DecryptKeyWrap|DecryptKeyWrapPadded|TryDecryptKeyWrap|TryDecryptKeyWrapPadded|GetKeyWrapLength|GetKeyWrapPaddedLength|TlsContext|TlsSession|TlsBufferSession|TlsSocketSession|TlsOperationStatus|CompositeMLKem|CompositeMLDsa|MLDsa|MLKem|SlhDsa|Hpke|HpkeSender|HpkeRecipient|HpkeSuite|ChaCha20Poly1305|CreateForKeyEncapsulation|System\.Random|Random|CipherMode\.ECB|SecurityAlgorithms\.None)\b").Select(match => match.Value));
         }
 
         return names.Where(name => !string.IsNullOrWhiteSpace(name)).Distinct(StringComparer.OrdinalIgnoreCase);
@@ -715,14 +715,22 @@ public static class CryptoAnalyzer
     }
 
     /// <summary>
-    ///     The experimental caller-driven TLS session types added in .NET 11
-    ///     (System.Net.Security, diagnostic SYSLIB5007). Matched with word boundaries and
-    ///     reported once per line: the names share suffixes, so a substring check would report
-    ///     the same usage several times.
+    ///     Crypto APIs the .NET 11 reference pack marks <c>[Experimental]</c>, one rule per
+    ///     diagnostic: the caller-driven TLS session types (System.Net.Security, SYSLIB5007),
+    ///     HPKE (SYSLIB5009), and the post-quantum surface still under SYSLIB5006 - composite
+    ///     ML-KEM and ML-DSA, SLH-DSA, and ML-DSA's mu and pre-hash members. Matched with word
+    ///     boundaries and reported once per line and rule: the names share prefixes and
+    ///     suffixes, so a substring check would report the same usage several times.
     /// </summary>
-    private static readonly Regex ExperimentalTlsSessionApi = new(
-        @"\b(TlsContext|TlsSession|TlsBufferSession|TlsSocketSession|TlsOperationStatus)\b",
-        RegexOptions.Compiled);
+    private static readonly (Regex Pattern, string Rule, string Summary)[] ExperimentalCryptoApis =
+    [
+        (new Regex(@"\b(TlsContext|TlsSession|TlsBufferSession|TlsSocketSession|TlsOperationStatus)\b", RegexOptions.Compiled),
+            "DOSAI-CRYPTO-EXPERIMENTAL-TLS-API", "Experimental caller-driven TLS session API is used (diagnostic SYSLIB5007)."),
+        (new Regex(@"\b(Hpke|HpkeSender|HpkeRecipient|HpkeSuite|HpkeKem|HpkeKdf|HpkeAead)\b", RegexOptions.Compiled),
+            "DOSAI-CRYPTO-EXPERIMENTAL-HPKE", "Experimental Hybrid Public Key Encryption (HPKE) API is used (diagnostic SYSLIB5009)."),
+        (new Regex(@"\b(CompositeMLKem|CompositeMLKemAlgorithm|CompositeMLKemCng|CompositeMLDsa|CompositeMLDsaAlgorithm|CompositeMLDsaCng|SlhDsa|SlhDsaAlgorithm|SlhDsaCng|SlhDsaOpenSsl|SignMu|VerifyMu|SignPreHash|VerifyPreHash)\b", RegexOptions.Compiled),
+            "DOSAI-CRYPTO-EXPERIMENTAL-PQC-API", "Experimental post-quantum cryptography API is used (diagnostic SYSLIB5006).")
+    ];
 
     private static readonly (string Pattern, string Rule, string Severity, string Summary, string Recommendation)[] LineMisuseChecks =
         BuildLineMisuseChecks();
@@ -745,12 +753,17 @@ public static class CryptoAnalyzer
 
     private static void DetectLineMisuse(string line, string basePath, string file, int lineNumber, string? namespaceName, string? className, string? methodName, CryptoReachability reachability, CryptoAnalysisResult result)
     {
-        if (ExperimentalTlsSessionApi.Match(line) is { Success: true } experimentalTls)
+        foreach (var experimental in ExperimentalCryptoApis)
         {
-            var location = CreateLocation(basePath, file, lineNumber, experimentalTls.Index + 1);
+            if (experimental.Pattern.Match(line) is not { Success: true } match)
+            {
+                continue;
+            }
+
+            var location = CreateLocation(basePath, file, lineNumber, match.Index + 1);
             var methodId = ResolveMethodId(reachability, file, namespaceName, className, methodName);
             var entryPointIds = reachability.EntryPointsFor(methodId, file, methodName);
-            AddFinding(result, "DOSAI-CRYPTO-EXPERIMENTAL-TLS-API", "Low", "High", "Experimental caller-driven TLS session API is used (diagnostic SYSLIB5007).", "Pin the runtime version and review usages before relying on this API in production; the surface may still change.", location, methodId, entryPointIds.Count > 0, entryPointIds, [], [], []);
+            AddFinding(result, experimental.Rule, "Low", "High", experimental.Summary, "Pin the runtime version and review usages before relying on this API in production; the surface may still change.", location, methodId, entryPointIds.Count > 0, entryPointIds, [], [], []);
         }
 
         foreach (var check in LineMisuseChecks.Where(check => line.Contains(check.Pattern, StringComparison.OrdinalIgnoreCase)))
@@ -1048,8 +1061,23 @@ public static class CryptoAnalyzer
             return Classify(symbol.Contains("Triple", StringComparison.OrdinalIgnoreCase) ? "3DES" : "DES/RC2/RC4", "symmetric", "weak", rule: "DOSAI-CRYPTO-WEAK-CIPHER", severity: "High", summary: "Weak or legacy symmetric cipher was detected.", recommendation: "Use AES-GCM or another approved authenticated encryption mode.");
         if (HasCryptoToken(symbolText, "AesGcm", "AES_gcm", "EVP_aes_256_gcm")) return Classify("AES-GCM", "symmetric", "strong", "encrypt/decrypt", "NIST");
         if (HasCryptoToken(symbolText, "AesCcm", "AES_ccm")) return Classify("AES-CCM", "symmetric", "strong", "encrypt/decrypt", "NIST");
-        // .NET's post-quantum algorithms (FIPS 203/204/205) - previewed with .NET 10 and part
-        // of the .NET 11 baseline - are strong primitives and belong in the CBOM like any other.
+        if (HasCryptoToken(symbolText, "ChaCha20Poly1305", "EVP_chacha20_poly1305")) return Classify("ChaCha20-Poly1305", "symmetric", "strong", "encrypt/decrypt", "RFC 8439");
+        // Composite ML-KEM and ML-DSA pair the post-quantum algorithm with a classical one
+        // (CompositeMLKemAlgorithm.MLKem768WithX25519, CompositeMLDsaAlgorithm.MLDsa65WithECDsaP256),
+        // experimental under SYSLIB5006. They come before the pure algorithms, whose names they
+        // contain: a framework-qualified symbol matches by substring.
+        if (HasCryptoToken(symbolText, "CompositeMLKem")) return Classify("Composite ML-KEM", "key-agreement", "strong", "key-agreement/encapsulate", "draft-ietf-lamps-pq-composite-kem");
+        if (HasCryptoToken(symbolText, "CompositeMLDsa")) return Classify("Composite ML-DSA", "signature", "strong", "sign", "draft-ietf-lamps-pq-composite-sigs");
+        // HPKE (.NET 11 RC2, SYSLIB5009): a KEM, a KDF and an AEAD combined into public-key
+        // encryption. Its suites name AES-GCM and X25519, so it comes before those branches.
+        if (HasCryptoToken(symbolText, "Hpke", "HpkeSender", "HpkeRecipient", "HpkeSuite")) return Classify("HPKE", "pke", "strong", "encrypt/decrypt", "RFC 9180");
+        // CMS KEMRecipientInfo (RFC 9629): EnvelopedCms encrypts to an ML-KEM certificate through
+        // CmsRecipient.CreateForKeyEncapsulation, pure ML-KEM only in .NET 11 RC2. The decrypt
+        // overloads take the MLKem or CompositeMLKem key and classify by its type.
+        if (HasCryptoToken(symbolText, "CreateForKeyEncapsulation")) return Classify("ML-KEM", "key-agreement", "strong", "key-agreement/encapsulate", "RFC 9629");
+        // .NET's post-quantum algorithms (FIPS 203/204/205) - ML-KEM and ML-DSA are part of the
+        // .NET 11 baseline, SLH-DSA is still experimental (SYSLIB5006) - are strong primitives
+        // and belong in the CBOM like any other.
         if (HasCryptoToken(symbolText, "MLKem")) return Classify("ML-KEM", "key-agreement", "strong", "key-agreement/encapsulate", "FIPS 203");
         if (HasCryptoToken(symbolText, "MLDsa")) return Classify("ML-DSA", "signature", "strong", "sign", "FIPS 204");
         if (HasCryptoToken(symbolText, "SlhDsa")) return Classify("SLH-DSA", "signature", "strong", "sign", "FIPS 205");

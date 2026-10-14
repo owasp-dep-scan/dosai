@@ -3729,6 +3729,70 @@ class PqcSample
         Assert.Contains(result.Assets, asset => asset is { Name: "SLH-DSA", Family: "signature", Strength: "strong", Standard: "FIPS 205" });
         Assert.Contains(result.Operations, operation => operation is { Algorithm: "ML-DSA", OperationType: "sign" });
         Assert.Contains(result.Operations, operation => operation is { Algorithm: "ML-KEM", OperationType: "key-agreement/encapsulate" });
+        // SLH-DSA is still [Experimental] (SYSLIB5006) in the .NET 11 reference pack.
+        Assert.Contains(result.Findings, finding => finding is { RuleId: "DOSAI-CRYPTO-EXPERIMENTAL-PQC-API", Severity: "Low" });
+    }
+
+    // .NET 11 RC2 crypto: composite ML-KEM (SYSLIB5006) and HPKE (SYSLIB5009) are experimental,
+    // and EnvelopedCms gained ML-KEM recipients. A composite algorithm must not be reported as
+    // the pure algorithm its name contains, and HPKE must not fall through to the AES-GCM or
+    // X25519 its suite names. ChaCha20-Poly1305 predates RC2 but was not classified either.
+    // System.Security.Cryptography.Pkcs is a package, so the CMS call binds only by line.
+    [Fact]
+    public void CryptoAnalysis_DetectsCompositePostQuantumHpkeChaChaAndCmsKem()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Rc2CryptoSample.cs"), """
+#pragma warning disable SYSLIB5006, SYSLIB5009
+using System;
+using System.Security.Cryptography;
+using System.Security.Cryptography.Pkcs;
+using System.Security.Cryptography.X509Certificates;
+
+class Rc2CryptoSample
+{
+    static byte[] Composite(byte[] data)
+    {
+        using var kem = CompositeMLKem.GenerateKey(CompositeMLKemAlgorithm.MLKem768WithX25519);
+        kem.Encapsulate(out byte[] ciphertext, out byte[] secret);
+        using var dsa = CompositeMLDsa.GenerateKey(CompositeMLDsaAlgorithm.MLDsa65WithECDsaP256);
+        return dsa.SignData(data, Array.Empty<byte>());
+    }
+
+    static byte[] Seal(byte[] plaintext)
+    {
+        var suite = new HpkeSuite(HpkeKem.DHKEM_X25519_HKDF_SHA256, HpkeKdf.HKDF_SHA256, HpkeAead.AES_128_GCM);
+        using var hpke = Hpke.GenerateKey(suite);
+        using var sender = hpke.CreateSender(out byte[] encapsulated, ReadOnlySpan<byte>.Empty);
+        return sender.Seal(plaintext, Array.Empty<byte>());
+    }
+
+    static void Aead(byte[] key, byte[] nonce, byte[] plaintext, byte[] ciphertext, byte[] tag)
+    {
+        using var chacha = new ChaCha20Poly1305(key);
+        chacha.Encrypt(nonce, plaintext, ciphertext, tag);
+    }
+
+    static CmsRecipient Recipient(X509Certificate2 certificate)
+    {
+        return CmsRecipient.CreateForKeyEncapsulation(certificate, ReadOnlySpan<byte>.Empty);
+    }
+}
+""");
+
+        var result = CryptoAnalyzer.Analyze(tempDirectory.Path);
+
+        Assert.Contains(result.Assets, asset => asset is { Name: "Composite ML-KEM", Family: "key-agreement", Strength: "strong", Standard: "draft-ietf-lamps-pq-composite-kem" });
+        Assert.Contains(result.Assets, asset => asset is { Name: "Composite ML-DSA", Family: "signature", Strength: "strong", Standard: "draft-ietf-lamps-pq-composite-sigs" });
+        Assert.Contains(result.Assets, asset => asset is { Name: "HPKE", Family: "pke", Strength: "strong", Standard: "RFC 9180" });
+        Assert.Contains(result.Assets, asset => asset is { Name: "ChaCha20-Poly1305", Family: "symmetric", Strength: "strong", Standard: "RFC 8439" });
+        Assert.Contains(result.Assets, asset => asset is { Name: "ML-KEM", Standard: "RFC 9629" });
+        Assert.DoesNotContain(result.Assets, asset => asset is { Name: "ML-KEM", Standard: "FIPS 203" } or { Name: "ML-DSA" } or { Name: "X25519" } or { Name: "AES-GCM" });
+        Assert.Contains(result.Operations, operation => operation is { Algorithm: "Composite ML-KEM", OperationType: "key-agreement/encapsulate" });
+        Assert.Contains(result.Operations, operation => operation is { Algorithm: "HPKE", OperationType: "encrypt/decrypt" });
+        Assert.Contains(result.Findings, finding => finding is { RuleId: "DOSAI-CRYPTO-EXPERIMENTAL-HPKE", Severity: "Low" });
+        Assert.Contains(result.Findings, finding => finding is { RuleId: "DOSAI-CRYPTO-EXPERIMENTAL-PQC-API", Severity: "Low" });
+        Assert.DoesNotContain(result.Findings, finding => finding.RuleId == "DOSAI-CRYPTO-EXPERIMENTAL-TLS-API");
     }
 
     [Fact]

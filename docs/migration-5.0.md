@@ -126,16 +126,33 @@ class name for them.
   ML-DSA (family `signature`, operation `sign`, standard FIPS 204), and `SlhDsa` → SLH-DSA
   (family `signature`, operation `sign`, standard FIPS 205). They appear in `Assets[]`,
   `Operations[]`, and the CBOM like any other primitive.
+- The composite post-quantum algorithms classify as their own strong assets: `CompositeMLKem` →
+  Composite ML-KEM (family `key-agreement`, operation `key-agreement/encapsulate`, standard
+  `draft-ietf-lamps-pq-composite-kem`) and `CompositeMLDsa` → Composite ML-DSA (family
+  `signature`, operation `sign`, standard `draft-ietf-lamps-pq-composite-sigs`). A
+  framework-qualified symbol matched by substring, so these were reported as ML-KEM and ML-DSA.
+- `Hpke`, `HpkeSender`, `HpkeRecipient` and `HpkeSuite` (.NET 11 RC 2) classify as an `HPKE`
+  asset: family `pke`, strength `strong`, operation `encrypt/decrypt`, standard `RFC 9180`. The
+  AES-GCM and X25519 that a suite names stay part of the HPKE asset.
+- `ChaCha20Poly1305` classifies as a `ChaCha20-Poly1305` asset: family `symmetric`, strength
+  `strong`, operation `encrypt/decrypt`, standard `RFC 8439`.
+- `CmsRecipient.CreateForKeyEncapsulation` (`EnvelopedCms` KEM recipients, pure ML-KEM in
+  .NET 11 RC 2) classifies as ML-KEM with standard `RFC 9629`; before, only the certificate
+  argument was reported, as X.509. The `EnvelopedCms.Decrypt` overloads classify by the
+  `MLKem` or `CompositeMLKem` key they take.
 - The experimental caller-driven TLS session types in `System.Net.Security` (`TlsContext`,
   `TlsSession`, `TlsBufferSession`, `TlsSocketSession`, `TlsOperationStatus`) classify as TLS
-  `protocol` assets and raise one new finding per line:
+  `protocol` assets. They and the other crypto APIs the .NET 11 reference pack marks
+  `[Experimental]` raise one new finding per line and diagnostic:
 
-| Rule id                             | Severity | Meaning                                                        |
-| ----------------------------------- | -------- | -------------------------------------------------------------- |
-| `DOSAI-CRYPTO-EXPERIMENTAL-TLS-API` | `Low`    | Experimental TLS session API in use (diagnostic `SYSLIB5007`). |
+| Rule id                             | Severity | Meaning                                                                                                    |
+| ----------------------------------- | -------- | ---------------------------------------------------------------------------------------------------------- |
+| `DOSAI-CRYPTO-EXPERIMENTAL-TLS-API` | `Low`    | Experimental TLS session API in use (diagnostic `SYSLIB5007`).                                             |
+| `DOSAI-CRYPTO-EXPERIMENTAL-HPKE`    | `Low`    | Experimental HPKE API in use (diagnostic `SYSLIB5009`).                                                    |
+| `DOSAI-CRYPTO-EXPERIMENTAL-PQC-API` | `Low`    | Composite ML-KEM or ML-DSA, SLH-DSA, or ML-DSA's mu and pre-hash members in use (diagnostic `SYSLIB5006`). |
 
-Consumers that enumerate rule ids, or that fail a build on any new finding, should expect this
-id. It is informational: the API works, its surface is not yet stable.
+Consumers that enumerate rule ids, or that fail a build on any new finding, should expect these
+ids. They are informational: the APIs work, their surface is not yet stable.
 
 ### F# 11
 
