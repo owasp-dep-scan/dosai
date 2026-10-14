@@ -5624,6 +5624,64 @@ class SqlFlow
 """);
     }
 
+    // `--path ./src/Program.cs`: restore output resolves from the file's directory, the same
+    // project context every other per-root lookup uses (TargetFrameworkDetection.ProjectContextRoot).
+    // The file itself used to be enumerated as a directory, which found no package and printed
+    // "Skipping unreadable directory" for every methods, dataflows and crypto run.
+    [Fact]
+    public void RestoreCache_SingleFileRoot_ResolvesItsDirectoryWithoutAnUnreadableWarning()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var packageCacheRoot = Path.Combine(tempDirectory.Path, "package-cache");
+        var packageLibDirectory = Path.Combine(packageCacheRoot, "restore-sample-lib", "1.0.0", "lib", "net10.0");
+        Directory.CreateDirectory(packageLibDirectory);
+        File.WriteAllBytes(Path.Combine(packageLibDirectory, "RestoreSampleLib.dll"), []);
+
+        var analyzedDirectory = Path.Combine(tempDirectory.Path, "app", "src");
+        Directory.CreateDirectory(Path.Combine(analyzedDirectory, "obj"));
+        var sourceFile = Path.Combine(analyzedDirectory, "Program.cs");
+        File.WriteAllText(sourceFile, "internal static class Program { private static void Main() { } }");
+        File.WriteAllText(Path.Combine(analyzedDirectory, "obj", "project.assets.json"), $$"""
+{
+  "version": 3,
+  "project": { "version": "1.0.0" },
+  "packageFolders": { "{{packageCacheRoot.Replace('\\', '/')}}/": {} },
+  "libraries": {
+    "RestoreSampleLib/1.0.0": { "type": "package", "path": "restore-sample-lib/1.0.0" }
+  },
+  "targets": {
+    "net10.0": {
+      "RestoreSampleLib/1.0.0": {
+        "type": "package",
+        "compile": { "lib/net10.0/RestoreSampleLib.dll": {} }
+      }
+    }
+  }
+}
+""");
+
+        var recorder = new LineRecorder();
+        IReadOnlyList<string> fromFile;
+        lock (ConsoleOutputLock)
+        {
+            var originalError = Console.Error;
+            Console.SetError(recorder);
+            try
+            {
+                fromFile = NuGetRestoreCache.GetReferencePaths(sourceFile);
+            }
+            finally
+            {
+                Console.SetError(originalError);
+            }
+        }
+
+        Assert.DoesNotContain(recorder.Snapshot(), line => line.Contains("Skipping unreadable directory", StringComparison.Ordinal));
+        Assert.Equal("RestoreSampleLib.dll", Path.GetFileName(Assert.Single(fromFile)));
+        Assert.Equal(NuGetRestoreCache.GetReferencePaths(analyzedDirectory), fromFile);
+        Assert.Contains(NuGetRestoreCache.GetDiagnostics(sourceFile), diagnostic => diagnostic.Contains("Resolved 1 package assemblies from NuGet restore output", StringComparison.Ordinal));
+    }
+
     [Fact]
     public void Methods_RestoreCacheOutput_BindsPackageCallsWithoutBuildOutput()
     {

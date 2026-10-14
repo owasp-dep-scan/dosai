@@ -89,7 +89,10 @@ public static class NuGetRestoreCache
         string canonicalRoot;
         try
         {
-            canonicalRoot = Path.GetFullPath(root);
+            // A single-file root reads the restore output of the file's directory, like every
+            // other project-context lookup; enumerating the file itself as a directory resolved
+            // nothing and warned that the scan root was unreadable.
+            canonicalRoot = TargetFrameworkDetection.ProjectContextRoot(Path.GetFullPath(root));
         }
         catch (ArgumentException)
         {
