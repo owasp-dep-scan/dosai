@@ -1,0 +1,28 @@
+docs/migration-5.0.md
+  s_5bad3094f7bc65::t_997d7d7587edaa 129-142,145-146,148-152,154-155
+Dosai/CryptoAnalysis.cs
+  s_5bad3094f7bc65::t_e4d4f9e9590ca3 1078-1080
+  s_5bad3094f7bc65::t_fd45b8df69dc90 668,718-723,725-733,756,758-763,766,1064-1077
+README.md
+  s_5bad3094f7bc65::t_997d7d7587edaa 160
+Dosai.Tests/DosaiTests.cs
+  s_5bad3094f7bc65::t_5f99d3b59cbdf1 3732-3795
+docs/crypto-cbom.md
+  s_5bad3094f7bc65::t_997d7d7587edaa 61
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "46e9e49a1dc3128d472d298eee5cff5270332389",
+  "prompts": {},
+  "sessions": {
+    "s_5bad3094f7bc65": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c8058ad5-2c38-4556-995e-6d27935e4326",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
