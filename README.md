@@ -28,7 +28,7 @@ To pin Dosai per repository, install it into a local tool manifest (`dotnet new 
 On macOS and Linux, Homebrew installs the same self-contained build:
 
 ```bash
-brew install appthreat/tap/dosai
+brew install owasp-dep-scan/tap/dosai
 ```
 
 Every [GitHub release](https://github.com/owasp-dep-scan/dosai/releases) also has standalone binaries: the `-full` builds are self-contained, and the others need a matching .NET runtime.
