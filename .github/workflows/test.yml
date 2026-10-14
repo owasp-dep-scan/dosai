@@ -363,7 +363,7 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [unit-tests, smoke-methods, smoke-dataflows, smoke-crypto, smoke-r]
+    needs: [unit-tests, smoke-methods, smoke-dataflows, smoke-crypto, smoke-r, smoke-self-contained]
     permissions:
       contents: write
       packages: write
@@ -404,10 +404,14 @@ jobs:
         dotnet publish ./Dosai/ -r linux-arm64 --property:PublishDir=dosai-linux-arm64-full -p:PublishSingleFile=true --self-contained true /p:UseAppHost=true /p:AssemblyName=Dosai-linux-arm64-full
         dotnet publish ./Dosai/ -r linux-musl-x64 --property:PublishDir=dosai-linux-musl-x64-full -p:PublishSingleFile=true --self-contained true /p:UseAppHost=true /p:AssemblyName=Dosai-linux-musl-x64-full
         dotnet publish ./Dosai/ -r linux-musl-arm64 --property:PublishDir=dosai-linux-musl-arm64-full -p:PublishSingleFile=true --self-contained true /p:UseAppHost=true /p:AssemblyName=Dosai-linux-musl-arm64-full
+    # The .NET tool: a `Dosai` package pointing at one self-contained `Dosai.<rid>` package per RID
+    # (see Dosai.csproj), so `dotnet tool install -g Dosai` and `dnx Dosai` need a .NET 10+ SDK but
+    # no .NET 11 runtime.
+    - name: Pack the .NET tool
+      run: dotnet pack --configuration Release Dosai --output nupkgs
     - name: Publish the package
       run: |
-        dotnet pack --configuration Release Dosai
-        dotnet nuget push --skip-duplicate Dosai/bin/x64/Release/*.nupkg
+        dotnet nuget push --skip-duplicate "nupkgs/*.nupkg"
       if: startsWith(github.ref, 'refs/tags/')
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -447,3 +451,55 @@ jobs:
       uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228  # v3.0.2
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    # nuget.org trusted publishing: the OIDC token is exchanged for a short-lived API key, so no
+    # long-lived key is stored. Needs a trusted publishing policy on nuget.org for this repository
+    # and workflow file, and the policy owner's nuget.org user name in the NUGET_USER variable;
+    # the steps are skipped until that variable exists, after the GitHub release is out.
+    - name: Log in to nuget.org
+      id: nuget-login
+      if: startsWith(github.ref, 'refs/tags/') && vars.NUGET_USER != ''
+      uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841  # v1.2.0
+      with:
+        user: ${{ vars.NUGET_USER }}
+    - name: Publish the .NET tool to nuget.org
+      if: startsWith(github.ref, 'refs/tags/') && vars.NUGET_USER != ''
+      run: |
+        # The per-RID packages go first, so the `Dosai` package never points at one nuget.org lacks.
+        for package in nupkgs/Dosai.[a-z]*.nupkg nupkgs/Dosai.[0-9]*.nupkg; do
+          dotnet nuget push "$package" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
+        done
+      env:
+        NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
+
+  # Keeps the `dosai` formula in AppThreat/homebrew-tap on the latest release. The formula installs
+  # the self-contained `-full` binaries; their sha256 comes from the release asset digests, so
+  # nothing is downloaded. HOMEBREW_TAP_TOKEN needs contents write access to that repository.
+  update-homebrew:
+    runs-on: ubuntu-latest
+    needs: publish
+    if: startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-')
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      with:
+        repository: appthreat/homebrew-tap
+        persist-credentials: false
+    - name: Update formula with release digests
+      env:
+        GH_TOKEN: ${{ github.token }}
+        TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      run: |
+        set -euo pipefail
+        sed -i "s/^  version \".*\"/  version \"${GITHUB_REF_NAME#v}\"/" Formula/dosai.rb
+        for asset in Dosai-osx-arm64-full Dosai-osx-x64-full Dosai-linux-arm64-full Dosai-linux-amd64-full; do
+          sha=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" \
+            --jq ".assets[] | select(.name == \"${asset}\") | .digest | sub(\"^sha256:\"; \"\")")
+          test -n "$sha"
+          sed -i "/url .*\/${asset}\"/{n;s/sha256 \".*\"/sha256 \"${sha}\"/;}" Formula/dosai.rb
+        done
+        git diff --exit-code --quiet Formula/dosai.rb && exit 0
+        git config user.name "AppThreat Bot"
+        git config user.email "bot@appthreat.com"
+        git commit -am "dosai ${GITHUB_REF_NAME}"
+        git push "https://x-access-token:${TAP_TOKEN}@github.com/appthreat/homebrew-tap.git" HEAD

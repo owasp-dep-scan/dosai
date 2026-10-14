@@ -14,6 +14,25 @@ If your work is compliance, audit, or bills of materials, see the [compliance an
 
 The [command reference](./docs/commands.md) documents every command with inputs, outputs, algorithms, strengths, and limitations, and it is useful regardless of role. The [threat model](./docs/THREAT_MODEL.md) explains how Dosai handles untrusted input, and [SECURITY.md](./SECURITY.md) covers reporting security issues. [SKILL.md](./SKILL.md) packages the common workflows as an AI agent skill, and the [blint integration](./docs/BLINT-INTEGRATION.md) and [YARA usage](./docs/YARA-USAGE.md) notes cover complementary binary and rule-based analysis. The [lessons](./docs/LESSON1.md) walk the common workflows end to end with runnable examples.
 
+## Installation
+
+With a .NET 10 or later SDK, install Dosai as a .NET tool from NuGet. The package carries its own .NET runtime for each platform, so no .NET 11 runtime is needed:
+
+```bash
+dotnet tool install -g Dosai       # then run `dosai`
+dnx Dosai methods --path ./src     # run once without installing
+```
+
+To pin Dosai per repository, install it into a local tool manifest (`dotnet new tool-manifest`, then `dotnet tool install Dosai`) and run it as `dotnet dosai`.
+
+On macOS and Linux, Homebrew installs the same self-contained build:
+
+```bash
+brew install appthreat/tap/dosai
+```
+
+Every [GitHub release](https://github.com/owasp-dep-scan/dosai/releases) also has standalone binaries: the `-full` builds are self-contained, and the others need a matching .NET runtime.
+
 ## Usage
 
 `Dosai [command] [options]`

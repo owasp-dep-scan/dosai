@@ -20,11 +20,26 @@
     <Authors>Team AppThreat &lt;cloud@appthreat.com&gt;</Authors>
     <Description>OWASP Dosai (Dotnet Source and Assembly Inspector) inspects .NET source code, assemblies, and NuGet packages to extract methods, dependencies, API endpoints, call graphs, data-flow slices, crypto evidence, and severity-tagged security findings for review.</Description>
     <PackageProjectUrl>https://github.com/owasp-dep-scan/dosai</PackageProjectUrl>
-    <PackageLicense>MIT</PackageLicense>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <RepositoryUrl>https://github.com/owasp-dep-scan/dosai</RepositoryUrl>
-    <RepositoryType>GitHub</RepositoryType>
+    <RepositoryType>git</RepositoryType>
     <PackageTags>roslyn,disassembler,slices,call-graph,data-flow</PackageTags>
     <Company>AppThreat</Company>
+  </PropertyGroup>
+
+  <!-- `dotnet pack` builds Dosai as a .NET tool: `dotnet tool install -g Dosai`, `dnx Dosai`, or
+       `dotnet dosai` from a local tool manifest. The `Dosai` package only points at one
+       self-contained package per RID (`Dosai.linux-x64`, ...), so the tool installs and runs from
+       a .NET 10 SDK with no .NET 11 runtime present. RuntimeIdentifiers is set only while packing:
+       every restore would otherwise fetch a runtime pack per RID. -->
+  <PropertyGroup>
+    <PackageId>Dosai</PackageId>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>dosai</ToolCommandName>
+    <ToolPackageRuntimeIdentifiers>linux-x64;linux-arm64;linux-arm;linux-musl-x64;linux-musl-arm64;osx-x64;osx-arm64;win-x64;win-arm64</ToolPackageRuntimeIdentifiers>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(_IsPacking)' == 'true'">
+    <RuntimeIdentifiers>$(ToolPackageRuntimeIdentifiers)</RuntimeIdentifiers>
   </PropertyGroup>
 
   <ItemGroup>
