@@ -285,6 +285,14 @@ The following bugs are fixed. All of them could **remove** or corrupt results in
   skipped - so a symlinked source tree keeps contributing results. The metadata reference sweep
   and assembly discovery report the skipped directory in `Diagnostics[]`; the remaining discovery
   sites warn on stderr, leaving stdout to the MCP server's JSON-RPC stream.
+- **Assembly call-graph nodes for uncalled methods had line 0.** A method's node took its line
+  from the reflection inventory, which carries none, so it was placed only when another method
+  called it or a state machine named it as its kickoff. A runtime-async method (.NET 11,
+  `<Features>runtime-async=on</Features>`; the shared framework itself is built this way) has no
+  state machine, so an uncalled one lost its line. Nodes now take the method's first PDB
+  sequence point when the inventory has no line. Runtime-async bodies are otherwise read like any
+  method: their calls, `AsyncHelpers.Await` included, start at the method itself, and their
+  parameter sources reach sinks across awaits.
 
 ## Nothing to change in queries or exports
 

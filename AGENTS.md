@@ -153,7 +153,9 @@ dotnet test ./Dosai.sln
 - An async or iterator method's IL is a stub with no sequence points; both PDB source maps
   (`DataFlowAssembly`, `AssemblyCallGraphAnalyzer`) resolve it to its `MoveNext`'s first point
   through `MethodDebugInformation.GetStateMachineKickoffMethod` (issue #84). Never fall back to
-  the assembly path for such a stub when its PDB is present.
+  the assembly path for such a stub when its PDB is present. A runtime-async method (.NET 11,
+  `runtime-async=on`) has no stub and no state machine: it is placed by its own sequence points,
+  and its call-graph node by its first one when the inventory has no line (`RuntimeAsyncTests`).
 - A PDB document path is the build's, not the scan's: absolute, `/_/`-mapped, or in the other
   file system's form. Every path an IL record writes goes through `SourceDocumentPaths`
   (`InTree` relative to the scan root, a tree-built assembly's foreign documents placed by

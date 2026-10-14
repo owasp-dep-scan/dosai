@@ -109,7 +109,16 @@ internal static class AssemblyCallGraphAnalyzer
             ? knownMethod
             : CreateFallbackMethod(reader, methodHandle, methodDefinition, assemblyPath, scan.SourceMap);
         var sourceId = sourceMethod.AssemblySignature ?? BuildMethodSymbol(reader, methodHandle, methodDefinition, assemblyPath).Symbol;
-        AddNode(fragment.Nodes, sourceId, sourceMethod.Name ?? sourceId, sourceMethod.ClassName, sourceMethod.Namespace, sourceMethod.FileName, sourceMethod.Assembly, sourceMethod.Module, sourceMethod.Name == ".ctor" ? "Constructor" : "Method", sourceMethod.LineNumber, sourceMethod.ColumnNumber, isExternal: false, isGeneratedStateMachine ? AnalysisEvidenceKind.AssemblyIlGeneratedState : AnalysisEvidenceKind.AssemblyIlDirect);
+        var (lineNumber, columnNumber) = (sourceMethod.LineNumber, sourceMethod.ColumnNumber);
+        if (lineNumber <= 0 && !isGeneratedStateMachine && scan.SourceMap.Resolve(methodToken, 1, assemblyPath) is { LineNumber: > 0 } first)
+        {
+            // The reflection inventory carries no source line, so a method nothing calls kept
+            // line 0 unless a state machine named it as its kickoff. A runtime-async method
+            // (.NET 11) has no state machine: its own first sequence point places it.
+            (lineNumber, columnNumber) = (first.LineNumber, first.ColumnNumber);
+        }
+
+        AddNode(fragment.Nodes, sourceId, sourceMethod.Name ?? sourceId, sourceMethod.ClassName, sourceMethod.Namespace, sourceMethod.FileName, sourceMethod.Assembly, sourceMethod.Module, sourceMethod.Name == ".ctor" ? "Constructor" : "Method", lineNumber, columnNumber, isExternal: false, isGeneratedStateMachine ? AnalysisEvidenceKind.AssemblyIlGeneratedState : AnalysisEvidenceKind.AssemblyIlDirect);
         var body = peReader.GetMethodBody(methodDefinition.RelativeVirtualAddress);
         var delegateState = new AssemblyDelegateState();
         foreach (var instruction in DecodeInstructions(body.GetILReader()))
