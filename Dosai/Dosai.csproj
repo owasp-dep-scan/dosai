@@ -28,18 +28,17 @@
   </PropertyGroup>
 
   <!-- `dotnet pack` builds Dosai as a .NET tool: `dotnet tool install -g Dosai`, `dnx Dosai`, or
-       `dotnet dosai` from a local tool manifest. The `Dosai` package only points at one
-       self-contained package per RID (`Dosai.linux-x64`, ...), so the tool installs and runs from
-       a .NET 10 SDK with no .NET 11 runtime present. RuntimeIdentifiers is set only while packing:
-       every restore would otherwise fetch a runtime pack per RID. -->
+       `dotnet dosai` from a local tool manifest. The tool is one framework-dependent package that
+       runs on the user's .NET 11 runtime; the self-contained builds ship as GitHub release
+       binaries. While packing, only English resources are kept: the compilers' localized
+       satellite assemblies were a quarter of the package. -->
   <PropertyGroup>
     <PackageId>Dosai</PackageId>
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>dosai</ToolCommandName>
-    <ToolPackageRuntimeIdentifiers>linux-x64;linux-arm64;linux-arm;linux-musl-x64;linux-musl-arm64;osx-x64;osx-arm64;win-x64;win-arm64</ToolPackageRuntimeIdentifiers>
   </PropertyGroup>
   <PropertyGroup Condition="'$(_IsPacking)' == 'true'">
-    <RuntimeIdentifiers>$(ToolPackageRuntimeIdentifiers)</RuntimeIdentifiers>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
   </PropertyGroup>
 
   <ItemGroup>
