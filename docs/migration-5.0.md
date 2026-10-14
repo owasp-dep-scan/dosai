@@ -91,6 +91,16 @@ worse for a scanner than a declaration the analyzed project's own target would n
   inventoried normally.
 - A `#:package Id@Version` directive surfaces in `Dependencies[]` with namespace `nuget` and
   module `FileBasedApp`, because a file-based app declares its NuGet references nowhere else.
+  An exact version is its `Purl` (`pkg:nuget/Id@Version`); a floating or ranged one is left to
+  the restore tables. The .NET 11 RC 2 trailing item metadata (`Aliases=...`) is ignored. F#
+  script references (`#r "nuget: Id, Version"`) pin their purl the same way.
+- A file-based app without a project gets the global usings of the virtual project the SDK
+  generates for it: `ImplicitUsings` enabled, the SDK's target framework (net11.0), and its
+  `#:sdk` and `#:property` directives, so `#:sdk Microsoft.NET.Sdk.Web` adds the web usings and
+  `#:property ImplicitUsings=disable` removes them. Before, every call through an implicit using
+  (`Console`, `List<T>`, `File`, LINQ) was `SourceUnresolved`. A file counts as a file-based app
+  when it sits outside every project's directory and opens with `#!` or `#:` directives, or holds
+  top-level statements.
 
 ### .NET 11 process-launch sinks
 

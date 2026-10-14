@@ -40,7 +40,9 @@ dotnet test ./Dosai.sln
   version than the referenced compiler's default, and a parse error silently drops the file from
   every result, so the accepted language version stays a single decision. The parser also
   enables the `FileBasedProgram` feature so file-based app `#:` directives parse as trivia;
-  `#:package` lines surface as dependencies in `GetSourceMethods`.
+  `#:package` lines surface as dependencies in `GetSourceMethods`, and an exact
+  `#:package Id@Version` (or F# `#r "nuget: Id, Version"`) pins its purl through
+  `Dependency.DeclaredPurl`, ahead of the restore tables: a script restores outside the tree.
 - Conditional compilation resolves against preprocessor symbols derived from the analyzed
   project's detected target framework (`TargetFrameworkDetection.ForFile` feeding the per-file
   `CSharpSourceParser` parse options and the F# line frontend's `#if`/`#elif` tracking). A file
@@ -335,7 +337,11 @@ dotnet test ./Dosai.sln
   nearest `Directory.Build.props/targets`' `<Using>` items (Include/Remove/Static/Alias;
   unevaluable conditions are applied with a diagnostic), and MSBuild's generated
   `obj/**/<Project>.GlobalUsings.g.cs` when it exists for the resolved target and is no older
-  than the project file. One compilation means one union-merged set; disagreeing projects get
+  than the project file. A file-based app (a C# file outside every project's directory that
+  opens with `#!` or `#:` directives, or holds top-level statements) contributes the usings of
+  the virtual project the SDK generates for it: `ImplicitUsings` enabled, the SDK's own target
+  framework, its `#:sdk` and `#:property` values (`FileBasedAppTests`). One compilation means
+  one union-merged set; disagreeing projects get
   a diagnostic naming them, and a using that resolves nowhere errors alone - it never stops
   other bindings (pinned by test).
 - Partition parsed C# trees through `ReferenceSources.Partition` before creating a

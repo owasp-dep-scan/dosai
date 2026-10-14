@@ -1171,7 +1171,18 @@ public sealed partial class PackageUrlResolver
         return builder.ToString();
     }
 
-    private static string BuildNuGetPurl(string name, string version) => $"pkg:nuget/{EscapePurl(name)}@{EscapePurl(version)}";
+    internal static string BuildNuGetPurl(string name, string version) => $"pkg:nuget/{EscapePurl(name)}@{EscapePurl(version)}";
+
+    /// <summary>
+    ///     The purl of a package a script directive names with an exact version, or null for
+    ///     a floating (<c>*</c>, <c>1.*</c>), ranged (<c>[1.0,2.0)</c>) or MSBuild-property
+    ///     version, which only a restore resolves.
+    /// </summary>
+    internal static string? DeclaredNuGetPurl(string name, string? version) =>
+        version is { Length: > 0 } && ExactNuGetVersionRegex().IsMatch(version) ? BuildNuGetPurl(name, version) : null;
+
+    [GeneratedRegex(@"^\d+(?:\.\d+){1,3}(?:-[0-9A-Za-z][0-9A-Za-z.\-]*)?(?:\+[0-9A-Za-z.\-]+)?$", RegexOptions.CultureInvariant)]
+    private static partial Regex ExactNuGetVersionRegex();
 
     private static string EscapePurl(string value) => Uri.EscapeDataString(value).Replace("%2E", ".", StringComparison.Ordinal).Replace("%2D", "-", StringComparison.Ordinal).Replace("%5F", "_", StringComparison.Ordinal);
 

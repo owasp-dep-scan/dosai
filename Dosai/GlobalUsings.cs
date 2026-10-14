@@ -23,7 +23,8 @@ namespace Depscan;
 ///         Verified byte-identical between the SDKs installed on the development machines at
 ///         the time of writing: macOS <c>/usr/local/share/dotnet/sdk/{10.0.302,
 ///         11.0.100-rc.1.26425.128}</c> and the Windows VM <c>C:\Program Files\dotnet\sdk\
-///         {10.0.400, 11.0.100-rc.1.26425.128}</c>, except that only the 11 SDKs add the
+///         {10.0.400, 11.0.100-rc.1.26425.128}</c>, and unchanged in macOS
+///         <c>~/.dotnet/sdk/11.0.100-rc.2.26504.105</c>, except that only the 11 SDKs add the
 ///         base <c>System.Net.Http.Json</c> using (gated on .NET 11+), which is applied by
 ///         target framework here rather than by SDK version. The Razor, Blazor Web Assembly
 ///         and WPF SDKs add no usings of their own on disk (Razor's
@@ -133,21 +134,34 @@ internal static partial class GlobalUsings
                 .Order(SafeFileRead.PathComparer)
                 .ToList();
             var projectSets = new List<(string Project, List<string> Directives)>();
+            void AddSet(string file, List<string> directives)
+            {
+                var normalized = new List<string>(directives.Count);
+                var unique = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var directive in directives)
+                {
+                    if (NormalizeDirective(directive) is { Length: > 0 } spelled && unique.Add(spelled))
+                    {
+                        normalized.Add(spelled);
+                    }
+                }
+
+                projectSets.Add((Path.GetRelativePath(root, file), normalized));
+            }
+
             foreach (var project in projects)
             {
                 if (ProjectUsings(root, project, diagnostics) is { Count: > 0 } directives)
                 {
-                    var normalized = new List<string>(directives.Count);
-                    var unique = new HashSet<string>(StringComparer.Ordinal);
-                    foreach (var directive in directives)
-                    {
-                        if (NormalizeDirective(directive) is { Length: > 0 } spelled && unique.Add(spelled))
-                        {
-                            normalized.Add(spelled);
-                        }
-                    }
+                    AddSet(project, directives);
+                }
+            }
 
-                    projectSets.Add((Path.GetRelativePath(root, project), normalized));
+            foreach (var app in FileBasedApps(root, projects))
+            {
+                if (FileBasedAppUsings(root, app.File, app.Text, diagnostics) is { Count: > 0 } directives)
+                {
+                    AddSet(app.File, directives);
                 }
             }
 
@@ -197,13 +211,18 @@ internal static partial class GlobalUsings
     }
 
     /// <summary>The using directives of one project: MSBuild's generated file when it is authoritative, else the SDK list plus the project's Using items.</summary>
-    private static List<string> ProjectUsings(string root, string projectFile, List<string> diagnostics)
-    {
-        if (!SafeFileRead.TryReadAllText(projectFile, out var project))
-        {
-            return [];
-        }
+    private static List<string> ProjectUsings(string root, string projectFile, List<string> diagnostics) =>
+        SafeFileRead.TryReadAllText(projectFile, out var project)
+            ? ProjectUsings(root, projectFile, project, null, diagnostics)
+            : [];
 
+    /// <summary>
+    ///     <paramref name="virtualTargets" /> is set for a file-based app's virtual project: it
+    ///     has no file for the target detection to read and no build output in the tree (the SDK
+    ///     builds it in a per-user cache), so its targets come from its directives instead.
+    /// </summary>
+    private static List<string> ProjectUsings(string root, string projectFile, string project, List<string>? virtualTargets, List<string> diagnostics)
+    {
         var projectDirectory = Path.GetDirectoryName(projectFile)!;
         var sdks = ProjectSdks(project);
         var implicitUsings = PropertyWithInheritance(root, projectDirectory, project, "ImplicitUsings");
@@ -217,14 +236,14 @@ internal static partial class GlobalUsings
         // The project's targets as the guard evaluation sees them (its own file, else the
         // nearest Directory.Build.props/targets): a monorepo commonly sets TargetFramework once
         // in Directory.Build.props, and a regex over the project file alone missed it.
-        var targets = TargetFrameworkDetection.ForFile(root, projectFile, ".csproj").TargetFrameworks;
+        var targets = virtualTargets ?? TargetFrameworkDetection.ForFile(root, projectFile, ".csproj").TargetFrameworks;
         var representative = FrameworkPreprocessorDefines.TrySelectRepresentative(targets, out var selected) ? selected : null;
         var isNetFramework = representative?.StartsWith("net4", StringComparison.OrdinalIgnoreCase) == true;
 
         // MSBuild's own output is authoritative when it exists for the resolved target and is
         // not older than the project file; obj/ is excluded from discovery, so it is read here
         // explicitly (issue #74).
-        if (GeneratedUsingsFile(projectDirectory, projectFile, representative, diagnostics) is { } generated)
+        if (virtualTargets is null && GeneratedUsingsFile(projectDirectory, projectFile, representative, diagnostics) is { } generated)
         {
             return generated;
         }
@@ -282,6 +301,140 @@ internal static partial class GlobalUsings
 
         ApplyUsingItems(root, projectFile, project, projectDirectory, directives, names, diagnostics);
         return directives;
+    }
+
+    /// <summary>
+    ///     The file-based apps (<c>dotnet run app.cs</c>) of a scan root: C# files outside every
+    ///     project's directory that open with a <c>#!</c> line or <c>#:</c> directives, or that
+    ///     hold top-level statements, which only an entry point can. A file inside a project's
+    ///     directory is that project's source (the SDK's default compile glob).
+    /// </summary>
+    private static List<(string File, string Text)> FileBasedApps(string root, List<string> projects)
+    {
+        var projectDirectories = new HashSet<string>(projects.Select(project => Path.GetDirectoryName(project)!), SafeFileRead.PathComparer);
+        var apps = new List<(string File, string Text)>();
+        foreach (var file in SafeFileRead.EnumerateAllFilesSafe(root, "*" + Constants.CSharpSourceExtension).Order(SafeFileRead.PathComparer))
+        {
+            if (IsUnderBuildDirectory(root, file) || IsInsideProject(file) || !SafeFileRead.TryReadAllText(file, out var text))
+            {
+                continue;
+            }
+
+            if (FileBasedAppHead(text).Marked || HasTopLevelStatements(text, file))
+            {
+                apps.Add((file, text));
+            }
+        }
+
+        return apps;
+
+        bool IsInsideProject(string file)
+        {
+            for (var directory = Path.GetDirectoryName(file); directory is not null; directory = Path.GetDirectoryName(directory))
+            {
+                if (projectDirectories.Contains(directory))
+                {
+                    return true;
+                }
+
+                if (string.Equals(directory, root, SafeFileRead.PathComparison))
+                {
+                    break;
+                }
+            }
+
+            return false;
+        }
+
+        bool HasTopLevelStatements(string text, string file) =>
+            CSharpSourceParser.Parse(text, file, root).GetRoot() is Microsoft.CodeAnalysis.CSharp.Syntax.CompilationUnitSyntax unit &&
+            unit.Members.Any(member => member is Microsoft.CodeAnalysis.CSharp.Syntax.GlobalStatementSyntax);
+    }
+
+    /// <summary>
+    ///     The usings of a file-based app, through the virtual project the SDK generates for it
+    ///     (what <c>dotnet project convert</c> writes, checked with the 11.0.100-rc.2 SDK):
+    ///     <c>Microsoft.NET.Sdk</c> unless <c>#:sdk</c> names another, <c>ImplicitUsings</c>
+    ///     enabled, the SDK's own target framework, then each <c>#:property</c> in file order.
+    ///     The nearest Directory.Build.props/targets apply as they do to a project.
+    /// </summary>
+    private static List<string> FileBasedAppUsings(string root, string file, string text, List<string> diagnostics)
+    {
+        var head = FileBasedAppHead(text);
+        var properties = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["TargetFramework"] = $"net{FrameworkPreprocessorDefines.LatestModernNetMajor}.0",
+            ["ImplicitUsings"] = "enable"
+        };
+        foreach (var (name, value) in head.Properties)
+        {
+            properties[name] = value;
+        }
+
+        var project = new System.Text.StringBuilder();
+        project.Append("<Project Sdk=\"").Append(System.Security.SecurityElement.Escape(string.Join(",", head.Sdks.DefaultIfEmpty("Microsoft.NET.Sdk")))).Append("\"><PropertyGroup>");
+        foreach (var (name, value) in properties)
+        {
+            project.Append('<').Append(name).Append('>').Append(System.Security.SecurityElement.Escape(value)).Append("</").Append(name).Append('>');
+        }
+
+        project.Append("</PropertyGroup></Project>");
+        var targetFramework = properties["TargetFramework"];
+        List<string> targets = targetFramework.Contains("$(", StringComparison.Ordinal) ? [] : [targetFramework.Trim().ToLowerInvariant()];
+        return ProjectUsings(root, Path.ChangeExtension(file, ".csproj"), project.ToString(), targets, diagnostics);
+    }
+
+    /// <summary>
+    ///     The <c>#:</c> directives a file-based app opens with: the compiler accepts them only
+    ///     before the first token, after an optional <c>#!</c> line. <c>#:sdk Name@Version</c>
+    ///     keeps the name; <c>#:property Name=Value</c> keeps the value, unquoted (quoted values
+    ///     arrived in .NET 11 RC 2).
+    /// </summary>
+    internal static (bool Marked, List<string> Sdks, List<(string Name, string Value)> Properties) FileBasedAppHead(string text)
+    {
+        var marked = false;
+        var sdks = new List<string>();
+        var properties = new List<(string Name, string Value)>();
+        foreach (var rawLine in text.AsSpan().EnumerateLines())
+        {
+            var line = rawLine.Trim();
+            if (line.IsEmpty || line.StartsWith("//", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (line.StartsWith("#!", StringComparison.Ordinal))
+            {
+                marked = true;
+                continue;
+            }
+
+            if (!line.StartsWith("#:", StringComparison.Ordinal))
+            {
+                break;
+            }
+
+            marked = true;
+            var directive = FileBasedDirectiveRegex().Match(line[2..].ToString());
+            if (!directive.Success)
+            {
+                continue;
+            }
+
+            var value = directive.Groups["value"].Value.Trim();
+            if (directive.Groups["kind"].Value.Equals("sdk", StringComparison.OrdinalIgnoreCase))
+            {
+                var at = value.IndexOf('@');
+                sdks.Add(at > 0 ? value[..at] : value);
+            }
+            else if (directive.Groups["kind"].Value.Equals("property", StringComparison.OrdinalIgnoreCase) &&
+                     PropertyDirectiveRegex().Match(value) is { Success: true } property)
+            {
+                properties.Add((property.Groups["name"].Value, property.Groups["value"].Value.Trim().Trim('"')));
+            }
+        }
+
+        return (marked, sdks, properties);
     }
 
     private static void ApplyUsingItems(string root, string projectFile, string project, string projectDirectory, List<string> directives, HashSet<string> names, List<string> diagnostics)
@@ -589,6 +742,13 @@ internal static partial class GlobalUsings
 
         return false;
     }
+
+    [GeneratedRegex(@"^\s*(?<kind>[A-Za-z]+)\s+(?<value>.+)$", RegexOptions.CultureInvariant)]
+    private static partial Regex FileBasedDirectiveRegex();
+
+    // `Name=Value` (the documented form) or `Name Value`; the name must be an MSBuild property name.
+    [GeneratedRegex(@"^(?<name>[A-Za-z_][A-Za-z0-9_\-]*)\s*(?:=|\s)\s*(?<value>.*)$", RegexOptions.CultureInvariant)]
+    private static partial Regex PropertyDirectiveRegex();
 
     [GeneratedRegex(@"<!--.*?-->", RegexOptions.CultureInvariant | RegexOptions.Singleline)]
     private static partial Regex XmlCommentRegex();

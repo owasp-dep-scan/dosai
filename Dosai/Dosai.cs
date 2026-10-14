@@ -1004,7 +1004,7 @@ public static class Dosai
         List<SourceAssemblyMapping> sourceAssemblyMappings)
     {
         ForEachItem(methods, method => method.Purl = resolver.Resolve(method.Assembly, method.Module, method.SourceSignature ?? method.AssemblySignature, method.Namespace, method.ClassName, method.Path));
-        ForEachItem(dependencies, dependency => dependency.Purl = resolver.Resolve(dependency.Assembly, dependency.Module, dependency.Name, dependency.Namespace, null, dependency.Path));
+        ForEachItem(dependencies, dependency => dependency.Purl = dependency.DeclaredPurl ?? resolver.Resolve(dependency.Assembly, dependency.Module, dependency.Name, dependency.Namespace, null, dependency.Path));
         ForEachItem(methodCalls, call =>
         {
             call.Purl = resolver.Resolve(call.Assembly, call.Module, call.TargetId ?? call.CalledMethod, call.Namespace, call.ClassName, call.Path);
@@ -3388,7 +3388,8 @@ public static class Dosai
                         continue;
                     }
 
-                    var packageMatch = Regex.Match(directiveText, @"^#:\s*package\s+([A-Za-z0-9_.\-]+)");
+                    // `#:package Id@Version`, optionally followed by RC2's `Name=Value` item metadata.
+                    var packageMatch = Regex.Match(directiveText, @"^#:\s*package\s+([A-Za-z0-9_.\-]+)(?:@(\S+))?");
                     if (!packageMatch.Success)
                     {
                         continue;
@@ -3405,7 +3406,8 @@ public static class Dosai
                         Name = packageMatch.Groups[1].Value,
                         LineNumber = directiveSpan.Line + 1,
                         ColumnNumber = directiveSpan.Character + 1,
-                        NamespaceMembers = []
+                        NamespaceMembers = [],
+                        DeclaredPurl = PackageUrlResolver.DeclaredNuGetPurl(packageMatch.Groups[1].Value, packageMatch.Groups[2].Value)
                     });
                 }
             }
