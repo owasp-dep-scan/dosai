@@ -1,0 +1,14 @@
+Dosai/Dosai.csproj
+  h_0926447d100ad2 21
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1c47e936112c3b7b40d1be97a798b3b372263cbb",
+  "prompts": {},
+  "humans": {
+    "h_0926447d100ad2": {
+      "author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}

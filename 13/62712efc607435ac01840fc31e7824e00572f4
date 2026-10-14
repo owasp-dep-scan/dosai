@@ -1,0 +1,25 @@
+Dosai.Tests/DosaiTests.cs
+  s_ce505af18ddad7::t_9bfb6b2c709c97 1262-1264,1266,1288-1289,1293,1313-1332
+  s_ce505af18ddad7::t_717b4519899c52 1258-1261,1265,1267-1287,1290-1292,1294-1312,1333-1334
+AGENTS.md
+  s_ce505af18ddad7::t_256ac3c39d3158 61-64
+Dosai/Dosai.cs
+  s_ce505af18ddad7::t_9a6bf678bae8eb 16,1200
+  s_ce505af18ddad7::t_6ce6948c2b322b 1201-1205,1211-1221,1223-1246
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "1362712efc607435ac01840fc31e7824e00572f4",
+  "prompts": {},
+  "sessions": {
+    "s_ce505af18ddad7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "12350b12-bb44-4911-8fad-a3b40cf5a3dc",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}

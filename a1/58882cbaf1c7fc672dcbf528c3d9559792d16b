@@ -1,0 +1,24 @@
+docs/compiler-engineering.md
+  s_cc3ac20205c0f7::t_17ffacc59d73b2 365-367,401-408
+  s_cc3ac20205c0f7::t_24e7f07ee3ccf6 394-398
+docs/LESSON12.md
+  s_cc3ac20205c0f7::t_5eb7eb11c75ef5 54
+docs/commands.md
+  s_cc3ac20205c0f7::t_5eb7eb11c75ef5 125
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "a158882cbaf1c7fc672dcbf528c3d9559792d16b",
+  "prompts": {},
+  "sessions": {
+    "s_cc3ac20205c0f7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d8a8c3fa-9c04-4188-8d5e-e28b5f0838c1",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}

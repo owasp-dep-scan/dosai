@@ -1,0 +1,21 @@
+Dosai.Tests/DosaiTests.cs
+  s_5bad3094f7bc65::t_872a1f17c9536b 5627-5684
+Dosai/NuGetRestoreCache.cs
+  s_5bad3094f7bc65::t_9ff83e5134448c 92-95
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2970299f6014d36537cad9368cf31e21f6b9608a",
+  "prompts": {},
+  "sessions": {
+    "s_5bad3094f7bc65": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c8058ad5-2c38-4556-995e-6d27935e4326",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}

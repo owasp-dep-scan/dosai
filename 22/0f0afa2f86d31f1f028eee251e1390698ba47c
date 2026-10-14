@@ -1,0 +1,49 @@
+Dosai/DosaiQueryEngine.cs
+  s_c49eb31e317cab::t_1eb85a43e2648f 1,242-245
+Dosai/NuGetRestoreCache.cs
+  s_c49eb31e317cab::t_1eb85a43e2648f 4,230
+Dosai/DataFlowExporter.cs
+  s_c49eb31e317cab::t_1eb85a43e2648f 1,109,125,163
+Dosai/DataFlowAssembly.cs
+  s_c49eb31e317cab::t_1eb85a43e2648f 1537
+Dosai/Frameworks/Providers/BackgroundJobProvider.cs
+  s_c49eb31e317cab::t_1eb85a43e2648f 343,348
+Dosai.Tests/IssueRegressionTests.cs
+  s_c49eb31e317cab::t_75542534b82c7b 8-9
+Dosai/Frameworks/Providers/MlRuntimeProvider.cs
+  s_c49eb31e317cab::t_1eb85a43e2648f 5,38,139
+Dosai/Frameworks/Providers/GraphQLODataProvider.cs
+  s_c49eb31e317cab::t_1eb85a43e2648f 4,79,81,83
+Dosai/Dosai.csproj
+  s_c49eb31e317cab::t_387cdb91574ba0 35-37
+Dosai.Tests/LocaleInvarianceTests.cs
+  s_c49eb31e317cab::t_75542534b82c7b 1-304
+Dosai/Frameworks/Providers/McpProvider.cs
+  s_c49eb31e317cab::t_1eb85a43e2648f 497
+Dosai/LanguageFrontendAnalyzer.cs
+  s_c49eb31e317cab::t_1eb85a43e2648f 2,760,787
+Dosai/CallGraphExporter.cs
+  s_c49eb31e317cab::t_1eb85a43e2648f 1,131,134-135,151,201,204-205,224
+Dosai/CryptoAnalysis.cs
+  s_c49eb31e317cab::t_1eb85a43e2648f 11,574,1674-1679,1777
+Dosai/Suppression.cs
+  s_c49eb31e317cab::t_1eb85a43e2648f 1,173
+Dosai/Globalization.globalconfig
+  s_c49eb31e317cab::t_387cdb91574ba0 1-16
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "220f0afa2f86d31f1f028eee251e1390698ba47c",
+  "prompts": {},
+  "sessions": {
+    "s_c49eb31e317cab": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3f2c4695-4d8f-41c7-8a07-f27eb3294e64",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
