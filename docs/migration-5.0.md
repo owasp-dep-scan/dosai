@@ -348,6 +348,35 @@ These change which slices an unchanged input reports, in both directions:
 `SinkParameters` fields (empty for the historic behavior). Assembly (IL) mode does not apply
 either field yet.
 
+## Crypto and CBOM changes (5.0.0-rc.2)
+
+- **Algorithm tokens match whole identifier words.** `Describe` no longer classifies as DES and
+  `UniversalTagNumber` no longer as RSA. MACs and KDFs come before the hashes they name, so
+  `HMACSHA256` is an HMAC asset (it was SHA-2) and `HMACMD5` no longer raises the MD5 hash rule.
+- **New assets:** SHA-3, SHAKE, KMAC, HKDF, KBKDF, PBKDF1 (`PasswordDeriveBytes`), DSA,
+  Rijndael, `X509CertificateLoader`, `SecurityProtocolType`.
+- **Findings carry their rule's CWE.** Every finding used to be CWE-327, CWE-321 or CWE-295;
+  weak hashes are now CWE-328, static IVs CWE-1204, PBKDF2 CWE-916, insecure RNG CWE-338, JWT
+  rules CWE-347 and the experimental-API rules CWE-1357. Hardcoded material stays CWE-321.
+- **New rules:** `DOSAI-CRYPTO-WEAK-KDF-PRF`, `DOSAI-CRYPTO-WEAK-KDF`, `DOSAI-CRYPTO-WEAK-SIGNATURE`,
+  `DOSAI-CRYPTO-WEAK-KEY-SIZE`, `DOSAI-CRYPTO-RSA-PKCS1-ENCRYPTION`,
+  `DOSAI-CRYPTO-JWT-VALIDATION-DISABLED`, `DOSAI-CRYPTO-NON-CONSTANT-TIME-COMPARE`,
+  `DOSAI-CRYPTO-TLS-CERT-VALIDATION-CUSTOM` and `DOSAI-CRYPTO-OBSOLETE-API` (SYSLIB0021, 0022,
+  0023, 0045, 0053, 0057, 0060). TLS 1.0 now raises `DOSAI-CRYPTO-LEGACY-TLS`, and `EncryptEcb`
+  raises `DOSAI-CRYPTO-ECB-MODE`.
+- **Certificate callbacks are told apart.** Only an always-true callback is
+  `DOSAI-CRYPTO-TLS-CERT-VALIDATION-DISABLED` (High); any other custom callback is
+  `DOSAI-CRYPTO-TLS-CERT-VALIDATION-CUSTOM` (Medium).
+- **PBKDF2 is read from the bound call in C# and VB.** Constants are folded, an omitted count is
+  the constructors' 1,000, and a salt size is no longer reported as the iteration count.
+- **Static IVs.** Zero and constant IVs are found through arguments and assignments; log and
+  exception messages that mention an IV are no longer reported as IV material.
+- **Comments are not code.** Commented-out C# and VB lines no longer produce assets or findings.
+- **One protocol per line.** A line seen by the classifier and by a TLS version check is one
+  `Protocols[]` entry with the version and the weaker strength.
+- **CycloneDX primitives follow the algorithm:** ML-KEM is `kem` (was `key-agree`), AES-GCM
+  `ae`, AES `block-cipher`, the CSPRNG `drbg`.
+
 ## Nothing to change in queries or exports
 
 Field names, identifier formats (`Metadata`, `SourceSignature`, method ids), severity and

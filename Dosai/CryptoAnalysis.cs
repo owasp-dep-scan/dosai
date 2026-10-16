@@ -247,11 +247,21 @@ public static class CryptoAnalyzer
         })
         .ToList();
 
+    /// <summary>The most specific CWE for each crypto rule; anything unmapped is a broken or risky algorithm (CWE-327).</summary>
     private static string CweForRule(string? ruleId) => ruleId switch
     {
-        "DOSAI-CRYPTO-HARDCODED-MATERIAL" => "CWE-798",
+        "DOSAI-CRYPTO-HARDCODED-MATERIAL" => "CWE-321",
         "DOSAI-CRYPTO-STATIC-IV" => "CWE-1204",
-        "DOSAI-CRYPTO-LOW-PBKDF2-ITERATIONS" => "CWE-916",
+        "DOSAI-CRYPTO-LOW-PBKDF2-ITERATIONS" or "DOSAI-CRYPTO-WEAK-KDF" or "DOSAI-CRYPTO-WEAK-KDF-PRF" => "CWE-916",
+        "DOSAI-CRYPTO-WEAK-HASH-MD5" or "DOSAI-CRYPTO-WEAK-HASH-SHA1" => "CWE-328",
+        "DOSAI-CRYPTO-INSECURE-RNG" => "CWE-338",
+        "DOSAI-CRYPTO-TLS-CERT-VALIDATION-DISABLED" or "DOSAI-CRYPTO-TLS-CERT-VALIDATION-CUSTOM" => "CWE-295",
+        "DOSAI-CRYPTO-JWT-NONE" or "DOSAI-CRYPTO-JWT-VALIDATION-DISABLED" => "CWE-347",
+        "DOSAI-CRYPTO-WEAK-KEY-SIZE" => "CWE-326",
+        "DOSAI-CRYPTO-RSA-PKCS1-ENCRYPTION" => "CWE-780",
+        "DOSAI-CRYPTO-NON-CONSTANT-TIME-COMPARE" => "CWE-208",
+        "DOSAI-CRYPTO-OBSOLETE-API" => "CWE-477",
+        "DOSAI-CRYPTO-EXPERIMENTAL-TLS-API" or "DOSAI-CRYPTO-EXPERIMENTAL-HPKE" or "DOSAI-CRYPTO-EXPERIMENTAL-PQC-API" => "CWE-1357",
         _ => "CWE-327"
     };
 
@@ -605,6 +615,12 @@ public static class CryptoAnalyzer
 
     private static void AnalyzeLineFallback(string basePath, string file, string[] lines, CryptoReachability reachability, CryptoAnalysisResult result, string language)
     {
+        // Commented-out code is not a use: `// var md5 = MD5.Create();` must not report MD5.
+        if (language is "csharp" or "vb")
+        {
+            lines = BlankComments(lines, language);
+        }
+
         var currentMethod = string.Empty;
         var currentClass = string.Empty;
         var currentNamespace = string.Empty;
@@ -619,8 +635,149 @@ public static class CryptoAnalyzer
             }
 
             DetectLiteralMaterial(line, basePath, file, index + 1, currentNamespace, currentClass, currentMethod, reachability, result);
-            DetectLineMisuse(line, basePath, file, index + 1, currentNamespace, currentClass, currentMethod, reachability, result);
+            DetectLineMisuse(line, basePath, file, index + 1, currentNamespace, currentClass, currentMethod, reachability, result, semantic: language is "csharp" or "vb");
         }
+    }
+
+    /// <summary>
+    ///     The lines with C# (`//`, `/* */`) or VB (`'`, `REM`) comment text replaced by spaces,
+    ///     so columns stay put. String literals are kept: hardcoded material lives in them. C#
+    ///     regular, verbatim and raw (`"""`) strings and character literals are skipped as units;
+    ///     a block comment, verbatim or raw string may span lines.
+    /// </summary>
+    internal static string[] BlankComments(string[] lines, string language)
+    {
+        var output = new string[lines.Length];
+        var inBlockComment = false;
+        string? openString = null; // the terminator of a string spanning lines: """ (verbatim) or """"" (raw)
+        for (var lineIndex = 0; lineIndex < lines.Length; lineIndex++)
+        {
+            var chars = lines[lineIndex].ToCharArray();
+            var index = 0;
+            while (index < chars.Length)
+            {
+                if (inBlockComment)
+                {
+                    if (chars[index] == '*' && index + 1 < chars.Length && chars[index + 1] == '/')
+                    {
+                        chars[index] = chars[index + 1] = ' ';
+                        index += 2;
+                        inBlockComment = false;
+                        continue;
+                    }
+
+                    chars[index++] = ' ';
+                    continue;
+                }
+
+                if (openString is not null)
+                {
+                    if (openString == "\"\"\"" ? StartsWith(chars, index, "\"\"\"") : chars[index] == '"' && !(index + 1 < chars.Length && chars[index + 1] == '"'))
+                    {
+                        index += openString.Length;
+                        openString = null;
+                    }
+                    else
+                    {
+                        index += chars[index] == '"' ? 2 : 1;
+                    }
+
+                    continue;
+                }
+
+                var c = chars[index];
+                if (language == "vb")
+                {
+                    if (c == '"')
+                    {
+                        index++;
+                        while (index < chars.Length && !(chars[index] == '"' && !(index + 1 < chars.Length && chars[index + 1] == '"')))
+                        {
+                            index += chars[index] == '"' ? 2 : 1;
+                        }
+
+                        index++;
+                        continue;
+                    }
+
+                    if (c is '\'' or '\u2018' or '\u2019' || (StartsWith(chars, index, "REM", ignoreCase: true) && (index == 0 || char.IsWhiteSpace(chars[index - 1])) && (index + 3 == chars.Length || char.IsWhiteSpace(chars[index + 3]))))
+                    {
+                        Array.Fill(chars, ' ', index, chars.Length - index);
+                        break;
+                    }
+
+                    index++;
+                    continue;
+                }
+
+                if (c == '/' && index + 1 < chars.Length && chars[index + 1] == '/')
+                {
+                    Array.Fill(chars, ' ', index, chars.Length - index);
+                    break;
+                }
+
+                if (c == '/' && index + 1 < chars.Length && chars[index + 1] == '*')
+                {
+                    chars[index] = chars[index + 1] = ' ';
+                    index += 2;
+                    inBlockComment = true;
+                    continue;
+                }
+
+                if (StartsWith(chars, index, "\"\"\""))
+                {
+                    var close = new string(chars).IndexOf("\"\"\"", index + 3, StringComparison.Ordinal);
+                    if (close < 0)
+                    {
+                        openString = "\"\"\"";
+                        break;
+                    }
+
+                    index = close + 3;
+                    continue;
+                }
+
+                if (c == '@' && index + 1 < chars.Length && chars[index + 1] == '"' || c == '$' && StartsWith(chars, index + 1, "@\"") || c == '@' && StartsWith(chars, index + 1, "$\""))
+                {
+                    index += c == '@' && chars[index + 1] == '"' ? 2 : 3;
+                    while (index < chars.Length && !(chars[index] == '"' && !(index + 1 < chars.Length && chars[index + 1] == '"')))
+                    {
+                        index += chars[index] == '"' ? 2 : 1;
+                    }
+
+                    if (index >= chars.Length)
+                    {
+                        openString = "\"";
+                        break;
+                    }
+
+                    index++;
+                    continue;
+                }
+
+                if (c is '"' or '\'')
+                {
+                    index++;
+                    while (index < chars.Length && chars[index] != c)
+                    {
+                        index += chars[index] == '\\' ? 2 : 1;
+                    }
+
+                    index++;
+                    continue;
+                }
+
+                index++;
+            }
+
+            output[lineIndex] = new string(chars);
+        }
+
+        return output;
+
+        static bool StartsWith(char[] chars, int index, string value, bool ignoreCase = false) =>
+            index >= 0 && index + value.Length <= chars.Length &&
+            string.Compare(new string(chars, index, value.Length), value, ignoreCase ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal) == 0;
     }
 
     private static void UpdateTextContext(string line, string language, ref string currentNamespace, ref string currentClass, ref string currentMethod)
@@ -665,7 +822,7 @@ public static class CryptoAnalyzer
         }
         else
         {
-            names.AddRange(Regex.Matches(line, @"\b(AesGcm|AesCcm|Aes|DES|TripleDES|RC2|MD5|SHA1|SHA256|SHA384|SHA512|RSA|DSA|ECDsa|ECDiffieHellman|X25519DiffieHellman|X25519|HMACSHA256|HMACSHA384|HMACSHA512|Rfc2898DeriveBytes|RandomNumberGenerator|RNGCryptoServiceProvider|X509Certificate2|SslStream|SslProtocols|EncryptKeyWrap|EncryptKeyWrapPadded|DecryptKeyWrap|DecryptKeyWrapPadded|TryDecryptKeyWrap|TryDecryptKeyWrapPadded|GetKeyWrapLength|GetKeyWrapPaddedLength|TlsContext|TlsSession|TlsBufferSession|TlsSocketSession|TlsOperationStatus|CompositeMLKem|CompositeMLDsa|MLDsa|MLKem|SlhDsa|Hpke|HpkeSender|HpkeRecipient|HpkeSuite|ChaCha20Poly1305|CreateForKeyEncapsulation|System\.Random|Random|CipherMode\.ECB|SecurityAlgorithms\.None)\b").Select(match => match.Value));
+            names.AddRange(Regex.Matches(line, @"\b(AesGcm|AesCcm|Aes|DES|TripleDES|RC2|MD5|SHA1|SHA256|SHA384|SHA512|RSA|DSA|ECDsa|ECDiffieHellman|X25519DiffieHellman|X25519|HMACMD5|HMACSHA1|HMACSHA256|HMACSHA384|HMACSHA512|HMACSHA3_256|HMACSHA3_384|HMACSHA3_512|Kmac128|Kmac256|KmacXof128|KmacXof256|HKDF|SP800108HmacCounterKdf|PasswordDeriveBytes|SHA3_256|SHA3_384|SHA3_512|Shake128|Shake256|Rijndael|RijndaelManaged|DSACryptoServiceProvider|X509CertificateLoader|SecurityProtocolType|Rfc2898DeriveBytes|RandomNumberGenerator|RNGCryptoServiceProvider|X509Certificate2|SslStream|SslProtocols|EncryptKeyWrap|EncryptKeyWrapPadded|DecryptKeyWrap|DecryptKeyWrapPadded|TryDecryptKeyWrap|TryDecryptKeyWrapPadded|GetKeyWrapLength|GetKeyWrapPaddedLength|TlsContext|TlsSession|TlsBufferSession|TlsSocketSession|TlsOperationStatus|CompositeMLKem|CompositeMLDsa|MLDsa|MLKem|SlhDsa|Hpke|HpkeSender|HpkeRecipient|HpkeSuite|ChaCha20Poly1305|CreateForKeyEncapsulation|System\.Random|Random|CipherMode\.ECB|SecurityAlgorithms\.None)\b").Select(match => match.Value));
         }
 
         return names.Where(name => !string.IsNullOrWhiteSpace(name)).Distinct(StringComparer.OrdinalIgnoreCase);
@@ -732,26 +889,44 @@ public static class CryptoAnalyzer
             "DOSAI-CRYPTO-EXPERIMENTAL-PQC-API", "Experimental post-quantum cryptography API is used (diagnostic SYSLIB5006).")
     ];
 
-    private static readonly (string Pattern, string Rule, string Severity, string Summary, string Recommendation)[] LineMisuseChecks =
-        BuildLineMisuseChecks();
+    /// <summary>
+    ///     Misuse visible in one line of any language. A check with a protocol version also
+    ///     records the protocol it names. The certificate-callback checks tell an always-true
+    ///     callback (validation disabled) from one with logic of its own (custom validation).
+    /// </summary>
+    private static readonly (Regex Pattern, string Rule, string Severity, string Summary, string Recommendation, string? Protocol)[] LineMisuseChecks =
+    [
+        (new Regex(@"\b\w*(?:CertificateCustomValidationCallback|CertificateValidationCallback|RemoteCertificateValidationCallback)\s*(?:\+?=)\s*(?:(?:\([^()]*\)|\w+)\s*=>\s*(?:true\b|\{\s*return\s+true\s*;\s*\})|delegate\s*(?:\([^()]*\))?\s*\{\s*return\s+true\s*;\s*\})", RegexOptions.Compiled),
+            "DOSAI-CRYPTO-TLS-CERT-VALIDATION-DISABLED", "High", "TLS certificate validation callback accepts every certificate.", "Remove the callback, or validate the chain and pin explicitly.", null),
+        (new Regex(@"\b\w*(?:CertificateCustomValidationCallback|CertificateValidationCallback)\s*(?:\+?=)(?!=)", RegexOptions.Compiled),
+            "DOSAI-CRYPTO-TLS-CERT-VALIDATION-CUSTOM", "Medium", "A custom TLS certificate validation callback replaces platform validation.", "Keep platform validation (check sslPolicyErrors == None) and add pinning on top of it.", null),
+        (new Regex(@"DangerousAcceptAnyServerCertificateValidator", RegexOptions.Compiled),
+            "DOSAI-CRYPTO-TLS-CERT-VALIDATION-DISABLED", "High", "TLS certificate validation is explicitly disabled.", "Remove dangerous validation bypasses.", null),
+        (new Regex(@"CipherMode\.ECB\b|\b(?:Try)?(?:En|De)cryptEcb\s*\(", RegexOptions.Compiled),
+            "DOSAI-CRYPTO-ECB-MODE", "High", "ECB cipher mode is used.", "Use an authenticated mode such as AES-GCM, or CBC with random IV and authentication.", null),
+        (new Regex(@"SecurityAlgorithms\.None\b", RegexOptions.Compiled),
+            "DOSAI-CRYPTO-JWT-NONE", "High", "JWT 'none' signing algorithm is referenced.", "Require a strong signing algorithm and validate tokens.", null),
+        (new Regex(@"\b(?:RequireSignedTokens|ValidateIssuerSigningKey)\s*=\s*false\b|\bSignatureValidator\s*=(?!=)", RegexOptions.Compiled),
+            "DOSAI-CRYPTO-JWT-VALIDATION-DISABLED", "High", "JWT signature validation is disabled or replaced.", "Keep RequireSignedTokens and signing-key validation on, and do not override SignatureValidator.", null),
+        (new Regex(@"\b(?:ValidateLifetime|RequireExpirationTime|ValidateAudience|ValidateIssuer)\s*=\s*false\b", RegexOptions.Compiled),
+            "DOSAI-CRYPTO-JWT-VALIDATION-DISABLED", "Medium", "JWT claim validation (lifetime, audience or issuer) is disabled.", "Validate token lifetime, audience and issuer.", null),
+        (new Regex(@"\b(?:SslProtocols|SecurityProtocolType)\.Ssl[23]\b", RegexOptions.Compiled),
+            "DOSAI-CRYPTO-LEGACY-TLS", "High", "Legacy SSL protocol is referenced.", "Require TLS 1.2 or newer.", "SSL 3.0"),
+        (new Regex(@"\b(?:SslProtocols|SecurityProtocolType)\.Tls\b(?!\d)", RegexOptions.Compiled),
+            "DOSAI-CRYPTO-LEGACY-TLS", "High", "Legacy TLS 1.0 protocol is referenced.", "Require TLS 1.2 or newer.", "TLS 1.0"),
+        (new Regex(@"\b(?:SslProtocols|SecurityProtocolType)\.Tls11\b", RegexOptions.Compiled),
+            "DOSAI-CRYPTO-LEGACY-TLS", "Medium", "Legacy TLS 1.1 protocol is referenced.", "Require TLS 1.2 or newer.", "TLS 1.1"),
+        (new Regex(@"RSAEncryptionPadding\.Pkcs1\b", RegexOptions.Compiled),
+            "DOSAI-CRYPTO-RSA-PKCS1-ENCRYPTION", "Medium", "RSA encryption uses PKCS#1 v1.5 padding, which is open to padding-oracle attacks.", "Use RSAEncryptionPadding.OaepSHA256 or stronger.", null),
+        (new Regex(@"ECCurve\.NamedCurves\.brainpoolP(?:160|192)[rt]1\b|\b(?:secp|prime|sect)(?:112|128|131|160|163|192)[rk]\d\b", RegexOptions.Compiled),
+            "DOSAI-CRYPTO-WEAK-KEY-SIZE", "High", "An elliptic curve below 224 bits is used.", "Use NIST P-256 or stronger, or X25519/Ed25519.", null),
+        (new Regex(@"\b\w*(?i:hash|hmac|mac|signature|digest|tag)\w*\s*\.\s*SequenceEqual\s*\(|\.SequenceEqual\s*\(\s*\w*(?i:hash|hmac|mac|signature|digest|tag)\w*\s*[,)]", RegexOptions.Compiled),
+            "DOSAI-CRYPTO-NON-CONSTANT-TIME-COMPARE", "Medium", "A MAC, hash or signature is compared with an early-exit comparison, which leaks timing.", "Compare with CryptographicOperations.FixedTimeEquals.", null),
+        (new Regex(@"SSL_VERIFY_NONE", RegexOptions.Compiled),
+            "DOSAI-CRYPTO-TLS-CERT-VALIDATION-DISABLED", "High", "OpenSSL peer verification is disabled.", "Use SSL_VERIFY_PEER and verify hostnames.", null)
+    ];
 
-    private static (string Pattern, string Rule, string Severity, string Summary, string Recommendation)[] BuildLineMisuseChecks()
-    {
-        var checks = new[]
-        {
-            (Pattern: "ServerCertificateCustomValidationCallback", Rule: "DOSAI-CRYPTO-TLS-CERT-VALIDATION-DISABLED", Severity: "High", Summary: "TLS certificate validation callback is configured and may disable certificate validation.", Recommendation: "Use platform certificate validation or restrict callback logic to explicit certificate pinning."),
-            (Pattern: "DangerousAcceptAnyServerCertificateValidator", Rule: "DOSAI-CRYPTO-TLS-CERT-VALIDATION-DISABLED", Severity: "High", Summary: "TLS certificate validation is explicitly disabled.", Recommendation: "Remove dangerous validation bypasses."),
-            (Pattern: "CipherMode.ECB", Rule: "DOSAI-CRYPTO-ECB-MODE", Severity: "High", Summary: "ECB cipher mode is used.", Recommendation: "Use an authenticated mode such as AES-GCM, or CBC with random IV and authentication."),
-            (Pattern: "SecurityAlgorithms.None", Rule: "DOSAI-CRYPTO-JWT-NONE", Severity: "High", Summary: "JWT 'none' signing algorithm is referenced.", Recommendation: "Require a strong signing algorithm and validate tokens."),
-            (Pattern: "SslProtocols.Ssl3", Rule: "DOSAI-CRYPTO-LEGACY-TLS", Severity: "High", Summary: "Legacy SSL/TLS protocol is referenced.", Recommendation: "Require TLS 1.2 or newer."),
-            (Pattern: "SslProtocols.Tls11", Rule: "DOSAI-CRYPTO-LEGACY-TLS", Severity: "Medium", Summary: "Legacy TLS 1.1 protocol is referenced.", Recommendation: "Require TLS 1.2 or newer."),
-            (Pattern: "SSL_VERIFY_NONE", Rule: "DOSAI-CRYPTO-TLS-CERT-VALIDATION-DISABLED", Severity: "High", Summary: "OpenSSL peer verification is disabled.", Recommendation: "Use SSL_VERIFY_PEER and verify hostnames.")
-        };
-
-        return checks;
-    }
-
-    private static void DetectLineMisuse(string line, string basePath, string file, int lineNumber, string? namespaceName, string? className, string? methodName, CryptoReachability reachability, CryptoAnalysisResult result)
+    private static void DetectLineMisuse(string line, string basePath, string file, int lineNumber, string? namespaceName, string? className, string? methodName, CryptoReachability reachability, CryptoAnalysisResult result, bool semantic = false)
     {
         foreach (var experimental in ExperimentalCryptoApis)
         {
@@ -766,19 +941,37 @@ public static class CryptoAnalyzer
             AddFinding(result, experimental.Rule, "Low", "High", experimental.Summary, "Pin the runtime version and review usages before relying on this API in production; the surface may still change.", location, methodId, entryPointIds.Count > 0, entryPointIds, [], [], []);
         }
 
-        foreach (var check in LineMisuseChecks.Where(check => line.Contains(check.Pattern, StringComparison.OrdinalIgnoreCase)))
+        var disabledCallback = false;
+        foreach (var check in LineMisuseChecks)
         {
-            var location = CreateLocation(basePath, file, lineNumber, Math.Max(1, line.IndexOf(check.Pattern, StringComparison.OrdinalIgnoreCase) + 1));
+            if (check.Pattern.Match(line) is not { Success: true } match)
+            {
+                continue;
+            }
+
+            // An always-true callback is the disabled case; the custom-callback check would
+            // otherwise report the same assignment again.
+            if (check.Rule == "DOSAI-CRYPTO-TLS-CERT-VALIDATION-CUSTOM" && disabledCallback)
+            {
+                continue;
+            }
+
+            disabledCallback |= check.Rule == "DOSAI-CRYPTO-TLS-CERT-VALIDATION-DISABLED";
+            var location = CreateLocation(basePath, file, lineNumber, match.Index + 1);
             var methodId = ResolveMethodId(reachability, file, namespaceName, className, methodName);
             var entryPointIds = reachability.EntryPointsFor(methodId, file, methodName);
-            if (check.Rule == "DOSAI-CRYPTO-LEGACY-TLS" || check.Pattern.Contains("SSL", StringComparison.OrdinalIgnoreCase))
+            if (check.Protocol is { } version)
             {
-                AddProtocol(result, "TLS", InferProtocolVersion(check.Pattern), check.Severity == "High" ? "weak" : "legacy", check.Pattern, location, methodId, entryPointIds.Count > 0, entryPointIds, "line-fallback");
+                AddProtocol(result, "TLS", version, check.Severity == "High" ? "weak" : "legacy", match.Value, location, methodId, entryPointIds.Count > 0, entryPointIds, "line-fallback");
             }
+
             AddFinding(result, check.Rule, check.Severity, "High", check.Summary, check.Recommendation, location, methodId, entryPointIds.Count > 0, entryPointIds, [], [], []);
         }
 
-        var pbkdf2 = Regex.Match(line, @"Rfc2898DeriveBytes\s*\([^\n;]*(?<iterations>\b\d{1,6}\b)");
+        // C# and VB read iteration counts from the bound call (constants folded, the
+        // constructors' default included); a regex over the line took the first number in the
+        // argument list, a salt size as often as the iteration count.
+        var pbkdf2 = semantic ? Match.Empty : Regex.Match(line, @"Rfc2898DeriveBytes\s*\([^\n;]*(?<iterations>\b\d{1,6}\b)");
         if (pbkdf2.Success && int.TryParse(pbkdf2.Groups["iterations"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var iterations) && iterations < 100_000)
         {
             var location = CreateLocation(basePath, file, lineNumber, Math.Max(1, pbkdf2.Index + 1));
@@ -803,8 +996,9 @@ public static class CryptoAnalyzer
         foreach (var match in literalMatches)
         {
             var value = match.Groups["value"].Value;
-            if (materialNameKind == "iv-or-nonce" && value.Length < 8)
+            if (materialNameKind == "iv-or-nonce" && (value.Length < 8 || value.Any(char.IsWhiteSpace) || !AssignsToIvBefore(line, match.Index)))
             {
+                // A log message or exception text that mentions an IV is prose, not an IV.
                 continue;
             }
             if (materialNameKind != "iv-or-nonce" && value.Length < 32 && !value.Contains("BEGIN", StringComparison.OrdinalIgnoreCase))
@@ -931,7 +1125,7 @@ public static class CryptoAnalyzer
             Confidence = confidence,
             Summary = summary,
             Recommendation = recommendation,
-            Cwe = ruleId.Contains("HARDCODED", StringComparison.OrdinalIgnoreCase) ? "CWE-321" : ruleId.Contains("CERT", StringComparison.OrdinalIgnoreCase) ? "CWE-295" : "CWE-327",
+            Cwe = CweForRule(ruleId),
             MethodId = methodId,
             AssetIds = assetIds,
             OperationIds = operationIds,
@@ -957,10 +1151,28 @@ public static class CryptoAnalyzer
     {
         var dedupeKey = $"{name}\u001f{version}\u001f{location.Path}\u001f{location.LineNumber}";
         var existing = result.Protocols.FirstOrDefault(protocol => protocol.Properties.TryGetValue("dedupeKey", out var value) && value == dedupeKey);
+        // The same line seen by the classifier (no version, generic strength) and by a version
+        // check (`SslProtocols.Tls11`, legacy) is one protocol observation: the versioned,
+        // weaker reading wins.
+        existing ??= result.Protocols.FirstOrDefault(protocol =>
+            protocol.Name == name && protocol.Location.Path == location.Path && protocol.Location.LineNumber == location.LineNumber &&
+            (protocol.Version is null || version is null));
         if (existing is not null)
         {
             MergeUnique(existing.EntryPointIds, entryPointIds);
             existing.ReachableFromEntryPoint = existing.ReachableFromEntryPoint || reachable;
+            if (existing.Version is null && version is not null)
+            {
+                existing.Version = version;
+                existing.Symbol = symbol;
+                existing.Properties["dedupeKey"] = dedupeKey;
+            }
+
+            if (StrengthRank(strength) < StrengthRank(existing.Strength))
+            {
+                existing.Strength = strength;
+            }
+
             return;
         }
 
@@ -979,14 +1191,41 @@ public static class CryptoAnalyzer
         });
     }
 
+    private static int StrengthRank(string? strength) => strength?.ToLowerInvariant() switch
+    {
+        "weak" => 0,
+        "legacy" => 1,
+        "acceptable" => 2,
+        "strong" => 3,
+        _ => 4
+    };
+
     private static string? InferProtocolVersion(string text)
     {
+        if (text.Contains("Ssl2", StringComparison.OrdinalIgnoreCase) || text.Contains("SSLv2", StringComparison.OrdinalIgnoreCase)) return "SSL 2.0";
         if (text.Contains("Ssl3", StringComparison.OrdinalIgnoreCase) || text.Contains("SSLv3", StringComparison.OrdinalIgnoreCase)) return "SSL 3.0";
         if (text.Contains("Tls11", StringComparison.OrdinalIgnoreCase) || text.Contains("TLSv1_1", StringComparison.OrdinalIgnoreCase) || text.Contains("TLS1_1", StringComparison.OrdinalIgnoreCase)) return "TLS 1.1";
         if (text.Contains("Tls12", StringComparison.OrdinalIgnoreCase) || text.Contains("TLSv1_2", StringComparison.OrdinalIgnoreCase) || text.Contains("TLS1_2", StringComparison.OrdinalIgnoreCase)) return "TLS 1.2";
         if (text.Contains("Tls13", StringComparison.OrdinalIgnoreCase) || text.Contains("TLSv1_3", StringComparison.OrdinalIgnoreCase) || text.Contains("TLS1_3", StringComparison.OrdinalIgnoreCase)) return "TLS 1.3";
+        if (Regex.IsMatch(text, @"\b(?:SslProtocols|SecurityProtocolType)\.Tls\b(?!\d)|\bTLSv1(?:_0)?\b|\bTLS1_0\b")) return "TLS 1.0";
         return null;
     }
+
+    /// <summary>Whether an IV- or nonce-named target is assigned (`=`, `:`, a named argument) before <paramref name="literalIndex"/>.</summary>
+    private static bool AssignsToIvBefore(string line, int literalIndex)
+    {
+        foreach (Match assignment in IvAssignment.Matches(line))
+        {
+            if (assignment.Index < literalIndex && IsIvOrNonceName(assignment.Groups["name"].Value))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static readonly Regex IvAssignment = new(@"(?<name>[A-Za-z_]\w*)\s*(?:=(?![=>])|:(?!:))", RegexOptions.Compiled);
 
     private static string? ClassifySensitiveMaterialName(string line)
     {
@@ -1053,10 +1292,25 @@ public static class CryptoAnalyzer
         var symbolText = symbol;
         var codeText = code;
 
+        // MACs and KDFs name the hash they are built on (HMACSHA256, HMACMD5, SP800108HmacCounterKdf),
+        // so they are classified before the bare hashes their names contain.
+        if (HasCryptoToken(symbolText, "SP800108HmacCounterKdf")) return Classify("KBKDF", "kdf", "strong", "key-derivation", "NIST SP 800-108");
+        if (HasCryptoToken(symbolText, "HMACMD5")) return Classify("HMAC-MD5", "mac", "weak", "mac", "RFC 2104");
+        if (HasCryptoToken(symbolText, "HMACSHA1")) return Classify("HMAC-SHA1", "mac", "acceptable", "mac", "RFC 2104");
+        if (HasCryptoToken(symbolText, "HMACSHA3_256", "HMACSHA3_384", "HMACSHA3_512")) return Classify("HMAC-SHA3", "mac", "strong", "mac", "FIPS 202");
+        if (HasCryptoToken(symbolText, "HMACSHA256", "HMACSHA384", "HMACSHA512", "HMAC(", "HMAC")) return Classify("HMAC", "mac", "strong", "mac", "RFC 2104");
+        if (HasCryptoToken(symbolText, "Kmac128", "Kmac256", "KmacXof128", "KmacXof256")) return Classify("KMAC", "mac", "strong", "mac", "NIST SP 800-185");
+        if (HasCryptoToken(symbolText, "HKDF")) return Classify("HKDF", "kdf", "strong", "key-derivation", "RFC 5869");
+        if (HasCryptoToken(symbolText, "PasswordDeriveBytes"))
+            return Classify("PBKDF1", "kdf", "weak", "key-derivation", "PKCS#5", rule: "DOSAI-CRYPTO-WEAK-KDF", severity: "Medium", summary: "PasswordDeriveBytes (PBKDF1) key derivation was detected.", recommendation: "Use Rfc2898DeriveBytes.Pbkdf2 with SHA-256 or stronger and a high iteration count.");
+        if (HasCryptoToken(symbolText, "Rfc2898DeriveBytes", "PKCS5_PBKDF2_HMAC")) return Classify("PBKDF2", "kdf", "acceptable", "key-derivation", "PKCS#5");
+        if (HasCryptoToken(symbolText, "Shake128", "Shake256")) return Classify("SHAKE", "xof", "strong", "hash", "FIPS 202");
+        if (HasCryptoToken(symbolText, "SHA3_256", "SHA3_384", "SHA3_512")) return Classify("SHA-3", "hash", "strong", "hash", "FIPS 202");
         if (HasCryptoToken(symbolText, "MD5", "EVP_md5", "digest::digest") || codeText.Contains("algo = \"md5\"", StringComparison.OrdinalIgnoreCase))
             return Classify("MD5", "hash", "weak", rule: "DOSAI-CRYPTO-WEAK-HASH-MD5", severity: "High", summary: "MD5 hashing was detected.", recommendation: "Use SHA-256 or stronger for integrity, and password-specific hashing for passwords.");
         if (HasCryptoToken(symbolText, "SHA1", "SHA1CryptoServiceProvider", "EVP_sha1") || codeText.Contains("algo = \"sha1\"", StringComparison.OrdinalIgnoreCase))
             return Classify("SHA-1", "hash", "weak", rule: "DOSAI-CRYPTO-WEAK-HASH-SHA1", severity: "Medium", summary: "SHA-1 hashing was detected.", recommendation: "Use SHA-256 or stronger, unless required only for legacy non-security identifiers.");
+        if (HasCryptoToken(symbolText, "Rijndael", "RijndaelManaged")) return Classify("AES", "symmetric", "acceptable", "encrypt/decrypt", "NIST");
         if (HasCryptoToken(symbolText, "DES", "TripleDES", "RC2", "EVP_des", "EVP_rc4"))
             return Classify(symbol.Contains("Triple", StringComparison.OrdinalIgnoreCase) ? "3DES" : "DES/RC2/RC4", "symmetric", "weak", rule: "DOSAI-CRYPTO-WEAK-CIPHER", severity: "High", summary: "Weak or legacy symmetric cipher was detected.", recommendation: "Use AES-GCM or another approved authenticated encryption mode.");
         if (HasCryptoToken(symbolText, "AesGcm", "AES_gcm", "EVP_aes_256_gcm")) return Classify("AES-GCM", "symmetric", "strong", "encrypt/decrypt", "NIST");
@@ -1090,17 +1344,16 @@ public static class CryptoAnalyzer
         if (HasCryptoToken(symbolText, "Aes", "AES_", "EVP_aes")) return Classify("AES", "symmetric", "acceptable", "encrypt/decrypt", "NIST");
         if (HasCryptoToken(symbolText, "RSA", "RSA_")) return Classify("RSA", "asymmetric", "acceptable", "sign/encrypt", "PKCS#1");
         if (HasCryptoToken(symbolText, "ECDsa", "ECDSA")) return Classify("ECDSA", "asymmetric", "strong", "sign", "FIPS 186");
+        if (HasCryptoToken(symbolText, "DSA", "DSACryptoServiceProvider")) return Classify("DSA", "asymmetric", "weak", "sign", "FIPS 186", rule: "DOSAI-CRYPTO-WEAK-SIGNATURE", severity: "Medium", summary: "DSA signing was detected; FIPS 186-5 no longer approves DSA for signature generation.", recommendation: "Use ECDSA, Ed25519 or ML-DSA.");
         if (HasCryptoToken(symbolText, "ECDiffieHellman", "ECDH")) return Classify("ECDH", "key-agreement", "strong", "key-agreement");
         // X25519 Diffie-Hellman (.NET 11): the TLS 1.3/SSH/Signal curve; strong and CBOM-worthy
         // like ECDH, with RFC 7748 as its defining standard.
         if (HasCryptoToken(symbolText, "X25519DiffieHellman", "X25519")) return Classify("X25519", "key-agreement", "strong", "key-agreement", "RFC 7748");
         if (HasCryptoToken(symbolText, "SHA256", "SHA384", "SHA512", "EVP_sha256", "EVP_sha512")) return Classify(symbol.Contains("512", StringComparison.Ordinal) ? "SHA-512" : "SHA-2", "hash", "strong");
-        if (HasCryptoToken(symbolText, "HMACSHA256", "HMACSHA384", "HMACSHA512", "HMAC(")) return Classify("HMAC", "mac", "strong", "mac");
-        if (HasCryptoToken(symbolText, "Rfc2898DeriveBytes", "PKCS5_PBKDF2_HMAC")) return Classify("PBKDF2", "kdf", "acceptable", "key-derivation", "PKCS#5");
         if (HasCryptoToken(symbolText, "RandomNumberGenerator", "RNGCryptoServiceProvider", "RAND_bytes")) return Classify("CSPRNG", "random", "strong", "random");
         if (HasCryptoToken(symbolText, "System.Random", "Random", "rand", "srand")) return Classify("Non-cryptographic RNG", "random", "weak", "random", rule: "DOSAI-CRYPTO-INSECURE-RNG", severity: "Medium", summary: "Non-cryptographic random number generator was detected near security analysis context.", recommendation: "Use RandomNumberGenerator for security-sensitive randomness.");
-        if (HasCryptoToken(symbolText, "X509Certificate2", "X509_STORE", "CertificateRequest")) return Classify("X.509", "certificate", "unknown", "certificate");
-        if (HasCryptoToken(symbolText, "SslStream", "SSL_CTX", "SslProtocols", "TlsContext", "TlsSession", "TlsBufferSession", "TlsSocketSession", "TlsOperationStatus", "TLS")) return Classify("TLS", "protocol", "acceptable", "transport-security", "TLS");
+        if (HasCryptoToken(symbolText, "X509Certificate2", "X509CertificateLoader", "X509_STORE", "CertificateRequest")) return Classify("X.509", "certificate", "unknown", "certificate");
+        if (HasCryptoToken(symbolText, "SslStream", "SSL_CTX", "SslProtocols", "SecurityProtocolType", "TlsContext", "TlsSession", "TlsBufferSession", "TlsSocketSession", "TlsOperationStatus", "TLS")) return Classify("TLS", "protocol", "acceptable", "transport-security", "TLS");
         if (HasCryptoToken(symbolText, "SecurityAlgorithms.None")) return Classify("JWT none", "signature", "weak", "sign", rule: "DOSAI-CRYPTO-JWT-NONE", severity: "High", summary: "JWT 'none' algorithm was detected.", recommendation: "Require strong token signing and validation.");
         if (HasCryptoToken(symbolText, "openssl::", "sodium::", "digest::")) return Classify(symbol, "library", "unknown", "library");
         return null;
@@ -1129,7 +1382,31 @@ public static class CryptoAnalyzer
                 return true;
             }
 
-            if (frameworkQualified && symbol.Contains(candidate, StringComparison.OrdinalIgnoreCase))
+            if (frameworkQualified && ContainsIdentifierToken(symbol, candidate))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    ///     Whether <paramref name="candidate"/> occurs in <paramref name="symbol"/> as an identifier
+    ///     word: at the start of a segment or a camel-case hump (`GetRSAPublicKey`, `TripleDES`),
+    ///     and not running on into a lowercase continuation. A plain substring test classified
+    ///     `Describe` as DES and `UniversalTagNumber` as RSA.
+    /// </summary>
+    private static bool ContainsIdentifierToken(string symbol, string candidate)
+    {
+        for (var index = symbol.IndexOf(candidate, StringComparison.OrdinalIgnoreCase); index >= 0; index = symbol.IndexOf(candidate, index + 1, StringComparison.OrdinalIgnoreCase))
+        {
+            var startsWord = index == 0 ||
+                             !char.IsLetterOrDigit(symbol[index - 1]) ||
+                             (char.IsUpper(symbol[index]) && (char.IsLower(symbol[index - 1]) || char.IsDigit(symbol[index - 1])));
+            var end = index + candidate.Length;
+            var endsWord = end >= symbol.Length || !char.IsLetter(candidate[^1]) || !char.IsLower(symbol[end]);
+            if (startsWord && endsWord)
             {
                 return true;
             }
@@ -1290,24 +1567,282 @@ public static class CryptoAnalyzer
         public override void VisitInvocation(IInvocationOperation operation)
         {
             Record(operation, operation.TargetMethod, SafeSyntaxText.Text(operation.Syntax));
+            DetectSemanticMisuse(operation, operation.TargetMethod, operation.Arguments);
             base.VisitInvocation(operation);
         }
 
         public override void VisitObjectCreation(IObjectCreationOperation operation)
         {
             Record(operation, operation.Constructor, SafeSyntaxText.Text(operation.Syntax));
+            if (operation.Constructor is not null)
+            {
+                DetectSemanticMisuse(operation, operation.Constructor, operation.Arguments);
+            }
+
             base.VisitObjectCreation(operation);
+        }
+
+        private const string CryptographyNamespace = "System.Security.Cryptography";
+        private const int MinimumPbkdf2Iterations = 100_000;
+        private const int MinimumAsymmetricKeyBits = 2048;
+
+        private static readonly HashSet<string> Syslib0021Types = new(StringComparer.Ordinal)
+        {
+            "AesCryptoServiceProvider", "AesManaged", "DESCryptoServiceProvider", "MD5CryptoServiceProvider", "RC2CryptoServiceProvider",
+            "SHA1CryptoServiceProvider", "SHA1Managed", "SHA256CryptoServiceProvider", "SHA256Managed", "SHA384CryptoServiceProvider",
+            "SHA384Managed", "SHA512CryptoServiceProvider", "SHA512Managed", "TripleDESCryptoServiceProvider"
+        };
+
+        /// <summary>
+        ///     Misuse only the bound call shows: constant arguments folded by the compiler
+        ///     (`const int Iterations = 1000`), defaults of omitted parameters (the PBKDF2
+        ///     constructors default to 1,000 iterations of SHA-1), parameter roles (the IV of
+        ///     `CreateEncryptor`, the padding of `RSA.Encrypt`) and the APIs .NET marks obsolete.
+        /// </summary>
+        private void DetectSemanticMisuse(IOperation operation, IMethodSymbol method, IEnumerable<IArgumentOperation> argumentOperations)
+        {
+            var type = method.ContainingType;
+            if (type is null || !(type.ContainingNamespace?.ToDisplayString() ?? string.Empty).StartsWith(CryptographyNamespace, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            var arguments = argumentOperations.ToList();
+            var isConstructor = method.MethodKind == MethodKind.Constructor;
+            IArgumentOperation? Argument(string name) => arguments.FirstOrDefault(argument => argument.Parameter?.Name == name && argument.ArgumentKind != ArgumentKind.DefaultValue);
+
+            if (type.Name == "Rfc2898DeriveBytes" && (isConstructor || method.Name == "Pbkdf2"))
+            {
+                var iterations = Argument("iterations") is { } iterationArgument
+                    ? iterationArgument.Value.ConstantValue is { HasValue: true, Value: int value } ? value : (int?)null
+                    : 1000;
+                if (iterations is < MinimumPbkdf2Iterations)
+                {
+                    var origin = Argument("iterations") is null ? " (the constructor's default)" : string.Empty;
+                    Report(operation, "DOSAI-CRYPTO-LOW-PBKDF2-ITERATIONS", "Medium", "High", $"PBKDF2 iteration count {iterations.Value.ToString(CultureInfo.InvariantCulture)}{origin} is below the recommended baseline.", "Use at least 100,000 iterations, and prefer current platform guidance.");
+                }
+
+                var prf = Argument("hashAlgorithm") is { } prfArgument ? HashAlgorithmNameOf(prfArgument.Value) : "SHA1";
+                if (prf is "SHA1" or "MD5")
+                {
+                    var origin = Argument("hashAlgorithm") is null ? " (the constructor's default)" : string.Empty;
+                    Report(operation, "DOSAI-CRYPTO-WEAK-KDF-PRF", "Medium", "High", $"PBKDF2 uses HMAC-{prf}{origin} as its pseudorandom function.", "Pass HashAlgorithmName.SHA256 or stronger to Rfc2898DeriveBytes.Pbkdf2.");
+                }
+
+                if (isConstructor)
+                {
+                    Obsolete(operation, "SYSLIB0060", "The Rfc2898DeriveBytes constructors are obsolete.", "Use the static Rfc2898DeriveBytes.Pbkdf2 method.");
+                }
+            }
+
+            foreach (var argument in arguments.Where(argument => argument.Parameter?.Name is "iv" or "rgbIV" or "nonce" && argument.ArgumentKind != ArgumentKind.DefaultValue))
+            {
+                if (StaticBytesKind(argument.Value) is { } staticKind)
+                {
+                    Report(argument, "DOSAI-CRYPTO-STATIC-IV", "High", "High", $"A {staticKind} IV/nonce is passed to {type.Name}.{(isConstructor ? type.Name : method.Name)}.", "Generate a fresh random IV (or a unique nonce) for every encryption.");
+                }
+            }
+
+            if (method.Name is "EncryptEcb" or "DecryptEcb" or "TryEncryptEcb" or "TryDecryptEcb")
+            {
+                Report(operation, "DOSAI-CRYPTO-ECB-MODE", "High", "High", $"ECB mode is used through {type.Name}.{method.Name}.", "Use an authenticated mode such as AES-GCM, or CBC with a random IV and authentication.");
+            }
+
+            if (method.Name is "Encrypt" or "Decrypt" or "TryEncrypt" or "TryDecrypt" && IsRsa(type) &&
+                (Argument("padding") is { } padding && Strip(padding.Value) is IPropertyReferenceOperation { Property.Name: "Pkcs1", Property.ContainingType.Name: "RSAEncryptionPadding" } ||
+                 Argument("fOAEP") is { Value.ConstantValue: { HasValue: true, Value: false } }))
+            {
+                Report(operation, "DOSAI-CRYPTO-RSA-PKCS1-ENCRYPTION", "Medium", "High", "RSA encryption uses PKCS#1 v1.5 padding, which is open to padding-oracle attacks.", "Use RSAEncryptionPadding.OaepSHA256 or stronger.");
+            }
+
+            if ((type.Name is "RSA" or "DSA" && method.Name == "Create" || isConstructor && type.Name is "RSACryptoServiceProvider" or "DSACryptoServiceProvider" or "RSACng" or "DSACng" or "RSAOpenSsl" or "DSAOpenSsl") &&
+                arguments.FirstOrDefault(argument => argument.Parameter?.Name is "keySizeInBits" or "dwKeySize" or "keySize") is { Value.ConstantValue: { HasValue: true, Value: int bits } } && bits < MinimumAsymmetricKeyBits)
+            {
+                Report(operation, "DOSAI-CRYPTO-WEAK-KEY-SIZE", "High", "High", $"{type.Name} key size {bits.ToString(CultureInfo.InvariantCulture)} bits is below {MinimumAsymmetricKeyBits.ToString(CultureInfo.InvariantCulture)}.", "Use RSA keys of at least 2048 bits (3072 for use beyond 2030), or ECDSA P-256 or stronger.");
+            }
+
+            if (isConstructor && Syslib0021Types.Contains(type.Name))
+            {
+                Obsolete(operation, "SYSLIB0021", $"{type.Name} is obsolete.", $"Use the algorithm's static Create method (for example {type.Name.Replace("CryptoServiceProvider", string.Empty, StringComparison.Ordinal).Replace("Managed", string.Empty, StringComparison.Ordinal)}.Create()).");
+            }
+
+            if (type.Name is "Rijndael" or "RijndaelManaged" && (isConstructor || method.Name == "Create"))
+            {
+                Obsolete(operation, "SYSLIB0022", $"{type.Name} is obsolete.", "Use Aes.Create().");
+            }
+
+            if (isConstructor && type.Name == "RNGCryptoServiceProvider")
+            {
+                Obsolete(operation, "SYSLIB0023", "RNGCryptoServiceProvider is obsolete.", "Use RandomNumberGenerator.Create() or the static RandomNumberGenerator methods.");
+            }
+
+            if (!isConstructor && method.IsStatic && method.Name == "Create" && method.Parameters is [{ Type.SpecialType: SpecialType.System_String }])
+            {
+                Obsolete(operation, "SYSLIB0045", $"{type.Name}.Create(string) is obsolete.", "Call the specific algorithm's Create() method.");
+            }
+
+            if (isConstructor && type.Name == "AesGcm" && method.Parameters.Length == 1)
+            {
+                Obsolete(operation, "SYSLIB0053", "The AesGcm constructor without a tag size is obsolete.", "Pass the tag size: new AesGcm(key, AesGcm.TagByteSizes.MaxSize).");
+            }
+
+            if ((isConstructor && type.Name is "X509Certificate2" or "X509Certificate" && method.Parameters is [{ Type: var first }, ..] &&
+                 (first.SpecialType == SpecialType.System_String || first is IArrayTypeSymbol { ElementType.SpecialType: SpecialType.System_Byte } || first.Name == "ReadOnlySpan")) ||
+                (type.Name == "X509Certificate2Collection" && method.Name == "Import"))
+            {
+                Obsolete(operation, "SYSLIB0057", $"Loading certificates through {type.Name}{(isConstructor ? " constructors" : "." + method.Name)} is obsolete.", "Use X509CertificateLoader.");
+            }
+        }
+
+        private static bool InheritsFrom(INamedTypeSymbol type, string name)
+        {
+            for (var current = type; current is not null; current = current.BaseType)
+            {
+                if (current.Name == name)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool IsRsa(INamedTypeSymbol type)
+        {
+            for (var current = type; current is not null; current = current.BaseType)
+            {
+                if (current.Name == "RSA" && current.ContainingNamespace?.ToDisplayString() == CryptographyNamespace)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static string? HashAlgorithmNameOf(IOperation value) => Strip(value) switch
+        {
+            IPropertyReferenceOperation { Property.ContainingType.Name: "HashAlgorithmName" } property => property.Property.Name,
+            IObjectCreationOperation { Arguments: [{ Value.ConstantValue: { HasValue: true, Value: string name } }] } => name,
+            _ => null
+        };
+
+        /// <summary>
+        ///     "zero" for a freshly allocated array (`new byte[16]`), "constant" for one built only
+        ///     from constants (`new byte[] { 1, 2, … }`, `Encoding.UTF8.GetBytes("literal")`,
+        ///     `Convert.FromBase64String("…")`); null for anything computed.
+        /// </summary>
+        internal static string? StaticBytesKind(IOperation value)
+        {
+            value = Strip(value);
+            if (value is IArrayCreationOperation array)
+            {
+                if (array.Initializer is null)
+                {
+                    return array.DimensionSizes.All(size => size.ConstantValue.HasValue) ? "zero" : null;
+                }
+
+                if (array.Initializer.ElementValues.All(element => element.ConstantValue.HasValue))
+                {
+                    return array.Initializer.ElementValues.All(element => element.ConstantValue.Value is 0 or (byte)0) ? "zero" : "constant";
+                }
+
+                return null;
+            }
+
+            // Text decoded from a literal; RandomNumberGenerator.GetBytes(16) is the opposite.
+            if (value is IInvocationOperation { TargetMethod: { Name: "GetBytes" or "FromBase64String" or "FromHexString", ContainingType: { } decoder } } invocation &&
+                (decoder.Name == "Convert" || InheritsFrom(decoder, "Encoding")) &&
+                invocation.Arguments.Length > 0 && invocation.Arguments.All(argument => argument.Value.ConstantValue.HasValue))
+            {
+                return "constant";
+            }
+
+            if (value is IInvocationOperation { TargetMethod.Name: "ToArray" or "AsSpan" } conversion && conversion.Instance is { } instance)
+            {
+                return StaticBytesKind(instance);
+            }
+
+            return null;
+        }
+
+        private static IOperation Strip(IOperation operation)
+        {
+            while (operation is IConversionOperation conversion)
+            {
+                operation = conversion.Operand;
+            }
+
+            return operation;
+        }
+
+        private void Obsolete(IOperation operation, string diagnostic, string summary, string recommendation) =>
+            Report(operation, "DOSAI-CRYPTO-OBSOLETE-API", "Low", "High", $"{summary} (diagnostic {diagnostic})", recommendation, ("diagnostic", diagnostic));
+
+        private void Report(IOperation operation, string rule, string severity, string confidence, string summary, string recommendation, (string Key, string Value)? property = null)
+        {
+            var method = model.GetEnclosingSymbol(operation.Syntax.SpanStart) as IMethodSymbol;
+            var position = operation.Syntax.GetLocation().GetLineSpan().StartLinePosition;
+            var location = CreateLocation(basePath, sourceFilePath, position.Line + 1, position.Character + 1);
+            var methodId = ResolveMethodId(reachability, sourceFilePath, method?.ContainingNamespace?.ToDisplayString(), method?.ContainingType?.Name, method?.Name);
+            var entryPointIds = reachability.EntryPointsFor(methodId, sourceFilePath, method?.Name);
+            AddFinding(result, rule, severity, confidence, summary, recommendation, location, methodId, entryPointIds.Count > 0, entryPointIds, [], [], []);
+            if (property is { } extra && result.Findings.LastOrDefault(finding => finding.RuleId == rule && finding.Location.LineNumber == location.LineNumber) is { } finding)
+            {
+                finding.Properties[extra.Key] = extra.Value;
+            }
         }
 
         public override void VisitSimpleAssignment(ISimpleAssignmentOperation operation)
         {
+            if (Strip(operation.Target) is IPropertyReferenceOperation { Property.ContainingType: { } owner } property &&
+                (owner.ContainingNamespace?.ToDisplayString() ?? string.Empty).StartsWith(CryptographyNamespace, StringComparison.Ordinal))
+            {
+                if (property.Property.Name == "IV" && StaticBytesKind(operation.Value) is { } staticKind)
+                {
+                    Report(operation, "DOSAI-CRYPTO-STATIC-IV", "High", "High", $"A {staticKind} IV is assigned to {owner.Name}.IV.", "Generate a fresh random IV for every encryption (SymmetricAlgorithm.GenerateIV()).");
+                }
+
+                if (property.Property.Name == "KeySize" && operation.Value.ConstantValue is { HasValue: true, Value: int bits } && bits < MinimumAsymmetricKeyBits && property.Instance?.Type is INamedTypeSymbol instanceType && IsAsymmetric(instanceType))
+                {
+                    Report(operation, "DOSAI-CRYPTO-WEAK-KEY-SIZE", "High", "High", $"{instanceType.Name} key size {bits.ToString(CultureInfo.InvariantCulture)} bits is below {MinimumAsymmetricKeyBits.ToString(CultureInfo.InvariantCulture)}.", "Use RSA keys of at least 2048 bits, or ECDSA P-256 or stronger.");
+                }
+            }
+            else if (Strip(operation.Target) is ILocalReferenceOperation { Local.Name: var localName } && IsIvOrNonceName(localName) && StaticBytesKind(operation.Value) is { } staticLocal)
+            {
+                Report(operation, "DOSAI-CRYPTO-STATIC-IV", "High", "Medium", $"A {staticLocal} IV/nonce is assigned to {localName}.", "Generate a fresh random IV (or a unique nonce) for every encryption.");
+            }
+
             var code = SafeSyntaxText.Text(operation.Syntax);
-            if (code.Contains("CipherMode.ECB", StringComparison.OrdinalIgnoreCase) || code.Contains("ServerCertificateCustomValidationCallback", StringComparison.OrdinalIgnoreCase))
+            if (code.Contains("CipherMode.ECB", StringComparison.OrdinalIgnoreCase) || code.Contains("ValidationCallback", StringComparison.OrdinalIgnoreCase))
             {
                 var method = model.GetEnclosingSymbol(operation.Syntax.SpanStart) as IMethodSymbol;
-                DetectLineMisuse(code, basePath, sourceFilePath, operation.Syntax.GetLocation().GetLineSpan().StartLinePosition.Line + 1, method?.ContainingNamespace?.ToDisplayString(), method?.ContainingType?.Name, method?.Name, reachability, result);
+                DetectLineMisuse(code, basePath, sourceFilePath, operation.Syntax.GetLocation().GetLineSpan().StartLinePosition.Line + 1, method?.ContainingNamespace?.ToDisplayString(), method?.ContainingType?.Name, method?.Name, reachability, result, semantic: true);
             }
             base.VisitSimpleAssignment(operation);
+        }
+
+        public override void VisitVariableDeclarator(IVariableDeclaratorOperation operation)
+        {
+            if (IsIvOrNonceName(operation.Symbol.Name) && operation.GetVariableInitializer()?.Value is { } initializer && StaticBytesKind(initializer) is { } staticKind)
+            {
+                Report(operation, "DOSAI-CRYPTO-STATIC-IV", "High", "Medium", $"A {staticKind} IV/nonce is assigned to {operation.Symbol.Name}.", "Generate a fresh random IV (or a unique nonce) for every encryption.");
+            }
+
+            base.VisitVariableDeclarator(operation);
+        }
+
+        private static bool IsAsymmetric(INamedTypeSymbol type)
+        {
+            for (var current = type; current is not null; current = current.BaseType)
+            {
+                if (current.Name == "AsymmetricAlgorithm")
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         public override void VisitLiteral(ILiteralOperation operation)
@@ -1789,7 +2324,7 @@ public static class CryptoBomExporter
             CryptoProperties: new
             {
                 assetType = ToCycloneDxAssetType(asset.AssetType),
-                algorithmProperties = ToCycloneDxPrimitive(asset.Family) is { } primitive
+                algorithmProperties = ToCycloneDxPrimitive(asset.Name, asset.Family) is { } primitive
                     ? new { primitive }
                     : null
             },
@@ -1948,6 +2483,21 @@ public static class CryptoBomExporter
     ///     enum when the concepts coincide; returns null otherwise so the property is omitted
     ///     rather than guessed (the family always survives as a dosai:crypto:family property).
     /// </summary>
+    private static string? ToCycloneDxPrimitive(string? algorithm, string? family) => (algorithm ?? string.Empty).Trim() switch
+    {
+        // The algorithm decides first: dosai's families are coarser than the CycloneDX
+        // primitives (ML-KEM is a key-agreement family member but a KEM, AES-GCM is symmetric but
+        // authenticated encryption).
+        "ML-KEM" or "Composite ML-KEM" => "kem",
+        "AES-GCM" or "AES-CCM" or "ChaCha20-Poly1305" => "ae",
+        "AES" or "3DES" or "DES/RC2/RC4" => "block-cipher",
+        "HPKE" => "pke",
+        "CSPRNG" => "drbg",
+        "SHAKE" => "xof",
+        "ECDSA" or "DSA" or "ML-DSA" or "SLH-DSA" or "Composite ML-DSA" => "signature",
+        _ => ToCycloneDxPrimitive(family)
+    };
+
     private static string? ToCycloneDxPrimitive(string? family) => (family ?? string.Empty).Trim().ToLowerInvariant() switch
     {
         "hash" => "hash",
