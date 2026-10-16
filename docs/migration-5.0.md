@@ -304,6 +304,50 @@ The following bugs are fixed. All of them could **remove** or corrupt results in
   method: their calls, `AsyncHelpers.Await` included, start at the method itself, and their
   parameter sources reach sinks across awaits.
 
+## Data-flow precision changes (5.0.0-rc.2)
+
+These change which slices an unchanged input reports, in both directions:
+
+- **Property setters and conversion operators are sinks.** `cmd.CommandText = q`,
+  `psi.Arguments = q`, `message.RequestUri = uri` and `(MarkupString)html` now reach the sink
+  their setter or operator matches, directly and through helper summaries. An object
+  initializer's stores still report once, at the sink that consumes the object.
+- **Encoders are scoped to what they encode.** A sanitizer pattern can list
+  `SanitizesCategories`; the HTML encoders now stop only `xss` (plus `header`/`log` for
+  `TextEncoder`), so `Process.Start(HtmlEncoder.Default.Encode(q))` is reported as command
+  injection. `HtmlEncoder.Default.Encode` binds to `TextEncoder.Encode`, which the old
+  `HtmlEncoder.Encode` pattern never matched, so encoded XSS flows were reported before and are
+  `SanitizedFlows` entries now.
+- **Argument-specific sinks.** A sink pattern can list `SinkParameters`. `ExecuteSqlRaw`,
+  `FromSqlRaw`, `SqlQueryRaw` and Dapper flag only the SQL text, not bound parameter values; the
+  ReDoS patterns flag only a tainted `pattern` (a tainted input matched against a fixed regex
+  was a Low finding and is gone; a tainted pattern is now Medium and covers
+  `Replace`/`Split`/`Count`/`Matches`/`EnumerateMatches`/`EnumerateSplits`).
+- **Sinks and sources added:** `HttpClientJsonExtensions`, `HttpRequestMessage`, `WebRequest`,
+  `WebClient`; `FileInfo`/`DirectoryInfo`/`StreamReader`/`StreamWriter` by path,
+  `PhysicalFile`, `Results.File`; zip and tar extraction targets, with archive entry names as an
+  `archive` source (zip slip); `SqlQueryRaw`, `DbDataSource.CreateCommand`, `CommandText`
+  setters; `RedirectResult`; `HtmlString`, `AppendHtml`; `Activator.CreateInstance`,
+  `AssemblyLoadContext.LoadFrom*`, `Assembly.GetType(string)`; Roslyn `CSharpScript` and Dynamic
+  LINQ (`code-injection`).
+- **Sinks and sanitizers removed:** `LocalRedirect` (it rejects non-local URLs) and the route
+  redirects (`RedirectToAction` and friends matched the old `ControllerBase.Redirect` prefix) are
+  no longer redirect sinks; `Path.GetFullPath` is no longer a path sanitizer (it does not
+  confine a path).
+- **Sanitizers added:** `IsLocalUrl`, `Regex.Escape` (scoped to `redos`), numeric, date and
+  `Guid` `Parse`/`ParseExact`, `Convert.To<numeric>`.
+- **Validators and guards.** A validator's `out` value is clean (`int.TryParse(q, out var n)` no
+  longer taints `n`), and an early exit (`if (!Regex.IsMatch(q, …)) return;`, or `throw`,
+  `continue`, `break`) validates `q` for the rest of the block.
+- **Qualified member patterns match.** A property or field is matched as
+  `Namespace.Type.Member`; it used to be matched by its bare name, so qualified `Method`/`Symbol`
+  patterns on members (the WebForms control-value source, `Console.In`) never matched a bound
+  member.
+
+`Patterns.Sanitizers[]` and `Patterns.Sinks[]` entries gain the `SanitizesCategories` and
+`SinkParameters` fields (empty for the historic behavior). Assembly (IL) mode does not apply
+either field yet.
+
 ## Nothing to change in queries or exports
 
 Field names, identifier formats (`Metadata`, `SourceSignature`, method ids), severity and

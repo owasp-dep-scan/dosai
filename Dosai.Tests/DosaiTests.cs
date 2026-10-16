@@ -4089,7 +4089,10 @@ class SanitizedFlow
 
         Assert.Contains(result.Patterns.Sanitizers, pattern => pattern.Category == "html-encoding");
         Assert.Contains(result.Patterns.Sanitizers, pattern => pattern.Category == "validation");
-        Assert.DoesNotContain(result.Slices, slice => slice.SinkCategory == "command");
+        // HTML encoding neutralizes XSS, not a shell command: the encoded value still reaches
+        // Process.Start. The regex guard validates its branch.
+        Assert.Contains(result.Slices, slice => slice.SinkCategory == "command" && slice.SinkArgument == "encoded");
+        Assert.DoesNotContain(result.Slices, slice => slice.SinkCategory == "command" && slice.SinkArgument == "guarded");
     }
 
     [Fact]

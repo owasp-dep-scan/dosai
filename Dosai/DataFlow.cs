@@ -54,6 +54,19 @@ public sealed class DataFlowPattern
     public string? Description { get; set; }
     public List<string> TaintKinds { get; set; } = [];
     public List<string> RemovesTaintKinds { get; set; } = [];
+    /// <summary>
+    ///     Sanitizers only: the sink categories this sanitizer neutralizes. Empty keeps the
+    ///     historic behavior (the flow stops for every sink); a non-empty list lets the flow keep
+    ///     going and suppresses it only at sinks of these categories, so `HtmlEncode` stops XSS
+    ///     but not a command injection through the same value.
+    /// </summary>
+    public List<string> SanitizesCategories { get; set; } = [];
+    /// <summary>
+    ///     Sinks only: the parameter names whose argument is the dangerous one (`pattern` of
+    ///     `Regex.Replace`, `sql` of `ExecuteSqlRaw`). Empty makes every argument a sink, as
+    ///     before; `this` names the receiver.
+    /// </summary>
+    public List<string> SinkParameters { get; set; } = [];
     public string Confidence { get; set; } = "Medium";
     /// <summary>Optional severity override (info/low/medium/high/critical). Empty falls back to the per-category default.</summary>
     public string? Severity { get; set; }
@@ -637,6 +650,26 @@ public static partial class DataFlowAnalyzer
         }
     }
 
+    /// <summary>
+    ///     Whether <paramref name="parameter"/> (null: the receiver) is a dangerous argument of
+    ///     the matched sinks: any matched pattern without <see cref="DataFlowPattern.SinkParameters"/>
+    ///     makes every argument one.
+    /// </summary>
+    private static bool IsSinkArgument(IReadOnlyList<DataFlowPattern> sinkPatterns, IParameterSymbol? parameter) =>
+        sinkPatterns.Count == 0 || sinkPatterns.Any(pattern => pattern.SinkParameters.Count == 0 ||
+            pattern.SinkParameters.Contains(parameter?.Name ?? "this", StringComparer.Ordinal));
+
+    /// <summary>
+    ///     The text a <c>Method</c>/<c>Symbol</c> pattern compares against. A property, field or
+    ///     event renders as its bare name through the fully qualified display format, so
+    ///     `ZipArchiveEntry.FullName` or a WebForms `TextBox.Text` could never match a qualified
+    ///     pattern; members are qualified by their containing type, as methods already are.
+    /// </summary>
+    private static string PatternSymbolText(ISymbol symbol, string described) =>
+        symbol is IPropertySymbol or IFieldSymbol or IEventSymbol && symbol.ContainingType is { } containingType
+            ? $"{Normalize(containingType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat))}.{symbol.Name}"
+            : described;
+
     private static DataFlowPatternSet LoadPatterns(string? patternsPath, string? patternPacks)
     {
         var defaults = CreateDefaultPatterns();
@@ -688,16 +721,23 @@ public static partial class DataFlowAnalyzer
                 new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Attribute, Pattern = "FromRoute", Match = DataFlowMatchKind.Contains, Category = "http", Description = "ASP.NET route input" }
             ]);
             patterns.Sinks.AddRange([
-                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "Microsoft.AspNetCore.Mvc.ControllerBase.Redirect", Match = DataFlowMatchKind.Contains, Category = "redirect", Description = "ASP.NET redirect" },
-                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "Microsoft.AspNetCore.Mvc.ControllerBase.LocalRedirect", Match = DataFlowMatchKind.Contains, Category = "redirect", Description = "ASP.NET local redirect" }
+                // LocalRedirect is the safe form (it rejects non-local URLs) and RedirectToAction
+                // and friends take route values, not URLs, so only the URL-taking redirects match.
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = @"^Microsoft\.AspNetCore\.Mvc\.ControllerBase\.Redirect(Permanent)?(Preserve(Method)?)?\(", Match = DataFlowMatchKind.Regex, Category = "redirect", Description = "ASP.NET redirect" },
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "Microsoft.AspNetCore.Mvc.RedirectResult..ctor", Match = DataFlowMatchKind.Contains, Category = "redirect", Description = "ASP.NET RedirectResult", SinkParameters = ["url"] },
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "Microsoft.AspNetCore.Mvc.ControllerBase.PhysicalFile", Match = DataFlowMatchKind.Contains, Category = "file", Description = "ASP.NET physical file result", SinkParameters = ["physicalPath"] },
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = @"^Microsoft\.AspNetCore\.Http\.(Typed)?Results\.(File|PhysicalFile)\(", Match = DataFlowMatchKind.Regex, Category = "file", Description = "Minimal API file result", SinkParameters = ["path"] }
+            ]);
+            patterns.Sanitizers.AddRange([
+                new() { Target = DataFlowPatternTarget.Sanitizer, Kind = DataFlowPatternKind.Name, Pattern = "IsLocalUrl", Match = DataFlowMatchKind.Exact, Category = "redirect-validation", Description = "Local-URL check guarding a redirect" }
             ]);
         }
 
         if (requested.Contains("data"))
         {
             patterns.Sinks.AddRange([
-                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "Dapper.SqlMapper.Query", Match = DataFlowMatchKind.Contains, Category = "sql", Description = "Dapper raw SQL query" },
-                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "Dapper.SqlMapper.Execute", Match = DataFlowMatchKind.Contains, Category = "sql", Description = "Dapper raw SQL execution" },
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "Dapper.SqlMapper.Query", Match = DataFlowMatchKind.Contains, Category = "sql", Description = "Dapper raw SQL query", SinkParameters = ["sql", "command"] },
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "Dapper.SqlMapper.Execute", Match = DataFlowMatchKind.Contains, Category = "sql", Description = "Dapper raw SQL execution", SinkParameters = ["sql", "command"] },
                 new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "Npgsql.NpgsqlCommand", Match = DataFlowMatchKind.Contains, Category = "sql", Description = "PostgreSQL command" }
             ]);
             patterns.Sanitizers.AddRange([
@@ -718,8 +758,19 @@ public static partial class DataFlowAnalyzer
         if (requested.Contains("filesystem"))
         {
             patterns.Sanitizers.AddRange([
-                new() { Target = DataFlowPatternTarget.Sanitizer, Kind = DataFlowPatternKind.Method, Pattern = "System.IO.Path.GetFileName", Match = DataFlowMatchKind.Contains, Category = "path-validation", Description = "Path traversal limiting filename extraction" },
-                new() { Target = DataFlowPatternTarget.Sanitizer, Kind = DataFlowPatternKind.Method, Pattern = "System.IO.Path.GetFullPath", Match = DataFlowMatchKind.Contains, Category = "path-normalization", Description = "Path normalization" }
+                // GetFullPath is not a sanitizer: it resolves `..` segments, it does not confine
+                // the result to a base directory.
+                new() { Target = DataFlowPatternTarget.Sanitizer, Kind = DataFlowPatternKind.Method, Pattern = "System.IO.Path.GetFileName", Match = DataFlowMatchKind.Contains, Category = "path-validation", Description = "Path traversal limiting filename extraction" }
+            ]);
+            patterns.Sources.AddRange([
+                // Zip slip: an archive entry's name is attacker-chosen, `../` included.
+                new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Symbol, Pattern = @"^(System\.IO\.Compression\.ZipArchiveEntry\.(FullName|Name)|System\.Formats\.Tar\.TarEntry\.(Name|LinkName))$", Match = DataFlowMatchKind.Regex, Category = "archive", Description = "Archive entry name (zip slip)", TaintKinds = ["archive-entry", "path"] }
+            ]);
+            patterns.Sinks.AddRange([
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = @"^System\.IO\.(FileInfo|DirectoryInfo)\.\.ctor\(", Match = DataFlowMatchKind.Regex, Category = "file", Description = "File system info construction" },
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = @"^System\.IO\.(StreamReader|StreamWriter)\.\.ctor\(", Match = DataFlowMatchKind.Regex, Category = "file", Description = "File reader/writer opened by path", SinkParameters = ["path"] },
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = @"^System\.IO\.Compression\.(ZipFile|ZipFileExtensions)\.ExtractTo(File|Directory)\w*\(", Match = DataFlowMatchKind.Regex, Category = "file", Description = "Zip extraction target", SinkParameters = ["destinationFileName", "destinationDirectoryName"] },
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = @"^System\.Formats\.Tar\.(TarFile\.ExtractToDirectory|TarEntry\.ExtractToFile)\w*\(", Match = DataFlowMatchKind.Regex, Category = "file", Description = "Tar extraction target", SinkParameters = ["destinationFileName", "destinationDirectoryName"] }
             ]);
         }
 
@@ -844,7 +895,9 @@ public static partial class DataFlowAnalyzer
                 new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "HtmlHelper.Raw", Match = DataFlowMatchKind.Contains, Category = "xss", Description = "Unencoded HTML output (IHtmlHelper.Raw/HtmlHelper.Raw)" },
                 new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "System.Web.HttpResponse.Write", Match = DataFlowMatchKind.Contains, Category = "xss", Description = "Legacy HttpResponse.Write of unencoded markup" },
                 new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "System.Web.HttpResponse.WriteLiteral", Match = DataFlowMatchKind.Contains, Category = "xss", Description = "Legacy HttpResponse.WriteLiteral" },
-                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "Microsoft.AspNetCore.Components.MarkupString", Match = DataFlowMatchKind.Contains, Category = "xss", Description = "Blazor MarkupString construction bypasses encoding" },
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "Microsoft.AspNetCore.Components.MarkupString", Match = DataFlowMatchKind.Contains, Category = "xss", Description = "Blazor MarkupString construction or cast bypasses encoding" },
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "Microsoft.AspNetCore.Html.HtmlString..ctor", Match = DataFlowMatchKind.Contains, Category = "xss", Description = "HtmlString wraps markup without encoding" },
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = @"\.AppendHtml(Line)?\(", Match = DataFlowMatchKind.Regex, Category = "xss", Description = "AppendHtml writes markup without encoding" },
                 new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Code, Pattern = "Html.Raw(", Match = DataFlowMatchKind.Contains, Category = "xss", Description = "Razor @Html.Raw fallback for syntax-only views", Confidence = "Low" },
                 new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Code, Pattern = ".InnerHtml =", Match = DataFlowMatchKind.Contains, Category = "xss", Description = "WebForms/DOM InnerHtml assignment", Confidence = "Low" }
             ]);
@@ -901,7 +954,11 @@ public static partial class DataFlowAnalyzer
                 new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "MongoDB.Driver.FilterDefinitionBuilder.Where", Match = DataFlowMatchKind.Contains, Category = "nosql", Description = "String-filter Where clause (expression form is parameterized)" },
                 new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "MongoDB.Driver.IMongoDatabase.RunCommand", Match = DataFlowMatchKind.Contains, Category = "nosql", Description = "RunCommand with tainted command document" },
                 new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Name, Pattern = "ScriptEvaluate", Match = DataFlowMatchKind.Exact, Category = "nosql", Description = "Redis Lua script evaluation (code injection adjacent)" },
-                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Name, Pattern = "LuaScript", Match = DataFlowMatchKind.Exact, Category = "nosql", Description = "Redis LuaScript preparation from tainted source" }
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Name, Pattern = "LuaScript", Match = DataFlowMatchKind.Exact, Category = "nosql", Description = "Redis LuaScript preparation from tainted source" },
+                // Code evaluation (CWE-94/CWE-917)
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "Microsoft.CodeAnalysis.CSharp.Scripting.CSharpScript.", Match = DataFlowMatchKind.Contains, Category = "code-injection", Description = "Roslyn scripting evaluates tainted C#", SinkParameters = ["code"] },
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "System.Linq.Dynamic.Core.DynamicQueryableExtensions.", Match = DataFlowMatchKind.Contains, Category = "code-injection", Description = "Dynamic LINQ expression from tainted text", SinkParameters = ["predicate", "selector", "ordering", "keySelector", "resultSelector", "propertyName"] },
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "System.Linq.Dynamic.Core.DynamicExpressionParser.Parse", Match = DataFlowMatchKind.Contains, Category = "code-injection", Description = "Dynamic LINQ lambda parsed from tainted text", SinkParameters = ["expression"] }
             ]);
         }
 
@@ -944,9 +1001,10 @@ public static partial class DataFlowAnalyzer
                 // Tainted *pattern* arguments. Tainted subjects validated against a fixed regex are the
                 // correct pattern, so these default to Low severity; catastrophic *literal* patterns are
                 // additionally flagged statically by the ReDoS literal heuristic.
-                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "System.Text.RegularExpressions.Regex..ctor", Match = DataFlowMatchKind.Contains, Category = "redos", Description = "Regex constructed from tainted pattern", Severity = "Medium" },
-                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "System.Text.RegularExpressions.Regex.IsMatch", Match = DataFlowMatchKind.Contains, Category = "redos", Description = "Regex.IsMatch with tainted pattern argument", Severity = "Low", Confidence = "Low" },
-                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "System.Text.RegularExpressions.Regex.Match", Match = DataFlowMatchKind.Contains, Category = "redos", Description = "Regex.Match with tainted pattern argument", Severity = "Low", Confidence = "Low" }
+                // Only the pattern argument: matching a tainted *input* against a fixed regex is
+                // what validation looks like.
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "System.Text.RegularExpressions.Regex..ctor", Match = DataFlowMatchKind.Contains, Category = "redos", Description = "Regex constructed from tainted pattern", Severity = "Medium", SinkParameters = ["pattern"] },
+                new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = @"^System\.Text\.RegularExpressions\.Regex\.(IsMatch|Match|Matches|Replace|Split|Count|EnumerateMatches|EnumerateSplits)\(", Match = DataFlowMatchKind.Regex, Category = "redos", Description = "Static Regex call with tainted pattern argument", Severity = "Medium", SinkParameters = ["pattern"] }
             ]);
         }
 
@@ -1030,6 +1088,10 @@ public static partial class DataFlowAnalyzer
             new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Code, Pattern = "CopyTo(", Match = DataFlowMatchKind.Contains, Category = "file", Description = "Stream/file copy" },
             new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Code, Pattern = "Server.MapPath", Match = DataFlowMatchKind.Contains, Category = "file", Description = "Server path mapping" },
             new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "System.Net.Http.HttpClient.", Match = DataFlowMatchKind.Contains, Category = "network", Description = "Outbound HTTP request" },
+            new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "System.Net.Http.Json.HttpClientJsonExtensions.", Match = DataFlowMatchKind.Contains, Category = "network", Description = "Outbound HTTP JSON request", SinkParameters = ["requestUri"] },
+            new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = @"^System\.Net\.Http\.HttpRequestMessage\.(\.ctor|set_RequestUri)\(", Match = DataFlowMatchKind.Regex, Category = "network", Description = "Outbound HTTP request target", SinkParameters = ["requestUri", "value"] },
+            new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = @"^System\.Net\.(WebRequest|HttpWebRequest)\.Create(Http|Default)?\(", Match = DataFlowMatchKind.Regex, Category = "network", Description = "Outbound WebRequest" },
+            new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = @"^System\.Net\.WebClient\.(Download|Upload|Open)\w*\(", Match = DataFlowMatchKind.Regex, Category = "network", Description = "Outbound WebClient request", SinkParameters = ["address"] },
             new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "Response.Redirect", Match = DataFlowMatchKind.Contains, Category = "redirect", Description = "HTTP redirect" },
             new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Name, Pattern = "Redirect", Match = DataFlowMatchKind.Exact, Category = "redirect", Description = "HTTP redirect" },
             new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "GetGrain", Match = DataFlowMatchKind.Contains, Category = "rpc", Description = "Orleans grain dispatch" },
@@ -1040,10 +1102,19 @@ public static partial class DataFlowAnalyzer
             new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "SqliteCommand", Match = DataFlowMatchKind.Contains, Category = "sql", Description = "SQLite command" },
             new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Name, Pattern = "ExecuteNonQuery", Match = DataFlowMatchKind.Exact, Category = "sql", Description = "SQL command execution" },
             new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Name, Pattern = "ExecuteReader", Match = DataFlowMatchKind.Exact, Category = "sql", Description = "SQL query execution" },
-            new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "ExecuteSqlRaw", Match = DataFlowMatchKind.Contains, Category = "sql", Description = "Entity Framework raw SQL execution" },
-            new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "FromSqlRaw", Match = DataFlowMatchKind.Contains, Category = "sql", Description = "Entity Framework raw SQL query" },
+            new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "ExecuteSqlRaw", Match = DataFlowMatchKind.Contains, Category = "sql", Description = "Entity Framework raw SQL execution", SinkParameters = ["sql"] },
+            new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "FromSqlRaw", Match = DataFlowMatchKind.Contains, Category = "sql", Description = "Entity Framework raw SQL query", SinkParameters = ["sql"] },
+            // Only the SQL text is dangerous: the trailing parameter values are bound, never spliced.
+            new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "SqlQueryRaw", Match = DataFlowMatchKind.Contains, Category = "sql", Description = "Entity Framework raw SQL query (SqlQueryRaw)", SinkParameters = ["sql"] },
+            new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "System.Data.Common.DbDataSource.CreateCommand", Match = DataFlowMatchKind.Contains, Category = "sql", Description = "ADO.NET data-source command text" },
+            // Property stores run setters: `cmd.CommandText = q` on the provider-neutral command types.
+            new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = @"^System\.Data\.(Common\.DbCommand|IDbCommand)\.set_CommandText\(", Match = DataFlowMatchKind.Regex, Category = "sql", Description = "SQL command text assignment" },
+            new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = @"^System\.Data\.(Common\.DbBatchCommand)\.set_CommandText\(", Match = DataFlowMatchKind.Regex, Category = "sql", Description = "SQL batch command text assignment" },
             new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "System.Reflection.Assembly.Load", Match = DataFlowMatchKind.Contains, Category = "reflection", Description = "Dynamic assembly loading" },
             new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "System.Type.GetType", Match = DataFlowMatchKind.Contains, Category = "reflection", Description = "Dynamic type lookup" },
+            new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = @"^System\.Reflection\.Assembly\.GetType\(string", Match = DataFlowMatchKind.Regex, Category = "reflection", Description = "Dynamic type lookup in an assembly" },
+            new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "System.Activator.CreateInstance", Match = DataFlowMatchKind.Contains, Category = "reflection", Description = "Dynamic instantiation" },
+            new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "System.Runtime.Loader.AssemblyLoadContext.LoadFrom", Match = DataFlowMatchKind.Contains, Category = "reflection", Description = "Dynamic assembly loading (AssemblyLoadContext)" },
             new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "BinaryFormatter.Deserialize", Match = DataFlowMatchKind.Contains, Category = "deserialization", Description = "BinaryFormatter deserialization" },
             new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Name, Pattern = "Deserialize", Match = DataFlowMatchKind.Exact, Category = "deserialization", Description = "Object deserialization" }
         ],
@@ -1057,9 +1128,19 @@ public static partial class DataFlowAnalyzer
         ],
         Sanitizers =
         [
-            new() { Target = DataFlowPatternTarget.Sanitizer, Kind = DataFlowPatternKind.Method, Pattern = "System.Text.Encodings.Web.HtmlEncoder.Encode", Match = DataFlowMatchKind.Contains, Category = "html-encoding", Description = "HTML encoding" },
-            new() { Target = DataFlowPatternTarget.Sanitizer, Kind = DataFlowPatternKind.Method, Pattern = "System.Net.WebUtility.HtmlEncode", Match = DataFlowMatchKind.Contains, Category = "html-encoding", Description = "HTML encoding" },
-            new() { Target = DataFlowPatternTarget.Sanitizer, Kind = DataFlowPatternKind.Method, Pattern = "System.Uri.EscapeDataString", Match = DataFlowMatchKind.Contains, Category = "url-encoding", Description = "URL component encoding" },
+            // Encoders neutralize the sinks they encode for, not every sink: an HTML-encoded value
+            // still injects a shell command or a path. HtmlEncoder/JavaScriptEncoder/UrlEncoder
+            // calls bind to the inherited TextEncoder.Encode, and every TextEncoder escapes control
+            // characters, so CR/LF injection is covered too.
+            new() { Target = DataFlowPatternTarget.Sanitizer, Kind = DataFlowPatternKind.Method, Pattern = "System.Text.Encodings.Web.TextEncoder.Encode", Match = DataFlowMatchKind.Contains, Category = "html-encoding", Description = "Web text encoding (HtmlEncoder/JavaScriptEncoder/UrlEncoder)", SanitizesCategories = ["xss", "header", "log"] },
+            new() { Target = DataFlowPatternTarget.Sanitizer, Kind = DataFlowPatternKind.Method, Pattern = "System.Text.Encodings.Web.HtmlEncoder.Encode", Match = DataFlowMatchKind.Contains, Category = "html-encoding", Description = "HTML encoding", SanitizesCategories = ["xss", "header", "log"] },
+            new() { Target = DataFlowPatternTarget.Sanitizer, Kind = DataFlowPatternKind.Method, Pattern = "System.Net.WebUtility.HtmlEncode", Match = DataFlowMatchKind.Contains, Category = "html-encoding", Description = "HTML encoding", SanitizesCategories = ["xss"] },
+            new() { Target = DataFlowPatternTarget.Sanitizer, Kind = DataFlowPatternKind.Method, Pattern = "System.Web.HttpUtility.HtmlEncode", Match = DataFlowMatchKind.Contains, Category = "html-encoding", Description = "HTML encoding", SanitizesCategories = ["xss"] },
+            new() { Target = DataFlowPatternTarget.Sanitizer, Kind = DataFlowPatternKind.Method, Pattern = "System.Uri.EscapeDataString", Match = DataFlowMatchKind.Contains, Category = "url-encoding", Description = "URL component encoding", SanitizesCategories = ["xss", "header", "log", "redirect"] },
+            // A parsed number, date or id carries no injectable text.
+            new() { Target = DataFlowPatternTarget.Sanitizer, Kind = DataFlowPatternKind.Method, Pattern = @"^(System\.(Byte|SByte|Int16|UInt16|Int32|UInt32|Int64|UInt64|Int128|UInt128|Half|Single|Double|Decimal|Boolean|Guid|DateTime|DateTimeOffset|DateOnly|TimeOnly|TimeSpan)|byte|sbyte|short|ushort|int|uint|long|ulong|float|double|decimal|bool)\.Parse(Exact)?\(", Match = DataFlowMatchKind.Regex, Category = "type-conversion", Description = "Parse into a non-text type" },
+            new() { Target = DataFlowPatternTarget.Sanitizer, Kind = DataFlowPatternKind.Method, Pattern = @"^System\.Convert\.To(Byte|SByte|Int16|UInt16|Int32|UInt32|Int64|UInt64|Single|Double|Decimal|Boolean|DateTime)\(", Match = DataFlowMatchKind.Regex, Category = "type-conversion", Description = "Convert into a non-text type" },
+            new() { Target = DataFlowPatternTarget.Sanitizer, Kind = DataFlowPatternKind.Method, Pattern = "System.Text.RegularExpressions.Regex.Escape", Match = DataFlowMatchKind.Contains, Category = "regex-escaping", Description = "Regex metacharacter escaping", SanitizesCategories = ["redos"] },
             new() { Target = DataFlowPatternTarget.Sanitizer, Kind = DataFlowPatternKind.Method, Pattern = "System.Text.RegularExpressions.Regex.IsMatch", Match = DataFlowMatchKind.Contains, Category = "validation", Description = "Regex validator used as a guard" },
             new() { Target = DataFlowPatternTarget.Sanitizer, Kind = DataFlowPatternKind.Name, Pattern = "IsMatch", Match = DataFlowMatchKind.Exact, Category = "validation", Description = "Validator method used as a guard or sanitizer" },
             new() { Target = DataFlowPatternTarget.Sanitizer, Kind = DataFlowPatternKind.Name, Pattern = "TryParse", Match = DataFlowMatchKind.Exact, Category = "validation", Description = "Parse validator" }
@@ -1906,6 +1987,12 @@ public static partial class DataFlowAnalyzer
         public override void VisitSimpleAssignment(ISimpleAssignmentOperation operation)
         {
             RecordWrite(operation.Target, operation.Value);
+            if (Strip(operation.Target) is IPropertyReferenceOperation { Property.SetMethod: { } setter } property)
+            {
+                // `cmd.CommandText = q` runs the setter: a sink like any other call.
+                RecordSinkSummary(operation, setter, [(operation.Value, setter.Parameters.LastOrDefault())], property.Instance);
+            }
+
             if (_currentMethod is not null &&
                 Strip(operation.Target) is IParameterReferenceOperation { Parameter.RefKind: RefKind.Out or RefKind.Ref } parameterReference)
             {
@@ -2038,7 +2125,10 @@ public static partial class DataFlowAnalyzer
             }
         }
 
-        private void RecordSinkSummary(IOperation operation, IMethodSymbol? targetMethod, IEnumerable<IArgumentOperation> arguments, IOperation? instance)
+        private void RecordSinkSummary(IOperation operation, IMethodSymbol? targetMethod, IEnumerable<IArgumentOperation> arguments, IOperation? instance) =>
+            RecordSinkSummary(operation, targetMethod, arguments.Select(argument => (argument.Value, argument.Parameter)), instance);
+
+        private void RecordSinkSummary(IOperation operation, IMethodSymbol? targetMethod, IEnumerable<(IOperation Value, IParameterSymbol? Parameter)> arguments, IOperation? instance)
         {
             if (_currentMethod is null || targetMethod is null)
             {
@@ -2054,8 +2144,12 @@ public static partial class DataFlowAnalyzer
             var summary = GetSummary(_currentMethod);
             // A receiver member reaching the sink, as an argument or as the sink's own receiver
             // (`_command.ExecuteReader()`), makes calls on a receiver holding taint there a flow.
-            AddAll(summary.ReceiverSinkMembers, Derive(instance).Members);
-            foreach (var argument in arguments)
+            if (IsSinkArgument(sinkPatterns, null))
+            {
+                AddAll(summary.ReceiverSinkMembers, Derive(instance).Members);
+            }
+
+            foreach (var argument in arguments.Where(argument => IsSinkArgument(sinkPatterns, argument.Parameter)))
             {
                 var derivation = Derive(argument.Value);
                 AddAll(summary.ReceiverSinkMembers, derivation.Members);
@@ -2123,7 +2217,7 @@ public static partial class DataFlowAnalyzer
 
         private static IEnumerable<DataFlowPattern> MatchSymbol(ISymbol symbol, SyntaxNode syntax, IEnumerable<DataFlowPattern> candidatePatterns)
         {
-            var normalizedSymbol = DescribeSymbol(symbol);
+            var normalizedSymbol = PatternSymbolText(symbol, DescribeSymbol(symbol));
             var name = symbol.Name;
             var containingType = Normalize((symbol.ContainingType ?? symbol as INamedTypeSymbol)?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty);
             var namespaceName = symbol.ContainingNamespace?.ToDisplayString() ?? string.Empty;
@@ -2299,8 +2393,69 @@ public static partial class DataFlowAnalyzer
                 _currentMethod = methodSymbol;
                 SeedMethodParameters(methodSymbol, operation.Syntax);
             }
-            base.VisitBlock(operation);
+
+            VisitStatements(operation.Operations);
         }
+
+        /// <summary>
+        ///     Visits statements in order, honouring early-exit guards: after
+        ///     `if (!Regex.IsMatch(q, "^[a-z]+$")) return;` (or `throw`, `continue`, `break`) the
+        ///     rest of the block only runs with a validated `q`, exactly like the true branch of
+        ///     `if (Regex.IsMatch(q, …)) { … }`. The suppression ends with the block.
+        /// </summary>
+        private void VisitStatements(IEnumerable<IOperation> statements)
+        {
+            Dictionary<string, TaintTrace?>? saved = null;
+            try
+            {
+                foreach (var statement in statements)
+                {
+                    Visit(statement);
+                    if (statement is not IConditionalOperation { WhenFalse: null } guard || !AlwaysExits(guard.WhenTrue))
+                    {
+                        continue;
+                    }
+
+                    foreach (var key in GetSanitizedGuardKeys(guard.Condition, whenConditionIsTrue: false).Distinct(StringComparer.Ordinal))
+                    {
+                        saved ??= new Dictionary<string, TaintTrace?>(StringComparer.Ordinal);
+                        if (!saved.ContainsKey(key))
+                        {
+                            saved[key] = _taintedSymbols.TryGetValue(key, out var trace) ? trace : null;
+                            if (trace is not null)
+                            {
+                                graph.RecordSanitizedGuard(trace, guard.Condition.Syntax, sourceFilePath);
+                            }
+                        }
+
+                        _taintedSymbols.Remove(key);
+                        _suppressedGuardKeys.Add(key);
+                    }
+                }
+            }
+            finally
+            {
+                if (saved is not null)
+                {
+                    foreach (var (key, trace) in saved)
+                    {
+                        _suppressedGuardKeys.Remove(key);
+                        if (trace is not null)
+                        {
+                            _taintedSymbols[key] = trace;
+                        }
+                    }
+                }
+            }
+        }
+
+        private static bool AlwaysExits(IOperation operation) => operation switch
+        {
+            IReturnOperation or IThrowOperation or IBranchOperation { BranchKind: BranchKind.Continue or BranchKind.Break } => true,
+            IExpressionStatementOperation { Operation: IThrowOperation } => true,
+            IBlockOperation block => block.Operations.Length > 0 && AlwaysExits(block.Operations[^1]),
+            _ => false
+        };
 
         /// <summary>
         ///     Analyzes top-level statements (the default `dotnet new console` template) under
@@ -2322,13 +2477,7 @@ public static partial class DataFlowAnalyzer
             try
             {
                 SeedMethodParameters(topLevelMain, statementList[0]);
-                foreach (var statement in statementList)
-                {
-                    if (OperationDepthGuard.GetOperation(model, statement) is { } operation)
-                    {
-                        Visit(operation);
-                    }
-                }
+                VisitStatements(statementList.Select(statement => OperationDepthGuard.GetOperation(model, statement)).OfType<IOperation>());
             }
             finally
             {
@@ -2375,9 +2524,62 @@ public static partial class DataFlowAnalyzer
             if (!IsInitializerStore(operation))
             {
                 AssignTarget(operation.Target, operation.Value, operation.Syntax, "Assignment");
+                ProcessSetterSink(operation);
             }
 
             base.VisitSimpleAssignment(operation);
+        }
+
+        /// <summary>
+        ///     A property store runs the setter, so `cmd.CommandText = q`, `psi.Arguments = q` and
+        ///     `request.RequestUri = u` reach a sink exactly as the equivalent call would. An object
+        ///     initializer's stores are left to the created object: the sink that consumes it
+        ///     (`Process.Start(new ProcessStartInfo { FileName = q })`) reports the flow once.
+        /// </summary>
+        private void ProcessSetterSink(ISimpleAssignmentOperation operation)
+        {
+            if (Strip(operation.Target) is IPropertyReferenceOperation { Property.SetMethod: { } setter } property)
+            {
+                ProcessValueSink(operation, setter, property.Property.Name, property.Property.Type, operation.Value);
+            }
+        }
+
+        /// <summary>A user-defined conversion runs its operator: `(MarkupString)html` is a sink like `new MarkupString(html)`.</summary>
+        public override void VisitConversion(IConversionOperation operation)
+        {
+            if (operation.OperatorMethod is { } conversionOperator && operation.Type is not null)
+            {
+                ProcessValueSink(operation, conversionOperator, conversionOperator.ContainingType?.Name ?? conversionOperator.Name, operation.Type, operation.Operand);
+            }
+
+            base.VisitConversion(operation);
+        }
+
+        /// <summary>A sink method that receives one value without an argument list: a property setter or a conversion operator.</summary>
+        private void ProcessValueSink(IOperation operation, IMethodSymbol method, string name, ITypeSymbol type, IOperation value)
+        {
+            var matchedSinkPatterns = MatchSymbol(method, operation.Syntax, _patternIndex.Sinks).ToList();
+            if (matchedSinkPatterns.Count == 0 || !IsSinkArgument(matchedSinkPatterns, method.Parameters.LastOrDefault()) || GetTaint(value) is not { } taint)
+            {
+                return;
+            }
+
+            var sinkCategory = matchedSinkPatterns[0].Category;
+            if (SuppressedAtSink(taint, sinkCategory, operation.Syntax))
+            {
+                return;
+            }
+
+            var sinkNode = graph.AddNode("Sink", name, operation, model, basePath, sourceFilePath, _currentMethod,
+                isSource: false,
+                isSink: true,
+                matchedPatterns: matchedSinkPatterns,
+                category: sinkCategory,
+                symbol: DescribeSymbol(method),
+                typeName: Normalize(type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)),
+                code: SyntaxText(operation.Syntax));
+            graph.AddEdges(taint.NodeIds, sinkNode.Id, "SinkArgument", value.Syntax, sourceFilePath, method.Parameters.LastOrDefault()?.Name ?? "value");
+            graph.AddSlice(taint, sinkNode, matchedSinkPatterns[0], SyntaxText(value.Syntax), 0);
         }
 
         private static bool IsInitializerStore(ISimpleAssignmentOperation operation) =>
@@ -2553,6 +2755,26 @@ public static partial class DataFlowAnalyzer
                 .Select(argument => GetTaint(argument.Value))
                 .Append(GetTaint(operation.Instance)));
             TryGetSummary(operation.TargetMethod, out var summary);
+
+            // A validator's out value is what it validated into (`int.TryParse(q, out var n)`
+            // writes a number): the write-back is clean, and it replaces whatever the slot held.
+            var sanitizers = MatchSymbol(operation.TargetMethod, operation.Syntax, _patternIndex.Sanitizers)
+                .Where(pattern => pattern.RemovesTaintKinds.Count == 0 && pattern.SanitizesCategories.Count == 0)
+                .ToList();
+            if (sanitizers.Count > 0)
+            {
+                foreach (var (_, symbol) in writeBacks)
+                {
+                    _taintedSymbols.Remove(SymbolKey(symbol!));
+                }
+
+                if (inTaint is not null)
+                {
+                    graph.RecordSanitizedFlow("SanitizerMatch", inTaint, sanitizers, operation.Syntax, sourceFilePath);
+                }
+
+                return;
+            }
 
             foreach (var (argument, symbol) in writeBacks)
             {
@@ -3186,12 +3408,12 @@ public static partial class DataFlowAnalyzer
             var taint = Combine(summary.ReceiverSinkMembers
                 .Select(member => MemberKeyAt(member, receiverKey))
                 .Select(key => key is not null && _taintedSymbols.TryGetValue(key, out var memberTaint) ? memberTaint : null));
-            if (taint is null)
+            var category = summary.SinkCategories.FirstOrDefault() ?? "interprocedural";
+            if (taint is null || SuppressedAtSink(taint, category, operation.Syntax))
             {
                 return;
             }
 
-            var category = summary.SinkCategories.FirstOrDefault() ?? "interprocedural";
             var summaryPattern = new DataFlowPattern
             {
                 Target = DataFlowPatternTarget.Sink,
@@ -3538,7 +3760,9 @@ public static partial class DataFlowAnalyzer
                 return;
             }
 
-            if (operation is IInvocationOperation { Instance: not null } invocation && GetTaint(invocation.Instance) is { } receiverTaint)
+            var sinkCategory = matchedSinkPatterns.FirstOrDefault()?.Category;
+            if (operation is IInvocationOperation { Instance: not null } invocation && IsSinkArgument(matchedSinkPatterns, null) &&
+                GetTaint(invocation.Instance) is { } receiverTaint && !SuppressedAtSink(receiverTaint, sinkCategory, operation.Syntax))
             {
                 var sinkNode = graph.AddNode("Sink", targetMethod.Name, operation, model, basePath, sourceFilePath, _currentMethod,
                     isSource: false,
@@ -3555,7 +3779,7 @@ public static partial class DataFlowAnalyzer
             for (var index = 0; index < argumentList.Count; index++)
             {
                 var argument = argumentList[index];
-                if (argumentTaints[index] is not { } taint)
+                if (argumentTaints[index] is not { } taint || !IsSinkArgument(matchedSinkPatterns, argument.Parameter) || SuppressedAtSink(taint, sinkCategory, operation.Syntax))
                 {
                     continue;
                 }
@@ -3583,12 +3807,12 @@ public static partial class DataFlowAnalyzer
             foreach (var parameterIndex in summary.SinkParameterIndexes.Where(index => index >= 0 && index < argumentList.Count))
             {
                 var argument = argumentList[parameterIndex];
-                if (argumentTaints[parameterIndex] is not { } taint)
+                var category = summary.SinkCategories.FirstOrDefault() ?? "interprocedural";
+                if (argumentTaints[parameterIndex] is not { } taint || SuppressedAtSink(taint, category, operation.Syntax))
                 {
                     continue;
                 }
 
-                var category = summary.SinkCategories.FirstOrDefault() ?? "interprocedural";
                 var summaryPattern = new DataFlowPattern
                 {
                     Target = DataFlowPatternTarget.Sink,
@@ -3612,6 +3836,26 @@ public static partial class DataFlowAnalyzer
                 graph.AddEdges(taint.NodeIds, sinkNode.Id, "InterproceduralSink", argument.Syntax, sourceFilePath, argument.Parameter?.Name ?? $"arg{parameterIndex}");
                 graph.AddSlice(taint, sinkNode, summaryPattern, SyntaxText(argument.Syntax), parameterIndex);
             }
+        }
+
+        /// <summary>
+        ///     A flow a category-scoped sanitizer already neutralized for this sink's category
+        ///     ends here as negative evidence.
+        /// </summary>
+        private bool SuppressedAtSink(TaintTrace taint, string? sinkCategory, SyntaxNode syntax)
+        {
+            if (!taint.IsSanitizedFor(sinkCategory))
+            {
+                return false;
+            }
+
+            var sanitizers = taint.Sanitizers?.Where(pattern => pattern.SanitizesCategories.Contains(sinkCategory!, StringComparer.OrdinalIgnoreCase)).ToList();
+            if (sanitizers is { Count: > 0 })
+            {
+                graph.RecordSanitizedFlow("SanitizerMatch", taint, sanitizers, syntax, sourceFilePath);
+            }
+
+            return true;
         }
 
         private bool TryGetSummary(IMethodSymbol method, out DataFlowMethodSummary summary)
@@ -3660,19 +3904,37 @@ public static partial class DataFlowAnalyzer
         /// </summary>
         private static TaintTrace? ApplySanitizers(List<DataFlowPattern> sanitizerPatterns, TaintTrace trace)
         {
-            if (sanitizerPatterns.Any(pattern => pattern.RemovesTaintKinds.Count == 0))
+            if (sanitizerPatterns.Any(pattern => pattern.RemovesTaintKinds.Count == 0 && pattern.SanitizesCategories.Count == 0))
             {
                 return null;
             }
 
+            // Category-scoped sanitizers (HtmlEncode neutralizes XSS, not command injection) keep
+            // the flow live and mark it; the sink of a neutralized category records the negative
+            // evidence and reports nothing.
+            var scoped = sanitizerPatterns.Where(pattern => pattern.SanitizesCategories.Count > 0).ToList();
+            if (scoped.Count > 0)
+            {
+                trace = trace with
+                {
+                    SanitizedFor = (trace.SanitizedFor ?? []).Concat(scoped.SelectMany(pattern => pattern.SanitizesCategories)).Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
+                    Sanitizers = (trace.Sanitizers ?? []).Concat(scoped).Distinct().ToList()
+                };
+            }
+
             var removed = sanitizerPatterns.SelectMany(pattern => pattern.RemovesTaintKinds).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (removed.Count == 0)
+            {
+                return trace;
+            }
+
             if (trace.TaintKinds.Count == 0 || trace.TaintKinds.All(kind => removed.Contains(kind)))
             {
                 return null;
             }
 
             var kept = trace.TaintKinds.Where(kind => !removed.Contains(kind)).ToList();
-            return kept.Count == trace.TaintKinds.Count ? trace : new TaintTrace(trace.NodeIds, kept, trace.FieldPaths);
+            return kept.Count == trace.TaintKinds.Count ? trace : trace with { TaintKinds = kept };
         }
 
         private TaintTrace? FindExistingTaint(IOperation operation)
@@ -3834,7 +4096,9 @@ public static partial class DataFlowAnalyzer
 
             var argumentList = codeSinkArguments;
             var argumentTaints = argumentList.Select(argument => GetTaint(argument.Value)).ToList();
-            if (operation is IInvocationOperation { Instance: not null } invocation && GetTaint(invocation.Instance) is { } receiverTaint)
+            var sinkCategory = matchedSinkPatterns.FirstOrDefault()?.Category;
+            if (operation is IInvocationOperation { Instance: not null } invocation && IsSinkArgument(matchedSinkPatterns, null) &&
+                GetTaint(invocation.Instance) is { } receiverTaint && !SuppressedAtSink(receiverTaint, sinkCategory, operation.Syntax))
             {
                 var sinkNode = graph.AddNode("Sink", GetOperationName(operation), operation, model, basePath, sourceFilePath, _currentMethod,
                     isSource: false,
@@ -3851,7 +4115,7 @@ public static partial class DataFlowAnalyzer
             for (var index = 0; index < argumentList.Count; index++)
             {
                 var argument = argumentList[index];
-                if (argumentTaints[index] is not { } taint)
+                if (argumentTaints[index] is not { } taint || !IsSinkArgument(matchedSinkPatterns, argument.Parameter) || SuppressedAtSink(taint, sinkCategory, operation.Syntax))
                 {
                     continue;
                 }
@@ -3884,7 +4148,7 @@ public static partial class DataFlowAnalyzer
             }
 
             var taint = Combine(operation.ChildOperations.Select(GetTaint));
-            if (taint is null)
+            if (taint is null || SuppressedAtSink(taint, matchedSinkPatterns.FirstOrDefault()?.Category, operation.Syntax))
             {
                 return;
             }
@@ -3934,7 +4198,10 @@ public static partial class DataFlowAnalyzer
                 // evidence instead of letting the flow silently disappear.
                 var existingTaint = FindExistingTaint(operation) ?? GetTaintThroughChildrenForSanitizerEvidence(operation);
                 var sanitized = existingTaint is null ? null : ApplySanitizers(sanitizerPatterns, existingTaint);
-                if (existingTaint is not null && !ReferenceEquals(sanitized, existingTaint))
+                // A category-scoped sanitizer only marks the flow: its negative evidence is
+                // recorded at the sink it neutralizes, not here.
+                var marksOnly = sanitized is not null && sanitizerPatterns.All(pattern => pattern.SanitizesCategories.Count > 0 && pattern.RemovesTaintKinds.Count == 0);
+                if (existingTaint is not null && !ReferenceEquals(sanitized, existingTaint) && !marksOnly)
                 {
                     graph.RecordSanitizedFlow("SanitizerMatch", existingTaint, sanitizerPatterns, operation.Syntax, sourceFilePath);
                 }
@@ -4159,7 +4426,7 @@ public static partial class DataFlowAnalyzer
 
         private IEnumerable<DataFlowPattern> MatchSymbol(ISymbol symbol, SyntaxNode syntax, IReadOnlyList<DataFlowPattern> candidatePatterns)
         {
-            var normalizedSymbol = DescribeSymbol(symbol);
+            var normalizedSymbol = PatternSymbolText(symbol, DescribeSymbol(symbol));
             var name = symbol.Name;
             var containingType = Normalize((symbol.ContainingType ?? symbol as INamedTypeSymbol)?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty);
             var namespaceName = symbol.ContainingNamespace?.ToDisplayString() ?? string.Empty;
@@ -4220,12 +4487,26 @@ public static partial class DataFlowAnalyzer
             var seenNodeIds = new HashSet<string>(StringComparer.Ordinal);
             var seenTaintKinds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var seenFieldPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            // A value is neutralized for a sink category only when every part of it is.
+            List<string>? sanitizedFor = null;
+            List<DataFlowPattern>? sanitizers = null;
 
             foreach (var trace in traces)
             {
                 if (trace is null)
                 {
                     continue;
+                }
+
+                if (sanitizedFor is null)
+                {
+                    sanitizedFor = trace.SanitizedFor?.ToList() ?? [];
+                    sanitizers = trace.Sanitizers?.ToList() ?? [];
+                }
+                else if (sanitizedFor.Count > 0)
+                {
+                    sanitizedFor.RemoveAll(category => trace.SanitizedFor?.Contains(category, StringComparer.OrdinalIgnoreCase) != true);
+                    sanitizers!.AddRange(trace.Sanitizers ?? []);
                 }
 
                 foreach (var nodeId in trace.NodeIds)
@@ -4244,7 +4525,11 @@ public static partial class DataFlowAnalyzer
                 }
             }
 
-            return nodeIds.Count == 0 ? null : new TaintTrace(nodeIds, taintKinds, fieldPaths);
+            return nodeIds.Count == 0
+                ? null
+                : new TaintTrace(nodeIds, taintKinds, fieldPaths,
+                    sanitizedFor is { Count: > 0 } ? sanitizedFor : null,
+                    sanitizedFor is { Count: > 0 } ? sanitizers!.Where(pattern => pattern.SanitizesCategories.Any(category => sanitizedFor.Contains(category, StringComparer.OrdinalIgnoreCase))).Distinct().ToList() : null);
         }
 
         private string SyntaxText(SyntaxNode syntax)
@@ -4345,7 +4630,12 @@ public static partial class DataFlowAnalyzer
         }
     }
 
-    private sealed record TaintTrace(List<string> NodeIds, List<string> TaintKinds, List<string> FieldPaths)
+    /// <param name="SanitizedFor">
+    ///     Sink categories a category-scoped sanitizer (<see cref="DataFlowPattern.SanitizesCategories"/>)
+    ///     already neutralized on every path into this value; the flow stays live for every other sink.
+    /// </param>
+    /// <param name="Sanitizers">The category-scoped sanitizer patterns behind <paramref name="SanitizedFor"/>, for negative evidence.</param>
+    private sealed record TaintTrace(List<string> NodeIds, List<string> TaintKinds, List<string> FieldPaths, IReadOnlyList<string>? SanitizedFor = null, IReadOnlyList<DataFlowPattern>? Sanitizers = null)
     {
         public TaintTrace Append(string nodeId)
         {
@@ -4357,12 +4647,15 @@ public static partial class DataFlowAnalyzer
             var nodeIds = new List<string>(NodeIds.Count + 1);
             nodeIds.AddRange(NodeIds);
             nodeIds.Add(nodeId);
-            return new TaintTrace(nodeIds, TaintKinds, FieldPaths);
+            return this with { NodeIds = nodeIds };
         }
 
         public TaintTrace WithFieldPath(string? fieldPath) => string.IsNullOrWhiteSpace(fieldPath) || FieldPaths.Contains(fieldPath, StringComparer.Ordinal)
             ? this
-            : new TaintTrace(NodeIds, TaintKinds, FieldPaths.Concat([fieldPath]).ToList());
+            : this with { FieldPaths = FieldPaths.Concat([fieldPath]).ToList() };
+
+        public bool IsSanitizedFor(string? sinkCategory) =>
+            sinkCategory is not null && SanitizedFor is { Count: > 0 } categories && categories.Contains(sinkCategory, StringComparer.OrdinalIgnoreCase);
     }
 
     private sealed class DataFlowPatternIndex

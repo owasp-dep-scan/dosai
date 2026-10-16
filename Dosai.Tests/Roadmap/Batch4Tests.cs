@@ -419,7 +419,7 @@ public class CmdController : Microsoft.AspNetCore.Mvc.ControllerBase
     // ----- Ref/out propagation -----
 
     [Fact]
-    public void DataFlows_TryParseOutVar_CarriesTaintToSink()
+    public void DataFlows_TryParseOutVar_IsValidatedNotTainted()
     {
         using var directory = new RoadmapTemporaryDirectory();
         directory.WriteSource("TryParse.cs", """
@@ -433,12 +433,21 @@ public static class TryParseFlow
         {
             Process.Start("ping", number.ToString());
         }
+
+        Split(args[1], out var head);
+        Process.Start("ping", head);
     }
+
+    private static void Split(string value, out string head) => head = value.Split(' ')[0];
 }
 """);
         var result = directory.DataFlows();
 
-        Assert.Contains(result.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" } && slice.SinkArgument!.Contains("number", StringComparison.Ordinal));
+        // A validator writes what it validated into: a parsed number carries no command text.
+        Assert.DoesNotContain(result.Slices, slice => slice.SinkArgument!.Contains("number", StringComparison.Ordinal));
+        Assert.Contains(result.SanitizedFlows, sanitized => sanitized is { Kind: "SanitizerMatch", SanitizerCategory: "validation" });
+        // Any other out parameter still carries its inputs back to the caller.
+        Assert.Contains(result.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" } && slice.SinkArgument!.Contains("head", StringComparison.Ordinal));
         Assert.Contains(result.Nodes, node => node.Kind == "OutArgument");
     }
 
