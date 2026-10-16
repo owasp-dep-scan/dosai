@@ -1,0 +1,35 @@
+Dosai/GlobalUsings.cs
+  s_5bad3094f7bc65::t_b8061ce02a98ae 137,139-141,143,145,147-150,152-164,214-217,219-225,239,246,306-439,746-751
+  s_5bad3094f7bc65::t_bd7c692b5629cb 26-27
+  s_5bad3094f7bc65::t_8289593ed158db 752
+Dosai.Tests/FileBasedAppTests.cs
+  s_5bad3094f7bc65::t_9cea0f75c6a3f3 1-154
+docs/migration-5.0.md
+  s_5bad3094f7bc65::t_068332b8bf1d41 94-103
+Dosai/Dosai.cs
+  s_5bad3094f7bc65::t_3171df34f26ccb 1007,3391-3392,3409-3410
+AGENTS.md
+  s_5bad3094f7bc65::t_068332b8bf1d41 43-45,340-344
+Dosai/PackageUrlResolver.cs
+  s_5bad3094f7bc65::t_3171df34f26ccb 1174-1185
+Dosai/LanguageFrontendAnalyzer.cs
+  s_5bad3094f7bc65::t_3171df34f26ccb 183,190,192,197-199
+Dosai/Dependency.cs
+  s_5bad3094f7bc65::t_3171df34f26ccb 15-22
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "547b1f3d9f7d075a9a25dc860c4c1433bcae2a1a",
+  "prompts": {},
+  "sessions": {
+    "s_5bad3094f7bc65": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c8058ad5-2c38-4556-995e-6d27935e4326",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
