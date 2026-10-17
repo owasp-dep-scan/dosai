@@ -51,13 +51,30 @@ internal static class AssemblyEndpointAnalyzer
         }
 
         var root = SourceDocumentPaths.Root(path);
+        files = files.Where(file => root is null || !TreeFrameworks.IsBuiltFromSource(root, file)).ToList();
+
+        // Conventional route templates first: the program that registers them is usually not the
+        // assembly that declares the controllers.
+        var templates = new List<string>();
         foreach (var file in files)
         {
-            if (root is not null && TreeFrameworks.IsBuiltFromSource(root, file))
+            try
             {
-                continue;
+                using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                using var peReader = new PEReader(stream);
+                if (peReader.HasMetadata)
+                {
+                    templates.AddRange(ConventionalTemplates(peReader).Where(template => !templates.Contains(template, StringComparer.Ordinal)));
+                }
             }
+            catch (Exception ex) when (ex is BadImageFormatException or IOException or UnauthorizedAccessException or InvalidOperationException)
+            {
+                // Reported by the endpoint pass below.
+            }
+        }
 
+        foreach (var file in files)
+        {
             try
             {
                 using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
@@ -67,7 +84,7 @@ internal static class AssemblyEndpointAnalyzer
                     continue;
                 }
 
-                AnalyzeAssembly(path, file, peReader, knownMethods, result);
+                AnalyzeAssembly(path, file, peReader, knownMethods, result, templates);
             }
             catch (Exception ex) when (ex is BadImageFormatException or IOException or UnauthorizedAccessException or InvalidOperationException)
             {
@@ -90,7 +107,7 @@ internal static class AssemblyEndpointAnalyzer
 
         try
         {
-            AnalyzeAssembly(basePath, assemblyPath, peReader, null, result);
+            AnalyzeAssembly(basePath, assemblyPath, peReader, null, result, ConventionalTemplates(peReader));
         }
         catch (Exception ex) when (ex is BadImageFormatException or InvalidOperationException)
         {
@@ -100,7 +117,7 @@ internal static class AssemblyEndpointAnalyzer
         return result.Handlers;
     }
 
-    private static void AnalyzeAssembly(string basePath, string assemblyPath, PEReader peReader, IReadOnlyList<Method>? knownMethods, Result result)
+    private static void AnalyzeAssembly(string basePath, string assemblyPath, PEReader peReader, IReadOnlyList<Method>? knownMethods, Result result, IReadOnlyList<string> conventionalTemplates)
     {
         var reader = peReader.GetMetadataReader();
         var fileName = Path.GetFileName(assemblyPath);
@@ -116,9 +133,11 @@ internal static class AssemblyEndpointAnalyzer
             var type = reader.GetTypeDefinition(typeHandle);
             if (IsController(reader, type))
             {
-                AnalyzeController(reader, typeHandle, type, assemblyPath, fileName, relativePath, knownMethods, result);
+                AnalyzeController(reader, typeHandle, type, assemblyPath, fileName, relativePath, knownMethods, result, conventionalTemplates);
             }
         }
+
+        AnalyzeCompiledRazorPages(reader, assemblyPath, fileName, relativePath, knownMethods, result);
 
         foreach (var methodHandle in reader.MethodDefinitions)
         {
@@ -176,7 +195,7 @@ internal static class AssemblyEndpointAnalyzer
         return false;
     }
 
-    private static void AnalyzeController(MetadataReader reader, TypeDefinitionHandle typeHandle, TypeDefinition type, string assemblyPath, string fileName, string relativePath, IReadOnlyList<Method>? knownMethods, Result result)
+    private static void AnalyzeController(MetadataReader reader, TypeDefinitionHandle typeHandle, TypeDefinition type, string assemblyPath, string fileName, string relativePath, IReadOnlyList<Method>? knownMethods, Result result, IReadOnlyList<string> conventionalTemplates)
     {
         var typeName = reader.GetString(type.Name);
         var controllerName = typeName.EndsWith("Controller", StringComparison.Ordinal) ? typeName[..^"Controller".Length] : typeName;
@@ -217,18 +236,23 @@ internal static class AssemblyEndpointAnalyzer
                 routes.AddRange(methodRoutes.Select(template => ("ANY", template)));
             }
 
-            var conventional = false;
-            if (routes.Count == 0)
+            // An action with no route template of its own on a controller without one is routed
+            // conventionally (verb attributes still constrain it): every registered
+            // MapControllerRoute/MapDefaultControllerRoute template, expanded with the controller
+            // and action names, else `{controller}/{action}`. Attribute-routed API controllers
+            // expose only attributed actions.
+            var conventional = routes.All(route => route.Template is null) && !classRoutes.Any(route => route is not null);
+            if (conventional)
             {
-                // Attribute-routed API controllers expose only attributed actions; an MVC
-                // controller's public actions are reachable through the conventional route.
-                if (isApiController || classRoutes.Any(route => route is not null))
+                if (isApiController)
                 {
                     continue;
                 }
 
-                routes.Add(("ANY", null));
-                conventional = true;
+                var verbs = routes.Select(route => route.Verb).Distinct(StringComparer.Ordinal).DefaultIfEmpty("ANY").ToList();
+                routes = [.. (conventionalTemplates.Count > 0 ? conventionalTemplates : ["{controller}/{action}"])
+                    .SelectMany(template => verbs.Select(verb => (verb, (string?)ExpandConventional(template, controllerName, actionName))))
+                    .Distinct()];
             }
 
             var methodId = AssemblyCallGraphAnalyzer.MethodId(reader, methodHandle, assemblyPath, knownMethods);
@@ -236,7 +260,7 @@ internal static class AssemblyEndpointAnalyzer
             {
                 foreach (var (verb, template) in routes)
                 {
-                    var combined = conventional ? $"/{controllerName}/{actionName}" : Combine(classRoute, template);
+                    var combined = conventional ? "/" + template!.TrimStart('/') : Combine(classRoute, template);
                     combined = combined.Replace("[controller]", controllerName, StringComparison.OrdinalIgnoreCase).Replace("[action]", actionName, StringComparison.OrdinalIgnoreCase);
                     var resolved = Frameworks.RouteTemplateResolver.Resolve(combined);
                     var endpoint = new ApiEndpoint
@@ -354,7 +378,225 @@ internal static class AssemblyEndpointAnalyzer
         }
     }
 
-    private static void Add(Result result, ApiEndpoint endpoint, string kind, string methodId, string assemblyPath, int token)
+    private static readonly System.Text.RegularExpressions.Regex ControllerToken = new(@"\{controller(=[^}]*)?\}", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+    private static readonly System.Text.RegularExpressions.Regex ActionToken = new(@"\{action(=[^}]*)?\}", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    /// <summary>A conventional template with its controller and action parameters filled in (<c>{controller=Home}/{action=Index}/{id?}</c> → <c>Home/Index/{id?}</c>).</summary>
+    private static string ExpandConventional(string template, string controller, string action) =>
+        ActionToken.Replace(ControllerToken.Replace(template, controller), action);
+
+    /// <summary>
+    ///     Route templates registered with <c>MapControllerRoute(name, pattern)</c>, <c>MapRoute(name, template)</c>,
+    ///     <c>MapAreaControllerRoute(name, area, pattern)</c> and <c>MapDefaultControllerRoute()</c>
+    ///     (<c>{controller=Home}/{action=Index}/{id?}</c>), read from the string arguments loaded
+    ///     since the previous call.
+    /// </summary>
+    internal static List<string> ConventionalTemplates(PEReader peReader)
+    {
+        var reader = peReader.GetMetadataReader();
+        var templates = new List<string>();
+        foreach (var methodHandle in reader.MethodDefinitions)
+        {
+            var method = reader.GetMethodDefinition(methodHandle);
+            if (method.RelativeVirtualAddress == 0)
+            {
+                continue;
+            }
+
+            var strings = new List<string>();
+            foreach (var (_, opCode, operand) in AssemblyCallGraphAnalyzer.Decode(peReader.GetMethodBody(method.RelativeVirtualAddress).GetILReader()))
+            {
+                if (opCode == OpCodes.Ldstr && operand is int stringToken)
+                {
+                    strings.Add(reader.GetUserString(MetadataTokens.UserStringHandle(stringToken)));
+                    continue;
+                }
+
+                if (opCode != OpCodes.Call && opCode != OpCodes.Callvirt)
+                {
+                    continue;
+                }
+
+                var name = operand is int token ? CalleeName(reader, token)?.Name : null;
+                var template = name switch
+                {
+                    "MapControllerRoute" or "MapRoute" => strings.Count >= 2 ? strings[1] : strings.LastOrDefault(),
+                    "MapAreaControllerRoute" => strings.Count >= 3 ? strings[2] : strings.LastOrDefault(),
+                    "MapDefaultControllerRoute" => "{controller=Home}/{action=Index}/{id?}",
+                    _ => null
+                };
+                if (template is not null && !templates.Contains(template, StringComparer.Ordinal))
+                {
+                    templates.Add(template);
+                }
+
+                strings.Clear();
+            }
+        }
+
+        return templates;
+    }
+
+    /// <summary>
+    ///     Razor Pages compiled into the assembly: <c>[assembly: RazorCompiledItem(type,
+    ///     "mvc.1.0.razor-page", "/Pages/X.cshtml")]</c> (route from the identifier plus the page
+    ///     type's <c>RouteTemplate</c> metadata) and ASP.NET Core 2.x
+    ///     <c>[assembly: RazorPage(path, type, routeTemplate)]</c>. The page type's <c>Model</c>
+    ///     property names the PageModel, whose <c>On{Verb}[Handler][Async]</c> methods are the
+    ///     endpoints; authorization comes from the page and PageModel attributes. Views
+    ///     (<c>mvc.1.0.view</c>) are not endpoints.
+    /// </summary>
+    private static void AnalyzeCompiledRazorPages(MetadataReader reader, string assemblyPath, string fileName, string relativePath, IReadOnlyList<Method>? knownMethods, Result result)
+    {
+        if (!reader.IsAssembly)
+        {
+            return;
+        }
+
+        foreach (var attribute in Attributes(reader, reader.GetAssemblyDefinition().GetCustomAttributes()))
+        {
+            string? typeName, identifier, routeTemplate = null;
+            switch (attribute.Name)
+            {
+                case "RazorCompiledItemAttribute" when attribute.Fixed is [string type, "mvc.1.0.razor-page", string id]:
+                    (typeName, identifier) = (type, id);
+                    break;
+                case "RazorPageAttribute" when attribute.Fixed is [string path, string type, var template]:
+                    (typeName, identifier, routeTemplate) = (type, path, template as string);
+                    break;
+                default:
+                    continue;
+            }
+
+            var pageType = FindType(reader, typeName.Split(',')[0].Trim());
+            var pageAttributes = pageType is { } page ? Attributes(reader, reader.GetTypeDefinition(page).GetCustomAttributes()).ToList() : [];
+            routeTemplate ??= pageAttributes.FirstOrDefault(candidate => candidate.Name == "RazorCompiledItemMetadataAttribute" && candidate.Fixed is ["RouteTemplate", string])?.Fixed![1] as string;
+            var conventional = CompiledPageRoute(identifier);
+            var route = string.IsNullOrEmpty(routeTemplate) ? conventional
+                : routeTemplate.StartsWith('/') || routeTemplate.StartsWith("~/", StringComparison.Ordinal) ? "/" + routeTemplate.TrimStart('~', '/')
+                : conventional.TrimEnd('/') + "/" + routeTemplate;
+            var resolved = Frameworks.RouteTemplateResolver.Resolve(route);
+            var pagePath = resolved.Path ?? route;
+
+            var modelType = pageType is { } typed ? ModelType(reader, typed) : null;
+            var modelAttributes = modelType is { } model ? Attributes(reader, reader.GetTypeDefinition(model).GetCustomAttributes()).ToList() : [];
+            var handlers = new List<(string Verb, string? Handler, MethodDefinitionHandle? Method)>();
+            if (modelType is { } modelHandle)
+            {
+                foreach (var methodHandle in reader.GetTypeDefinition(modelHandle).GetMethods())
+                {
+                    var method = reader.GetMethodDefinition(methodHandle);
+                    var match = PageHandlerName.Match(reader.GetString(method.Name));
+                    if (match.Success && (method.Attributes & MethodAttributes.MemberAccessMask) == MethodAttributes.Public)
+                    {
+                        var handlerName = match.Groups[2].Length > 0 ? match.Groups[2].Value : null;
+                        handlers.Add((match.Groups[1].Value.ToUpperInvariant(), handlerName, methodHandle));
+                    }
+                }
+            }
+
+            if (handlers.Count == 0)
+            {
+                handlers.Add(("GET", null, null));
+            }
+
+            foreach (var (verb, handlerName, methodHandle) in handlers)
+            {
+                var path = handlerName is null ? pagePath : $"{pagePath}?handler={handlerName}";
+                var method = methodHandle is { } handle ? reader.GetMethodDefinition(handle) : (MethodDefinition?)null;
+                var declaring = method is { } definition ? reader.GetTypeDefinition(definition.GetDeclaringType()) : (TypeDefinition?)null;
+                var endpoint = new ApiEndpoint
+                {
+                    Path = path,
+                    Route = route,
+                    FilePath = relativePath,
+                    FileName = fileName,
+                    Namespace = declaring is { } owner ? reader.GetString(owner.Namespace) : null,
+                    ClassName = declaring is { } named ? reader.GetString(named.Name) : null,
+                    MethodName = method is { } handlerMethod ? reader.GetString(handlerMethod.Name) : null,
+                    HttpMethod = verb,
+                    EndpointKind = "RazorPage",
+                    RoutingKind = "Template",
+                    Framework = Framework,
+                    Confidence = "medium",
+                    RouteParameters = resolved.Parameters,
+                    Evidence = new AnalysisEvidence { Kind = AnalysisEvidenceKind.AssemblyIlDirect, Source = "assembly-il", Description = $"Compiled Razor Page {identifier} in {fileName}." }
+                };
+                ApplyAuthorization(endpoint, pageAttributes.Concat(modelAttributes).ToList());
+                Add(result, endpoint, "HttpRazorPage", methodHandle is { } id ? AssemblyCallGraphAnalyzer.MethodId(reader, id, assemblyPath, knownMethods) : null, assemblyPath, methodHandle is { } token ? MetadataTokens.GetToken(token) : 0);
+            }
+        }
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex PageHandlerName = new(@"^On(Get|Post|Put|Delete|Patch|Head|Options)([A-Z]\w*?)?(Async)?$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    /// <summary>A compiled page's conventional route: its path under <c>Pages</c> (or an area's), without the extension, <c>Index</c> naming its folder.</summary>
+    private static string CompiledPageRoute(string identifier)
+    {
+        var segments = identifier.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries).ToList();
+        if (segments.Count >= 3 && segments[0].Equals("Areas", StringComparison.OrdinalIgnoreCase) && segments[2].Equals("Pages", StringComparison.OrdinalIgnoreCase))
+        {
+            segments.RemoveAt(2);
+            segments.RemoveAt(0);
+        }
+        else if (segments.Count > 0 && segments[0].Equals("Pages", StringComparison.OrdinalIgnoreCase))
+        {
+            segments.RemoveAt(0);
+        }
+
+        if (segments.Count > 0)
+        {
+            segments[^1] = Path.GetFileNameWithoutExtension(segments[^1]);
+            if (segments[^1].Equals("Index", StringComparison.OrdinalIgnoreCase))
+            {
+                segments.RemoveAt(segments.Count - 1);
+            }
+        }
+
+        return "/" + string.Join('/', segments);
+    }
+
+    private static TypeDefinitionHandle? FindType(MetadataReader reader, string fullName)
+    {
+        foreach (var handle in reader.TypeDefinitions)
+        {
+            var type = reader.GetTypeDefinition(handle);
+            var name = reader.GetString(type.Name);
+            var space = reader.GetString(type.Namespace);
+            if ((space.Length == 0 ? name : $"{space}.{name}") == fullName)
+            {
+                return handle;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>The PageModel a compiled page exposes through its <c>Model</c> property, when this assembly declares it.</summary>
+    private static TypeDefinitionHandle? ModelType(MetadataReader reader, TypeDefinitionHandle page)
+    {
+        foreach (var propertyHandle in reader.GetTypeDefinition(page).GetProperties())
+        {
+            var property = reader.GetPropertyDefinition(propertyHandle);
+            if (reader.GetString(property.Name) != "Model")
+            {
+                continue;
+            }
+
+            var blob = reader.GetBlobReader(property.Signature);
+            blob.ReadSignatureHeader();
+            blob.ReadCompressedInteger(); // parameter count
+            var code = blob.ReadSignatureTypeCode();
+            if (code is SignatureTypeCode.TypeHandle && blob.ReadTypeHandle() is { Kind: HandleKind.TypeDefinition } model)
+            {
+                return (TypeDefinitionHandle)model;
+            }
+        }
+
+        return null;
+    }
+
+    private static void Add(Result result, ApiEndpoint endpoint, string kind, string? methodId, string assemblyPath, int token)
     {
         var operationId = $"op:{Framework}:{endpoint.FilePath}#{endpoint.HttpMethod}:{endpoint.Path}:{endpoint.MethodName}";
         endpoint.OperationId = operationId;
@@ -376,7 +618,10 @@ internal static class AssemblyEndpointAnalyzer
             Roles = endpoint.Roles,
             AllowAnonymous = endpoint.AllowAnonymous
         });
-        result.Handlers.Add(new Handler(assemblyPath, token, methodId, endpoint.Path ?? string.Empty));
+        if (methodId is not null)
+        {
+            result.Handlers.Add(new Handler(assemblyPath, token, methodId, endpoint.Path ?? string.Empty));
+        }
     }
 
     private static void ApplyAuthorization(ApiEndpoint endpoint, List<DecodedAttribute> attributes, bool keepExisting = false)
@@ -440,7 +685,7 @@ internal static class AssemblyEndpointAnalyzer
         }
     }
 
-    private sealed record DecodedAttribute(string Name, string? FirstString, Dictionary<string, string?> Named);
+    private sealed record DecodedAttribute(string Name, string? FirstString, Dictionary<string, string?> Named, List<object?>? Fixed = null);
 
     private static IEnumerable<DecodedAttribute> Attributes(MetadataReader reader, CustomAttributeHandleCollection handles)
     {
@@ -465,11 +710,13 @@ internal static class AssemblyEndpointAnalyzer
             }
 
             string? first = null;
+            List<object?>? fixedValues = null;
             var named = new Dictionary<string, string?>(StringComparer.Ordinal);
             try
             {
                 var value = attribute.DecodeValue(StringTypeProvider.Instance);
                 first = value.FixedArguments.Select(argument => argument.Value).OfType<string>().FirstOrDefault();
+                fixedValues = [.. value.FixedArguments.Select(argument => argument.Value)];
                 foreach (var argument in value.NamedArguments)
                 {
                     if (argument.Name is { } argumentName) named[argumentName] = argument.Value as string;
@@ -480,7 +727,7 @@ internal static class AssemblyEndpointAnalyzer
                 // An enum or type argument from an assembly we cannot see: keep the name.
             }
 
-            yield return new DecodedAttribute(name, first, named);
+            yield return new DecodedAttribute(name, first, named, fixedValues);
         }
     }
 
@@ -514,8 +761,10 @@ internal static class AssemblyEndpointAnalyzer
         public string GetPrimitiveType(PrimitiveTypeCode typeCode) => typeCode.ToString();
         public string GetSystemType() => "System.Type";
         public string GetSZArrayType(string elementType) => elementType + "[]";
-        public string GetTypeFromDefinition(MetadataReader reader, TypeDefinitionHandle handle, byte rawTypeKind) => reader.GetString(reader.GetTypeDefinition(handle).Name);
-        public string GetTypeFromReference(MetadataReader reader, TypeReferenceHandle handle, byte rawTypeKind) => reader.GetString(reader.GetTypeReference(handle).Name);
+        // Full names: a `System.Type` argument is told apart from an enum by its name.
+        public string GetTypeFromDefinition(MetadataReader reader, TypeDefinitionHandle handle, byte rawTypeKind) => Qualified(reader.GetString(reader.GetTypeDefinition(handle).Namespace), reader.GetString(reader.GetTypeDefinition(handle).Name));
+        public string GetTypeFromReference(MetadataReader reader, TypeReferenceHandle handle, byte rawTypeKind) => Qualified(reader.GetString(reader.GetTypeReference(handle).Namespace), reader.GetString(reader.GetTypeReference(handle).Name));
+        private static string Qualified(string space, string name) => space.Length == 0 ? name : $"{space}.{name}";
         public string GetTypeFromSerializedName(string name) => name;
         public PrimitiveTypeCode GetUnderlyingEnumType(string type) => PrimitiveTypeCode.Int32;
         public bool IsSystemType(string type) => type == "System.Type";

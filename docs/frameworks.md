@@ -143,8 +143,12 @@ route (a relative template is appended to the conventional route), and authoriza
 the PageModel's attributes and `@attribute [Authorize(...)]`. Handler parameters are taint seeds
 and `[BindProperty]`/`[BindProperties]` properties are sources.
 
-Assembly-only inputs get endpoints from IL (`Framework: "assembly-il"`): controller attributes
-and minimal-API `Map*` registrations, with the IL call graph's method ids.
+Assembly-only inputs get endpoints from IL (`Framework: "assembly-il"`): controller attributes,
+conventional routes (`MapControllerRoute`/`MapAreaControllerRoute`/`MapRoute`/`MapDefaultControllerRoute`
+templates expanded for unattributed actions), minimal-API `Map*` registrations, and compiled
+Razor Pages (`RazorCompiledItem` with `RouteTemplate` metadata, 2.x `RazorPage`), with the IL call
+graph's method ids. Security findings are derived from source, so IL-only endpoints carry no
+endpoint findings.
 
 `TrustZone`: `public` (anonymous inbound), `authenticated`, `internal` (loopback/queue),
 `external` (outbound to non-loopback hosts), `unknown`. `CrossesTrustBoundary` is computed from

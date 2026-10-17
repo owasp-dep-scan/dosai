@@ -131,4 +131,112 @@ namespace Microsoft.AspNetCore.Builder
         Assert.Equal("/run/{name}", RouteOf("name"));
         Assert.Equal("/api/Items", RouteOf("command"));
     }
+
+    private const string ConventionalAndRazorSource = """
+using System;
+using System.Diagnostics;
+using System.Threading.Tasks;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.RazorPages;
+using Microsoft.AspNetCore.Razor.Hosting;
+
+[assembly: RazorCompiledItem(typeof(AspNetCoreGeneratedDocument.Pages_Items), "mvc.1.0.razor-page", "/Pages/Items.cshtml")]
+[assembly: RazorCompiledItem(typeof(AspNetCoreGeneratedDocument.Pages_About), "mvc.1.0.razor-page", "/Pages/About.cshtml")]
+[assembly: RazorCompiledItem(typeof(AspNetCoreGeneratedDocument.Views_Home_Index), "mvc.1.0.view", "/Views/Home/Index.cshtml")]
+[assembly: Microsoft.AspNetCore.Mvc.Razor.Compilation.RazorPage("/Pages/Legacy.cshtml", typeof(AspNetCoreGeneratedDocument.Pages_Legacy), "/old/{slug}")]
+
+var app = new WebApplication();
+app.MapControllerRoute("default", "{controller=Home}/{action=Index}/{id?}");
+app.MapRoute("legacy", "legacy/{controller}/{action}");
+
+public class HomeController : Controller
+{
+    public string Index() => "home";
+    [HttpPost] public void Save(string text) => Process.Start(text);
+}
+
+public class ItemsModel : PageModel
+{
+    public void OnGet(int id) { }
+    public async Task OnPostDeleteAsync(string reason) { await Task.Yield(); Process.Start(reason); }
+}
+
+namespace AspNetCoreGeneratedDocument
+{
+    [RazorCompiledItemMetadata("RouteTemplate", "{id:int}"), Authorize(Roles = "Admin")]
+    public sealed class Pages_Items : Page { public ItemsModel Model => null!; }
+    public sealed class Pages_About : Page { }
+    public sealed class Pages_Legacy : Page { }
+    public sealed class Views_Home_Index { }
+}
+
+namespace Microsoft.AspNetCore.Razor.Hosting
+{
+    [AttributeUsage(AttributeTargets.Assembly, AllowMultiple = true)] public sealed class RazorCompiledItemAttribute : Attribute { public RazorCompiledItemAttribute(Type type, string kind, string identifier) { } }
+    [AttributeUsage(AttributeTargets.Class, AllowMultiple = true)] public sealed class RazorCompiledItemMetadataAttribute : Attribute { public RazorCompiledItemMetadataAttribute(string key, string value) { } }
+}
+namespace Microsoft.AspNetCore.Mvc.Razor.Compilation
+{
+    [AttributeUsage(AttributeTargets.Assembly, AllowMultiple = true)] public sealed class RazorPageAttribute : Attribute { public RazorPageAttribute(string path, Type viewType, string routeTemplate) { } }
+}
+namespace Microsoft.AspNetCore.Mvc.RazorPages
+{
+    public abstract class Page { }
+    public abstract class PageModel { }
+}
+namespace Microsoft.AspNetCore.Mvc
+{
+    public abstract class ControllerBase { }
+    public abstract class Controller : ControllerBase { }
+    public sealed class HttpPostAttribute : Attribute { }
+}
+namespace Microsoft.AspNetCore.Authorization
+{
+    public sealed class AuthorizeAttribute : Attribute { public string? Roles { get; set; } }
+}
+namespace Microsoft.AspNetCore.Builder
+{
+    public interface IEndpointRouteBuilder { }
+    public sealed class WebApplication : IEndpointRouteBuilder { }
+    public static class ControllerEndpointRouteBuilderExtensions
+    {
+        public static object MapControllerRoute(this IEndpointRouteBuilder endpoints, string name, string pattern, object? defaults = null) => new();
+        public static object MapRoute(this IEndpointRouteBuilder routes, string name, string template) => new();
+    }
+}
+""";
+
+    [Fact]
+    public void AssemblyOnlyInput_ConventionalRoutesAndCompiledRazorPages()
+    {
+        using var fixture = new IlDataFlowParityTests.TempDir();
+        IlDataFlowParityTests.EmitAssembly(fixture.Path, ConventionalAndRazorSource, outputKind: OutputKind.ConsoleApplication);
+
+        var slice = JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(fixture.Path), RoadmapTemporaryDirectory.JsonOptions)!;
+        var endpoints = slice.ApiEndpoints!.Where(endpoint => endpoint.Framework == "assembly-il").ToList();
+        ApiEndpoint Endpoint(string path, string verb) => Assert.Single(endpoints, endpoint => endpoint.Path == path && endpoint.HttpMethod == verb);
+
+        // The registered conventional template, expanded per controller and action.
+        Assert.Equal("Index", Endpoint("/Home/Index/{id}", "ANY").MethodName);
+        Assert.Equal("Conventional", Endpoint("/Home/Save/{id}", "POST").RoutingKind);
+        Assert.Equal("Save", Endpoint("/legacy/Home/Save", "POST").MethodName);
+        Assert.DoesNotContain(endpoints, endpoint => endpoint.Path == "/");
+
+        // Compiled Razor Pages: the route from the identifier plus RouteTemplate, the PageModel's handlers.
+        var get = Endpoint("/Items/{id}", "GET");
+        Assert.Equal("OnGet", get.MethodName);
+        Assert.Equal(["Admin"], get.Roles);
+        Assert.Equal("OnPostDeleteAsync", Endpoint("/Items/{id}?handler=Delete", "POST").MethodName);
+        Assert.Equal("RazorPage", Endpoint("/About", "GET").EndpointKind);
+        Assert.Single(endpoints, endpoint => endpoint.Path == "/old/{slug}");
+        Assert.DoesNotContain(endpoints, endpoint => endpoint.Path?.Contains("Views", StringComparison.Ordinal) == true || endpoint.Path == "/Home/Index" && endpoint.EndpointKind == "RazorPage");
+
+        var result = DataFlowAnalyzer.Analyze(fixture.Path);
+        var nodes = result.Nodes.ToDictionary(node => node.Id);
+        var flow = Assert.Single(result.Slices, candidate => candidate.SinkCategory == "command" && nodes[candidate.SourceId].Name == "reason");
+        var chain = Assert.Single(result.ExploitChains, candidate => candidate.SliceId == flow.Id);
+        Assert.Equal("/Items/{id}?handler=Delete", Assert.Single(result.EntryPoints, entry => entry.Id == chain.EntryPointId).Route);
+    }
 }

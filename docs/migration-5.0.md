@@ -369,14 +369,25 @@ Assembly-only inputs now report the flows source mode reports, where IL can expr
   for the rest of the method, and a clean sibling member stays clean. An opaque mutator
   (`psi.Arguments = q`, `list.Add(q)`, an initializer's setters on a framework type) taints the
   object it was called on, wherever that object was loaded from. Stored field taint is per
-  field, not per instance, and a getter reads another method's store only for auto-property
+  field for objects that escape, and a getter reads another method's store only for auto-property
   backing fields (data holders); computing getters over shared state stay local, which keeps
   large packages within the state budget.
+- **Object identity.** An object a method creates (`newobj`) is tracked by its creation site
+  through locals, arguments and the stack, and its members are its own: `r.Set(q); r.Go()`
+  reports at the `Go()` call (the callee summary lists the receiver members it sinks), while a
+  reassigned variable (`r = new Runner(); r.Go()`) or another instance does not inherit them.
+  An object that escapes (passed to a call, stored, returned) publishes its members as stored
+  field taints, as before.
+- **Inherited and referenced properties.** Attribute sources on properties are found up the base
+  types and in referenced assemblies (beside the input, framework references and packs, the NuGet
+  cache), so an override or a base component's `[SupplyParameterFromQuery]` property is a source.
 - **Helpers that return a source** are sources at their call sites (node `Properties.summaryMethod`
   names the helper); a `bool` result is a decision, not the source.
 - **`SanitizesCategories` and `SinkParameters`** apply as in source mode; parameter names come
   from the callee's definition (analyzed assembly, a referenced assembly beside it, or the
-  framework reference set). Without a definition every argument stays dangerous.
+  framework reference set, then the installed reference packs and shared frameworks, then the
+  NuGet global packages folder). Without a definition every argument stays dangerous, and a
+  diagnostic names the assembly (`SinkParameters could not be applied to calls into …`).
 - **Early-exit validator guards** (`if (!Valid(x)) return;`) in Release and Debug builds.
 - **IL nodes carry `Properties.methodId`** (the IL method id), so exploit chains resolve IL entry
   points. `DataFlowMethodSummary` indexes stay parameter positions; the receiver is internal.
@@ -448,7 +459,14 @@ Assembly-only inputs now report the flows source mode reports, where IL can expr
   a base controller's, `[ApiController]`, `ControllerBase`/`Controller` bases, `[NonAction]`;
   conventional `/{controller}/{action}` for unattributed MVC controllers) and minimal-API
   `Map*` registrations (a route `ldstr` and handler `ldftn` feeding the call, with fluent
-  `RequireAuthorization`/`AllowAnonymous`). `MethodId` is the IL call graph's node id. In
+  `RequireAuthorization`/`AllowAnonymous`). Unattributed MVC actions expand every registered
+  `MapControllerRoute`/`MapAreaControllerRoute`/`MapRoute` template and
+  `MapDefaultControllerRoute()` (`{controller=Home}/{action=Index}/{id?}` gives
+  `/Home/Index/{id}`), keeping their verb attributes; with none registered, `/{controller}/{action}`.
+  Compiled Razor Pages are endpoints too: `[assembly: RazorCompiledItem(type, "mvc.1.0.razor-page",
+  "/Pages/X.cshtml")]` with the page type's `RouteTemplate` metadata, and 2.x
+  `[assembly: RazorPage(path, type, routeTemplate)]`; the page's `Model` property names the
+  PageModel whose handlers are the endpoints (views are not). `MethodId` is the IL call graph's node id. In
   `dataflows`, those handlers' parameters are `http` sources (`Properties.route`), so flows
   attach to the route.
 - **Middleware misconfiguration findings** (`SecurityFindings[]`, see
