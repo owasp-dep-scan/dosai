@@ -523,7 +523,9 @@ public static partial class DataFlowAnalyzer
         // C# endpoint) and merges through the same dedup as methods mode, rebuilding entry
         // points from provider endpoints produced a second, MethodId-less copy of each.
         var legacyEntryPoints = DebugLog.Measure("dataflows.legacy-entry-points", () => TransparencyBuilder.BuildEntryPoints(ApiEndpointAnalyzer.GetApiEndpoints(path)));
-        var frameworkEntryPoints = Depscan.Dosai.MergeEntryPoints(legacyEntryPoints, frameworkResult.EntryPoints);
+        // Endpoints of assembly-only inputs (controller attributes and Map* registrations in IL).
+        var ilEndpoints = DebugLog.Measure("dataflows.assembly-endpoints", () => AssemblyEndpointAnalyzer.Analyze(path, null, result.Diagnostics));
+        var frameworkEntryPoints = Depscan.Dosai.MergeEntryPoints(legacyEntryPoints, [.. frameworkResult.EntryPoints, .. ilEndpoints.EntryPoints]);
         AddDataFlowEntryPoints(result);
         var next = frameworkEntryPoints.Count;
         foreach (var entryPoint in result.EntryPoints)
@@ -718,7 +720,15 @@ public static partial class DataFlowAnalyzer
                 new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Attribute, Pattern = "FromBody", Match = DataFlowMatchKind.Contains, Category = "http", Description = "ASP.NET model-bound body input" },
                 new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Attribute, Pattern = "FromQuery", Match = DataFlowMatchKind.Contains, Category = "http", Description = "ASP.NET query input" },
                 new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Attribute, Pattern = "FromForm", Match = DataFlowMatchKind.Contains, Category = "http", Description = "ASP.NET form input" },
-                new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Attribute, Pattern = "FromRoute", Match = DataFlowMatchKind.Contains, Category = "http", Description = "ASP.NET route input" }
+                new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Attribute, Pattern = "FromRoute", Match = DataFlowMatchKind.Contains, Category = "http", Description = "ASP.NET route input" },
+                new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Attribute, Pattern = "FromHeader", Match = DataFlowMatchKind.Contains, Category = "http", Description = "ASP.NET header input" },
+                new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Attribute, Pattern = "AsParameters", Match = DataFlowMatchKind.Contains, Category = "http", Description = "Minimal API [AsParameters] bound input" },
+                // Property-level binding: a Razor PageModel's [BindProperty] and a Blazor
+                // component's [SupplyParameterFromQuery]/[SupplyParameterFromForm] are filled
+                // from the request; reading the property reads the request.
+                new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Attribute, Pattern = "BindProperty", Match = DataFlowMatchKind.Contains, Category = "http", Description = "Razor Pages [BindProperty] request-bound property" },
+                new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Attribute, Pattern = "SupplyParameterFromQuery", Match = DataFlowMatchKind.Contains, Category = "http", Description = "Blazor query-string bound property" },
+                new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Attribute, Pattern = "SupplyParameterFromForm", Match = DataFlowMatchKind.Contains, Category = "http", Description = "Blazor form bound property" }
             ]);
             patterns.Sinks.AddRange([
                 // LocalRedirect is the safe form (it rejects non-local URLs) and RedirectToAction
@@ -4424,6 +4434,23 @@ public static partial class DataFlowAnalyzer
                    name is "First" or "FirstOrDefault" or "Single" or "SingleOrDefault" or "Last" or "LastOrDefault" or "ElementAt" or "ToList" or "ToArray" or "Select" or "Where" or "Trim" or "Replace" or "Substring" or "ToString";
         }
 
+        /// <summary>
+        ///     The attribute names a symbol carries. A public settable property of a type marked
+        ///     <c>[BindProperties]</c> is bound from the request exactly as if it carried
+        ///     <c>[BindProperty]</c>, so it reads as one.
+        /// </summary>
+        private static string SymbolAttributeNames(ISymbol symbol)
+        {
+            var names = string.Join(' ', symbol.GetAttributes().Select(a => a.AttributeClass?.Name ?? string.Empty));
+            if (symbol is IPropertySymbol { SetMethod.DeclaredAccessibility: Accessibility.Public, IsStatic: false } property &&
+                property.ContainingType.GetAttributes().Any(attribute => attribute.AttributeClass?.Name is "BindPropertiesAttribute"))
+            {
+                names += " BindPropertyAttribute";
+            }
+
+            return names;
+        }
+
         private IEnumerable<DataFlowPattern> MatchSymbol(ISymbol symbol, SyntaxNode syntax, IReadOnlyList<DataFlowPattern> candidatePatterns)
         {
             var normalizedSymbol = PatternSymbolText(symbol, DescribeSymbol(symbol));
@@ -4443,7 +4470,7 @@ public static partial class DataFlowAnalyzer
                     DataFlowPatternKind.Namespace => namespaceName,
                     DataFlowPatternKind.Name => name,
                     DataFlowPatternKind.Code => code ??= SyntaxText(syntax),
-                    DataFlowPatternKind.Attribute => attributes ??= string.Join(' ', symbol.GetAttributes().Select(a => a.AttributeClass?.Name ?? string.Empty)),
+                    DataFlowPatternKind.Attribute => attributes ??= SymbolAttributeNames(symbol),
                     DataFlowPatternKind.Parameter => null,
                     _ => normalizedSymbol
                 };

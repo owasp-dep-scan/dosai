@@ -1004,6 +1004,22 @@ internal static class AssemblyCallGraphAnalyzer
         }
     }
 
+    /// <summary>An IL body's instructions (offset, opcode, operand) for the other IL passes.</summary>
+    internal static IEnumerable<(int Offset, OpCode OpCode, object? Operand)> Decode(BlobReader ilReader) =>
+        DecodeInstructions(ilReader).Select(instruction => (instruction.Offset, instruction.OpCode, instruction.Operand));
+
+    /// <summary>
+    ///     A method definition's call-graph id: the inventory's assembly signature when the
+    ///     inventory read it, else the IL symbol the call graph falls back to.
+    /// </summary>
+    internal static string MethodId(MetadataReader reader, MethodDefinitionHandle handle, string assemblyPath, IReadOnlyList<Method>? knownMethods)
+    {
+        var token = MetadataTokens.GetToken(handle);
+        var fullPath = Path.GetFullPath(assemblyPath);
+        var known = knownMethods?.FirstOrDefault(method => method.MetadataToken == token && method.Path is { } path && string.Equals(Path.GetFullPath(path), fullPath, SafeFileRead.PathComparison) && !string.IsNullOrWhiteSpace(method.AssemblySignature));
+        return known?.AssemblySignature ?? BuildMethodSymbol(reader, handle, reader.GetMethodDefinition(handle), assemblyPath).Symbol;
+    }
+
     private static IEnumerable<AssemblyCallInstruction> DecodeInstructions(BlobReader ilReader)
     {
         while (ilReader.RemainingBytes > 0)

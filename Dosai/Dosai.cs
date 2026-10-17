@@ -563,6 +563,12 @@ public static class Dosai
         {
             (assemblyMethodCalls, assemblyCallGraph) = AssemblyCallGraphAnalyzer.Analyze(path, methods, assemblyDiagnostics);
         }
+
+        // Endpoints of assemblies the tree does not build from source (assembly-only inputs):
+        // controller attributes and minimal-API Map* registrations read from metadata and IL.
+        var ilEndpoints = DebugLog.Measure("methods.assembly-endpoints", () => AssemblyEndpointAnalyzer.Analyze(path, methods, assemblyDiagnostics));
+        apiEndpoints.AddRange(ilEndpoints.Endpoints);
+        frameworkResult.EntryPoints.AddRange(ilEndpoints.EntryPoints);
         DebugLog.Count("call graph (assembly IL) nodes", assemblyCallGraph.Nodes.Count);
         DebugLog.Count("call graph (assembly IL) edges", assemblyCallGraph.Edges.Count);
         NormalizeAssemblyGraphToSourceIds(assemblyMethodCalls, assemblyCallGraph, sourceAssemblyMapping);
