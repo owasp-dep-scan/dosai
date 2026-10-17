@@ -201,6 +201,48 @@ app.Run();
     }
 
     [Fact]
+    public void MinimalApiLambdaHandlers_NameTheirLambdaAndOwnTheirFlows()
+    {
+        using var directory = new RoadmapTemporaryDirectory();
+        directory.WriteSource("Program.cs", """
+using Microsoft.AspNetCore.Builder;
+
+var app = WebApplication.Create();
+System.Diagnostics.Process.Start(args[0]);
+app.MapGet("/health", () => "ok");
+app.MapPost("/run", (string command) =>
+{
+    System.Diagnostics.Process.Start(command);
+    return "ran";
+});
+app.Run();
+""" + MinimalStubs);
+
+        var slice = directory.Methods();
+        var run = Assert.Single(slice.EntryPoints!, entryPoint => entryPoint.Route == "/run");
+        Assert.Equal("Program.<<Main>$>lambda2(string):string", run.MethodId);
+        Assert.Equal("Program.<<Main>$>lambda1():string", Assert.Single(slice.EntryPoints!, entryPoint => entryPoint.Route == "/health").MethodId);
+        // The id is the call graph's own lambda node, so reachability walks start from the handler.
+        Assert.Contains(slice.CallGraph!.Nodes, node => node.Id == run.MethodId);
+        var processStart = slice.CallGraph.Edges.Where(edge => edge.SourceId == run.MethodId && edge.TargetId.StartsWith("System.Diagnostics.Process.Start(", StringComparison.Ordinal)).Select(edge => edge.TargetId).First();
+        Assert.Contains(run.Id, Assert.Single(slice.Reachability!, fact => fact.NodeId == processStart).ReachableEntryPoints);
+
+        var result = directory.DataFlows();
+        var http = Assert.Single(result.EntryPoints, entryPoint => entryPoint.Route == "/run");
+        Assert.Equal(run.MethodId, http.MethodId);
+        var cli = Assert.Single(result.EntryPoints, entryPoint => entryPoint.Kind == "Cli");
+        var nodes = result.Nodes.ToDictionary(node => node.Id);
+        var handlerSlice = Assert.Single(result.Slices, candidate => candidate.SinkCategory == "command" && nodes[candidate.SourceId].Name == "command");
+        var argsSlice = Assert.Single(result.Slices, candidate => candidate.SinkCategory == "command" && nodes[candidate.SourceId].Name == "args");
+        Assert.Equal(http.Id, Assert.Single(result.ExploitChains, chain => chain.SliceId == handlerSlice.Id).EntryPointId);
+        Assert.Equal(cli.Id, Assert.Single(result.ExploitChains, chain => chain.SliceId == argsSlice.Id).EntryPointId);
+        Assert.Equal("/run", Assert.Single(result.WeaknessCandidates, weakness => weakness.SliceId == handlerSlice.Id).Route);
+        var surface = result.AttackSurface.SelectMany(group => group.EntryPoints).ToList();
+        Assert.Equal(1, Assert.Single(surface, entry => entry.EntryPointId == http.Id).ExploitChainCount);
+        Assert.Equal(1, Assert.Single(surface, entry => entry.EntryPointId == cli.Id).ExploitChainCount);
+    }
+
+    [Fact]
     public void GlobalAuthorization_AppliesToEndpointsWithoutTheirOwnMetadata()
     {
         using var directory = new RoadmapTemporaryDirectory();

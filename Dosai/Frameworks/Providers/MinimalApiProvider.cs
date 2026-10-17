@@ -500,6 +500,16 @@ public sealed class MinimalApiProvider : IFrameworkProvider
     }
 
     /// <summary>
+    ///     An inline handler's own method: the lambda the compiler emits, whose id
+    ///     (<see cref="Depscan.Dosai.FormatMethodSignature" />, named by
+    ///     <see cref="Depscan.Dosai.NestedFunctionName" /> as <c>&lt;&lt;Main&gt;$&gt;lambda2</c>) is
+    ///     the call graph's and the data flow's id for the handler body. The lambda symbol binds
+    ///     even when the Map* overload does not (unresolved framework references).
+    /// </summary>
+    private static IMethodSymbol? LambdaSymbol(FrameworkContext ctx, LambdaExpressionSyntax lambda) =>
+        ctx.CSharp?.GetSemanticModel(lambda.SyntaxTree).GetSymbolInfo(lambda).Symbol as IMethodSymbol is { MethodKind: MethodKind.AnonymousFunction } symbol ? symbol : null;
+
+    /// <summary>
     ///     The handler argument of a Map* call: a lambda's attributes, or a method group's symbol
     ///     and the attributes on its declaration.
     /// </summary>
@@ -510,9 +520,9 @@ public sealed class MinimalApiProvider : IFrameworkProvider
             switch (argument.Expression)
             {
                 case ParenthesizedLambdaExpressionSyntax lambda:
-                    return (null, ProviderHelpers.AttributesOf(lambda.AttributeLists).ToList());
+                    return (LambdaSymbol(ctx, lambda), ProviderHelpers.AttributesOf(lambda.AttributeLists).ToList());
                 case SimpleLambdaExpressionSyntax simple:
-                    return (null, ProviderHelpers.AttributesOf(simple.AttributeLists).ToList());
+                    return (LambdaSymbol(ctx, simple), ProviderHelpers.AttributesOf(simple.AttributeLists).ToList());
                 case IdentifierNameSyntax or MemberAccessExpressionSyntax when ctx.CSharp is not null:
                 {
                     var symbolInfo = ctx.CSharp.GetSemanticModel(invocation.SyntaxTree).GetSymbolInfo(argument.Expression);
@@ -790,8 +800,9 @@ public sealed class MinimalApiProvider : IFrameworkProvider
             Kind = "HttpMinimalApi",
             // A method-group handler is a method of its own: name it so flows and call paths
             // land on this route instead of the file's first entry point.
+            // A lambda handler is named the way the call graph and data flow name it.
             MethodId = handler?.Method is { } handlerMethod ? Depscan.Dosai.FormatMethodSignature(handlerMethod) : null,
-            MethodName = handler?.Method?.Name,
+            MethodName = handler?.Method is { } named ? Depscan.Dosai.IsNestedFunction(named) ? Depscan.Dosai.NestedFunctionName(named) : named.Name : null,
             ClassName = handler?.Method?.ContainingType?.Name,
             Namespace = handler?.Method?.ContainingType?.ContainingNamespace?.ToDisplayString(),
             FileName = fileName,

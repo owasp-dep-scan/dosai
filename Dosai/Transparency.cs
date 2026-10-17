@@ -916,14 +916,34 @@ public static class TransparencyBuilder
             // route the attacker actually takes: entry point → … → sink frame.
             nodesById.TryGetValue(slice.SinkId, out var sinkNode);
             nodesById.TryGetValue(slice.SourceId, out var sourceNode);
-            var startMethodId =
-                sinkNode?.Properties.GetValueOrDefault("sinkMethodId") as string ??
-                sinkNode?.Properties.GetValueOrDefault("methodId") as string ??
-                sourceNode?.Properties.GetValueOrDefault("methodId") as string;
-            if (string.IsNullOrWhiteSpace(startMethodId) ||
-                !TryFindReversePath(reverseEdges, entryPointsByMethodId, startMethodId, out var entryPoint, out var callPath))
+            // The walk starts at the method that holds the sink call: starting at the sink API
+            // itself let any other caller of that API win, so a minimal-API lambda's
+            // Process.Start was attributed to the program's own top-level Process.Start (CLI).
+            // The sink API stays the last frame of the path.
+            // A source seeded in an entry point's own frame (a minimal-API lambda's parameter,
+            // whose body nodes carry the enclosing `<Main>$`) names that entry point directly.
+            var sinkMethodId = sinkNode?.Properties.GetValueOrDefault("sinkMethodId") as string;
+            var sourceMethodId = sourceNode?.Properties.GetValueOrDefault("methodId") as string;
+            var holderMethodId = sourceMethodId is not null && entryPointsByMethodId.ContainsKey(sourceMethodId)
+                ? sourceMethodId
+                : sinkNode?.Properties.GetValueOrDefault("methodId") as string ?? sourceMethodId;
+            EntryPoint entryPoint;
+            List<string> callPath;
+            if (!string.IsNullOrWhiteSpace(holderMethodId) && TryFindReversePath(reverseEdges, entryPointsByMethodId, holderMethodId, out entryPoint, out callPath))
             {
-                continue;
+                if (!string.IsNullOrWhiteSpace(sinkMethodId) && !string.Equals(sinkMethodId, holderMethodId, StringComparison.Ordinal))
+                {
+                    callPath.Insert(0, sinkMethodId);
+                }
+            }
+            else
+            {
+                var startMethodId = sinkMethodId ?? holderMethodId;
+                if (string.IsNullOrWhiteSpace(startMethodId) ||
+                    !TryFindReversePath(reverseEdges, entryPointsByMethodId, startMethodId, out entryPoint, out callPath))
+                {
+                    continue;
+                }
             }
 
             // callPath is sink → entry point; store entry → sink for readability.
