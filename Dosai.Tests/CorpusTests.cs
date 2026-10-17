@@ -49,10 +49,13 @@ public class CorpusTests
         // Repeated call sites collapse into counted edges.
         Assert.Contains(slice.CallGraph!.Edges, edge => edge.CallSiteCount > 1);
 
-        // The endpoint security findings engine produces real findings on a real app
-        // (11 antiforgery findings at the release run).
-        var antiforgeryFindings = slice.SecurityFindings!.Count(finding => finding.Kind == "StateChangingEndpointWithoutAntiforgery");
-        Assert.True(antiforgeryFindings >= 10, $"expected >= 10 antiforgery findings, got {antiforgeryFindings}");
+        // The endpoint security findings engine produces real findings on a real app. The
+        // ManageController actions carry [ValidateAntiForgeryToken]; until 5.0.0-rc.2 the rule
+        // tested `!= false` and reported them too (11 findings), leaving UserController.Logout as
+        // the one state-changing MVC action that does not opt in.
+        var antiforgeryFindings = slice.SecurityFindings!.Where(finding => finding.Kind == "StateChangingEndpointWithoutAntiforgery").ToList();
+        Assert.Contains(antiforgeryFindings, finding => finding.Route == "/User");
+        Assert.DoesNotContain(antiforgeryFindings, finding => finding.Route?.StartsWith("/Manage/", StringComparison.Ordinal) == true);
 
         // A restored tree resolves package purls into the slice.
         Assert.True(slice.PackageReachability!.Count > 25, $"expected resolved purls, got {slice.PackageReachability.Count}");

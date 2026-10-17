@@ -243,6 +243,27 @@ app.Run();
     }
 
     [Fact]
+    public void AntiforgeryOptIn_IsNotReportedAsMissing()
+    {
+        using var directory = new RoadmapTemporaryDirectory();
+        directory.WriteSource("OrdersController.cs", """
+using Microsoft.AspNetCore.Mvc;
+
+[Route("orders")]
+public class OrdersController : ControllerBase
+{
+    [HttpPost("validated"), ValidateAntiForgeryToken] public void Validated(int id) { }
+    [HttpPost("unvalidated")] public void Unvalidated(int id) { }
+}
+""" + AuthStubs.Replace("public class ControllerBase { }", "public class ControllerBase { } public class ValidateAntiForgeryTokenAttribute : System.Attribute { }", StringComparison.Ordinal));
+
+        var findings = directory.Methods().SecurityFindings!.Where(finding => finding.Kind == "StateChangingEndpointWithoutAntiforgery").ToList();
+
+        Assert.Contains(findings, finding => finding.Route == "/orders/unvalidated");
+        Assert.DoesNotContain(findings, finding => finding.Route == "/orders/validated");
+    }
+
+    [Fact]
     public void GlobalAuthorization_AppliesToEndpointsWithoutTheirOwnMetadata()
     {
         using var directory = new RoadmapTemporaryDirectory();

@@ -80,101 +80,160 @@ public static class SecurityAnalyzer
         var globalAntiforgery = HasGlobalAntiforgeryFilter(context);
         foreach (var endpoint in endpoints)
         {
-            var sensitive = SensitiveInboundClassifications(endpoint, servicesById);
-            var anonymous = endpoint.AllowAnonymous || endpoint.AuthorizationRequired == false;
-
-            // 1. Sensitive unauthenticated endpoint.
-            if (anonymous && sensitive.Count > 0)
-            {
-                findings.Add(new SecurityFinding
-                {
-                    Id = ids.Next("SensitiveUnauthenticatedEndpoint", endpoint.FileName, endpoint.LineNumber),
-                    Kind = "SensitiveUnauthenticatedEndpoint",
-                    Title = $"Anonymous endpoint {DescribeEndpoint(endpoint)} exchanges {string.Join(", ", sensitive)} data",
-                    Severity = "high",
-                    Cwe = "CWE-306",
-                    EndpointId = endpoint.OperationId,
-                    Route = endpoint.Path ?? endpoint.Route,
-                    FileName = endpoint.FileName,
-                    LineNumber = endpoint.LineNumber,
-                    Evidence = $"Classifications: {string.Join(", ", sensitive)}. Auth metadata: {(endpoint.AllowAnonymous ? "[AllowAnonymous]" : endpoint.AuthorizationRequired == false ? "no authorization" : "unknown")}.",
-                    Remediation = "Require authorization for endpoints that read or return sensitive data, or strip the sensitive fields for anonymous callers.",
-                    Confidence = ConfidenceTiers.Semantic,
-                    Properties = { ["classifications"] = string.Join(",", sensitive) }
-                });
-            }
-
-            // 3. State-changing endpoint without antiforgery (CWE-352). Bearer-token APIs are
-            // exempt (no cookie to forge); Razor Pages validate automatically; a global
-            // AutoValidateAntiforgeryToken filter already covers MVC.
-            var mutating = endpoint.HttpMethod is "POST" or "PUT" or "DELETE" or "PATCH";
-            var bearerOnly = endpoint.AuthenticationSchemes.Count > 0 && endpoint.AuthenticationSchemes.All(scheme => scheme.Contains("Bearer", StringComparison.OrdinalIgnoreCase));
-            if (mutating && !bearerOnly && !globalAntiforgery && endpoint.AntiForgeryRequired != false &&
-                endpoint.EndpointKind is "Attribute" or "MinimalApi" or "HttpController" or "Conventional")
-            {
-                findings.Add(new SecurityFinding
-                {
-                    Id = ids.Next("StateChangingEndpointWithoutAntiforgery", endpoint.FileName, endpoint.LineNumber),
-                    Kind = "StateChangingEndpointWithoutAntiforgery",
-                    Title = $"{endpoint.HttpMethod} endpoint {DescribeEndpoint(endpoint)} does not opt into antiforgery",
-                    Severity = "low",
-                    Cwe = "CWE-352",
-                    EndpointId = endpoint.OperationId,
-                    Route = endpoint.Path ?? endpoint.Route,
-                    FileName = endpoint.FileName,
-                    LineNumber = endpoint.LineNumber,
-                    Evidence = "Mutating handler with AntiForgeryRequired unset (no [ValidateAntiForgeryToken] or RequireAntiforgery detected).",
-                    Remediation = "Add antiforgery validation ([ValidateAntiForgeryToken] / RequireAntiforgery()) or switch the endpoint to bearer-token authentication.",
-                    Confidence = ConfidenceTiers.Heuristic
-                });
-            }
-
-            // 4. Antiforgery switched off on a state-changing, cookie-capable endpoint
-            // ([IgnoreAntiforgeryToken], DisableAntiforgery()). An explicit opt-out overrides a
-            // global filter, so it is reported even when one exists.
-            if (mutating && !bearerOnly && endpoint.AntiForgeryRequired == false && !endpoint.AllowAnonymous &&
-                endpoint.EndpointKind is "Attribute" or "MinimalApi" or "HttpController" or "Conventional")
-            {
-                findings.Add(new SecurityFinding
-                {
-                    Id = ids.Next("StateChangingEndpointAntiforgeryDisabled", endpoint.FileName, endpoint.LineNumber),
-                    Kind = "StateChangingEndpointAntiforgeryDisabled",
-                    Title = $"{endpoint.HttpMethod} endpoint {DescribeEndpoint(endpoint)} disables antiforgery validation",
-                    Severity = "medium",
-                    Cwe = "CWE-352",
-                    EndpointId = endpoint.OperationId,
-                    Route = endpoint.Path ?? endpoint.Route,
-                    FileName = endpoint.FileName,
-                    LineNumber = endpoint.LineNumber,
-                    Evidence = "Mutating handler opts out of antiforgery ([IgnoreAntiforgeryToken] or DisableAntiforgery()).",
-                    Remediation = "Keep antiforgery validation for cookie-authenticated endpoints, or restrict the endpoint to bearer-token authentication.",
-                    Confidence = ConfidenceTiers.Syntactic
-                });
-            }
-
-            // 5. Mass-assignment hint (informational, name-heuristic only).
             var dtoName = servicesById.GetValueOrDefault(endpoint.ServiceId ?? string.Empty)?.Data?
                 .FirstOrDefault(data => data.Flow is "inbound" or "bi-directional")?.Name;
-            if (anonymous && dtoName is not null && MassAssignmentShapes(dtoName, context))
-            {
-                findings.Add(new SecurityFinding
-                {
-                    Id = ids.Next("MassAssignmentHint", endpoint.FileName, endpoint.LineNumber),
-                    Kind = "MassAssignmentHint",
-                    Title = $"Anonymous endpoint {DescribeEndpoint(endpoint)} binds a DTO with role/enablement-shaped members",
-                    Severity = "info",
-                    Cwe = "CWE-915",
-                    EndpointId = endpoint.OperationId,
-                    Route = endpoint.Path ?? endpoint.Route,
-                    FileName = endpoint.FileName,
-                    LineNumber = endpoint.LineNumber,
-                    Evidence = $"Request model {dtoName} has bindable properties shaped like role/enablement flags.",
-                    Remediation = "Use a dedicated request DTO without role/enablement members, or [Bind Never] them, so unprivileged callers cannot set privileged fields.",
-                    Confidence = ConfidenceTiers.Heuristic
-                });
-            }
+            AssessEndpoint(endpoint, SensitiveInboundClassifications(endpoint, servicesById), globalAntiforgery, dtoName is not null && MassAssignmentShapes(dtoName, context) ? dtoName : null, findings, ids);
         }
 
+        AssessDuplicateRoutes(endpoints, findings, ids);
+
+        // 2. CORS wildcard on credentialed routes (CWE-942): policy definitions come from source.
+        foreach (var (policyName, fileName, line) in FindWildcardCredentialCorsPolicies(context).DistinctBy(item => (item.PolicyName, item.FileName, item.Line)))
+        {
+            findings.Add(new SecurityFinding
+            {
+                Id = ids.Next("CorsWildcardWithCredentials", fileName, line),
+                Kind = "CorsWildcardWithCredentials",
+                Title = policyName is null
+                    ? "Default CORS policy allows any origin together with credentials"
+                    : $"CORS policy '{policyName}' allows any origin together with credentials",
+                Severity = "medium",
+                Cwe = "CWE-942",
+                Route = policyName,
+                FileName = fileName,
+                LineNumber = line,
+                Evidence = $"AllowAnyOrigin/SetIsOriginAllowed combined with AllowCredentials in {fileName}:{line}.",
+                Remediation = "Restrict origins to an explicit allowlist; AllowCredentials requires explicit origins per the CORS specification.",
+                Confidence = ConfidenceTiers.Heuristic
+            });
+        }
+    }
+
+    /// <summary>
+    ///     The endpoint-level rules, read from an endpoint's metadata alone (route, verb,
+    ///     authorization and antiforgery attributes, the request data's classifications), so
+    ///     endpoints of source and of assembly-only inputs are judged alike.
+    /// </summary>
+    internal static void AssessEndpoint(ApiEndpoint endpoint, IReadOnlyList<string> sensitive, bool globalAntiforgery, string? massAssignmentDto, List<SecurityFinding> findings, FindingIds ids)
+    {
+        var anonymous = endpoint.AllowAnonymous || endpoint.AuthorizationRequired == false;
+
+        // 1. Sensitive unauthenticated endpoint.
+        if (anonymous && sensitive.Count > 0)
+        {
+            findings.Add(new SecurityFinding
+            {
+                Id = ids.Next("SensitiveUnauthenticatedEndpoint", endpoint.FileName, endpoint.LineNumber),
+                Kind = "SensitiveUnauthenticatedEndpoint",
+                Title = $"Anonymous endpoint {DescribeEndpoint(endpoint)} exchanges {string.Join(", ", sensitive)} data",
+                Severity = "high",
+                Cwe = "CWE-306",
+                EndpointId = endpoint.OperationId,
+                Route = endpoint.Path ?? endpoint.Route,
+                FileName = endpoint.FileName,
+                LineNumber = endpoint.LineNumber,
+                Evidence = $"Classifications: {string.Join(", ", sensitive)}. Auth metadata: {(endpoint.AllowAnonymous ? "[AllowAnonymous]" : endpoint.AuthorizationRequired == false ? "no authorization" : "unknown")}.",
+                Remediation = "Require authorization for endpoints that read or return sensitive data, or strip the sensitive fields for anonymous callers.",
+                Confidence = ConfidenceTiers.Semantic,
+                Properties = { ["classifications"] = string.Join(",", sensitive) }
+            });
+        }
+
+        // 3. State-changing endpoint without antiforgery (CWE-352). Bearer-token APIs are
+        // exempt (no cookie to forge); Razor Pages validate automatically; a global
+        // AutoValidateAntiforgeryToken filter already covers MVC.
+        var mutating = endpoint.HttpMethod is "POST" or "PUT" or "DELETE" or "PATCH";
+        var bearerOnly = endpoint.AuthenticationSchemes.Count > 0 && endpoint.AuthenticationSchemes.All(scheme => scheme.Contains("Bearer", StringComparison.OrdinalIgnoreCase));
+        // A handler that opts in ([ValidateAntiForgeryToken], RequireAntiforgery) is validated; the
+        // rule used to test `!= false` and flagged those too.
+        if (mutating && !bearerOnly && !globalAntiforgery && endpoint.AntiForgeryRequired is null &&
+            endpoint.EndpointKind is "Attribute" or "MinimalApi" or "HttpController" or "Controller" or "Conventional")
+        {
+            findings.Add(new SecurityFinding
+            {
+                Id = ids.Next("StateChangingEndpointWithoutAntiforgery", endpoint.FileName, endpoint.LineNumber),
+                Kind = "StateChangingEndpointWithoutAntiforgery",
+                Title = $"{endpoint.HttpMethod} endpoint {DescribeEndpoint(endpoint)} does not opt into antiforgery",
+                Severity = "low",
+                Cwe = "CWE-352",
+                EndpointId = endpoint.OperationId,
+                Route = endpoint.Path ?? endpoint.Route,
+                FileName = endpoint.FileName,
+                LineNumber = endpoint.LineNumber,
+                Evidence = "Mutating handler with AntiForgeryRequired unset (no [ValidateAntiForgeryToken] or RequireAntiforgery detected).",
+                Remediation = "Add antiforgery validation ([ValidateAntiForgeryToken] / RequireAntiforgery()) or switch the endpoint to bearer-token authentication.",
+                Confidence = ConfidenceTiers.Heuristic
+            });
+        }
+
+        // 4. Antiforgery switched off on a state-changing, cookie-capable endpoint
+        // ([IgnoreAntiforgeryToken], DisableAntiforgery()). An explicit opt-out overrides a
+        // global filter, so it is reported even when one exists.
+        if (mutating && !bearerOnly && endpoint.AntiForgeryRequired == false && !endpoint.AllowAnonymous &&
+            endpoint.EndpointKind is "Attribute" or "MinimalApi" or "HttpController" or "Controller" or "Conventional")
+        {
+            findings.Add(new SecurityFinding
+            {
+                Id = ids.Next("StateChangingEndpointAntiforgeryDisabled", endpoint.FileName, endpoint.LineNumber),
+                Kind = "StateChangingEndpointAntiforgeryDisabled",
+                Title = $"{endpoint.HttpMethod} endpoint {DescribeEndpoint(endpoint)} disables antiforgery validation",
+                Severity = "medium",
+                Cwe = "CWE-352",
+                EndpointId = endpoint.OperationId,
+                Route = endpoint.Path ?? endpoint.Route,
+                FileName = endpoint.FileName,
+                LineNumber = endpoint.LineNumber,
+                Evidence = "Mutating handler opts out of antiforgery ([IgnoreAntiforgeryToken] or DisableAntiforgery()).",
+                Remediation = "Keep antiforgery validation for cookie-authenticated endpoints, or restrict the endpoint to bearer-token authentication.",
+                Confidence = ConfidenceTiers.Syntactic
+            });
+        }
+
+        // 5. Mass-assignment hint (informational, name-heuristic only).
+        if (anonymous && massAssignmentDto is { } dtoName)
+        {
+            findings.Add(new SecurityFinding
+            {
+                Id = ids.Next("MassAssignmentHint", endpoint.FileName, endpoint.LineNumber),
+                Kind = "MassAssignmentHint",
+                Title = $"Anonymous endpoint {DescribeEndpoint(endpoint)} binds a DTO with role/enablement-shaped members",
+                Severity = "info",
+                Cwe = "CWE-915",
+                EndpointId = endpoint.OperationId,
+                Route = endpoint.Path ?? endpoint.Route,
+                FileName = endpoint.FileName,
+                LineNumber = endpoint.LineNumber,
+                Evidence = $"Request model {dtoName} has bindable properties shaped like role/enablement flags.",
+                Remediation = "Use a dedicated request DTO without role/enablement members, or [Bind Never] them, so unprivileged callers cannot set privileged fields.",
+                Confidence = ConfidenceTiers.Heuristic
+            });
+        }
+
+        // 6. [AllowAnonymous] beside authorization metadata (CWE-862): the anonymous opt-out
+        // wins, so the roles or policies the endpoint also names protect nothing.
+        if (endpoint.AllowAnonymous && (endpoint.Roles.Count > 0 || endpoint.AuthorizationPolicies.Count > 0))
+        {
+            findings.Add(new SecurityFinding
+            {
+                Id = ids.Next("AllowAnonymousOverridesAuthorization", endpoint.FileName, endpoint.LineNumber),
+                Kind = "AllowAnonymousOverridesAuthorization",
+                Title = $"Endpoint {DescribeEndpoint(endpoint)} is anonymous despite its authorization metadata",
+                Severity = "low",
+                Cwe = "CWE-862",
+                EndpointId = endpoint.OperationId,
+                Route = endpoint.Path ?? endpoint.Route,
+                FileName = endpoint.FileName,
+                LineNumber = endpoint.LineNumber,
+                Evidence = $"[AllowAnonymous] with roles [{string.Join(", ", endpoint.Roles)}] and policies [{string.Join(", ", endpoint.AuthorizationPolicies)}]; the opt-out disables both.",
+                Remediation = "Remove [AllowAnonymous] if the endpoint must be protected, or drop the roles/policies that no longer apply so the exposure is explicit.",
+                Confidence = ConfidenceTiers.Syntactic
+            });
+        }
+    }
+
+    /// <summary>One route served at different authorization levels (CWE-306).</summary>
+    internal static void AssessDuplicateRoutes(IReadOnlyList<ApiEndpoint> endpoints, List<SecurityFinding> findings, FindingIds ids)
+    {
         // 4. Duplicated routes with different auth levels.
         foreach (var group in endpoints
                      .Where(endpoint => !string.IsNullOrWhiteSpace(endpoint.Path) && !string.IsNullOrWhiteSpace(endpoint.HttpMethod))
@@ -208,28 +267,28 @@ public static class SecurityAnalyzer
                 Confidence = ConfidenceTiers.Semantic
             });
         }
-
-        // 2. CORS wildcard on credentialed routes (CWE-942): policy definitions come from source.
-        foreach (var (policyName, fileName, line) in FindWildcardCredentialCorsPolicies(context).DistinctBy(item => (item.PolicyName, item.FileName, item.Line)))
-        {
-            findings.Add(new SecurityFinding
-            {
-                Id = ids.Next("CorsWildcardWithCredentials", fileName, line),
-                Kind = "CorsWildcardWithCredentials",
-                Title = policyName is null
-                    ? "Default CORS policy allows any origin together with credentials"
-                    : $"CORS policy '{policyName}' allows any origin together with credentials",
-                Severity = "medium",
-                Cwe = "CWE-942",
-                Route = policyName,
-                FileName = fileName,
-                LineNumber = line,
-                Evidence = $"AllowAnyOrigin/SetIsOriginAllowed combined with AllowCredentials in {fileName}:{line}.",
-                Remediation = "Restrict origins to an explicit allowlist; AllowCredentials requires explicit origins per the CORS specification.",
-                Confidence = ConfidenceTiers.Heuristic
-            });
-        }
     }
+
+    /// <summary>
+    ///     Endpoint findings for endpoints read from assembly metadata (assembly-only inputs),
+    ///     which the source compilation never saw: the same rules, with sensitivity and
+    ///     mass-assignment shapes classified from the handlers' parameter and member names.
+    /// </summary>
+    public static List<SecurityFinding> AssessEndpointMetadata(IReadOnlyList<(ApiEndpoint Endpoint, IReadOnlyList<string> Sensitive, string? MassAssignmentDto)> endpoints, bool globalAntiforgery)
+    {
+        var findings = new List<SecurityFinding>();
+        var ids = new FindingIds("endpoint-security");
+        foreach (var (endpoint, sensitive, massAssignmentDto) in endpoints)
+        {
+            AssessEndpoint(endpoint, sensitive, globalAntiforgery, massAssignmentDto, findings, ids);
+        }
+
+        AssessDuplicateRoutes([.. endpoints.Select(entry => entry.Endpoint)], findings, ids);
+        return findings;
+    }
+
+    /// <summary>Member-name shapes of a mass-assignment hint (role and enablement flags).</summary>
+    internal static bool IsMassAssignmentMemberName(string name) => MassAssignmentMemberNames.Any(shape => name.Contains(shape, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
     ///     Detects a globally-registered antiforgery filter. Syntactic by design (filter

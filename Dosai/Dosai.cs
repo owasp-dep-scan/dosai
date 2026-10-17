@@ -569,6 +569,8 @@ public static class Dosai
         var ilEndpoints = DebugLog.Measure("methods.assembly-endpoints", () => AssemblyEndpointAnalyzer.Analyze(path, methods, assemblyDiagnostics));
         apiEndpoints.AddRange(ilEndpoints.Endpoints);
         frameworkResult.EntryPoints.AddRange(ilEndpoints.EntryPoints);
+        // The source security analyzer never saw them: the endpoint rules read their metadata.
+        securityFindings.AddRange(Frameworks.SecurityAnalyzer.AssessEndpointMetadata(ilEndpoints.ForSecurityRules(), ilEndpoints.GlobalAntiforgery));
         DebugLog.Count("call graph (assembly IL) nodes", assemblyCallGraph.Nodes.Count);
         DebugLog.Count("call graph (assembly IL) edges", assemblyCallGraph.Edges.Count);
         NormalizeAssemblyGraphToSourceIds(assemblyMethodCalls, assemblyCallGraph, sourceAssemblyMapping);

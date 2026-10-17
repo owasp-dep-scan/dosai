@@ -363,7 +363,7 @@ Assembly-only inputs now report the flows source mode reports, where IL can expr
   (`[BindProperty]`, `[SupplyParameterFrom*]`): a getter call on such a property is a source.
   Properties are resolved in the assembly that declares them.
 - **Object state.** Method summaries record the fields a method returns and the parameters it
-  stores into fields, and the receiver (`this`) is a summarized input of accessor-sized bodies (64 IL instructions or fewer). `o.Command = q` then
+  stores into fields, and the receiver (`this`) is a summarized input whenever that summary fits a 2,000-state budget (a larger method is summarized again without it, as before). `o.Command = q` then
   `o.Command`, `new Options { Command = q }`, `r.Set(q)` then `r.Go()`, and a data object passed
   to a helper (`Launch(job)`) carry the taint; a clean store (`o.Command = "fixed"`) clears it
   for the rest of the method, and a clean sibling member stays clean. An opaque mutator
@@ -472,6 +472,19 @@ Assembly-only inputs now report the flows source mode reports, where IL can expr
 - **Middleware misconfiguration findings** (`SecurityFindings[]`, see
   [frameworks](frameworks.md)): `DeveloperExceptionPageUnguarded`, `HttpsRedirectionMissing`,
   `HstsMissing`, `InsecureCookie`, `ForwardedHeadersTrustAll`, `RequestSizeLimitDisabled`.
+- **Endpoint findings for assembly-only inputs.** The endpoint rules
+  (`SensitiveUnauthenticatedEndpoint`, `StateChangingEndpointWithoutAntiforgery`,
+  `StateChangingEndpointAntiforgeryDisabled`, `MassAssignmentHint`, `DuplicateRouteAuthMismatch`
+  and the new `AllowAnonymousOverridesAuthorization`) run on the endpoints read from IL too:
+  sensitivity and mass-assignment shapes are classified from handler parameter names and the
+  public properties of request types the assembly declares; `[ValidateAntiForgeryToken]`,
+  `[IgnoreAntiforgeryToken]`, `DisableAntiforgery()` and a global
+  `AutoValidateAntiforgeryTokenAttribute` filter are read from metadata and IL.
+- **`AllowAnonymousOverridesAuthorization`** (low, CWE-862): `[AllowAnonymous]` on an endpoint
+  that also names roles or policies, which the opt-out disables.
+- **Antiforgery opt-ins are not "missing".** `StateChangingEndpointWithoutAntiforgery` tested
+  `AntiForgeryRequired != false`, so an action with `[ValidateAntiForgeryToken]` was reported; it
+  now requires the value to be unset.
 - **CORS findings name the open policy.** Each `AddPolicy`/`AddDefaultPolicy` is judged on its
   own builder: `AddCors(o => { o.AddPolicy("Strict", …); o.AddPolicy("Open", …any origin and
   credentials…); })` reported one unnamed "default policy" finding for the whole `AddCors`; it now

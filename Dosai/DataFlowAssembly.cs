@@ -185,8 +185,11 @@ public static partial class DataFlowAnalyzer
         return index < 0 ? plainType : plainType[(index + 1)..];
     }
 
-    /// <summary>The largest body (in instructions) whose summary tracks the receiver as an input.</summary>
-    private const int MaxReceiverSummaryInstructions = 64;
+    /// <summary>The summary interpreter's state budget per method.</summary>
+    private const int SummaryBudget = 10000;
+
+    /// <summary>The state budget of a summary that tracks the receiver; past it the method is summarized without one.</summary>
+    private const int ReceiverSummaryBudget = 2000;
 
     /// <summary>Re-analysis rounds for methods whose field reads went stale; the per-assembly summary loop's bound.</summary>
     private const int MaxFieldTaintRounds = 3;
@@ -1336,8 +1339,30 @@ public static partial class DataFlowAnalyzer
         type.StartsWith("Microsoft.Extensions.Logging.ILogger", StringComparison.Ordinal) || type.StartsWith("System.Security.Claims.ClaimsPrincipal", StringComparison.Ordinal) ||
         type.EndsWith("DbContext", StringComparison.Ordinal);
 
+    /// <summary>
+    ///     A method's summary, with the receiver (<c>this</c>) as a tracked input when that fits a
+    ///     state budget of its own: in a large instance method nearly every path reads <c>this</c>,
+    ///     and telling those states apart can run a package body into the full budget. Such a
+    ///     method is summarized again without the receiver, so it costs at most the receiver
+    ///     budget more and keeps the summary (and the budget diagnostics) it had without one.
+    /// </summary>
     private static AssemblyMethodSummary BuildAssemblyMethodSummary(PEReader peReader, MetadataReader reader, MethodDefinitionHandle methodHandle, MethodDefinition method, string assemblyPath, AssemblySourceMap sourceMap, AssemblyDataFlowContext context, IReadOnlyDictionary<string, AssemblyMethodSummary> summaries)
     {
+        if ((method.Attributes & MethodAttributes.Static) == 0)
+        {
+            var withReceiver = BuildAssemblyMethodSummaryCore(peReader, reader, methodHandle, method, assemblyPath, sourceMap, context, summaries, trackReceiver: true, ReceiverSummaryBudget, out var exhausted);
+            if (!exhausted)
+            {
+                return withReceiver;
+            }
+        }
+
+        return BuildAssemblyMethodSummaryCore(peReader, reader, methodHandle, method, assemblyPath, sourceMap, context, summaries, trackReceiver: false, SummaryBudget, out _);
+    }
+
+    private static AssemblyMethodSummary BuildAssemblyMethodSummaryCore(PEReader peReader, MetadataReader reader, MethodDefinitionHandle methodHandle, MethodDefinition method, string assemblyPath, AssemblySourceMap sourceMap, AssemblyDataFlowContext context, IReadOnlyDictionary<string, AssemblyMethodSummary> summaries, bool trackReceiver, int budget, out bool exhausted)
+    {
+        exhausted = false;
         var methodInfo = BuildMethodInfo(reader, methodHandle, method, assemblyPath, sourceMap);
         var summary = new AssemblyMethodSummary(methodInfo.Symbol);
         var body = peReader.GetMethodBody(method.RelativeVirtualAddress);
@@ -1361,10 +1386,8 @@ public static partial class DataFlowAnalyzer
             argumentTaints[ilIndex] = new AssemblySummaryTaint([parameter.SequenceNumber - 1]);
         }
 
-        // The receiver: a getter returns, and a setter stores into, the state of `this`. Tracked
-        // in accessor-sized bodies only: in a large instance method nearly every path reads
-        // `this`, and telling those states apart ran package bodies into the state budget.
-        if (!isStatic && instructions.Count <= MaxReceiverSummaryInstructions)
+        // The receiver: a getter returns, and a setter stores into, the state of `this`.
+        if (!isStatic && trackReceiver)
         {
             argumentTaints[0] = new AssemblySummaryTaint([ReceiverIndex]);
         }
@@ -1383,13 +1406,22 @@ public static partial class DataFlowAnalyzer
             visits.TryGetValue(visitKey, out var visitCount);
             // The summary-state budget truncates silently today; report it so a shallow
             // summary is visible instead of looking like a small method.
-            if (!budgetReported && visits.Count > 10000)
+            if (!budgetReported && visits.Count > budget)
             {
                 budgetReported = true;
-                context.RecordDiagnostic($"IL summary interpreter hit the 10000-state budget in {methodInfo.Symbol}; the summary for this method may be incomplete.");
+                exhausted = true;
+                if (!trackReceiver)
+                {
+                    context.RecordDiagnostic($"IL summary interpreter hit the 10000-state budget in {methodInfo.Symbol}; the summary for this method may be incomplete.");
+                }
+                else
+                {
+                    // The receiver attempt is abandoned for the receiver-less summary.
+                    return summary;
+                }
             }
 
-            if (visitCount >= 2 || visits.Count > 10000) continue;
+            if (visitCount >= 2 || visits.Count > budget) continue;
             visits[visitKey] = visitCount + 1;
 
             // No copy: the queued state is this step's alone (see EnqueueSummarySuccessors).

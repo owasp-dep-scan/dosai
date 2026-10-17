@@ -485,4 +485,33 @@ public static class Flows
         Assert.False(sinks.ContainsKey("UntaintedMember"));
         Assert.False(sinks.ContainsKey("OtherFieldInstance"));
     }
+
+    [Fact]
+    public void ObjectState_LargeMethodsSinkTheirReceiverMembersToo()
+    {
+        var sinks = Analyze(Header + """
+public class Runner
+{
+    private string command = "";
+    public void Set(string c) => command = c;
+    public void Go()
+    {
+        var total = 0;
+        for (var i = 0; i < 10; i++) { total += i * 2; Console.WriteLine(total); Console.WriteLine(i); Console.WriteLine(total - i); }
+        for (var i = 0; i < 10; i++) { total -= i; Console.WriteLine(total); Console.WriteLine(i + 1); Console.WriteLine(total * i); }
+        for (var i = 0; i < 10; i++) { total ^= i; Console.WriteLine(total); Console.WriteLine(i + 2); Console.WriteLine(total + i); }
+        Process.Start(command);
+    }
+}
+
+public static class Flows
+{
+    public static void SetterThenLargeGo() { var i = Console.ReadLine()!; var r = new Runner(); r.Set(i); r.Go(); }
+    public static void ReassignedThenLargeGo() { var i = Console.ReadLine()!; var r = new Runner(); r.Set(i); r = new Runner(); r.Go(); }
+}
+""" + Stubs);
+
+        Assert.True(Reaches(sinks, "SetterThenLargeGo", "command"));
+        Assert.False(sinks.ContainsKey("ReassignedThenLargeGo"));
+    }
 }

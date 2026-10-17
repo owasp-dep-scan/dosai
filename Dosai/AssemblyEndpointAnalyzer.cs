@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.Reflection;
 using System.Reflection.Emit;
 using System.Reflection.Metadata;
@@ -33,7 +34,18 @@ internal static class AssemblyEndpointAnalyzer
     /// <summary>One endpoint's handler: its assembly, metadata token, and the call-graph / data-flow id.</summary>
     internal sealed record Handler(string AssemblyPath, int MetadataToken, string MethodId, string Route);
 
-    internal sealed record Result(List<ApiEndpoint> Endpoints, List<EntryPoint> EntryPoints, List<Handler> Handlers);
+    internal sealed record Result(List<ApiEndpoint> Endpoints, List<EntryPoint> EntryPoints, List<Handler> Handlers)
+    {
+        /// <summary>Per endpoint, the data classifications of its handler's inputs and a mass-assignment-shaped request type.</summary>
+        public Dictionary<ApiEndpoint, (List<string> Sensitive, string? MassAssignmentDto)> Inputs { get; } = new(ReferenceEqualityComparer.Instance);
+
+        /// <summary>Whether any analyzed assembly registers <c>AutoValidateAntiforgeryTokenAttribute</c> as a global filter.</summary>
+        public bool GlobalAntiforgery { get; set; }
+
+        /// <summary>The endpoints with their inputs, for the metadata-only security rules.</summary>
+        public List<(ApiEndpoint Endpoint, IReadOnlyList<string> Sensitive, string? MassAssignmentDto)> ForSecurityRules() =>
+            [.. Endpoints.Select(endpoint => Inputs.TryGetValue(endpoint, out var inputs) ? (endpoint, (IReadOnlyList<string>)inputs.Sensitive, inputs.MassAssignmentDto) : (endpoint, [], null))];
+    }
 
     /// <summary>Endpoints of every analyzable assembly under <paramref name="path" /> that the tree does not build from source.</summary>
     internal static Result Analyze(string path, IReadOnlyList<Method>? knownMethods, ICollection<string> diagnostics)
@@ -64,6 +76,7 @@ internal static class AssemblyEndpointAnalyzer
                 using var peReader = new PEReader(stream);
                 if (peReader.HasMetadata)
                 {
+                    result.GlobalAntiforgery |= RegistersGlobalAntiforgery(peReader);
                     templates.AddRange(ConventionalTemplates(peReader).Where(template => !templates.Contains(template, StringComparer.Ordinal)));
                 }
             }
@@ -281,7 +294,7 @@ internal static class AssemblyEndpointAnalyzer
                         Evidence = new AnalysisEvidence { Kind = AnalysisEvidenceKind.AssemblyIlDirect, Source = "assembly-il", Description = $"Controller action attributes in {fileName}." }
                     };
                     ApplyAuthorization(endpoint, classAttributes.Concat(methodAttributes).ToList());
-                    Add(result, endpoint, "HttpController", methodId, assemblyPath, MetadataTokens.GetToken(methodHandle));
+                    Add(result, endpoint, "HttpController", methodId, assemblyPath, MetadataTokens.GetToken(methodHandle), reader);
                 }
             }
         }
@@ -368,11 +381,15 @@ internal static class AssemblyEndpointAnalyzer
                         endpoint.AllowAnonymous = true;
                         endpoint.AuthorizationRequired = false;
                     }
+                    else if (convention.Name == "DisableAntiforgery")
+                    {
+                        endpoint.AntiForgeryRequired = false;
+                    }
                 }
             }
 
             ApplyAuthorization(endpoint, Attributes(reader, handlerMethod.GetCustomAttributes()).ToList(), keepExisting: true);
-            Add(result, endpoint, "HttpMinimalApi", AssemblyCallGraphAnalyzer.MethodId(reader, handlerHandle, assemblyPath, knownMethods), assemblyPath, MetadataTokens.GetToken(handlerHandle));
+            Add(result, endpoint, "HttpMinimalApi", AssemblyCallGraphAnalyzer.MethodId(reader, handlerHandle, assemblyPath, knownMethods), assemblyPath, MetadataTokens.GetToken(handlerHandle), reader);
             route = null;
             handler = null;
         }
@@ -523,7 +540,7 @@ internal static class AssemblyEndpointAnalyzer
                     Evidence = new AnalysisEvidence { Kind = AnalysisEvidenceKind.AssemblyIlDirect, Source = "assembly-il", Description = $"Compiled Razor Page {identifier} in {fileName}." }
                 };
                 ApplyAuthorization(endpoint, pageAttributes.Concat(modelAttributes).ToList());
-                Add(result, endpoint, "HttpRazorPage", methodHandle is { } id ? AssemblyCallGraphAnalyzer.MethodId(reader, id, assemblyPath, knownMethods) : null, assemblyPath, methodHandle is { } token ? MetadataTokens.GetToken(token) : 0);
+                Add(result, endpoint, "HttpRazorPage", methodHandle is { } id ? AssemblyCallGraphAnalyzer.MethodId(reader, id, assemblyPath, knownMethods) : null, assemblyPath, methodHandle is { } token ? MetadataTokens.GetToken(token) : 0, reader);
             }
         }
     }
@@ -596,8 +613,13 @@ internal static class AssemblyEndpointAnalyzer
         return null;
     }
 
-    private static void Add(Result result, ApiEndpoint endpoint, string kind, string? methodId, string assemblyPath, int token)
+    private static void Add(Result result, ApiEndpoint endpoint, string kind, string? methodId, string assemblyPath, int token, MetadataReader reader)
     {
+        if (token != 0)
+        {
+            result.Inputs[endpoint] = ClassifyInputs(reader, MetadataTokens.MethodDefinitionHandle(token & 0xFFFFFF));
+        }
+
         var operationId = $"op:{Framework}:{endpoint.FilePath}#{endpoint.HttpMethod}:{endpoint.Path}:{endpoint.MethodName}";
         endpoint.OperationId = operationId;
         result.Endpoints.Add(endpoint);
@@ -626,11 +648,14 @@ internal static class AssemblyEndpointAnalyzer
 
     private static void ApplyAuthorization(ApiEndpoint endpoint, List<DecodedAttribute> attributes, bool keepExisting = false)
     {
-        if (attributes.Any(attribute => attribute.Name == "AllowAnonymousAttribute"))
+        if (attributes.Any(attribute => attribute.Name is "ValidateAntiForgeryTokenAttribute" or "AutoValidateAntiforgeryTokenAttribute" or "RequireAntiforgeryTokenAttribute"))
         {
-            endpoint.AllowAnonymous = true;
-            endpoint.AuthorizationRequired = false;
-            return;
+            endpoint.AntiForgeryRequired = true;
+        }
+
+        if (attributes.Any(attribute => attribute.Name is "IgnoreAntiforgeryTokenAttribute"))
+        {
+            endpoint.AntiForgeryRequired = false;
         }
 
         foreach (var authorize in attributes.Where(attribute => attribute.Name == "AuthorizeAttribute"))
@@ -642,10 +667,135 @@ internal static class AssemblyEndpointAnalyzer
             foreach (var scheme in (authorize.Named.GetValueOrDefault("AuthenticationSchemes") ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)) AddDistinct(endpoint.AuthenticationSchemes, scheme);
         }
 
-        if (!keepExisting && endpoint.AuthorizationRequired is null && attributes.Count > 0)
+        // [AllowAnonymous] wins over every authorization attribute; their roles and policies stay
+        // listed (the AllowAnonymousOverridesAuthorization finding reads them).
+        if (attributes.Any(attribute => attribute.Name == "AllowAnonymousAttribute"))
         {
-            endpoint.AuthorizationRequired = null;
+            endpoint.AllowAnonymous = true;
+            endpoint.AuthorizationRequired = false;
         }
+    }
+
+    /// <summary>
+    ///     A handler's request data, classified by name as the source providers classify bound
+    ///     types: its parameter names and, for a parameter of a type this assembly declares, its
+    ///     public properties (one level), plus that type's name when a property is shaped like a
+    ///     role or enablement flag.
+    /// </summary>
+    private static (List<string> Sensitive, string? MassAssignmentDto) ClassifyInputs(MetadataReader reader, MethodDefinitionHandle handle)
+    {
+        var sensitive = new List<string>();
+        string? massAssignment = null;
+        var method = reader.GetMethodDefinition(handle);
+        var signature = method.DecodeSignature(TypeNameProvider.Instance, null);
+        foreach (var parameterHandle in method.GetParameters())
+        {
+            var parameter = reader.GetParameter(parameterHandle);
+            if (parameter.SequenceNumber == 0)
+            {
+                continue;
+            }
+
+            Classify(reader.GetString(parameter.Name));
+            if (parameter.SequenceNumber - 1 < signature.ParameterTypes.Length && signature.ParameterTypes[parameter.SequenceNumber - 1] is { } type && type.StartsWith('#') &&
+                int.TryParse(type.AsSpan(1), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var row))
+            {
+                var definition = reader.GetTypeDefinition(MetadataTokens.TypeDefinitionHandle(row));
+                foreach (var propertyHandle in definition.GetProperties())
+                {
+                    var name = reader.GetString(reader.GetPropertyDefinition(propertyHandle).Name);
+                    Classify(name);
+                    if (massAssignment is null && Frameworks.SecurityAnalyzer.IsMassAssignmentMemberName(name))
+                    {
+                        massAssignment = reader.GetString(definition.Name);
+                    }
+                }
+            }
+        }
+
+        return (sensitive, massAssignment);
+
+        void Classify(string name)
+        {
+            foreach (var classification in Frameworks.DataClassifier.ClassifyName(name).Where(classification => !sensitive.Contains(classification, StringComparer.Ordinal)))
+            {
+                sensitive.Add(classification);
+            }
+        }
+    }
+
+    /// <summary>
+    ///     Whether the assembly registers <c>AutoValidateAntiforgeryTokenAttribute</c> as a global
+    ///     MVC filter: <c>Filters.Add&lt;AutoValidateAntiforgeryTokenAttribute&gt;()</c> (a generic
+    ///     instantiation naming it) or <c>Filters.Add(new AutoValidateAntiforgeryTokenAttribute())</c>
+    ///     (a <c>newobj</c> of it in a method body, never an attribute application).
+    /// </summary>
+    internal static bool RegistersGlobalAntiforgery(PEReader peReader)
+    {
+        const string Filter = "Microsoft.AspNetCore.Mvc.AutoValidateAntiforgeryTokenAttribute";
+        var reader = peReader.GetMetadataReader();
+        for (var row = 1; row <= reader.GetTableRowCount(TableIndex.MethodSpec); row++)
+        {
+            try
+            {
+                if (reader.GetMethodSpecification(MetadataTokens.MethodSpecificationHandle(row)).DecodeSignature(TypeNameProvider.Instance, null).Contains(Filter))
+                {
+                    return true;
+                }
+            }
+            catch (BadImageFormatException)
+            {
+                // Not decodable: not the filter registration.
+            }
+        }
+
+        foreach (var methodHandle in reader.MethodDefinitions)
+        {
+            var method = reader.GetMethodDefinition(methodHandle);
+            if (method.RelativeVirtualAddress == 0)
+            {
+                continue;
+            }
+
+            foreach (var (_, opCode, operand) in AssemblyCallGraphAnalyzer.Decode(peReader.GetMethodBody(method.RelativeVirtualAddress).GetILReader()))
+            {
+                if (opCode == OpCodes.Newobj && operand is int token && MetadataTokens.EntityHandle(token) is { Kind: HandleKind.MemberReference } reference &&
+                    reader.GetMemberReference((MemberReferenceHandle)reference).Parent is { Kind: HandleKind.TypeReference } parent &&
+                    TypeNameProvider.Instance.GetTypeFromReference(reader, (TypeReferenceHandle)parent, 0) == Filter)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>Type names for signatures: full names for references, <c>#row</c> for this assembly's definitions.</summary>
+    private sealed class TypeNameProvider : ISignatureTypeProvider<string, object?>
+    {
+        public static readonly TypeNameProvider Instance = new();
+        public string GetArrayType(string elementType, ArrayShape shape) => elementType + "[]";
+        public string GetByReferenceType(string elementType) => elementType + "&";
+        public string GetFunctionPointerType(MethodSignature<string> signature) => "fnptr";
+        public string GetGenericInstantiation(string genericType, ImmutableArray<string> typeArguments) => genericType;
+        public string GetGenericMethodParameter(object? genericContext, int index) => "!!" + index.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        public string GetGenericTypeParameter(object? genericContext, int index) => "!" + index.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        public string GetModifiedType(string modifier, string unmodifiedType, bool isRequired) => unmodifiedType;
+        public string GetPinnedType(string elementType) => elementType;
+        public string GetPointerType(string elementType) => elementType + "*";
+        public string GetPrimitiveType(PrimitiveTypeCode typeCode) => typeCode.ToString();
+        public string GetSZArrayType(string elementType) => elementType + "[]";
+        public string GetTypeFromDefinition(MetadataReader reader, TypeDefinitionHandle handle, byte rawTypeKind) => "#" + MetadataTokens.GetRowNumber(handle).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        public string GetTypeFromReference(MetadataReader reader, TypeReferenceHandle handle, byte rawTypeKind)
+        {
+            var reference = reader.GetTypeReference(handle);
+            var space = reader.GetString(reference.Namespace);
+            return space.Length == 0 ? reader.GetString(reference.Name) : $"{space}.{reader.GetString(reference.Name)}";
+        }
+
+        public string GetTypeFromSpecification(MetadataReader reader, object? genericContext, TypeSpecificationHandle handle, byte rawTypeKind) =>
+            reader.GetTypeSpecification(handle).DecodeSignature(this, genericContext);
     }
 
     private static void AddDistinct(List<string> list, string value)

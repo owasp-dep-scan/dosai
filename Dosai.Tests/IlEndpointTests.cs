@@ -239,4 +239,62 @@ namespace Microsoft.AspNetCore.Builder
         var chain = Assert.Single(result.ExploitChains, candidate => candidate.SliceId == flow.Id);
         Assert.Equal("/Items/{id}?handler=Delete", Assert.Single(result.EntryPoints, entry => entry.Id == chain.EntryPointId).Route);
     }
+
+    [Fact]
+    public void AssemblyOnlyEndpoints_GetEndpointSecurityFindings()
+    {
+        using var fixture = new IlDataFlowParityTests.TempDir();
+        IlDataFlowParityTests.EmitAssembly(fixture.Path, """
+using System;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+
+public class LoginRequest { public string Email { get; set; } = ""; public string Password { get; set; } = ""; }
+public class RegisterRequest { public string Name { get; set; } = ""; public bool IsAdmin { get; set; } }
+
+[ApiController, Route("api/account"), Authorize(Roles = "Admin")]
+public class AccountController : ControllerBase
+{
+    [HttpPost("login"), AllowAnonymous] public void Login(LoginRequest request) { }
+    [HttpPost("register"), AllowAnonymous] public void Register(RegisterRequest request) { }
+    [HttpPost("close")] public void Close(int id) { }
+    [HttpPost("purge"), IgnoreAntiforgeryToken] public void Purge(int id) { }
+    [HttpPost("safe"), ValidateAntiForgeryToken] public void Safe(int id) { }
+    [HttpGet("status")] public string Status() => "ok";
+}
+
+[ApiController, Route("api/account")]
+public class PublicAccountController : ControllerBase
+{
+    [HttpGet("status"), AllowAnonymous] public string Status() => "ok";
+}
+
+namespace Microsoft.AspNetCore.Mvc
+{
+    public abstract class ControllerBase { }
+    public sealed class ApiControllerAttribute : Attribute { }
+    public sealed class RouteAttribute : Attribute { public RouteAttribute(string template) { } }
+    public sealed class HttpGetAttribute : Attribute { public HttpGetAttribute(string template) { } }
+    public sealed class HttpPostAttribute : Attribute { public HttpPostAttribute(string template) { } }
+    public sealed class IgnoreAntiforgeryTokenAttribute : Attribute { }
+    public sealed class ValidateAntiForgeryTokenAttribute : Attribute { }
+}
+namespace Microsoft.AspNetCore.Authorization
+{
+    public sealed class AuthorizeAttribute : Attribute { public string? Roles { get; set; } }
+    public sealed class AllowAnonymousAttribute : Attribute { }
+}
+""");
+
+        var findings = JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(fixture.Path), RoadmapTemporaryDirectory.JsonOptions)!.SecurityFindings!;
+        Depscan.Frameworks.SecurityFinding Single(string kind, string route) => Assert.Single(findings, finding => finding.Kind == kind && finding.Route == route);
+
+        Assert.Contains("credential", Single("SensitiveUnauthenticatedEndpoint", "/api/account/login").Properties["classifications"], StringComparison.Ordinal);
+        Single("MassAssignmentHint", "/api/account/register");
+        Single("StateChangingEndpointWithoutAntiforgery", "/api/account/close");
+        Single("StateChangingEndpointAntiforgeryDisabled", "/api/account/purge");
+        Assert.DoesNotContain(findings, finding => finding.Route == "/api/account/safe");
+        Single("AllowAnonymousOverridesAuthorization", "/api/account/login");
+        Assert.Single(findings, finding => finding.Kind == "DuplicateRouteAuthMismatch" && finding.Route == "/api/account/status");
+    }
 }

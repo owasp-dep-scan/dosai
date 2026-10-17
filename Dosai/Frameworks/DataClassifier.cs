@@ -39,6 +39,14 @@ public static class DataClassifier
     ///     a word token starts, derived from underscores and camel/Pascal case transitions. Offset 0
     ///     and the end of the string are always boundaries.
     /// </summary>
+    /// <summary>The classifications a member name triggers (the rules <see cref="ClassifyAll" /> applies per member), for inputs read from metadata.</summary>
+    public static List<string> ClassifyName(string name)
+    {
+        var normalized = name.Replace("_", string.Empty).ToLowerInvariant();
+        var boundaries = TokenBoundaries(name);
+        return MemberRules.Where(rule => rule.Keywords.Any(keyword => MatchesAtTokenBoundary(normalized, boundaries, keyword))).Select(rule => rule.Classification).ToList();
+    }
+
     private static List<int> TokenBoundaries(string name)
     {
         var boundaries = new List<int> { 0 };

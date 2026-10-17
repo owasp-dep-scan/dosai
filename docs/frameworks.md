@@ -147,8 +147,10 @@ Assembly-only inputs get endpoints from IL (`Framework: "assembly-il"`): control
 conventional routes (`MapControllerRoute`/`MapAreaControllerRoute`/`MapRoute`/`MapDefaultControllerRoute`
 templates expanded for unattributed actions), minimal-API `Map*` registrations, and compiled
 Razor Pages (`RazorCompiledItem` with `RouteTemplate` metadata, 2.x `RazorPage`), with the IL call
-graph's method ids. Security findings are derived from source, so IL-only endpoints carry no
-endpoint findings.
+graph's method ids. The endpoint security rules run on them from metadata (handler parameter and
+request-type member names, authorization and antiforgery attributes, a global antiforgery filter).
+`AllowAnonymousOverridesAuthorization` (low, CWE-862) flags `[AllowAnonymous]` on an endpoint that
+also names roles or policies.
 
 `TrustZone`: `public` (anonymous inbound), `authenticated`, `internal` (loopback/queue),
 `external` (outbound to non-loopback hosts), `unknown`. `CrossesTrustBoundary` is computed from
