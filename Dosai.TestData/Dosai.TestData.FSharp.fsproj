@@ -8,6 +8,6 @@
     </ItemGroup>
     <!-- Update the SDK's implicit FSharp.Core to the exact version required by FSharp.Compiler.Service to avoid NU1608. -->
     <ItemGroup>
-        <PackageReference Update="FSharp.Core" Version="11.0.101-rc1.26425.128" />
+        <PackageReference Update="FSharp.Core" Version="11.0.101-rc2.26504.105" />
     </ItemGroup>
 </Project>

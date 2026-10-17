@@ -821,10 +821,30 @@ public static class TransparencyBuilder
         };
     }
 
+    /// <summary>
+    ///     The entry point a source belongs to: its own method's, else the nearest one declared
+    ///     above it in the file. An HTTP-seeded source (a minimal-API lambda parameter sits inside
+    ///     the top-level `Main`) prefers the nearest HTTP registration above it over the program's
+    ///     CLI entry point; the first entry point of the file was taken before, so every flow in
+    ///     a Program.cs was attributed to its first route.
+    /// </summary>
     private static EntryPoint? FindEntryPoint(IEnumerable<EntryPoint> entryPoints, DataFlowNode? source)
     {
         if (source is null) return null;
-        return entryPoints.FirstOrDefault(ep => string.Equals(ep.FileName, source.FileName, StringComparison.OrdinalIgnoreCase) && (ep.MethodName == source.MethodName || ep.LineNumber <= source.LineNumber));
+        var inFile = entryPoints.Where(ep => string.Equals(ep.FileName, source.FileName, StringComparison.OrdinalIgnoreCase)).ToList();
+        EntryPoint? NearestAbove(IEnumerable<EntryPoint> candidates) => candidates
+            .Where(ep => ep.LineNumber <= source.LineNumber)
+            .OrderByDescending(ep => ep.LineNumber)
+            .FirstOrDefault();
+
+        var sameMethod = inFile.Where(ep => ep.MethodName is not null && ep.MethodName == source.MethodName).ToList();
+        if (sameMethod.Count > 0 && sameMethod.All(ep => ep.Kind == "Cli") && source.Category is "http" &&
+            NearestAbove(inFile.Where(ep => ep.Kind is "HttpMinimalApi" or "HttpController" or "HttpRazorPage")) is { } http)
+        {
+            return http;
+        }
+
+        return sameMethod.Count > 0 ? NearestAbove(sameMethod) ?? sameMethod[0] : NearestAbove(inFile);
     }
 
     /// <summary>
@@ -896,14 +916,34 @@ public static class TransparencyBuilder
             // route the attacker actually takes: entry point → … → sink frame.
             nodesById.TryGetValue(slice.SinkId, out var sinkNode);
             nodesById.TryGetValue(slice.SourceId, out var sourceNode);
-            var startMethodId =
-                sinkNode?.Properties.GetValueOrDefault("sinkMethodId") as string ??
-                sinkNode?.Properties.GetValueOrDefault("methodId") as string ??
-                sourceNode?.Properties.GetValueOrDefault("methodId") as string;
-            if (string.IsNullOrWhiteSpace(startMethodId) ||
-                !TryFindReversePath(reverseEdges, entryPointsByMethodId, startMethodId, out var entryPoint, out var callPath))
+            // The walk starts at the method that holds the sink call: starting at the sink API
+            // itself let any other caller of that API win, so a minimal-API lambda's
+            // Process.Start was attributed to the program's own top-level Process.Start (CLI).
+            // The sink API stays the last frame of the path.
+            // A source seeded in an entry point's own frame (a minimal-API lambda's parameter,
+            // whose body nodes carry the enclosing `<Main>$`) names that entry point directly.
+            var sinkMethodId = sinkNode?.Properties.GetValueOrDefault("sinkMethodId") as string;
+            var sourceMethodId = sourceNode?.Properties.GetValueOrDefault("methodId") as string;
+            var holderMethodId = sourceMethodId is not null && entryPointsByMethodId.ContainsKey(sourceMethodId)
+                ? sourceMethodId
+                : sinkNode?.Properties.GetValueOrDefault("methodId") as string ?? sourceMethodId;
+            EntryPoint entryPoint;
+            List<string> callPath;
+            if (!string.IsNullOrWhiteSpace(holderMethodId) && TryFindReversePath(reverseEdges, entryPointsByMethodId, holderMethodId, out entryPoint, out callPath))
             {
-                continue;
+                if (!string.IsNullOrWhiteSpace(sinkMethodId) && !string.Equals(sinkMethodId, holderMethodId, StringComparison.Ordinal))
+                {
+                    callPath.Insert(0, sinkMethodId);
+                }
+            }
+            else
+            {
+                var startMethodId = sinkMethodId ?? holderMethodId;
+                if (string.IsNullOrWhiteSpace(startMethodId) ||
+                    !TryFindReversePath(reverseEdges, entryPointsByMethodId, startMethodId, out entryPoint, out callPath))
+                {
+                    continue;
+                }
             }
 
             // callPath is sink → entry point; store entry → sink for readability.
@@ -1037,7 +1077,10 @@ public static class TransparencyBuilder
     /// </summary>
     public static string ExposureFor(EntryPoint entryPoint)
     {
-        var authenticated = entryPoint.AuthorizationRequired == true || entryPoint.Roles.Count > 0 || entryPoint.AuthorizationPolicies.Count > 0 || entryPoint.AuthenticationSchemes.Count > 0;
+        // [AllowAnonymous] bypasses every authorization requirement, inherited roles and
+        // policies included.
+        var authenticated = !entryPoint.AllowAnonymous && entryPoint.AuthorizationRequired != false &&
+                            (entryPoint.AuthorizationRequired == true || entryPoint.Roles.Count > 0 || entryPoint.AuthorizationPolicies.Count > 0 || entryPoint.AuthenticationSchemes.Count > 0);
         return entryPoint.Kind switch
         {
             "HttpController" or "HttpMinimalApi" or "HttpRazorPage" => authenticated ? "authenticated-http" : "anonymous-http",

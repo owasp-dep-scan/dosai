@@ -166,7 +166,7 @@ public class CmdController : Microsoft.AspNetCore.Mvc.ControllerBase
 public class SafeController : Microsoft.AspNetCore.Mvc.ControllerBase
 {
     [HttpGet("run")]
-    public string Run(string input) => System.Diagnostics.Process.Start("sh", System.Net.WebUtility.HtmlEncode(input))?.ToString() ?? "";
+    public string Run(string input) => System.Diagnostics.Process.Start("sh", int.Parse(input).ToString())?.ToString() ?? "";
 }
 """);
         var result = directory.DataFlows();

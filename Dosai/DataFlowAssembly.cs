@@ -42,7 +42,7 @@ public static partial class DataFlowAnalyzer
             result.Diagnostics.Add(copiesDiagnostic);
         }
 
-        var context = new AssemblyDataFlowContext(result, patterns, path);
+        using var context = new AssemblyDataFlowContext(result, patterns, path);
         context.TreatAsOneAssembly(copies);
         var summaries = new Dictionary<string, AssemblyMethodSummary>(StringComparer.Ordinal);
 
@@ -59,6 +59,13 @@ public static partial class DataFlowAnalyzer
                 if (OpenAnalyzedAssembly(assemblyPath, result) is { } assembly)
                 {
                     assemblies.Add(assembly);
+                    context.AddAnalyzedDirectory(assemblyPath);
+                    // Controller actions and minimal-API handlers of an assembly-only input: their
+                    // parameters are request input, attributed to the route.
+                    foreach (var handler in AssemblyEndpointAnalyzer.Handlers(path, assemblyPath, assembly.PeReader))
+                    {
+                        context.RegisterHandler(assemblyPath, handler);
+                    }
                 }
             }
 
@@ -98,7 +105,7 @@ public static partial class DataFlowAnalyzer
             }
         }
 
-        foreach (var summary in summaries.Values.Where(summary => summary.ReturnParameterIndexes.Count > 0 || summary.SinkParameterIndexes.Count > 0))
+        foreach (var summary in summaries.Values.Where(summary => summary.ReturnParameterIndexes.Any(index => index >= 0) || summary.SinkParameterIndexes.Any(index => index >= 0)))
         {
             if (result.MethodSummaries.Any(existing => string.Equals(existing.Method, summary.Method, StringComparison.Ordinal)))
             {
@@ -109,8 +116,9 @@ public static partial class DataFlowAnalyzer
             result.MethodSummaries.Add(new DataFlowMethodSummary
             {
                 Method = summary.Method,
-                ReturnParameterIndexes = [.. summary.ReturnParameterIndexes],
-                SinkParameterIndexes = [.. summary.SinkParameterIndexes],
+                // The receiver index is internal to the IL pass: the published indexes stay parameter positions.
+                ReturnParameterIndexes = [.. summary.ReturnParameterIndexes.Where(index => index >= 0)],
+                SinkParameterIndexes = [.. summary.SinkParameterIndexes.Where(index => index >= 0)],
                 SinkCategories = [.. summary.SinkCategories],
                 SummaryKind = "AssemblyIL",
                 EvidenceKind = AnalysisEvidenceKind.AssemblyIlSummary,
@@ -176,6 +184,12 @@ public static partial class DataFlowAnalyzer
         var index = plainType.LastIndexOf('.');
         return index < 0 ? plainType : plainType[(index + 1)..];
     }
+
+    /// <summary>The summary interpreter's state budget per method.</summary>
+    private const int SummaryBudget = 10000;
+
+    /// <summary>The state budget of a summary that tracks the receiver; past it the method is summarized without one.</summary>
+    private const int ReceiverSummaryBudget = 2000;
 
     /// <summary>Re-analysis rounds for methods whose field reads went stale; the per-assembly summary loop's bound.</summary>
     private const int MaxFieldTaintRounds = 3;
@@ -533,28 +547,31 @@ public static partial class DataFlowAnalyzer
 
             if (TryGetLdargIndex(opCode, instruction.Operand, out var ldargIndex))
             {
-                state.Push(state.Arguments.TryGetValue(ldargIndex, out var taint) ? taint : null);
+                state.Push(state.Arguments.TryGetValue(ldargIndex, out var taint) ? taint : null, state.ArgumentOrigins.TryGetValue(ldargIndex, out var argumentOrigin) ? argumentOrigin : null);
                 EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
                 continue;
             }
 
             if (TryGetStargIndex(opCode, instruction.Operand, out var stargIndex))
             {
-                state.Arguments[stargIndex] = state.Pop();
+                var (storedArgument, storedOrigin) = state.PopWithOrigin();
+                state.Arguments[stargIndex] = storedArgument;
+                SetOrigin(state.ArgumentOrigins, stargIndex, storedOrigin);
                 EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
                 continue;
             }
 
             if (TryGetLdlocIndex(opCode, instruction.Operand, out var ldlocIndex))
             {
-                state.Push(state.Locals.TryGetValue(ldlocIndex, out var taint) ? taint : null);
+                state.Push(state.Locals.TryGetValue(ldlocIndex, out var taint) ? taint : null, state.LocalOrigins.TryGetValue(ldlocIndex, out var localOrigin) ? localOrigin : null);
                 EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
                 continue;
             }
 
             if (TryGetStlocIndex(opCode, instruction.Operand, out var stlocIndex))
             {
-                var localTaint = state.Pop();
+                var (localTaint, localOrigin) = state.PopWithOrigin();
+                SetOrigin(state.LocalOrigins, stlocIndex, localOrigin);
                 if (localTaint is { IsAddress: false })
                 {
                     var localName = sourceMap.GetLocalName(methodInfo.MetadataToken, stlocIndex, instruction.Offset) ?? $"local_{stlocIndex}";
@@ -586,10 +603,12 @@ public static partial class DataFlowAnalyzer
 
             if (opCode == OpCodes.Ldfld || opCode == OpCodes.Ldsfld)
             {
-                var instanceTaint = opCode == OpCodes.Ldfld ? state.Pop() : null;
+                var (instanceTaint, instanceOrigin) = opCode == OpCodes.Ldfld ? state.PopWithOrigin() : (null, null);
                 var fieldToken = instruction.Operand is int token ? token : 0;
                 var member = fieldToken != 0 ? ResolveMember(reader, fieldToken) : null;
-                var fieldTaint = member is not null && state.Fields.TryGetValue(member.Symbol, out var taint)
+                var fieldTaint = member is not null && instanceOrigin is { } readOrigin && state.InstanceFields.TryGetValue((readOrigin, member.Symbol), out var instanceField)
+                    ? instanceField.Taint
+                    : member is not null && state.Fields.TryGetValue(member.Symbol, out var taint)
                     ? taint
                     : member is not null && context.TryGetFieldTaint(FieldTaintKey(reader, fieldToken, member.Symbol), out var storedTaint)
                         ? storedTaint
@@ -601,12 +620,16 @@ public static partial class DataFlowAnalyzer
 
             if (opCode == OpCodes.Stfld || opCode == OpCodes.Stsfld)
             {
-                var valueTaint = state.Pop();
-                if (opCode == OpCodes.Stfld)
+                var (valueTaint, valueOrigin) = state.PopWithOrigin();
+                var (_, ownerOrigin) = opCode == OpCodes.Stfld ? state.PopWithOrigin() : (null, null);
+                // The stored object escapes into the heap: its members join the stored field taints.
+                FlushInstance(state, context, valueOrigin);
+                if (instruction.Operand is int ownedToken && ownerOrigin is { } owner && ResolveMember(reader, ownedToken) is { } ownedMember)
                 {
-                    _ = state.Pop();
+                    // A member of an object this method created: that object's state alone.
+                    state.InstanceFields[(owner, ownedMember.Symbol)] = (valueTaint, FieldTaintKey(reader, ownedToken, ownedMember.Symbol));
                 }
-                if (instruction.Operand is int fieldToken && ResolveMember(reader, fieldToken) is { } member)
+                else if (instruction.Operand is int fieldToken && ResolveMember(reader, fieldToken) is { } member)
                 {
                     state.Fields[member.Symbol] = valueTaint;
                     if (valueTaint is not null)
@@ -628,7 +651,7 @@ public static partial class DataFlowAnalyzer
 
             if (IsArrayElementStore(opCode))
             {
-                _ = state.Pop(); // value
+                FlushInstance(state, context, state.PopWithOrigin().Origin); // value
                 _ = state.Pop(); // index
                 _ = state.Pop(); // array
                 EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
@@ -637,20 +660,29 @@ public static partial class DataFlowAnalyzer
 
             if (opCode == OpCodes.Call || opCode == OpCodes.Callvirt || opCode == OpCodes.Newobj)
             {
-                ProcessAssemblyCall(reader, instruction, opCode, methodInfo, assemblyPath, context, state, summaries);
-
                 // Sanitizer-guard reasoning. `call Validator(x); brtrue.s L`, the true edge of a
-                // conditional branch on a sanitizer's result is the validated path; the argument
-                // slots that fed the validator are suppressed along that edge only. The guard is
-                // applied atomically here (successors of the *branch* are enqueued with validation)
-                // so the worklist's interleaved states never observe stale guard data. Debug builds
-                // forward the result through a local (stloc/ldloc) before branching, accepted too.
-                if (FindSanitizerGuardBranch(instructions, instructionIndex) is { } branchIndex &&
-                    TryDetectSanitizerGuardSlots(reader, instruction, instructions, instructionIndex, context) is { Count: > 0 } guardSlots)
+                // conditional branch on a sanitizer's result is the validated path; the values
+                // that fed the validator are suppressed along that edge only - by the slots they
+                // were loaded from and by identity (a Release build validates a value it keeps on
+                // the stack, `dup`ed, never stored). An early exit (`if (!Valid(x)) return;`) is
+                // the same edge seen from the other side: everything after it is the validated
+                // path. Debug builds negate (`ldc.i4.0; ceq`) and forward the result through a
+                // local before branching; both are read through. A validator scoped by
+                // SanitizesCategories marks the values sanitized for its categories instead.
+                var guardBranch = FindSanitizerGuardBranch(instructions, instructionIndex);
+                var guard = guardBranch is not null ? TryDetectSanitizerGuard(reader, instruction, instructions, instructionIndex, context, state) : null;
+                ProcessAssemblyCall(reader, instruction, opCode, methodInfo, assemblyPath, context, state, summaries, instructions, instructionIndex);
+
+                if (guard is not null && guardBranch is var (branchIndex, inverted))
                 {
                     _ = state.Pop(); // the validator's result feeds the branch (directly or via a local)
                     var branchInstruction = instructions[branchIndex];
                     var branchOnTrue = branchInstruction.OpCode == OpCodes.Brtrue || branchInstruction.OpCode == OpCodes.Brtrue_S;
+                    if (inverted)
+                    {
+                        branchOnTrue = !branchOnTrue;
+                    }
+
                     foreach (var successor in GetSuccessorIndexes(branchIndex, branchInstruction, instructions, instructionIndexByOffset, exceptionRegions))
                     {
                         if (successor.IsExceptionHandler)
@@ -664,17 +696,7 @@ public static partial class DataFlowAnalyzer
                         var successorState = state.Clone();
                         if (isValidatedPath)
                         {
-                            foreach (var (isArgument, slotIndex) in guardSlots)
-                            {
-                                if (isArgument)
-                                {
-                                    successorState.Arguments[slotIndex] = null;
-                                }
-                                else
-                                {
-                                    successorState.Locals[slotIndex] = null;
-                                }
-                            }
+                            guard.Apply(successorState);
                         }
 
                         worklist.Enqueue((successor.Index, successorState));
@@ -733,7 +755,7 @@ public static partial class DataFlowAnalyzer
 
             if (opCode == OpCodes.Dup)
             {
-                state.Push(state.Stack.Count > 0 ? state.Stack[^1] : null);
+                state.Push(state.Stack.Count > 0 ? state.Stack[^1] : null, state.TopOrigin);
                 EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
                 continue;
             }
@@ -747,7 +769,9 @@ public static partial class DataFlowAnalyzer
 
             if (opCode == OpCodes.Ret)
             {
-                if (state.Stack.Count > 0 && state.Pop() is { } returnTaint)
+                var (returned, returnedOrigin) = state.Stack.Count > 0 ? state.PopWithOrigin() : (null, null);
+                FlushInstance(state, context, returnedOrigin);
+                if (returned is { } returnTaint)
                 {
                     var node = context.AddNode("Return", "return", methodInfo, assemblyPath, isSource: false, isSink: false, [], null, methodInfo.Symbol, methodInfo.ReturnType, "ret", instruction.Offset);
                     context.AddEdges(returnTaint.NodeIds, node.Id, "AssemblyReturn", methodInfo, assemblyPath, instruction.Offset, "returned value");
@@ -863,7 +887,7 @@ public static partial class DataFlowAnalyzer
         _ => taint
     };
 
-    private static void ProcessAssemblyCall(MetadataReader reader, AssemblyInstruction instruction, OpCode opCode, AssemblyMethodInfo currentMethod, string assemblyPath, AssemblyDataFlowContext context, AssemblyMethodState state, IReadOnlyDictionary<string, AssemblyMethodSummary> summaries)
+    private static void ProcessAssemblyCall(MetadataReader reader, AssemblyInstruction instruction, OpCode opCode, AssemblyMethodInfo currentMethod, string assemblyPath, AssemblyDataFlowContext context, AssemblyMethodState state, IReadOnlyDictionary<string, AssemblyMethodSummary> summaries, IReadOnlyList<AssemblyInstruction> instructions, int instructionIndex)
     {
         if (instruction.Operand is not int token || ResolveMember(reader, token) is not { } member)
         {
@@ -872,37 +896,83 @@ public static partial class DataFlowAnalyzer
         }
 
         var argumentTaints = new List<AssemblyTaint?>();
+        var argumentOrigins = new List<int?>();
         for (var i = 0; i < member.ParameterCount; i++)
         {
-            argumentTaints.Add(state.Pop());
+            var (argument, argumentOrigin) = state.PopWithOrigin();
+            argumentTaints.Add(argument);
+            argumentOrigins.Add(argumentOrigin);
         }
         argumentTaints.Reverse();
-        var receiverTaint = member.HasThis && opCode != OpCodes.Newobj ? state.Pop() : null;
+        argumentOrigins.Reverse();
+        var (receiverTaint, receiverOrigin) = member.HasThis && opCode != OpCodes.Newobj ? state.PopWithOrigin() : (null, null);
+        // A constructed object is a new identity (its newobj site); the constructor's stores are its state.
+        if (opCode == OpCodes.Newobj)
+        {
+            receiverOrigin = instruction.Offset;
+            foreach (var key in state.InstanceFields.Keys.Where(key => key.Origin == instruction.Offset).ToList())
+            {
+                state.InstanceFields.Remove(key);
+            }
+        }
+
+        // Objects passed to the callee escape: what it may read of them is their stored state.
+        foreach (var argumentOrigin in argumentOrigins)
+        {
+            FlushInstance(state, context, argumentOrigin);
+        }
+
         var resolvedArguments = argumentTaints.Select(taint => ResolveAddressTaint(taint, state)).ToList();
         var resolvedReceiver = ResolveAddressTaint(receiverTaint, state);
         var allTaints = resolvedArguments.Concat([resolvedReceiver]).Where(taint => taint is not null).Cast<AssemblyTaint>().ToList();
+        AssemblyTaint? TaintAt(int index) => index == ReceiverIndex ? resolvedReceiver : index >= 0 && index < resolvedArguments.Count ? resolvedArguments[index] : null;
 
-        var sourcePatterns = context.MatchSource(member).ToList();
+        // Sources: a source API, or the getter of a property bound from the request
+        // ([BindProperty], [SupplyParameterFromQuery], ...).
+        var sourcePatterns = context.MatchSource(member).Concat(context.MatchPropertySource(reader, token, member)).Distinct().ToList();
         if (sourcePatterns.Count > 0)
         {
             var node = context.AddNode("Source", member.Name, currentMethod, assemblyPath, isSource: true, isSink: false, sourcePatterns, sourcePatterns.FirstOrDefault()?.Category, member.Symbol, member.ContainingType, member.Symbol, instruction.Offset);
             var sourceTaint = new AssemblyTaint([node.Id], ToTaintKinds(sourcePatterns), []);
             if (!member.ReturnsVoid || opCode == OpCodes.Newobj)
             {
-                state.Push(sourceTaint);
+                state.Push(sourceTaint, opCode == OpCodes.Newobj ? receiverOrigin : null);
             }
             return;
         }
 
+        // Sanitizers: an unscoped one ends the flow; one scoped by SanitizesCategories (an HTML
+        // encoder) keeps the value tainted but neutralized for its own sink categories, and one
+        // with RemovesTaintKinds drops those kinds - the source walker's rules.
+        // A call that is both (Regex.IsMatch validates its input and is a ReDoS sink for its
+        // pattern) is a sink for what enters it; the sanitizer acts on what leaves it.
         var sanitizerPatterns = context.MatchSanitizer(member).ToList();
-        var combined = sanitizerPatterns.Count > 0 ? null : CombineAssemblyTaints(allTaints);
-        var sinkPatterns = context.MatchSink(member).ToList();
-        if (sinkPatterns.Count > 0 && combined is not null)
+        var entering = CombineAssemblyTaints(allTaints);
+        var combined = entering;
+        if (sanitizerPatterns.Count > 0)
         {
-            var sinkNode = context.AddNode("Sink", member.Name, currentMethod, assemblyPath, isSource: false, isSink: true, sinkPatterns, sinkPatterns.FirstOrDefault()?.Category, member.Symbol, member.ContainingType, member.Symbol, instruction.Offset);
-            context.AddEdges(combined.NodeIds, sinkNode.Id, opCode == OpCodes.Newobj ? "AssemblySinkObjectCreation" : "AssemblySinkCall", currentMethod, assemblyPath, instruction.Offset, member.Name);
-            var sinkArgumentIndex = resolvedArguments.FindIndex(taint => taint is not null);
-            context.AddSlice(combined, sinkNode, sinkPatterns.FirstOrDefault(), GetSinkArgumentLabel(resolvedArguments, resolvedReceiver, sinkArgumentIndex), sinkArgumentIndex >= 0 ? sinkArgumentIndex : -1);
+            combined = sanitizerPatterns.Any(IsUnscopedSanitizer) ? null : ApplyScopedSanitizers(combined, sanitizerPatterns);
+        }
+
+        var sinkPatterns = context.MatchSink(member).ToList();
+        if (sinkPatterns.Count > 0 && entering is not null)
+        {
+            // Only the arguments the patterns name (SinkParameters) are dangerous, when the
+            // callee's parameter names resolve; a category the value was sanitized for is not.
+            var dangerous = sinkPatterns.Any(pattern => pattern.SinkParameters.Count > 0)
+                ? DangerousArgumentIndexes(sinkPatterns, context.ParameterNames(reader, token, member), member, opCode == OpCodes.Newobj)
+                : null;
+            var sinkTaint = dangerous is null ? entering : CombineAssemblyTaints(dangerous.Select(TaintAt).OfType<AssemblyTaint>().Where(taint => !taint.IsAddress));
+            var livePatterns = sinkTaint is null ? [] : sinkPatterns.Where(pattern => !sinkTaint.IsSanitizedFor(pattern.Category)).ToList();
+            if (sinkTaint is not null && livePatterns.Count > 0)
+            {
+                var sinkNode = context.AddNode("Sink", member.Name, currentMethod, assemblyPath, isSource: false, isSink: true, livePatterns, livePatterns.FirstOrDefault()?.Category, member.Symbol, member.ContainingType, member.Symbol, instruction.Offset);
+                context.AddEdges(sinkTaint.NodeIds, sinkNode.Id, opCode == OpCodes.Newobj ? "AssemblySinkObjectCreation" : "AssemblySinkCall", currentMethod, assemblyPath, instruction.Offset, member.Name);
+                var sinkArgumentIndex = dangerous is null
+                    ? resolvedArguments.FindIndex(taint => taint is not null)
+                    : dangerous.Where(index => index >= 0 && resolvedArguments[index] is not null).DefaultIfEmpty(-1).First();
+                context.AddSlice(sinkTaint, sinkNode, livePatterns.FirstOrDefault(), GetSinkArgumentLabel(resolvedArguments, resolvedReceiver, sinkArgumentIndex), sinkArgumentIndex >= 0 ? sinkArgumentIndex : -1);
+            }
         }
 
         // By-ref/out parameters: the callee writes through the pushed address. Compiler-generated
@@ -934,24 +1004,88 @@ public static partial class DataFlowAnalyzer
             }
         }
 
-        if (summaries.TryGetValue(member.Symbol, out var summary))
+        summaries.TryGetValue(member.Symbol, out var summary);
+        if (summary is not null)
         {
-            foreach (var sinkParameterIndex in summary.SinkParameterIndexes.Where(index => index >= 0 && index < resolvedArguments.Count && resolvedArguments[index] is not null))
+            foreach (var sinkParameterIndex in summary.SinkParameterIndexes)
             {
-                var taint = resolvedArguments[sinkParameterIndex]!;
+                // An object this method created is tracked member by member (SinkFields below):
+                // its constructor arguments are not the value its methods sink.
+                if (sinkParameterIndex == ReceiverIndex && receiverOrigin is not null)
+                {
+                    continue;
+                }
+
+                if (TaintAt(sinkParameterIndex) is not { IsAddress: false } taint || summary.SinkCategories.Count > 0 && summary.SinkCategories.All(taint.IsSanitizedFor))
+                {
+                    continue;
+                }
+
                 var summaryPattern = new DataFlowPattern
                 {
                     Target = DataFlowPatternTarget.Sink,
                     Kind = DataFlowPatternKind.Method,
                     Pattern = member.Symbol,
-                    Category = summary.SinkCategories.FirstOrDefault() ?? "interprocedural",
+                    Category = summary.SinkCategories.FirstOrDefault(category => !taint.IsSanitizedFor(category)) ?? "interprocedural",
                     Description = "Assembly IL sink reached through a summarized callee"
                 };
                 var sinkNode = context.AddNode("Sink", member.Name, currentMethod, assemblyPath, isSource: false, isSink: true, [summaryPattern], summaryPattern.Category, member.Symbol, member.ContainingType, member.Symbol, instruction.Offset);
                 sinkNode.Properties["summaryMethod"] = summary.Method;
                 context.AddEdges(taint.NodeIds, sinkNode.Id, "AssemblyInterproceduralSink", currentMethod, assemblyPath, instruction.Offset, member.Name);
-                context.AddSlice(taint, sinkNode, summaryPattern, $"arg{sinkParameterIndex}", sinkParameterIndex);
+                var label = sinkParameterIndex == ReceiverIndex ? "receiver" : $"arg{sinkParameterIndex}";
+                context.AddSlice(taint, sinkNode, summaryPattern, label, sinkParameterIndex);
             }
+
+            // Members of an object this method created that the callee sinks (`r.Set(q); r.Go()`):
+            // the sink is reached here, from this object's own state.
+            if (receiverOrigin is { } sinkOwner)
+            {
+                foreach (var (field, category) in summary.SinkFields)
+                {
+                    if (!state.InstanceFields.TryGetValue((sinkOwner, field.Symbol), out var held) || held.Taint is not { } fieldTaint || fieldTaint.IsSanitizedFor(category))
+                    {
+                        continue;
+                    }
+
+                    var memberPattern = new DataFlowPattern { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = member.Symbol, Category = category, Description = "Assembly IL sink reached through a summarized callee's receiver member" };
+                    var memberSink = context.AddNode("Sink", member.Name, currentMethod, assemblyPath, isSource: false, isSink: true, [memberPattern], category, member.Symbol, member.ContainingType, member.Symbol, instruction.Offset);
+                    memberSink.Properties["summaryMethod"] = summary.Method;
+                    memberSink.Properties["receiverMember"] = field.Symbol;
+                    context.AddEdges(fieldTaint.NodeIds, memberSink.Id, "AssemblyInterproceduralSink", currentMethod, assemblyPath, instruction.Offset, member.Name);
+                    context.AddSlice(fieldTaint, memberSink, memberPattern, "receiver", ReceiverIndex);
+                }
+            }
+
+            // Object state written by the callee (a setter, `Set(x)`): the field takes the
+            // argument's taint for the rest of this method and, through the stored field taints,
+            // for every method that reads it. A property setter always writes, so a clean value
+            // replaces the field's taint here (`o.Command = "fixed"`).
+            var isSetter = member.Name.StartsWith("set_", StringComparison.Ordinal);
+            foreach (var (parameter, field) in summary.FieldStores)
+            {
+                var stored = TaintAt(parameter) is { IsAddress: false } value ? value : null;
+                if (receiverOrigin is { } owner && field.OnReceiver)
+                {
+                    // The object is one this method created: its own state, strongly updated.
+                    state.InstanceFields[(owner, field.Symbol)] = (stored, field.Key);
+                }
+                else if (stored is not null)
+                {
+                    state.Fields[field.Symbol] = stored;
+                    context.RecordFieldTaint(field.Key, stored);
+                }
+                else if (isSetter)
+                {
+                    state.Fields[field.Symbol] = null;
+                }
+            }
+        }
+        else if (opCode != OpCodes.Newobj && member.HasThis && sinkPatterns.Count == 0 && sanitizerPatterns.Count == 0 && IsReceiverMutator(member.Name) &&
+                 CombineAssemblyTaints(resolvedArguments.OfType<AssemblyTaint>().Where(taint => !taint.IsAddress)) is { } stored)
+        {
+            // An opaque mutator (`psi.Arguments = q`, `list.Add(q)`, an initializer's setters):
+            // the object as a whole now carries the value, wherever the receiver came from.
+            TaintReceiverStorage(reader, instructions, instructionIndex, member, state, stored);
         }
 
         if (member.ReturnsVoid && opCode != OpCodes.Newobj)
@@ -959,40 +1093,187 @@ public static partial class DataFlowAnalyzer
             return;
         }
 
-        if (summaries.TryGetValue(member.Symbol, out var returnSummary))
+        if (summary is not null)
         {
-            var returnTaints = returnSummary.ReturnParameterIndexes
-                .Where(index => index >= 0 && index < resolvedArguments.Count)
-                .Select(index => resolvedArguments[index])
-                .Where(taint => taint is not null)
-                .Cast<AssemblyTaint>()
-                .ToList();
+            var returnTaints = summary.ReturnParameterIndexes.Select(TaintAt).OfType<AssemblyTaint>().Where(taint => !taint.IsAddress).ToList();
+            // A getter returns the field this method last stored (field-sensitive, strong
+            // updates), else the field's stored taint - for an auto-property's backing field only:
+            // a data holder (`job.Path`) carries what any method stored into it, while a computing
+            // getter over shared state (BigInteger's magnitude) would taint every value it touches
+            // and run large package bodies into the state budget.
+            foreach (var field in summary.ReturnFields)
+            {
+                if (field.OnReceiver && receiverOrigin is { } owner && state.InstanceFields.TryGetValue((owner, field.Symbol), out var instance))
+                {
+                    if (instance.Taint is not null) returnTaints.Add(instance.Taint);
+                }
+                else if (state.Fields.TryGetValue(field.Symbol, out var local))
+                {
+                    if (local is not null) returnTaints.Add(local);
+                }
+                else if (field.Symbol.Contains(">k__BackingField", StringComparison.Ordinal) && context.TryGetFieldTaint(field.Key, out var stored))
+                {
+                    returnTaints.Add(stored);
+                }
+            }
+
+            if (summary.ReturnSources.Count > 0)
+            {
+                // A helper that returns a source is a source at its call site.
+                var sourceNode = context.AddNode("Source", member.Name, currentMethod, assemblyPath, isSource: true, isSink: false, summary.ReturnSources, summary.ReturnSources.FirstOrDefault()?.Category, member.Symbol, member.ContainingType, member.Symbol, instruction.Offset);
+                sourceNode.Properties["summaryMethod"] = summary.Method;
+                returnTaints.Add(new AssemblyTaint([sourceNode.Id], ToTaintKinds(summary.ReturnSources), []));
+            }
+
             if (returnTaints.Count > 0 && CombineAssemblyTaints(returnTaints) is { } returnCombined)
             {
                 var callNode = context.AddNode("CallSummary", member.Name, currentMethod, assemblyPath, isSource: false, isSink: false, [], null, member.Symbol, member.ContainingType, member.Symbol, instruction.Offset);
                 context.AddEdges(returnCombined.NodeIds, callNode.Id, "AssemblyInterproceduralReturn", currentMethod, assemblyPath, instruction.Offset, member.Name);
-                state.Push(returnCombined.Append(callNode.Id));
+                state.Push(returnCombined.Append(callNode.Id), opCode == OpCodes.Newobj ? receiverOrigin : null);
                 return;
             }
         }
 
+        int? resultOrigin = opCode == OpCodes.Newobj ? receiverOrigin : null;
         if (combined is null)
         {
-            state.Push(null);
+            state.Push(null, resultOrigin);
             return;
         }
 
         var passthroughPatterns = context.MatchPassthrough(member).ToList();
-        if (passthroughPatterns.Count > 0 || member.Symbol.StartsWith("System.", StringComparison.Ordinal))
+        if (passthroughPatterns.Count > 0 || sanitizerPatterns.Count > 0 || member.Symbol.StartsWith("System.", StringComparison.Ordinal))
         {
             var callNode = context.AddNode("Call", member.Name, currentMethod, assemblyPath, isSource: false, isSink: false, [], null, member.Symbol, member.ContainingType, member.Symbol, instruction.Offset);
             context.AddEdges(combined.NodeIds, callNode.Id, "AssemblyCallReturn", currentMethod, assemblyPath, instruction.Offset, member.Name);
-            state.Push(combined.Append(callNode.Id));
+            state.Push(combined.Append(callNode.Id), resultOrigin);
         }
         else
         {
-            state.Push(combined);
+            state.Push(combined, resultOrigin);
         }
+    }
+
+    private static void SetOrigin(Dictionary<int, int> origins, int slot, int? origin)
+    {
+        if (origin is { } value)
+        {
+            origins[slot] = value;
+        }
+        else
+        {
+            origins.Remove(slot);
+        }
+    }
+
+    /// <summary>
+    ///     An object this method created escapes (passed to a call, stored, returned): its member
+    ///     taints become stored field taints every reader sees, as they were before identities.
+    /// </summary>
+    private static void FlushInstance(AssemblyMethodState state, AssemblyDataFlowContext context, int? origin)
+    {
+        if (origin is not { } escaped || state.InstanceFields.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var ((owner, _), (taint, key)) in state.InstanceFields)
+        {
+            if (owner == escaped && taint is not null)
+            {
+                context.RecordFieldTaint(key, taint);
+            }
+        }
+    }
+
+    /// <summary>The value after category-scoped sanitizers: marked sanitized for their categories, minus the taint kinds they remove.</summary>
+    private static AssemblyTaint? ApplyScopedSanitizers(AssemblyTaint? taint, IReadOnlyList<DataFlowPattern> sanitizerPatterns)
+    {
+        if (taint is null)
+        {
+            return null;
+        }
+
+        var removed = sanitizerPatterns.SelectMany(pattern => pattern.RemovesTaintKinds).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var kinds = taint.TaintKinds.Where(kind => !removed.Contains(kind)).ToList();
+        if (removed.Count > 0 && kinds.Count == 0)
+        {
+            return null;
+        }
+
+        var sanitizedFor = (taint.SanitizedFor ?? []).Concat(sanitizerPatterns.SelectMany(pattern => pattern.SanitizesCategories)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        return taint with { TaintKinds = kinds, SanitizedFor = sanitizedFor.Count > 0 ? sanitizedFor : null };
+    }
+
+    /// <summary>Instance methods that store their argument into the receiver: setters and collection adds.</summary>
+    private static bool IsReceiverMutator(string name) =>
+        name.StartsWith("set_", StringComparison.Ordinal) || name is "Add" or "AddRange" or "Insert" or "Push" or "Enqueue" or "Append" or "AppendLine" or "TryAdd";
+
+    /// <summary>
+    ///     Taints where a call's receiver came from: the local or argument it was loaded from, or,
+    ///     for an object initializer's <c>dup</c>, the original reference left on the stack. Found
+    ///     by walking back over the instructions that fed the call (bounded; any branch or
+    ///     unmodelled stack effect gives up rather than guessing).
+    /// </summary>
+    private static void TaintReceiverStorage(MetadataReader reader, IReadOnlyList<AssemblyInstruction> instructions, int callIndex, AssemblyMemberInfo member, AssemblyMethodState state, AssemblyTaint taint)
+    {
+        var depth = member.ParameterCount;
+        for (var index = callIndex - 1; index >= Math.Max(0, callIndex - 32); index--)
+        {
+            var pusher = instructions[index];
+            if (pusher.OpCode.FlowControl is FlowControl.Branch or FlowControl.Cond_Branch or FlowControl.Return or FlowControl.Throw)
+            {
+                return;
+            }
+
+            if (ScanStackEffect(reader, pusher) is not var (pop, push))
+            {
+                return;
+            }
+
+            if (push > depth)
+            {
+                if (TryGetLdlocIndex(pusher.OpCode, pusher.Operand, out var local) || TryGetLdlocaIndex(pusher.OpCode, pusher.Operand, out local))
+                {
+                    state.Locals[local] = CombineAssemblyTaints(new[] { state.Locals.GetValueOrDefault(local), taint }.OfType<AssemblyTaint>());
+                }
+                else if (TryGetLdargIndex(pusher.OpCode, pusher.Operand, out var argument) || TryGetLdargaIndex(pusher.OpCode, pusher.Operand, out argument))
+                {
+                    state.Arguments[argument] = CombineAssemblyTaints(new[] { state.Arguments.GetValueOrDefault(argument), taint }.OfType<AssemblyTaint>());
+                }
+                else if (pusher.OpCode == OpCodes.Dup && depth == 0 && state.Stack.Count > 0)
+                {
+                    state.Stack[^1] = CombineAssemblyTaints(new[] { state.Stack[^1], taint }.OfType<AssemblyTaint>().Where(value => !value.IsAddress));
+                }
+
+                return;
+            }
+
+            depth = depth - push + pop;
+        }
+    }
+
+    /// <summary>An instruction's (pop, push), calls included; null for one the receiver scan does not model.</summary>
+    private static (int Pop, int Push)? ScanStackEffect(MetadataReader reader, AssemblyInstruction instruction)
+    {
+        var opCode = instruction.OpCode;
+        if (opCode == OpCodes.Call || opCode == OpCodes.Callvirt || opCode == OpCodes.Newobj)
+        {
+            if (instruction.Operand is not int token || ResolveMember(reader, token) is not { } callee)
+            {
+                return null;
+            }
+
+            var isConstruction = opCode == OpCodes.Newobj;
+            return (callee.ParameterCount + (callee.HasThis && !isConstruction ? 1 : 0), isConstruction || !callee.ReturnsVoid ? 1 : 0);
+        }
+
+        if (opCode.StackBehaviourPop == StackBehaviour.Varpop || opCode.StackBehaviourPush == StackBehaviour.Varpush)
+        {
+            return opCode == OpCodes.Calli ? GetStackEffect(reader, instruction) : null;
+        }
+
+        return GetStackEffect(reader, instruction);
     }
 
     private static string GetSinkArgumentLabel(IReadOnlyList<AssemblyTaint?> argumentTaints, AssemblyTaint? receiverTaint, int sinkArgumentIndex) =>
@@ -1020,23 +1301,68 @@ public static partial class DataFlowAnalyzer
 
             var parameterName = reader.GetString(parameter.Name);
             var ilIndex = isStatic ? parameter.SequenceNumber - 1 : parameter.SequenceNumber;
+            var parameterAttributes = GetAttributeNames(reader, parameter.GetCustomAttributes()).ToList();
             var matched = context.MatchParameterSource(parameterName, methodInfo)
-                .Concat(context.MatchAttributeSource(GetAttributeNames(reader, method.GetCustomAttributes()).Concat(GetAttributeNames(reader, parameter.GetCustomAttributes()))))
+                .Concat(context.MatchAttributeSource(GetAttributeNames(reader, method.GetCustomAttributes()).Concat(parameterAttributes)))
                 .DistinctBy(pattern => pattern.Pattern)
                 .ToList();
-            if (matched.Count == 0)
+            var handler = context.HandlerFor(methodInfo);
+            if (matched.Count == 0 && (handler is null || parameterAttributes.Any(name => name is "FromServicesAttribute" or "FromKeyedServicesAttribute") || IsInfrastructureParameterType(ReadSignatureInfo(reader, method.Signature, method.Attributes).ParameterTypes.ElementAtOrDefault(parameter.SequenceNumber - 1))))
             {
                 continue;
             }
 
+            if (handler is not null && !matched.Any(pattern => pattern.Category == "http"))
+            {
+                // A route handler's bound parameter (IL endpoint pass): request input, whatever
+                // its name also suggests (`command`, `query`).
+                matched.Insert(0, new DataFlowPattern { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Parameter, Pattern = "http-endpoint", Category = "http", Description = "HTTP endpoint handler parameter (assembly IL)" });
+            }
+            else if (handler is not null)
+            {
+                matched = [.. matched.OrderBy(pattern => pattern.Category == "http" ? 0 : 1)];
+            }
+
             var node = context.AddNode("Source", parameterName, methodInfo, methodInfo.AssemblyPath, isSource: true, isSink: false, matched, matched.FirstOrDefault()?.Category, $"{methodInfo.Symbol}.{parameterName}", null, parameterName, 1);
+            if (handler is not null)
+            {
+                node.Properties["route"] = handler.Route;
+            }
             argumentTaints[ilIndex] = new AssemblyTaint([node.Id], ToTaintKinds(matched), []);
         }
         return argumentTaints;
     }
 
+    /// <summary>Parameter types a route handler receives from the framework, not the request.</summary>
+    private static bool IsInfrastructureParameterType(string? type) =>
+        type is null || type.StartsWith("System.Threading.CancellationToken", StringComparison.Ordinal) || type.StartsWith("Microsoft.AspNetCore.Http.HttpContext", StringComparison.Ordinal) ||
+        type.StartsWith("Microsoft.Extensions.Logging.ILogger", StringComparison.Ordinal) || type.StartsWith("System.Security.Claims.ClaimsPrincipal", StringComparison.Ordinal) ||
+        type.EndsWith("DbContext", StringComparison.Ordinal);
+
+    /// <summary>
+    ///     A method's summary, with the receiver (<c>this</c>) as a tracked input when that fits a
+    ///     state budget of its own: in a large instance method nearly every path reads <c>this</c>,
+    ///     and telling those states apart can run a package body into the full budget. Such a
+    ///     method is summarized again without the receiver, so it costs at most the receiver
+    ///     budget more and keeps the summary (and the budget diagnostics) it had without one.
+    /// </summary>
     private static AssemblyMethodSummary BuildAssemblyMethodSummary(PEReader peReader, MetadataReader reader, MethodDefinitionHandle methodHandle, MethodDefinition method, string assemblyPath, AssemblySourceMap sourceMap, AssemblyDataFlowContext context, IReadOnlyDictionary<string, AssemblyMethodSummary> summaries)
     {
+        if ((method.Attributes & MethodAttributes.Static) == 0)
+        {
+            var withReceiver = BuildAssemblyMethodSummaryCore(peReader, reader, methodHandle, method, assemblyPath, sourceMap, context, summaries, trackReceiver: true, ReceiverSummaryBudget, out var exhausted);
+            if (!exhausted)
+            {
+                return withReceiver;
+            }
+        }
+
+        return BuildAssemblyMethodSummaryCore(peReader, reader, methodHandle, method, assemblyPath, sourceMap, context, summaries, trackReceiver: false, SummaryBudget, out _);
+    }
+
+    private static AssemblyMethodSummary BuildAssemblyMethodSummaryCore(PEReader peReader, MetadataReader reader, MethodDefinitionHandle methodHandle, MethodDefinition method, string assemblyPath, AssemblySourceMap sourceMap, AssemblyDataFlowContext context, IReadOnlyDictionary<string, AssemblyMethodSummary> summaries, bool trackReceiver, int budget, out bool exhausted)
+    {
+        exhausted = false;
         var methodInfo = BuildMethodInfo(reader, methodHandle, method, assemblyPath, sourceMap);
         var summary = new AssemblyMethodSummary(methodInfo.Symbol);
         var body = peReader.GetMethodBody(method.RelativeVirtualAddress);
@@ -1060,6 +1386,14 @@ public static partial class DataFlowAnalyzer
             argumentTaints[ilIndex] = new AssemblySummaryTaint([parameter.SequenceNumber - 1]);
         }
 
+        // The receiver: a getter returns, and a setter stores into, the state of `this`.
+        if (!isStatic && trackReceiver)
+        {
+            argumentTaints[0] = new AssemblySummaryTaint([ReceiverIndex]);
+        }
+
+        var returnsDecisionOnly = methodInfo.ReturnType == "bool";
+
         var worklist = new Queue<(int Index, AssemblySummaryState State)>();
         var visits = new Dictionary<string, int>(StringComparer.Ordinal);
         var budgetReported = false;
@@ -1072,13 +1406,22 @@ public static partial class DataFlowAnalyzer
             visits.TryGetValue(visitKey, out var visitCount);
             // The summary-state budget truncates silently today; report it so a shallow
             // summary is visible instead of looking like a small method.
-            if (!budgetReported && visits.Count > 10000)
+            if (!budgetReported && visits.Count > budget)
             {
                 budgetReported = true;
-                context.RecordDiagnostic($"IL summary interpreter hit the 10000-state budget in {methodInfo.Symbol}; the summary for this method may be incomplete.");
+                exhausted = true;
+                if (!trackReceiver)
+                {
+                    context.RecordDiagnostic($"IL summary interpreter hit the 10000-state budget in {methodInfo.Symbol}; the summary for this method may be incomplete.");
+                }
+                else
+                {
+                    // The receiver attempt is abandoned for the receiver-less summary.
+                    return summary;
+                }
             }
 
-            if (visitCount >= 2 || visits.Count > 10000) continue;
+            if (visitCount >= 2 || visits.Count > budget) continue;
             visits[visitKey] = visitCount + 1;
 
             // No copy: the queued state is this step's alone (see EnqueueSummarySuccessors).
@@ -1146,10 +1489,42 @@ public static partial class DataFlowAnalyzer
                 var value = state.Pop();
                 _ = state.Pop(); // index
                 var array = state.Pop();
-                if (array is not null && value is { ParameterIndexes.Count: > 0 } && CombineSummaryTaints([array, value]) is { } stored)
+                if (array is not null && value is { IsEmpty: false } && CombineSummaryTaints([array, value]) is { } stored)
                 {
                     state.Replace(array, stored);
                 }
+                EnqueueSummarySuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
+                continue;
+            }
+
+            // Object state: a read is summarized as the field it reads (plus the instance, which
+            // the body pass also falls back to), a store of a parameter as a field store, so a
+            // caller replays `Set(x)` then `Go()` and `o.Command = x` then `o.Command`.
+            if (opCode == OpCodes.Ldfld || opCode == OpCodes.Ldsfld)
+            {
+                var instance = opCode == OpCodes.Ldfld ? state.Pop() : null;
+                var read = instruction.Operand is int readToken && ResolveMember(reader, readToken) is { } readField
+                    ? new AssemblySummaryTaint([], [new AssemblyFieldRef(FieldTaintKey(reader, readToken, readField.Symbol), readField.Symbol, instance?.ParameterIndexes.Contains(ReceiverIndex) == true)])
+                    : null;
+                state.Push(CombineSummaryTaints(new[] { instance, read }.OfType<AssemblySummaryTaint>()));
+                EnqueueSummarySuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
+                continue;
+            }
+
+            if (opCode == OpCodes.Stfld || opCode == OpCodes.Stsfld)
+            {
+                var stored = state.Pop();
+                var owner = opCode == OpCodes.Stfld ? state.Pop() : null;
+
+                if (stored is { ParameterIndexes.Count: > 0 } && instruction.Operand is int storeToken && ResolveMember(reader, storeToken) is { } storeField)
+                {
+                    var field = new AssemblyFieldRef(FieldTaintKey(reader, storeToken, storeField.Symbol), storeField.Symbol, owner?.ParameterIndexes.Contains(ReceiverIndex) == true);
+                    foreach (var index in stored.ParameterIndexes)
+                    {
+                        summary.AddFieldStore(index, field);
+                    }
+                }
+
                 EnqueueSummarySuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
                 continue;
             }
@@ -1183,6 +1558,20 @@ public static partial class DataFlowAnalyzer
                     {
                         summary.AddReturnParameter(index);
                     }
+
+                    foreach (var field in returnTaint.Fields ?? [])
+                    {
+                        summary.AddReturnField(field);
+                    }
+
+                    // A bool is a decision about the source, not the source (as in source mode).
+                    if (!returnsDecisionOnly)
+                    {
+                        foreach (var pattern in returnTaint.Sources ?? [])
+                        {
+                            summary.AddReturnSource(pattern);
+                        }
+                    }
                 }
                 continue;
             }
@@ -1198,8 +1587,7 @@ public static partial class DataFlowAnalyzer
             {
                 var right = state.Pop();
                 var left = state.Pop();
-                var parameterIndexes = new[] { left, right }.OfType<AssemblySummaryTaint>().SelectMany(taint => taint.ParameterIndexes).Distinct().ToList();
-                state.Push(parameterIndexes.Count > 0 ? new AssemblySummaryTaint(parameterIndexes) : null);
+                state.Push(CombineSummaryTaints(new[] { left, right }.OfType<AssemblySummaryTaint>()));
                 EnqueueSummarySuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
                 continue;
             }
@@ -1223,35 +1611,121 @@ public static partial class DataFlowAnalyzer
         for (var i = 0; i < member.ParameterCount; i++) argumentTaints.Add(state.Pop());
         argumentTaints.Reverse();
         var receiverTaint = member.HasThis && opCode != OpCodes.Newobj ? state.Pop() : null;
-        var combined = CombineSummaryTaints(argumentTaints.Concat([receiverTaint]).Where(taint => taint is not null).Cast<AssemblySummaryTaint>());
+        AssemblySummaryTaint? TaintAt(int index) => index == ReceiverIndex ? receiverTaint : index >= 0 && index < argumentTaints.Count ? argumentTaints[index] : null;
+
+        // A helper that returns a source: the caller's value is the source.
+        var sourcePatterns = context.MatchSource(member).Concat(context.MatchPropertySource(reader, token, member)).Distinct().ToList();
+        if (sourcePatterns.Count > 0)
+        {
+            if (!member.ReturnsVoid || opCode == OpCodes.Newobj)
+            {
+                state.Push(new AssemblySummaryTaint([], Sources: sourcePatterns));
+            }
+
+            return;
+        }
+
+        var sanitizerPatterns = context.MatchSanitizer(member).ToList();
+        var entering = CombineSummaryTaints(argumentTaints.Concat([receiverTaint]).OfType<AssemblySummaryTaint>());
+        var combined = sanitizerPatterns.Any(IsUnscopedSanitizer) ? null : entering;
 
         var sinkPatterns = context.MatchSink(member).ToList();
-        if (sinkPatterns.Count > 0 && combined is not null)
+        if (sinkPatterns.Count > 0 && entering is not null)
         {
-            foreach (var index in combined.ParameterIndexes) currentSummary.AddSinkParameter(index);
-            foreach (var category in sinkPatterns.Select(pattern => pattern.Category).Where(category => !string.IsNullOrWhiteSpace(category))) currentSummary.AddSinkCategory(category!);
+            var dangerous = sinkPatterns.Any(pattern => pattern.SinkParameters.Count > 0)
+                ? DangerousArgumentIndexes(sinkPatterns, context.ParameterNames(reader, token, member), member, opCode == OpCodes.Newobj)
+                : null;
+            var sinkTaint = dangerous is null ? entering : CombineSummaryTaints(dangerous.Select(TaintAt).OfType<AssemblySummaryTaint>());
+            if (sinkTaint is not null)
+            {
+                foreach (var index in sinkTaint.ParameterIndexes) currentSummary.AddSinkParameter(index);
+                foreach (var category in sinkPatterns.Select(pattern => pattern.Category).Where(category => !string.IsNullOrWhiteSpace(category))) currentSummary.AddSinkCategory(category!);
+                foreach (var field in (sinkTaint.Fields ?? []).Where(field => field.OnReceiver))
+                {
+                    currentSummary.AddSinkField(field, sinkPatterns.Select(pattern => pattern.Category).FirstOrDefault(category => !string.IsNullOrWhiteSpace(category)) ?? "interprocedural");
+                }
+            }
         }
 
         if (summaries.TryGetValue(member.Symbol, out var calleeSummary))
         {
-            foreach (var sinkParameterIndex in calleeSummary.SinkParameterIndexes.Where(index => index >= 0 && index < argumentTaints.Count && argumentTaints[index] is not null))
+            foreach (var sinkParameterIndex in calleeSummary.SinkParameterIndexes)
             {
-                foreach (var index in argumentTaints[sinkParameterIndex]!.ParameterIndexes) currentSummary.AddSinkParameter(index);
+                if (TaintAt(sinkParameterIndex) is not { } taint) continue;
+                foreach (var index in taint.ParameterIndexes) currentSummary.AddSinkParameter(index);
                 foreach (var category in calleeSummary.SinkCategories) currentSummary.AddSinkCategory(category);
+            }
+
+            // A callee on this same receiver sinks its members: so does this method.
+            if (TaintAt(ReceiverIndex)?.ParameterIndexes.Contains(ReceiverIndex) == true)
+            {
+                foreach (var (field, category) in calleeSummary.SinkFields) currentSummary.AddSinkField(field, category);
+            }
+
+            // A helper that stores its argument stores the caller's parameter (transitive setters).
+            foreach (var (parameter, field) in calleeSummary.FieldStores)
+            {
+                foreach (var index in TaintAt(parameter)?.ParameterIndexes ?? [])
+                {
+                    currentSummary.AddFieldStore(index, field);
+                }
             }
         }
 
         if (member.ReturnsVoid && opCode != OpCodes.Newobj) return;
 
-        if (summaries.TryGetValue(member.Symbol, out var returnSummary))
+        if (calleeSummary is not null)
         {
-            var returnTaints = returnSummary.ReturnParameterIndexes.Where(index => index >= 0 && index < argumentTaints.Count).Select(index => argumentTaints[index]).Where(taint => taint is not null).Cast<AssemblySummaryTaint>().ToList();
+            var returnTaints = calleeSummary.ReturnParameterIndexes.Select(TaintAt).OfType<AssemblySummaryTaint>().ToList();
+            if (calleeSummary.ReturnFields.Count > 0) returnTaints.Add(new AssemblySummaryTaint([], [.. calleeSummary.ReturnFields]));
+            if (calleeSummary.ReturnSources.Count > 0) returnTaints.Add(new AssemblySummaryTaint([], Sources: [.. calleeSummary.ReturnSources]));
             state.Push(CombineSummaryTaints(returnTaints));
+            return;
+        }
+
+        if (member.ReturnType == "bool")
+        {
+            // A decision about the value, not the value.
+            state.Push(null);
             return;
         }
 
         var passthroughPatterns = context.MatchPassthrough(member).ToList();
         state.Push(passthroughPatterns.Count > 0 || member.Symbol.StartsWith("System.", StringComparison.Ordinal) ? combined : null);
+    }
+
+    /// <summary>A sanitizer that neutralizes every sink: no taint kinds removed and no sink categories named.</summary>
+    private static bool IsUnscopedSanitizer(DataFlowPattern pattern) => pattern.RemovesTaintKinds.Count == 0 && pattern.SanitizesCategories.Count == 0;
+
+    /// <summary>
+    ///     The argument positions (<see cref="ReceiverIndex" /> for the receiver) a sink call is
+    ///     dangerous in, from the matched patterns' <see cref="DataFlowPattern.SinkParameters" />;
+    ///     null when every argument is (a pattern names none, or the callee's parameter names
+    ///     cannot be resolved, which keeps the flow rather than hiding it).
+    /// </summary>
+    private static List<int>? DangerousArgumentIndexes(IReadOnlyList<DataFlowPattern> sinkPatterns, string[]? parameterNames, AssemblyMemberInfo member, bool isConstruction)
+    {
+        if (sinkPatterns.Any(pattern => pattern.SinkParameters.Count == 0) || parameterNames is null || parameterNames.Length != member.ParameterCount)
+        {
+            return null;
+        }
+
+        var names = sinkPatterns.SelectMany(pattern => pattern.SinkParameters).ToHashSet(StringComparer.Ordinal);
+        var indexes = new List<int>();
+        if (names.Contains("this") && member.HasThis && !isConstruction)
+        {
+            indexes.Add(ReceiverIndex);
+        }
+
+        for (var index = 0; index < parameterNames.Length; index++)
+        {
+            if (names.Contains(parameterNames[index]))
+            {
+                indexes.Add(index);
+            }
+        }
+
+        return indexes;
     }
 
     private static AssemblyMethodInfo BuildMethodInfo(MetadataReader reader, MethodDefinitionHandle methodHandle, MethodDefinition method, string assemblyPath, AssemblySourceMap? sourceMap = null)
@@ -1746,31 +2220,65 @@ public static partial class DataFlowAnalyzer
 
     /// <summary>
     ///     Finds the conditional branch that consumes a sanitizer call's result: directly
-    ///     (`call; brXX`) or through a Debug-build local forward (`call; stloc.X; ldloc.X; brXX`).
-    ///     Returns the branch's instruction index, or null when the result is not branch-consumed.
+    ///     (`call; brXX`), negated (`call; ldc.i4.0; ceq; brXX`, a Debug build's `!Valid(x)`), and
+    ///     either through a Debug-build local forward (`stloc.X; ldloc.X`). Returns the branch's
+    ///     instruction index and whether the result was negated, or null when no branch consumes it.
     /// </summary>
-    private static int? FindSanitizerGuardBranch(IReadOnlyList<AssemblyInstruction> instructions, int callIndex)
+    private static (int Index, bool Inverted)? FindSanitizerGuardBranch(IReadOnlyList<AssemblyInstruction> instructions, int callIndex)
     {
-        if (callIndex + 1 >= instructions.Count)
+        var index = callIndex + 1;
+        var inverted = false;
+        if (index + 1 < instructions.Count && IsLdcI4Zero(instructions[index]) && instructions[index + 1].OpCode == OpCodes.Ceq)
         {
-            return null;
+            inverted = true;
+            index += 2;
         }
 
-        if (IsConditionalBranch(instructions[callIndex + 1].OpCode))
+        if (index + 1 < instructions.Count &&
+            TryGetStlocIndex(instructions[index].OpCode, instructions[index].Operand, out var storedIndex) &&
+            TryGetLdlocIndex(instructions[index + 1].OpCode, instructions[index + 1].Operand, out var loadedIndex) &&
+            storedIndex == loadedIndex)
         {
-            return callIndex + 1;
+            index += 2;
         }
 
-        if (callIndex + 3 < instructions.Count &&
-            TryGetStlocIndex(instructions[callIndex + 1].OpCode, instructions[callIndex + 1].Operand, out var storedIndex) &&
-            TryGetLdlocIndex(instructions[callIndex + 2].OpCode, instructions[callIndex + 2].Operand, out var loadedIndex) &&
-            storedIndex == loadedIndex &&
-            IsConditionalBranch(instructions[callIndex + 3].OpCode))
-        {
-            return callIndex + 3;
-        }
+        return index < instructions.Count && IsConditionalBranch(instructions[index].OpCode) ? (index, inverted) : null;
+    }
 
-        return null;
+    private static bool IsLdcI4Zero(AssemblyInstruction instruction) =>
+        instruction.OpCode == OpCodes.Ldc_I4_0 || (instruction.OpCode == OpCodes.Ldc_I4_S && instruction.Operand is sbyte or byte && Convert.ToInt32(instruction.Operand, CultureInfo.InvariantCulture) == 0);
+
+    /// <summary>What a validated branch does to the values that fed the validator.</summary>
+    private sealed class SanitizerGuard(List<(bool IsArgument, int SlotIndex)> slots, List<AssemblyTaint> values, List<string>? categories)
+    {
+        public void Apply(AssemblyMethodState state)
+        {
+            AssemblyTaint? Guarded(AssemblyTaint? taint) =>
+                taint is null || categories is null ? null : ApplyScopedSanitizers(taint, [new DataFlowPattern { Pattern = "guard", SanitizesCategories = categories }]);
+
+            foreach (var (isArgument, slotIndex) in slots)
+            {
+                if (isArgument)
+                {
+                    state.Arguments[slotIndex] = Guarded(state.Arguments.GetValueOrDefault(slotIndex));
+                }
+                else
+                {
+                    state.Locals[slotIndex] = Guarded(state.Locals.GetValueOrDefault(slotIndex));
+                }
+            }
+
+            foreach (var value in values)
+            {
+                for (var index = 0; index < state.Stack.Count; index++)
+                {
+                    if (ReferenceEquals(state.Stack[index], value)) state.Stack[index] = Guarded(value);
+                }
+
+                foreach (var slot in state.Locals.Where(pair => ReferenceEquals(pair.Value, value)).Select(pair => pair.Key).ToList()) state.Locals[slot] = Guarded(value);
+                foreach (var slot in state.Arguments.Where(pair => ReferenceEquals(pair.Value, value)).Select(pair => pair.Key).ToList()) state.Arguments[slot] = Guarded(value);
+            }
+        }
     }
 
     /// <summary>
@@ -1779,17 +2287,35 @@ public static partial class DataFlowAnalyzer
     ///     validator. A bounded forward stack simulation over the instructions before the call; any
     ///     opcode outside the whitelist yields no guard rather than a wrong one.
     /// </summary>
-    private static List<(bool IsArgument, int SlotIndex)>? TryDetectSanitizerGuardSlots(MetadataReader reader, AssemblyInstruction instruction, IReadOnlyList<AssemblyInstruction> instructions, int instructionIndex, AssemblyDataFlowContext context)
+    private static SanitizerGuard? TryDetectSanitizerGuard(MetadataReader reader, AssemblyInstruction instruction, IReadOnlyList<AssemblyInstruction> instructions, int instructionIndex, AssemblyDataFlowContext context, AssemblyMethodState state)
     {
         if (instruction.Operand is not int token || ResolveMember(reader, token) is not { } member)
         {
             return null;
         }
 
-        if (!context.MatchSanitizer(member).Any())
+        var sanitizers = context.MatchSanitizer(member).ToList();
+        if (sanitizers.Count == 0)
         {
             return null;
         }
+
+        // The values about to be passed (receiver included), by identity, as they sit on the stack.
+        var operandCount = member.ParameterCount + (member.HasThis ? 1 : 0);
+        var values = state.Stack.Skip(Math.Max(0, state.Stack.Count - operandCount))
+            .Select(taint => ResolveAddressTaint(taint, state))
+            .OfType<AssemblyTaint>()
+            .Where(taint => !taint.IsAddress)
+            .Distinct(ReferenceEqualityComparer.Instance)
+            .Cast<AssemblyTaint>()
+            .ToList();
+        var categories = sanitizers.Any(IsUnscopedSanitizer) ? null : sanitizers.SelectMany(pattern => pattern.SanitizesCategories).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var slots = TryDetectSanitizerGuardSlots(instructions, instructionIndex, member) ?? [];
+        return slots.Count > 0 || values.Count > 0 ? new SanitizerGuard(slots, values, categories) : null;
+    }
+
+    private static List<(bool IsArgument, int SlotIndex)>? TryDetectSanitizerGuardSlots(IReadOnlyList<AssemblyInstruction> instructions, int instructionIndex, AssemblyMemberInfo member)
+    {
 
         // Simulate up to 16 preceding instructions, enough for guarded validator calls on
         // locals, arguments, and array/collection elements without modeling whole methods.
@@ -2248,9 +2774,20 @@ public static partial class DataFlowAnalyzer
         var seenNodes = new HashSet<string>(StringComparer.Ordinal);
         var seenTaints = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var seenFields = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // A category stays sanitized only when every combined value was sanitized for it.
+        List<string>? sanitizedFor = null;
+        var first = true;
 
         foreach (var trace in traces)
         {
+            if (trace.NodeIds.Count > 0)
+            {
+                sanitizedFor = first
+                    ? trace.SanitizedFor is { Count: > 0 } own ? [.. own] : []
+                    : sanitizedFor!.Where(category => trace.IsSanitizedFor(category)).ToList();
+                first = false;
+            }
+
             foreach (var nodeId in trace.NodeIds)
             {
                 if (seenNodes.Add(nodeId)) nodeIds.Add(nodeId);
@@ -2265,17 +2802,63 @@ public static partial class DataFlowAnalyzer
             }
         }
 
-        return nodeIds.Count == 0 ? null : new AssemblyTaint(nodeIds, taintKinds, fieldPaths);
+        return nodeIds.Count == 0 ? null : new AssemblyTaint(nodeIds, taintKinds, fieldPaths, SanitizedFor: sanitizedFor is { Count: > 0 } ? sanitizedFor : null);
     }
 
     private static AssemblySummaryTaint? CombineSummaryTaints(IEnumerable<AssemblySummaryTaint> traces)
     {
-        var indexes = new List<int>();
-        foreach (var index in traces.SelectMany(trace => trace.ParameterIndexes).Distinct().Order())
+        // Hot in the summary pass: plain loops, no LINQ.
+        AssemblySummaryTaint? only = null;
+        var count = 0;
+        foreach (var trace in traces)
         {
-            indexes.Add(index);
+            if (trace.IsEmpty)
+            {
+                continue;
+            }
+
+            count++;
+            if (count == 1)
+            {
+                only = trace;
+                continue;
+            }
+
+            if (count == 2)
+            {
+                var merged = new AssemblySummaryTaint([.. only!.ParameterIndexes], only.Fields is null ? null : [.. only.Fields], only.Sources is null ? null : [.. only.Sources]);
+                only = merged;
+            }
+
+            foreach (var index in trace.ParameterIndexes)
+            {
+                if (!only!.ParameterIndexes.Contains(index)) only.ParameterIndexes.Add(index);
+            }
+
+            foreach (var field in trace.Fields ?? [])
+            {
+                var fields = only!.Fields ?? [];
+                if (!fields.Exists(existing => existing.Key == field.Key)) fields.Add(field);
+                only = only with { Fields = fields };
+            }
+
+            foreach (var source in trace.Sources ?? [])
+            {
+                var sources = only!.Sources ?? [];
+                if (!sources.Contains(source)) sources.Add(source);
+                only = only with { Sources = sources };
+            }
         }
-        return indexes.Count == 0 ? null : new AssemblySummaryTaint(indexes);
+
+        if (count > 1)
+        {
+            only!.ParameterIndexes.Sort();
+            return only;
+        }
+
+        // A fresh object even for one input: array stores re-point every copy by reference, so the
+        // result must never alias an argument's own taint.
+        return only is null ? null : new AssemblySummaryTaint(only.ParameterIndexes, only.Fields, only.Sources);
     }
 
     private static List<string> ToTaintKinds(IEnumerable<DataFlowPattern> patterns) => patterns
@@ -2306,7 +2889,7 @@ public static partial class DataFlowAnalyzer
         };
     }
 
-    private sealed class AssemblyDataFlowContext(DataFlowResult result, DataFlowPatternSet patterns, string basePath)
+    private sealed class AssemblyDataFlowContext(DataFlowResult result, DataFlowPatternSet patterns, string basePath) : IDisposable
     {
         /// <summary>
         ///     Sink categories whose exploitability hinges on a guard only the source walker can
@@ -2370,7 +2953,8 @@ public static partial class DataFlowAnalyzer
                 yield return pattern;
             }
 
-            if (method.Name == "Main" && parameterName.Equals("args", StringComparison.OrdinalIgnoreCase))
+            // `<Main>$` is the entry point the compiler synthesizes for top-level statements.
+            if (TransparencyBuilder.IsCliEntryPointName(method.Name) && parameterName.Equals("args", StringComparison.OrdinalIgnoreCase))
             {
                 foreach (var pattern in _patternIndex.SourceParameters.Where(pattern => AssemblyPatternMatches("Main", pattern)))
                 {
@@ -2379,12 +2963,369 @@ public static partial class DataFlowAnalyzer
             }
         }
 
-        public IEnumerable<DataFlowPattern> MatchSource(AssemblyMemberInfo member) => MatchMember(member, _patternIndex.Sources.Where(IsAssemblySourceMemberPattern));
-        public IEnumerable<DataFlowPattern> MatchSink(AssemblyMemberInfo member) => MatchMember(member, _patternIndex.Sinks);
-        public IEnumerable<DataFlowPattern> MatchSanitizer(AssemblyMemberInfo member) => MatchMember(member, _patternIndex.Sanitizers);
-        public IEnumerable<DataFlowPattern> MatchPassthrough(AssemblyMemberInfo member) => MatchMember(member, _patternIndex.Passthroughs);
+        // Member matches are memoized per member and role: both interpreters ask for every call
+        // instruction on every visit, and the regex patterns made that the summary pass's cost.
+        private readonly Dictionary<(string Symbol, string ContainingType, string Name, int Role), DataFlowPattern[]> _memberMatches = [];
+
+        private DataFlowPattern[] Memoized(AssemblyMemberInfo member, int role, Func<IEnumerable<DataFlowPattern>> candidates)
+        {
+            var key = (member.Symbol, member.ContainingType, member.Name, role);
+            if (!_memberMatches.TryGetValue(key, out var matched))
+            {
+                matched = [.. MatchMember(member, candidates())];
+                _memberMatches[key] = matched;
+            }
+
+            return matched;
+        }
+
+        public IEnumerable<DataFlowPattern> MatchSource(AssemblyMemberInfo member) => Memoized(member, 0, () => _patternIndex.Sources.Where(IsAssemblySourceMemberPattern));
+        public IEnumerable<DataFlowPattern> MatchSink(AssemblyMemberInfo member) => Memoized(member, 1, () => _patternIndex.Sinks);
+        public IEnumerable<DataFlowPattern> MatchSanitizer(AssemblyMemberInfo member) => Memoized(member, 2, () => _patternIndex.Sanitizers);
+        public IEnumerable<DataFlowPattern> MatchPassthrough(AssemblyMemberInfo member) => Memoized(member, 3, () => _patternIndex.Passthroughs);
         public IEnumerable<DataFlowPattern> MatchSourceCode(string code) => _patternIndex.SourceCode.Where(pattern => AssemblyPatternMatches(code, pattern));
         public IEnumerable<DataFlowPattern> MatchAttributeSource(IEnumerable<string> attributes) => _patternIndex.SourceAttributes.Where(pattern => attributes.Any(attribute => AssemblyPatternMatches(attribute, pattern)));
+
+        private readonly Dictionary<(MetadataReader Reader, int Type, string Property), List<string>> _propertyAttributes = [];
+
+        /// <summary>
+        ///     Attribute-source patterns of the property a getter belongs to: reading a
+        ///     <c>[BindProperty]</c> or <c>[SupplyParameterFromQuery]</c> property reads the request.
+        ///     The property is found on the getter's declaring type, in this assembly or a referenced
+        ///     one (beside the input, the framework references, packs or the NuGet cache), and an
+        ///     override inherits the attributes of the property it overrides up the base types.
+        /// </summary>
+        public IEnumerable<DataFlowPattern> MatchPropertySource(MetadataReader reader, int token, AssemblyMemberInfo member)
+        {
+            if (_patternIndex.SourceAttributes.Count == 0 || !member.Name.StartsWith("get_", StringComparison.Ordinal))
+            {
+                return [];
+            }
+
+            var handle = MetadataTokens.EntityHandle(token);
+            EntityHandle type = handle.Kind switch
+            {
+                HandleKind.MethodDefinition => reader.GetMethodDefinition((MethodDefinitionHandle)handle).GetDeclaringType(),
+                HandleKind.MemberReference => reader.GetMemberReference((MemberReferenceHandle)handle).Parent,
+                _ => default
+            };
+            if (type.IsNil)
+            {
+                return [];
+            }
+
+            try
+            {
+                var attributes = PropertyAttributes(reader, type, member.Name[4..], depth: 0);
+                return attributes.Count == 0 ? [] : MatchAttributeSource(attributes);
+            }
+            catch (Exception ex) when (ex is BadImageFormatException or InvalidOperationException or ArgumentException)
+            {
+                return [];
+            }
+        }
+
+        private List<string> PropertyAttributes(MetadataReader reader, EntityHandle type, string property, int depth)
+        {
+            if (depth > 16 || type.IsNil)
+            {
+                return [];
+            }
+
+            switch (type.Kind)
+            {
+                case HandleKind.TypeSpecification:
+                {
+                    var blob = reader.GetBlobReader(reader.GetTypeSpecification((TypeSpecificationHandle)type).Signature);
+                    if (blob.ReadSignatureTypeCode() != SignatureTypeCode.GenericTypeInstance) return [];
+                    blob.ReadSignatureTypeCode();
+                    return PropertyAttributes(reader, blob.ReadTypeHandle(), property, depth + 1);
+                }
+                case HandleKind.TypeReference:
+                {
+                    var reference = reader.GetTypeReference((TypeReferenceHandle)type);
+                    if (reference.ResolutionScope.Kind == HandleKind.TypeReference || DeclaringAssemblyName(reader, type) is not { } assemblyName || ReferenceReader(assemblyName, reportMissing: false) is not { } target)
+                    {
+                        return [];
+                    }
+
+                    foreach (var definitionHandle in target.TypeDefinitions)
+                    {
+                        var definition = target.GetTypeDefinition(definitionHandle);
+                        if (target.StringComparer.Equals(definition.Name, reader.GetString(reference.Name)) && target.StringComparer.Equals(definition.Namespace, reader.GetString(reference.Namespace)))
+                        {
+                            return PropertyAttributes(target, definitionHandle, property, depth + 1);
+                        }
+                    }
+
+                    return [];
+                }
+                case HandleKind.TypeDefinition:
+                {
+                    var key = (reader, MetadataTokens.GetToken(type), property);
+                    if (_propertyAttributes.TryGetValue(key, out var cached))
+                    {
+                        return cached;
+                    }
+
+                    _propertyAttributes[key] = [];
+                    var definition = reader.GetTypeDefinition((TypeDefinitionHandle)type);
+                    var attributes = new List<string>();
+                    foreach (var propertyHandle in definition.GetProperties())
+                    {
+                        var candidate = reader.GetPropertyDefinition(propertyHandle);
+                        if (reader.StringComparer.Equals(candidate.Name, property))
+                        {
+                            attributes.AddRange(GetAttributeNames(reader, candidate.GetCustomAttributes()));
+                            // [BindProperties] on the type binds every public settable property.
+                            if (candidate.GetAccessors().Setter is { IsNil: false } setter &&
+                                (reader.GetMethodDefinition(setter).Attributes & MethodAttributes.MemberAccessMask) == MethodAttributes.Public &&
+                                GetAttributeNames(reader, definition.GetCustomAttributes()).Contains("BindPropertiesAttribute"))
+                            {
+                                attributes.Add("BindPropertyAttribute");
+                            }
+                        }
+                    }
+
+                    if (attributes.Count == 0)
+                    {
+                        attributes = PropertyAttributes(reader, definition.BaseType, property, depth + 1);
+                    }
+
+                    _propertyAttributes[key] = attributes;
+                    return attributes;
+                }
+                default:
+                    return [];
+            }
+        }
+
+        private readonly Dictionary<string, string[]?> _parameterNames = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, MetadataReader?> _referenceReaders = new(StringComparer.OrdinalIgnoreCase);
+        private readonly List<IDisposable> _openedReferences = [];
+
+        /// <summary>
+        ///     The callee's parameter names, for <see cref="DataFlowPattern.SinkParameters" />: from
+        ///     its definition when the analyzed assembly declares it, else from the referenced
+        ///     assembly (beside the analyzed one, else in the tree's framework reference set),
+        ///     following type forwarders. Null when the definition cannot be found; the sink then
+        ///     treats every argument as dangerous.
+        /// </summary>
+        public string[]? ParameterNames(MetadataReader reader, int token, AssemblyMemberInfo member)
+        {
+            var handle = MetadataTokens.EntityHandle(token);
+            if (handle.Kind == HandleKind.MethodSpecification)
+            {
+                handle = reader.GetMethodSpecification((MethodSpecificationHandle)handle).Method;
+            }
+
+            if (handle.Kind == HandleKind.MethodDefinition)
+            {
+                return NamesOf(reader, (MethodDefinitionHandle)handle);
+            }
+
+            if (handle.Kind != HandleKind.MemberReference)
+            {
+                return null;
+            }
+
+            if (_parameterNames.TryGetValue(member.Symbol, out var cached))
+            {
+                return cached;
+            }
+
+            string[]? names = null;
+            try
+            {
+                var reference = reader.GetMemberReference((MemberReferenceHandle)handle);
+                var parent = reference.Parent;
+                if (parent.Kind == HandleKind.TypeSpecification)
+                {
+                    var blob = reader.GetBlobReader(reader.GetTypeSpecification((TypeSpecificationHandle)parent).Signature);
+                    if (blob.ReadSignatureTypeCode() == SignatureTypeCode.GenericTypeInstance)
+                    {
+                        blob.ReadSignatureTypeCode();
+                        parent = blob.ReadTypeHandle();
+                    }
+                }
+
+                if (parent.Kind == HandleKind.TypeReference && DeclaringAssemblyName(reader, parent) is { } assemblyName)
+                {
+                    var type = reader.GetTypeReference((TypeReferenceHandle)parent);
+                    names = FindParameterNames(assemblyName, reader.GetString(type.Namespace), reader.GetString(type.Name), member, depth: 0);
+                }
+            }
+            catch (Exception ex) when (ex is BadImageFormatException or InvalidOperationException or ArgumentException)
+            {
+                names = null;
+            }
+
+            _parameterNames[member.Symbol] = names;
+            return names;
+        }
+
+        private string[]? FindParameterNames(string assemblyName, string typeNamespace, string typeName, AssemblyMemberInfo member, int depth)
+        {
+            if (depth > 4 || ReferenceReader(assemblyName, reportMissing: true) is not { } target)
+            {
+                return null;
+            }
+
+            foreach (var typeHandle in target.TypeDefinitions)
+            {
+                var type = target.GetTypeDefinition(typeHandle);
+                if (!target.StringComparer.Equals(type.Name, typeName) || !target.StringComparer.Equals(type.Namespace, typeNamespace))
+                {
+                    continue;
+                }
+
+                var candidates = type.GetMethods()
+                    .Where(methodHandle => target.StringComparer.Equals(target.GetMethodDefinition(methodHandle).Name, member.Name))
+                    .Select(methodHandle => (Handle: methodHandle, Signature: ReadSignatureInfo(target, target.GetMethodDefinition(methodHandle).Signature, target.GetMethodDefinition(methodHandle).Attributes)))
+                    .Where(candidate => candidate.Signature.ParameterCount == member.ParameterCount)
+                    .ToList();
+                var exact = candidates.Where(candidate => member.Symbol.Contains($".{member.Name}({string.Join(',', candidate.Signature.ParameterTypes)})", StringComparison.Ordinal)).ToList();
+                var chosen = exact.Count > 0 ? exact : candidates;
+                var names = chosen.Select(candidate => NamesOf(target, candidate.Handle)).ToList();
+                return names.Count > 0 && names.All(candidate => candidate is not null && candidate.SequenceEqual(names[0]!)) ? names[0] : null;
+            }
+
+            // A facade forwards the type to the assembly that implements it.
+            foreach (var exportedHandle in target.ExportedTypes)
+            {
+                var exported = target.GetExportedType(exportedHandle);
+                if (exported.IsForwarder && target.StringComparer.Equals(exported.Name, typeName) && target.StringComparer.Equals(exported.Namespace, typeNamespace) &&
+                    exported.Implementation.Kind == HandleKind.AssemblyReference)
+                {
+                    var forwardedTo = target.GetString(target.GetAssemblyReference((AssemblyReferenceHandle)exported.Implementation).Name);
+                    return FindParameterNames(forwardedTo, typeNamespace, typeName, member, depth + 1);
+                }
+            }
+
+            return null;
+        }
+
+        private static string[]? NamesOf(MetadataReader reader, MethodDefinitionHandle handle)
+        {
+            var method = reader.GetMethodDefinition(handle);
+            var count = ReadSignatureInfo(reader, method.Signature, method.Attributes).ParameterCount;
+            var names = new string[count];
+            foreach (var parameterHandle in method.GetParameters())
+            {
+                var parameter = reader.GetParameter(parameterHandle);
+                if (parameter.SequenceNumber > 0 && parameter.SequenceNumber <= count)
+                {
+                    names[parameter.SequenceNumber - 1] = reader.GetString(parameter.Name);
+                }
+            }
+
+            return names.Any(string.IsNullOrEmpty) ? null : names;
+        }
+
+        /// <summary>A referenced assembly's metadata: an analyzed tree's own copy first (packages in <c>bin/</c>), then the framework reference set.</summary>
+        private readonly HashSet<string> _reportedMissing = new(StringComparer.OrdinalIgnoreCase);
+
+        private MetadataReader? ReferenceReader(string assemblyName, bool reportMissing)
+        {
+            if (_referenceReaders.TryGetValue(assemblyName, out var cached))
+            {
+                if (cached is null && reportMissing && _reportedMissing.Add(assemblyName))
+                {
+                    RecordMissingMetadata(assemblyName);
+                }
+
+                return cached;
+            }
+
+            MetadataReader? reader = null;
+            try
+            {
+                var fileName = assemblyName + ".dll";
+                var local = _analyzedDirectories.Select(directory => Path.Combine(directory, fileName)).FirstOrDefault(File.Exists);
+                var frameworkHit = local is null && FrameworkReferences.ForTree(basePath).References.Any(entry => string.Equals(Path.GetFileNameWithoutExtension(entry.Reference.FilePath ?? entry.Key), assemblyName, StringComparison.OrdinalIgnoreCase));
+                // Not beside the input and not in the tree's reference set: a reference pack, an
+                // installed shared framework, or the NuGet global packages folder.
+                local ??= frameworkHit ? null : FrameworkReferences.FindInstalledAssembly(assemblyName);
+                if (local is not null)
+                {
+                    var stream = new FileStream(local, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                    var peReader = new PEReader(stream);
+                    _openedReferences.Add(peReader);
+                    _openedReferences.Add(stream);
+                    reader = peReader.HasMetadata ? peReader.GetMetadataReader() : null;
+                }
+                else
+                {
+                    foreach (var (key, reference) in FrameworkReferences.ForTree(basePath).References)
+                    {
+                        var name = Path.GetFileNameWithoutExtension(reference.FilePath ?? key);
+                        if (!string.Equals(name, assemblyName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            continue;
+                        }
+
+                        var metadata = reference.GetMetadata();
+                        var module = metadata switch
+                        {
+                            Microsoft.CodeAnalysis.AssemblyMetadata assembly => assembly.GetModules().FirstOrDefault(),
+                            Microsoft.CodeAnalysis.ModuleMetadata single => single,
+                            _ => null
+                        };
+                        reader = module?.GetMetadataReader();
+                        break;
+                    }
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or BadImageFormatException or InvalidOperationException)
+            {
+                reader = null;
+            }
+
+            _referenceReaders[assemblyName] = reader;
+            if (reader is null && reportMissing && _reportedMissing.Add(assemblyName))
+            {
+                RecordMissingMetadata(assemblyName);
+            }
+
+            return reader;
+        }
+
+        private void RecordMissingMetadata(string assemblyName)
+        {
+            {
+                RecordDiagnostic($"SinkParameters could not be applied to calls into {assemblyName}: its metadata was not found beside the input, in the framework references or reference packs, or in the NuGet cache, so every tainted argument of those sink calls is treated as dangerous.");
+            }
+        }
+
+        private readonly SortedSet<string> _analyzedDirectories = new(StringComparer.Ordinal);
+
+        /// <summary>Registers an analyzed file's directory, where its package and project references sit.</summary>
+        public void AddAnalyzedDirectory(string assemblyPath)
+        {
+            if (Path.GetDirectoryName(Path.GetFullPath(assemblyPath)) is { } directory)
+            {
+                _analyzedDirectories.Add(directory);
+            }
+        }
+
+        public void Dispose()
+        {
+            foreach (var opened in _openedReferences)
+            {
+                opened.Dispose();
+            }
+
+            _openedReferences.Clear();
+        }
+
+        private readonly Dictionary<(string Assembly, int Token), AssemblyEndpointAnalyzer.Handler> _handlers = [];
+
+        public void RegisterHandler(string assemblyPath, AssemblyEndpointAnalyzer.Handler handler) =>
+            _handlers.TryAdd((Path.GetFullPath(assemblyPath), handler.MetadataToken), handler);
+
+        /// <summary>The endpoint whose handler this method is, when the IL endpoint pass found one.</summary>
+        public AssemblyEndpointAnalyzer.Handler? HandlerFor(AssemblyMethodInfo method) =>
+            _handlers.Count > 0 && _handlers.TryGetValue((Path.GetFullPath(method.AssemblyPath), method.MetadataToken), out var handler) ? handler : null;
 
         public void RecordDiagnostic(string message)
         {
@@ -2531,6 +3472,8 @@ public static partial class DataFlowAnalyzer
                 {
                     ["analysis"] = "assembly-il",
                     ["method"] = method.Symbol,
+                    // The IL method id, so exploit chains resolve IL entry points (IL endpoint pass).
+                    ["methodId"] = method.Symbol,
                     ["assembly"] = Path.GetFileName(assemblyPath),
                     ["ilOffset"] = ilOffset.ToString(System.Globalization.CultureInfo.InvariantCulture),
                     ["metadataToken"] = $"0x{method.MetadataToken:x8}"
@@ -2689,8 +3632,45 @@ public static partial class DataFlowAnalyzer
         public List<int> SinkParameterIndexes { get; } = [];
         public List<string> SinkCategories { get; } = [];
 
+        /// <summary>Fields whose value the method returns (a getter, a helper reading object state).</summary>
+        public List<AssemblyFieldRef> ReturnFields { get; } = [];
+        /// <summary>Source patterns of the values the method returns (a helper that returns a source).</summary>
+        public List<DataFlowPattern> ReturnSources { get; } = [];
+        /// <summary>Members of the receiver whose value reaches a sink, with the sink's category (<c>Go() =&gt; Process.Start(command)</c>).</summary>
+        public List<(AssemblyFieldRef Field, string Category)> SinkFields { get; } = [];
+
+        public bool AddSinkField(AssemblyFieldRef field, string category)
+        {
+            if (SinkFields.Any(existing => existing.Field.Key == field.Key && existing.Category == category)) return false;
+            SinkFields.Add((field, category));
+            return true;
+        }
+
+        /// <summary>Parameter (or <see cref="ReceiverIndex" />) values the method stores into a field (a setter, <c>Set(x)</c>).</summary>
+        public List<(int Parameter, AssemblyFieldRef Field)> FieldStores { get; } = [];
+
         public void AddReturnParameter(int index) => AddUnique(ReturnParameterIndexes, index);
         public void AddSinkParameter(int index) => AddUnique(SinkParameterIndexes, index);
+        public bool AddReturnField(AssemblyFieldRef field)
+        {
+            if (ReturnFields.Any(existing => existing.Key == field.Key)) return false;
+            ReturnFields.Add(field);
+            return true;
+        }
+
+        public bool AddReturnSource(DataFlowPattern pattern)
+        {
+            if (ReturnSources.Contains(pattern)) return false;
+            ReturnSources.Add(pattern);
+            return true;
+        }
+
+        public bool AddFieldStore(int parameter, AssemblyFieldRef field)
+        {
+            if (FieldStores.Any(existing => existing.Parameter == parameter && existing.Field.Key == field.Key)) return false;
+            FieldStores.Add((parameter, field));
+            return true;
+        }
         public void AddSinkCategory(string category)
         {
             if (!SinkCategories.Contains(category, StringComparer.OrdinalIgnoreCase)) SinkCategories.Add(category);
@@ -2701,6 +3681,10 @@ public static partial class DataFlowAnalyzer
             var changed = false;
             foreach (var index in other.ReturnParameterIndexes) changed |= AddUnique(ReturnParameterIndexes, index);
             foreach (var index in other.SinkParameterIndexes) changed |= AddUnique(SinkParameterIndexes, index);
+            foreach (var field in other.ReturnFields) changed |= AddReturnField(field);
+            foreach (var pattern in other.ReturnSources) changed |= AddReturnSource(pattern);
+            foreach (var (parameter, field) in other.FieldStores) changed |= AddFieldStore(parameter, field);
+            foreach (var (field, category) in other.SinkFields) changed |= AddSinkField(field, category);
             foreach (var category in other.SinkCategories)
             {
                 if (!SinkCategories.Contains(category, StringComparer.OrdinalIgnoreCase))
@@ -2727,17 +3711,51 @@ public static partial class DataFlowAnalyzer
         public Dictionary<int, AssemblyTaint?> Locals { get; } = locals;
         public Dictionary<int, AssemblyTaint?> Arguments { get; } = arguments;
         public Dictionary<string, AssemblyTaint?> Fields { get; } = new(StringComparer.Ordinal);
-        public void Push(AssemblyTaint? taint) => Stack.Add(taint);
-        public AssemblyTaint? Pop()
+
+        // Object identity: the `newobj` site (its IL offset) a stack value, local or argument
+        // holds, and the member state of each such object, keyed like source mode's receiver
+        // members. A reassigned variable holds a new identity and none of the old one's state.
+        public List<int?> Origins { get; private init; } = [.. stack.Select(_ => (int?)null)];
+        public Dictionary<int, int> LocalOrigins { get; private init; } = [];
+        public Dictionary<int, int> ArgumentOrigins { get; private init; } = [];
+        public Dictionary<(int Origin, string Field), (AssemblyTaint? Taint, string Key)> InstanceFields { get; private init; } = [];
+
+        public void Push(AssemblyTaint? taint) => Push(taint, null);
+
+        public void Push(AssemblyTaint? taint, int? origin)
         {
-            if (Stack.Count == 0) return null;
+            Stack.Add(taint);
+            Origins.Add(origin);
+        }
+
+        public AssemblyTaint? Pop() => PopWithOrigin().Taint;
+
+        public (AssemblyTaint? Taint, int? Origin) PopWithOrigin()
+        {
+            if (Stack.Count == 0) return (null, null);
             var value = Stack[^1];
             Stack.RemoveAt(Stack.Count - 1);
-            return value;
+            int? origin = null;
+            if (Origins.Count > 0)
+            {
+                origin = Origins[^1];
+                Origins.RemoveAt(Origins.Count - 1);
+            }
+
+            return (value, origin);
         }
+
+        public int? TopOrigin => Origins.Count > 0 ? Origins[^1] : null;
+
         public AssemblyMethodState Clone()
         {
-            var clone = new AssemblyMethodState([.. Stack], new Dictionary<int, AssemblyTaint?>(Locals), new Dictionary<int, AssemblyTaint?>(Arguments));
+            var clone = new AssemblyMethodState([.. Stack], new Dictionary<int, AssemblyTaint?>(Locals), new Dictionary<int, AssemblyTaint?>(Arguments))
+            {
+                Origins = [.. Origins],
+                LocalOrigins = new Dictionary<int, int>(LocalOrigins),
+                ArgumentOrigins = new Dictionary<int, int>(ArgumentOrigins),
+                InstanceFields = new Dictionary<(int Origin, string Field), (AssemblyTaint? Taint, string Key)>(InstanceFields)
+            };
             foreach (var (key, value) in Fields) clone.Fields[key] = value;
             return clone;
         }
@@ -2772,8 +3790,27 @@ public static partial class DataFlowAnalyzer
         public string Signature() => string.Join('|', Stack.Select(SummaryTaintSignature)) + ";L=" + string.Join(',', Locals.OrderBy(kvp => kvp.Key).Select(kvp => $"{kvp.Key}:{SummaryTaintSignature(kvp.Value)}")) + ";A=" + string.Join(',', Arguments.OrderBy(kvp => kvp.Key).Select(kvp => $"{kvp.Key}:{SummaryTaintSignature(kvp.Value)}"));
     }
 
-    private sealed record AssemblySummaryTaint(List<int> ParameterIndexes);
-    private sealed record AssemblyTaint(List<string> NodeIds, List<string> TaintKinds, List<string> FieldPaths, int? LocalSlot = null, int? ArgumentSlot = null)
+    /// <summary>
+    ///     What a summarized value derives from: the method's parameters (<see cref="ReceiverIndex" />
+    ///     for <c>this</c>), the fields it read (<see cref="AssemblyFieldRef" />), and the sources
+    ///     it called.
+    /// </summary>
+    private sealed record AssemblySummaryTaint(List<int> ParameterIndexes, List<AssemblyFieldRef>? Fields = null, List<DataFlowPattern>? Sources = null)
+    {
+        public bool IsEmpty => ParameterIndexes.Count == 0 && (Fields?.Count ?? 0) == 0 && (Sources?.Count ?? 0) == 0;
+    }
+
+    /// <summary>A field a summary reads or writes: its <see cref="FieldTaintKey" /> and its symbol (the per-method state key).</summary>
+    /// <summary>
+    ///     A field a summary reads or writes: its <see cref="FieldTaintKey" />, its symbol (the
+    ///     per-method state key), and whether it is a member of the method's own receiver.
+    /// </summary>
+    private sealed record AssemblyFieldRef(string Key, string Symbol, bool OnReceiver = false);
+
+    /// <summary>The summary index standing for the receiver (<c>this</c>) of an instance method.</summary>
+    private const int ReceiverIndex = -1;
+
+    private sealed record AssemblyTaint(List<string> NodeIds, List<string> TaintKinds, List<string> FieldPaths, int? LocalSlot = null, int? ArgumentSlot = null, List<string>? SanitizedFor = null)
     {
         /// <summary>
         ///     True for the marker pushed by <c>ldloca</c>/<c>ldarga</c>: the value is the address
@@ -2789,8 +3826,12 @@ public static partial class DataFlowAnalyzer
             {
                 return this;
             }
-            return new AssemblyTaint(NodeIds.Concat([nodeId]).ToList(), TaintKinds, FieldPaths);
+            return new AssemblyTaint(NodeIds.Concat([nodeId]).ToList(), TaintKinds, FieldPaths, SanitizedFor: SanitizedFor);
         }
+
+        /// <summary>Whether a category-scoped sanitizer on every path of this value neutralized it for <paramref name="category" />.</summary>
+        public bool IsSanitizedFor(string? category) =>
+            category is not null && SanitizedFor is { Count: > 0 } sanitized && sanitized.Contains(category, StringComparer.OrdinalIgnoreCase);
     }
 
     private static string TaintSignature(AssemblyTaint? taint) => taint switch
@@ -2799,7 +3840,12 @@ public static partial class DataFlowAnalyzer
         // Address markers must stay distinguishable in the visit signature or two states
         // pointing at different slots collapse into one and a local loses its write.
         { IsAddress: true } address => $"addr:{address.LocalSlot ?? -1}:{address.ArgumentSlot ?? -1}",
-        _ => string.Join('+', taint.NodeIds.Order(StringComparer.Ordinal))
+        _ => string.Join('+', taint.NodeIds.Order(StringComparer.Ordinal)) + (taint.SanitizedFor is { Count: > 0 } sanitized ? "~" + string.Join('+', sanitized.Order(StringComparer.OrdinalIgnoreCase)) : string.Empty)
     };
-    private static string SummaryTaintSignature(AssemblySummaryTaint? taint) => taint is null ? "_" : string.Join('+', taint.ParameterIndexes.Order());
+    // Only parameters (and whether a source is held) tell summary states apart: field reads are
+    // on almost every path of an instance method, and telling states apart by them ran large
+    // package bodies into the state budget. A field read joins whichever state reaches it first.
+    private static string SummaryTaintSignature(AssemblySummaryTaint? taint) => taint is null || taint.ParameterIndexes.Count == 0 && (taint.Sources?.Count ?? 0) == 0
+        ? "_"
+        : string.Join('+', taint.ParameterIndexes.Order()) + (taint.Sources is { Count: > 0 } ? "s" : string.Empty);
 }

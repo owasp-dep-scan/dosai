@@ -109,7 +109,16 @@ internal static class AssemblyCallGraphAnalyzer
             ? knownMethod
             : CreateFallbackMethod(reader, methodHandle, methodDefinition, assemblyPath, scan.SourceMap);
         var sourceId = sourceMethod.AssemblySignature ?? BuildMethodSymbol(reader, methodHandle, methodDefinition, assemblyPath).Symbol;
-        AddNode(fragment.Nodes, sourceId, sourceMethod.Name ?? sourceId, sourceMethod.ClassName, sourceMethod.Namespace, sourceMethod.FileName, sourceMethod.Assembly, sourceMethod.Module, sourceMethod.Name == ".ctor" ? "Constructor" : "Method", sourceMethod.LineNumber, sourceMethod.ColumnNumber, isExternal: false, isGeneratedStateMachine ? AnalysisEvidenceKind.AssemblyIlGeneratedState : AnalysisEvidenceKind.AssemblyIlDirect);
+        var (lineNumber, columnNumber) = (sourceMethod.LineNumber, sourceMethod.ColumnNumber);
+        if (lineNumber <= 0 && !isGeneratedStateMachine && scan.SourceMap.Resolve(methodToken, 1, assemblyPath) is { LineNumber: > 0 } first)
+        {
+            // The reflection inventory carries no source line, so a method nothing calls kept
+            // line 0 unless a state machine named it as its kickoff. A runtime-async method
+            // (.NET 11) has no state machine: its own first sequence point places it.
+            (lineNumber, columnNumber) = (first.LineNumber, first.ColumnNumber);
+        }
+
+        AddNode(fragment.Nodes, sourceId, sourceMethod.Name ?? sourceId, sourceMethod.ClassName, sourceMethod.Namespace, sourceMethod.FileName, sourceMethod.Assembly, sourceMethod.Module, sourceMethod.Name == ".ctor" ? "Constructor" : "Method", lineNumber, columnNumber, isExternal: false, isGeneratedStateMachine ? AnalysisEvidenceKind.AssemblyIlGeneratedState : AnalysisEvidenceKind.AssemblyIlDirect);
         var body = peReader.GetMethodBody(methodDefinition.RelativeVirtualAddress);
         var delegateState = new AssemblyDelegateState();
         foreach (var instruction in DecodeInstructions(body.GetILReader()))
@@ -993,6 +1002,22 @@ internal static class AssemblyCallGraphAnalyzer
         {
             return "object";
         }
+    }
+
+    /// <summary>An IL body's instructions (offset, opcode, operand) for the other IL passes.</summary>
+    internal static IEnumerable<(int Offset, OpCode OpCode, object? Operand)> Decode(BlobReader ilReader) =>
+        DecodeInstructions(ilReader).Select(instruction => (instruction.Offset, instruction.OpCode, instruction.Operand));
+
+    /// <summary>
+    ///     A method definition's call-graph id: the inventory's assembly signature when the
+    ///     inventory read it, else the IL symbol the call graph falls back to.
+    /// </summary>
+    internal static string MethodId(MetadataReader reader, MethodDefinitionHandle handle, string assemblyPath, IReadOnlyList<Method>? knownMethods)
+    {
+        var token = MetadataTokens.GetToken(handle);
+        var fullPath = Path.GetFullPath(assemblyPath);
+        var known = knownMethods?.FirstOrDefault(method => method.MetadataToken == token && method.Path is { } path && string.Equals(Path.GetFullPath(path), fullPath, SafeFileRead.PathComparison) && !string.IsNullOrWhiteSpace(method.AssemblySignature));
+        return known?.AssemblySignature ?? BuildMethodSymbol(reader, handle, reader.GetMethodDefinition(handle), assemblyPath).Symbol;
     }
 
     private static IEnumerable<AssemblyCallInstruction> DecodeInstructions(BlobReader ilReader)

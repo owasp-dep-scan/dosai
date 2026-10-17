@@ -23,6 +23,7 @@ public static class SecurityAnalyzer
         SafeRun(context, "endpoint-security", ids => AnalyzeEndpoints(context, frameworkResult, endpointList, findings, ids));
         SafeRun(context, "mcp-transport", ids => McpTransportAnalyzer.Assess(frameworkResult.Services, findings, ids, context.McpAllowlist));
         SafeRun(context, "config-security", ids => ConfigSecurityAnalyzer.Assess(context.ConfigFiles, findings, ids, context.Diagnostics));
+        SafeRun(context, "middleware-security", ids => MiddlewareSecurityAnalyzer.Assess(context, endpointList, findings, ids));
 
         return findings
             .OrderBy(finding => SeverityRank(finding.Severity), Comparer<int>.Create((a, b) => b.CompareTo(a)))
@@ -79,78 +80,160 @@ public static class SecurityAnalyzer
         var globalAntiforgery = HasGlobalAntiforgeryFilter(context);
         foreach (var endpoint in endpoints)
         {
-            var sensitive = SensitiveInboundClassifications(endpoint, servicesById);
-            var anonymous = endpoint.AllowAnonymous || endpoint.AuthorizationRequired == false;
-
-            // 1. Sensitive unauthenticated endpoint.
-            if (anonymous && sensitive.Count > 0)
-            {
-                findings.Add(new SecurityFinding
-                {
-                    Id = ids.Next("SensitiveUnauthenticatedEndpoint", endpoint.FileName, endpoint.LineNumber),
-                    Kind = "SensitiveUnauthenticatedEndpoint",
-                    Title = $"Anonymous endpoint {DescribeEndpoint(endpoint)} exchanges {string.Join(", ", sensitive)} data",
-                    Severity = "high",
-                    Cwe = "CWE-306",
-                    EndpointId = endpoint.OperationId,
-                    Route = endpoint.Path ?? endpoint.Route,
-                    FileName = endpoint.FileName,
-                    LineNumber = endpoint.LineNumber,
-                    Evidence = $"Classifications: {string.Join(", ", sensitive)}. Auth metadata: {(endpoint.AllowAnonymous ? "[AllowAnonymous]" : endpoint.AuthorizationRequired == false ? "no authorization" : "unknown")}.",
-                    Remediation = "Require authorization for endpoints that read or return sensitive data, or strip the sensitive fields for anonymous callers.",
-                    Confidence = ConfidenceTiers.Semantic,
-                    Properties = { ["classifications"] = string.Join(",", sensitive) }
-                });
-            }
-
-            // 3. State-changing endpoint without antiforgery (CWE-352). Bearer-token APIs are
-            // exempt (no cookie to forge); Razor Pages validate automatically; a global
-            // AutoValidateAntiforgeryToken filter already covers MVC.
-            var mutating = endpoint.HttpMethod is "POST" or "PUT" or "DELETE" or "PATCH";
-            var bearerOnly = endpoint.AuthenticationSchemes.Count > 0 && endpoint.AuthenticationSchemes.All(scheme => scheme.Contains("Bearer", StringComparison.OrdinalIgnoreCase));
-            if (mutating && !bearerOnly && !globalAntiforgery && endpoint.AntiForgeryRequired != false &&
-                endpoint.EndpointKind is "Attribute" or "MinimalApi" or "HttpController" or "Conventional")
-            {
-                findings.Add(new SecurityFinding
-                {
-                    Id = ids.Next("StateChangingEndpointWithoutAntiforgery", endpoint.FileName, endpoint.LineNumber),
-                    Kind = "StateChangingEndpointWithoutAntiforgery",
-                    Title = $"{endpoint.HttpMethod} endpoint {DescribeEndpoint(endpoint)} does not opt into antiforgery",
-                    Severity = "low",
-                    Cwe = "CWE-352",
-                    EndpointId = endpoint.OperationId,
-                    Route = endpoint.Path ?? endpoint.Route,
-                    FileName = endpoint.FileName,
-                    LineNumber = endpoint.LineNumber,
-                    Evidence = "Mutating handler with AntiForgeryRequired unset (no [ValidateAntiForgeryToken] or RequireAntiforgery detected).",
-                    Remediation = "Add antiforgery validation ([ValidateAntiForgeryToken] / RequireAntiforgery()) or switch the endpoint to bearer-token authentication.",
-                    Confidence = ConfidenceTiers.Heuristic
-                });
-            }
-
-            // 5. Mass-assignment hint (informational, name-heuristic only).
             var dtoName = servicesById.GetValueOrDefault(endpoint.ServiceId ?? string.Empty)?.Data?
                 .FirstOrDefault(data => data.Flow is "inbound" or "bi-directional")?.Name;
-            if (anonymous && dtoName is not null && MassAssignmentShapes(dtoName, context))
-            {
-                findings.Add(new SecurityFinding
-                {
-                    Id = ids.Next("MassAssignmentHint", endpoint.FileName, endpoint.LineNumber),
-                    Kind = "MassAssignmentHint",
-                    Title = $"Anonymous endpoint {DescribeEndpoint(endpoint)} binds a DTO with role/enablement-shaped members",
-                    Severity = "info",
-                    Cwe = "CWE-915",
-                    EndpointId = endpoint.OperationId,
-                    Route = endpoint.Path ?? endpoint.Route,
-                    FileName = endpoint.FileName,
-                    LineNumber = endpoint.LineNumber,
-                    Evidence = $"Request model {dtoName} has bindable properties shaped like role/enablement flags.",
-                    Remediation = "Use a dedicated request DTO without role/enablement members, or [Bind Never] them, so unprivileged callers cannot set privileged fields.",
-                    Confidence = ConfidenceTiers.Heuristic
-                });
-            }
+            AssessEndpoint(endpoint, SensitiveInboundClassifications(endpoint, servicesById), globalAntiforgery, dtoName is not null && MassAssignmentShapes(dtoName, context) ? dtoName : null, findings, ids);
         }
 
+        AssessDuplicateRoutes(endpoints, findings, ids);
+
+        // 2. CORS wildcard on credentialed routes (CWE-942): policy definitions come from source.
+        foreach (var (policyName, fileName, line) in FindWildcardCredentialCorsPolicies(context).DistinctBy(item => (item.PolicyName, item.FileName, item.Line)))
+        {
+            findings.Add(new SecurityFinding
+            {
+                Id = ids.Next("CorsWildcardWithCredentials", fileName, line),
+                Kind = "CorsWildcardWithCredentials",
+                Title = policyName is null
+                    ? "Default CORS policy allows any origin together with credentials"
+                    : $"CORS policy '{policyName}' allows any origin together with credentials",
+                Severity = "medium",
+                Cwe = "CWE-942",
+                Route = policyName,
+                FileName = fileName,
+                LineNumber = line,
+                Evidence = $"AllowAnyOrigin/SetIsOriginAllowed combined with AllowCredentials in {fileName}:{line}.",
+                Remediation = "Restrict origins to an explicit allowlist; AllowCredentials requires explicit origins per the CORS specification.",
+                Confidence = ConfidenceTiers.Heuristic
+            });
+        }
+    }
+
+    /// <summary>
+    ///     The endpoint-level rules, read from an endpoint's metadata alone (route, verb,
+    ///     authorization and antiforgery attributes, the request data's classifications), so
+    ///     endpoints of source and of assembly-only inputs are judged alike.
+    /// </summary>
+    internal static void AssessEndpoint(ApiEndpoint endpoint, IReadOnlyList<string> sensitive, bool globalAntiforgery, string? massAssignmentDto, List<SecurityFinding> findings, FindingIds ids)
+    {
+        var anonymous = endpoint.AllowAnonymous || endpoint.AuthorizationRequired == false;
+
+        // 1. Sensitive unauthenticated endpoint.
+        if (anonymous && sensitive.Count > 0)
+        {
+            findings.Add(new SecurityFinding
+            {
+                Id = ids.Next("SensitiveUnauthenticatedEndpoint", endpoint.FileName, endpoint.LineNumber),
+                Kind = "SensitiveUnauthenticatedEndpoint",
+                Title = $"Anonymous endpoint {DescribeEndpoint(endpoint)} exchanges {string.Join(", ", sensitive)} data",
+                Severity = "high",
+                Cwe = "CWE-306",
+                EndpointId = endpoint.OperationId,
+                Route = endpoint.Path ?? endpoint.Route,
+                FileName = endpoint.FileName,
+                LineNumber = endpoint.LineNumber,
+                Evidence = $"Classifications: {string.Join(", ", sensitive)}. Auth metadata: {(endpoint.AllowAnonymous ? "[AllowAnonymous]" : endpoint.AuthorizationRequired == false ? "no authorization" : "unknown")}.",
+                Remediation = "Require authorization for endpoints that read or return sensitive data, or strip the sensitive fields for anonymous callers.",
+                Confidence = ConfidenceTiers.Semantic,
+                Properties = { ["classifications"] = string.Join(",", sensitive) }
+            });
+        }
+
+        // 3. State-changing endpoint without antiforgery (CWE-352). Bearer-token APIs are
+        // exempt (no cookie to forge); Razor Pages validate automatically; a global
+        // AutoValidateAntiforgeryToken filter already covers MVC.
+        var mutating = endpoint.HttpMethod is "POST" or "PUT" or "DELETE" or "PATCH";
+        var bearerOnly = endpoint.AuthenticationSchemes.Count > 0 && endpoint.AuthenticationSchemes.All(scheme => scheme.Contains("Bearer", StringComparison.OrdinalIgnoreCase));
+        // A handler that opts in ([ValidateAntiForgeryToken], RequireAntiforgery) is validated; the
+        // rule used to test `!= false` and flagged those too.
+        if (mutating && !bearerOnly && !globalAntiforgery && endpoint.AntiForgeryRequired is null &&
+            endpoint.EndpointKind is "Attribute" or "MinimalApi" or "HttpController" or "Controller" or "Conventional")
+        {
+            findings.Add(new SecurityFinding
+            {
+                Id = ids.Next("StateChangingEndpointWithoutAntiforgery", endpoint.FileName, endpoint.LineNumber),
+                Kind = "StateChangingEndpointWithoutAntiforgery",
+                Title = $"{endpoint.HttpMethod} endpoint {DescribeEndpoint(endpoint)} does not opt into antiforgery",
+                Severity = "low",
+                Cwe = "CWE-352",
+                EndpointId = endpoint.OperationId,
+                Route = endpoint.Path ?? endpoint.Route,
+                FileName = endpoint.FileName,
+                LineNumber = endpoint.LineNumber,
+                Evidence = "Mutating handler with AntiForgeryRequired unset (no [ValidateAntiForgeryToken] or RequireAntiforgery detected).",
+                Remediation = "Add antiforgery validation ([ValidateAntiForgeryToken] / RequireAntiforgery()) or switch the endpoint to bearer-token authentication.",
+                Confidence = ConfidenceTiers.Heuristic
+            });
+        }
+
+        // 4. Antiforgery switched off on a state-changing, cookie-capable endpoint
+        // ([IgnoreAntiforgeryToken], DisableAntiforgery()). An explicit opt-out overrides a
+        // global filter, so it is reported even when one exists.
+        if (mutating && !bearerOnly && endpoint.AntiForgeryRequired == false && !endpoint.AllowAnonymous &&
+            endpoint.EndpointKind is "Attribute" or "MinimalApi" or "HttpController" or "Controller" or "Conventional")
+        {
+            findings.Add(new SecurityFinding
+            {
+                Id = ids.Next("StateChangingEndpointAntiforgeryDisabled", endpoint.FileName, endpoint.LineNumber),
+                Kind = "StateChangingEndpointAntiforgeryDisabled",
+                Title = $"{endpoint.HttpMethod} endpoint {DescribeEndpoint(endpoint)} disables antiforgery validation",
+                Severity = "medium",
+                Cwe = "CWE-352",
+                EndpointId = endpoint.OperationId,
+                Route = endpoint.Path ?? endpoint.Route,
+                FileName = endpoint.FileName,
+                LineNumber = endpoint.LineNumber,
+                Evidence = "Mutating handler opts out of antiforgery ([IgnoreAntiforgeryToken] or DisableAntiforgery()).",
+                Remediation = "Keep antiforgery validation for cookie-authenticated endpoints, or restrict the endpoint to bearer-token authentication.",
+                Confidence = ConfidenceTiers.Syntactic
+            });
+        }
+
+        // 5. Mass-assignment hint (informational, name-heuristic only).
+        if (anonymous && massAssignmentDto is { } dtoName)
+        {
+            findings.Add(new SecurityFinding
+            {
+                Id = ids.Next("MassAssignmentHint", endpoint.FileName, endpoint.LineNumber),
+                Kind = "MassAssignmentHint",
+                Title = $"Anonymous endpoint {DescribeEndpoint(endpoint)} binds a DTO with role/enablement-shaped members",
+                Severity = "info",
+                Cwe = "CWE-915",
+                EndpointId = endpoint.OperationId,
+                Route = endpoint.Path ?? endpoint.Route,
+                FileName = endpoint.FileName,
+                LineNumber = endpoint.LineNumber,
+                Evidence = $"Request model {dtoName} has bindable properties shaped like role/enablement flags.",
+                Remediation = "Use a dedicated request DTO without role/enablement members, or [Bind Never] them, so unprivileged callers cannot set privileged fields.",
+                Confidence = ConfidenceTiers.Heuristic
+            });
+        }
+
+        // 6. [AllowAnonymous] beside authorization metadata (CWE-862): the anonymous opt-out
+        // wins, so the roles or policies the endpoint also names protect nothing.
+        if (endpoint.AllowAnonymous && (endpoint.Roles.Count > 0 || endpoint.AuthorizationPolicies.Count > 0))
+        {
+            findings.Add(new SecurityFinding
+            {
+                Id = ids.Next("AllowAnonymousOverridesAuthorization", endpoint.FileName, endpoint.LineNumber),
+                Kind = "AllowAnonymousOverridesAuthorization",
+                Title = $"Endpoint {DescribeEndpoint(endpoint)} is anonymous despite its authorization metadata",
+                Severity = "low",
+                Cwe = "CWE-862",
+                EndpointId = endpoint.OperationId,
+                Route = endpoint.Path ?? endpoint.Route,
+                FileName = endpoint.FileName,
+                LineNumber = endpoint.LineNumber,
+                Evidence = $"[AllowAnonymous] with roles [{string.Join(", ", endpoint.Roles)}] and policies [{string.Join(", ", endpoint.AuthorizationPolicies)}]; the opt-out disables both.",
+                Remediation = "Remove [AllowAnonymous] if the endpoint must be protected, or drop the roles/policies that no longer apply so the exposure is explicit.",
+                Confidence = ConfidenceTiers.Syntactic
+            });
+        }
+    }
+
+    /// <summary>One route served at different authorization levels (CWE-306).</summary>
+    internal static void AssessDuplicateRoutes(IReadOnlyList<ApiEndpoint> endpoints, List<SecurityFinding> findings, FindingIds ids)
+    {
         // 4. Duplicated routes with different auth levels.
         foreach (var group in endpoints
                      .Where(endpoint => !string.IsNullOrWhiteSpace(endpoint.Path) && !string.IsNullOrWhiteSpace(endpoint.HttpMethod))
@@ -184,28 +267,28 @@ public static class SecurityAnalyzer
                 Confidence = ConfidenceTiers.Semantic
             });
         }
-
-        // 2. CORS wildcard on credentialed routes (CWE-942): policy definitions come from source.
-        foreach (var (policyName, fileName, line) in FindWildcardCredentialCorsPolicies(context).DistinctBy(item => (item.PolicyName, item.FileName, item.Line)))
-        {
-            findings.Add(new SecurityFinding
-            {
-                Id = ids.Next("CorsWildcardWithCredentials", fileName, line),
-                Kind = "CorsWildcardWithCredentials",
-                Title = policyName is null
-                    ? "Default CORS policy allows any origin together with credentials"
-                    : $"CORS policy '{policyName}' allows any origin together with credentials",
-                Severity = "medium",
-                Cwe = "CWE-942",
-                Route = policyName,
-                FileName = fileName,
-                LineNumber = line,
-                Evidence = $"AllowAnyOrigin/SetIsOriginAllowed combined with AllowCredentials in {fileName}:{line}.",
-                Remediation = "Restrict origins to an explicit allowlist; AllowCredentials requires explicit origins per the CORS specification.",
-                Confidence = ConfidenceTiers.Heuristic
-            });
-        }
     }
+
+    /// <summary>
+    ///     Endpoint findings for endpoints read from assembly metadata (assembly-only inputs),
+    ///     which the source compilation never saw: the same rules, with sensitivity and
+    ///     mass-assignment shapes classified from the handlers' parameter and member names.
+    /// </summary>
+    public static List<SecurityFinding> AssessEndpointMetadata(IReadOnlyList<(ApiEndpoint Endpoint, IReadOnlyList<string> Sensitive, string? MassAssignmentDto)> endpoints, bool globalAntiforgery)
+    {
+        var findings = new List<SecurityFinding>();
+        var ids = new FindingIds("endpoint-security");
+        foreach (var (endpoint, sensitive, massAssignmentDto) in endpoints)
+        {
+            AssessEndpoint(endpoint, sensitive, globalAntiforgery, massAssignmentDto, findings, ids);
+        }
+
+        AssessDuplicateRoutes([.. endpoints.Select(entry => entry.Endpoint)], findings, ids);
+        return findings;
+    }
+
+    /// <summary>Member-name shapes of a mass-assignment hint (role and enablement flags).</summary>
+    internal static bool IsMassAssignmentMemberName(string name) => MassAssignmentMemberNames.Any(shape => name.Contains(shape, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
     ///     Detects a globally-registered antiforgery filter. Syntactic by design (filter
@@ -327,16 +410,19 @@ public static class SecurityAnalyzer
                     continue;
                 }
 
-                // Report the outermost registration only: an AddCors(services) call whose argument
-                // chain also contains AddPolicy invocations would otherwise match twice.
-                if (invocation.Ancestors().OfType<InvocationExpressionSyntax>().Any(ancestor => IsCorsRegistrationName(ProviderHelpers.InvocationName(ancestor))))
+                // Report each policy at its own registration: an AddCors(options => { AddPolicy("a",
+                // ...); AddPolicy("b", ...); }) is judged per AddPolicy, so the finding names the
+                // policy that is open (the outermost call used to be judged on the text of every
+                // policy inside it, and named none). An AddCors with no policy registration inside
+                // is the registration itself.
+                if (invocation.ArgumentList.Arguments.Any(argument => argument.DescendantNodes().OfType<InvocationExpressionSyntax>().Any(inner => IsCorsRegistrationName(ProviderHelpers.InvocationName(inner)))))
                 {
                     continue;
                 }
 
                 string? policyName = null;
                 var arguments = invocation.ArgumentList.Arguments;
-                if (arguments.Count > 0 && arguments[0].Expression is LiteralExpressionSyntax { Token.Value: string name })
+                if (syntacticName != "AddDefaultPolicy" && arguments.Count > 1 && model.GetConstantValue(arguments[0].Expression) is { HasValue: true, Value: string name })
                 {
                     policyName = name;
                 }
@@ -697,5 +783,255 @@ public static class ConfigSecurityAnalyzer
 
                 break;
         }
+    }
+}
+
+/// <summary>
+///     ASP.NET Core pipeline and cookie misconfiguration read from code: the developer exception
+///     page outside an environment check, a web application with no HTTPS redirection or HSTS,
+///     cookies set insecure, forwarded-header trust opened to every proxy, and request body size
+///     limits removed. Each walk is gated on the file text and reads syntax; a member whose symbol
+///     resolves must belong to a cookie or forwarded-headers type, so a same-named property of an
+///     unrelated type is not reported.
+/// </summary>
+public static class MiddlewareSecurityAnalyzer
+{
+    public static void Assess(FrameworkContext context, IReadOnlyList<ApiEndpoint> endpoints, List<SecurityFinding> findings, SecurityAnalyzer.FindingIds ids)
+    {
+        if (context.CSharp is null)
+        {
+            return;
+        }
+
+        var pipelineFiles = new List<(string FileName, int Line)>();
+        var hasHttpsRedirection = false;
+        var hasHsts = false;
+        foreach (var tree in context.CSharpTrees)
+        {
+            var fileName = Path.GetFileName(tree.FilePath);
+            var model = context.CSharp.GetSemanticModel(tree);
+            foreach (var invocation in context.InvocationsNamed(tree, name => name is "UseDeveloperExceptionPage" or "UseHttpsRedirection" or "UseHsts" or "CreateBuilder" or "CreateSlimBuilder" or "CreateEmptyBuilder" or "Clear"))
+            {
+                var name = ProviderHelpers.InvocationName(invocation);
+                switch (name)
+                {
+                    case "UseHttpsRedirection":
+                        hasHttpsRedirection = true;
+                        break;
+                    case "UseHsts":
+                        hasHsts = true;
+                        break;
+                    case "CreateBuilder" or "CreateSlimBuilder" or "CreateEmptyBuilder" when invocation.Expression is MemberAccessExpressionSyntax { Expression: var receiver } && receiver.ToString().EndsWith("WebApplication", StringComparison.Ordinal):
+                        pipelineFiles.Add((fileName, Line(invocation)));
+                        break;
+                    case "UseDeveloperExceptionPage" when !IsInsideDevelopmentCheck(invocation):
+                        findings.Add(Finding(ids, "DeveloperExceptionPageUnguarded", "Developer exception page is enabled outside a development-environment check", "medium", "CWE-209", fileName, Line(invocation),
+                            "UseDeveloperExceptionPage() runs in every environment and returns stack traces, source lines and request details to clients.",
+                            "Call UseDeveloperExceptionPage() only inside `if (app.Environment.IsDevelopment())` and use UseExceptionHandler() elsewhere."));
+                        break;
+                    case "Clear" when invocation.Expression is MemberAccessExpressionSyntax { Expression: var cleared } && LastName(cleared) is "KnownProxies" or "KnownNetworks" or "KnownIPNetworks" &&
+                                      IsMemberOf(model, cleared, "ForwardedHeadersOptions"):
+                        findings.Add(Finding(ids, "ForwardedHeadersTrustAll", $"Forwarded headers are accepted from any proxy ({LastName(cleared)} cleared)", "medium", "CWE-348", fileName, Line(invocation),
+                            $"{LastName(cleared)}.Clear() removes the loopback default, so X-Forwarded-For/Proto from any client rewrites the remote address and scheme.",
+                            "List the real reverse proxies in KnownProxies/KnownNetworks instead of clearing them."));
+                        break;
+                }
+            }
+
+            // Pipeline shape of the Startup pattern: Configure(IApplicationBuilder app, ...).
+            if (context.TextContainsAny(tree, "IApplicationBuilder"))
+            {
+                foreach (var method in FrameworkContext.Declarations<MethodDeclarationSyntax>(tree))
+                {
+                    if (method.Identifier.Text == "Configure" && method.ParameterList.Parameters.Any(parameter => parameter.Type?.ToString() is "IApplicationBuilder" or "Microsoft.AspNetCore.Builder.IApplicationBuilder"))
+                    {
+                        pipelineFiles.Add((fileName, Line(method)));
+                    }
+                }
+            }
+
+            if (context.TextContainsAny(tree, "Secure", "HttpOnly", "SameSite", "MaxRequestBodySize"))
+            {
+                AssessAssignments(tree, model, fileName, findings, ids);
+            }
+
+            if (context.TextContainsAny(tree, "DisableRequestSizeLimit", "RequestSizeLimit"))
+            {
+                AssessSizeLimitAttributes(tree, fileName, endpoints, findings, ids);
+            }
+        }
+
+        // A web application with no HTTPS redirection or HSTS anywhere in its code.
+        if (pipelineFiles.Count > 0)
+        {
+            var (file, line) = pipelineFiles.OrderBy(entry => entry.FileName, StringComparer.Ordinal).ThenBy(entry => entry.Line).First();
+            if (!hasHttpsRedirection)
+            {
+                findings.Add(Finding(ids, "HttpsRedirectionMissing", "Web application does not redirect HTTP to HTTPS", "low", "CWE-319", file, line,
+                    "No UseHttpsRedirection() call was found in the application's request pipeline.",
+                    "Call app.UseHttpsRedirection() (or redirect at the reverse proxy and record that decision)."));
+            }
+
+            if (!hasHsts)
+            {
+                findings.Add(Finding(ids, "HstsMissing", "Web application does not send Strict-Transport-Security", "low", "CWE-319", file, line,
+                    "No UseHsts() call was found in the application's request pipeline.",
+                    "Call app.UseHsts() outside development (or send the header at the reverse proxy)."));
+            }
+        }
+    }
+
+    /// <summary>Insecure cookie settings and removed body size limits, from assignments and object initializers.</summary>
+    private static void AssessAssignments(SyntaxTree tree, SemanticModel model, string fileName, List<SecurityFinding> findings, SecurityAnalyzer.FindingIds ids)
+    {
+        foreach (var assignment in tree.GetRoot().DescendantNodes().OfType<AssignmentExpressionSyntax>())
+        {
+            var member = LastName(assignment.Left);
+            var value = assignment.Right.ToString().Replace(" ", string.Empty, StringComparison.Ordinal);
+            switch (member)
+            {
+                case "MaxRequestBodySize" when value == "null":
+                    findings.Add(Finding(ids, "RequestSizeLimitDisabled", "Request body size limit is removed (MaxRequestBodySize = null)", "medium", "CWE-770", fileName, Line(assignment),
+                        "A null MaxRequestBodySize lets a client stream an unbounded request body into the server.",
+                        "Keep a finite MaxRequestBodySize, raising it only on the endpoints that need it ([RequestSizeLimit(bytes)])."));
+                    continue;
+                case "SecurePolicy" or "Secure" when (value.EndsWith("CookieSecurePolicy.None", StringComparison.Ordinal) || (member == "Secure" && value == "false")) && IsCookieMember(model, assignment):
+                    findings.Add(Finding(ids, "InsecureCookie", "Cookie is not restricted to HTTPS", "medium", "CWE-614", fileName, Line(assignment),
+                        $"{member} = {assignment.Right} lets the cookie travel over plain HTTP.",
+                        "Use CookieSecurePolicy.Always (or Secure = true).", ("setting", member)));
+                    continue;
+                case "HttpOnly" when (value == "false" || value.EndsWith("HttpOnlyPolicy.None", StringComparison.Ordinal)) && IsCookieMember(model, assignment):
+                    findings.Add(Finding(ids, "InsecureCookie", "Cookie is readable from script (HttpOnly disabled)", "medium", "CWE-1004", fileName, Line(assignment),
+                        $"HttpOnly = {assignment.Right} exposes the cookie to any script running in the page.",
+                        "Keep HttpOnly = true (HttpOnlyPolicy.Always) for every cookie that carries session or auth state.", ("setting", member)));
+                    continue;
+                case "SameSite" or "MinimumSameSitePolicy" when value.EndsWith("SameSiteMode.None", StringComparison.Ordinal) && IsCookieMember(model, assignment):
+                    findings.Add(Finding(ids, "InsecureCookie", "Cookie is sent on cross-site requests (SameSite=None)", "low", "CWE-1275", fileName, Line(assignment),
+                        $"{member} = {assignment.Right} sends the cookie with cross-site requests, which re-enables CSRF for cookie-authenticated endpoints.",
+                        "Use SameSiteMode.Lax or Strict unless a cross-site flow requires None, and then require antiforgery.", ("setting", member)));
+                    continue;
+            }
+        }
+    }
+
+    /// <summary><c>[DisableRequestSizeLimit]</c> and a <c>[RequestSizeLimit]</c> of the type's maximum.</summary>
+    private static void AssessSizeLimitAttributes(SyntaxTree tree, string fileName, IReadOnlyList<ApiEndpoint> endpoints, List<SecurityFinding> findings, SecurityAnalyzer.FindingIds ids)
+    {
+        foreach (var attribute in tree.GetRoot().DescendantNodes().OfType<AttributeSyntax>())
+        {
+            var name = ProviderHelpers.NormalizeAttributeName(attribute);
+            var unlimited = name == "DisableRequestSizeLimit" ||
+                            name == "RequestSizeLimit" && attribute.ArgumentList?.Arguments.FirstOrDefault()?.Expression.ToString().Replace(" ", string.Empty, StringComparison.Ordinal) is "long.MaxValue" or "Int64.MaxValue" or "System.Int64.MaxValue" or "int.MaxValue" or "Int32.MaxValue";
+            if (!unlimited)
+            {
+                continue;
+            }
+
+            var method = attribute.Ancestors().OfType<MethodDeclarationSyntax>().FirstOrDefault();
+            var route = method is null
+                ? null
+                : endpoints.FirstOrDefault(endpoint => string.Equals(Path.GetFileName(endpoint.FilePath), fileName, StringComparison.OrdinalIgnoreCase) && endpoint.MethodName == method.Identifier.Text)?.Path;
+            var finding = Finding(ids, "RequestSizeLimitDisabled", $"Request body size limit is removed ([{attribute.Name}])", "medium", "CWE-770", fileName, Line(attribute),
+                $"[{attribute}] lets a client send an unbounded request body to this endpoint.",
+                "Use [RequestSizeLimit(bytes)] with the largest body the endpoint actually accepts.");
+            finding.Route = route;
+            findings.Add(finding);
+        }
+    }
+
+    /// <summary>
+    ///     Whether the call sits in the development branch of an environment check
+    ///     (<c>if (env.IsDevelopment())</c>, the <c>else</c> of <c>if (!env.IsDevelopment())</c>,
+    ///     <c>IsEnvironment("Development")</c>), or in a method or local function whose name says it
+    ///     configures development.
+    /// </summary>
+    private static bool IsInsideDevelopmentCheck(SyntaxNode node)
+    {
+        SyntaxNode child = node;
+        foreach (var ancestor in node.Ancestors())
+        {
+            if (ancestor is IfStatementSyntax ifStatement)
+            {
+                var condition = ifStatement.Condition.ToString().Replace(" ", string.Empty, StringComparison.Ordinal);
+                var checksDevelopment = condition.Contains("IsDevelopment(", StringComparison.Ordinal) || condition.Contains("IsEnvironment(", StringComparison.Ordinal) && condition.Contains("Development", StringComparison.Ordinal) ||
+                                        condition.Contains("IsDevelopment", StringComparison.Ordinal) || condition.Contains("\"Development\"", StringComparison.Ordinal);
+                if (checksDevelopment)
+                {
+                    var negated = condition.StartsWith('!') || condition.Contains("==false", StringComparison.Ordinal);
+                    var inThen = ifStatement.Statement == child;
+                    if (inThen != negated)
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            if (ancestor is ConditionalExpressionSyntax conditional && conditional.Condition.ToString().Contains("IsDevelopment", StringComparison.Ordinal) && conditional.WhenTrue == child)
+            {
+                return true;
+            }
+
+            if (ancestor is MethodDeclarationSyntax method && method.Identifier.Text.Contains("Development", StringComparison.Ordinal) ||
+                ancestor is LocalFunctionStatementSyntax local && local.Identifier.Text.Contains("Development", StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            child = ancestor;
+        }
+
+        return false;
+    }
+
+    /// <summary>The assigned member belongs to a cookie type (CookieOptions, CookieBuilder, CookiePolicyOptions, ...); syntax decides when the symbol does not resolve.</summary>
+    private static bool IsCookieMember(SemanticModel model, AssignmentExpressionSyntax assignment)
+    {
+        if (model.GetSymbolInfo(assignment.Left).Symbol is { ContainingType: { } type })
+        {
+            return type.Name.Contains("Cookie", StringComparison.Ordinal);
+        }
+
+        // Unresolved: the receiver (`options.Cookie.HttpOnly`) or the initialized object (`new CookieOptions { ... }`) names a cookie.
+        if (assignment.Left is MemberAccessExpressionSyntax access && access.Expression.ToString().Contains("Cookie", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return assignment.Parent is InitializerExpressionSyntax { Parent: ObjectCreationExpressionSyntax creation } && creation.Type.ToString().Contains("Cookie", StringComparison.Ordinal);
+    }
+
+    private static bool IsMemberOf(SemanticModel model, ExpressionSyntax expression, string typeName) =>
+        model.GetSymbolInfo(expression).Symbol is { ContainingType: { } type } ? type.Name == typeName : true;
+
+    private static string? LastName(ExpressionSyntax expression) => expression switch
+    {
+        MemberAccessExpressionSyntax access => access.Name.Identifier.Text,
+        IdentifierNameSyntax identifier => identifier.Identifier.Text,
+        _ => null
+    };
+
+    private static int Line(SyntaxNode node) => node.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
+
+    private static SecurityFinding Finding(SecurityAnalyzer.FindingIds ids, string kind, string title, string severity, string cwe, string fileName, int line, string evidence, string remediation, (string Key, string Value)? property = null)
+    {
+        var finding = new SecurityFinding
+        {
+            Id = ids.Next(kind, fileName, line),
+            Kind = kind,
+            Title = title,
+            Severity = severity,
+            Cwe = cwe,
+            FileName = fileName,
+            LineNumber = line,
+            Evidence = evidence,
+            Remediation = remediation,
+            Confidence = ConfidenceTiers.Syntactic
+        };
+        if (property is { } extra)
+        {
+            finding.Properties[extra.Key] = extra.Value;
+        }
+
+        return finding;
     }
 }

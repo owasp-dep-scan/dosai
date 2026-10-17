@@ -180,18 +180,23 @@ public static partial class LanguageFrontendAnalyzer
             if (reference.Success)
             {
                 var target = reference.Groups[2].Value.Trim();
+                string? declaredPurl = null;
                 if (target.StartsWith("nuget:", StringComparison.OrdinalIgnoreCase))
                 {
                     target = target["nuget:".Length..].Trim();
                     var versionSeparator = target.IndexOf(',');
                     if (versionSeparator > 0)
                     {
+                        var version = target[(versionSeparator + 1)..].Trim();
                         target = target[..versionSeparator].Trim();
+                        declaredPurl = PackageUrlResolver.DeclaredNuGetPurl(target, version);
                     }
                 }
                 if (!string.IsNullOrWhiteSpace(target))
                 {
-                    dependencies.Add(CreateDependency(basePath, file, target, target, i + 1, Math.Max(1, line.IndexOf(target, StringComparison.Ordinal) + 1)));
+                    var dependency = CreateDependency(basePath, file, target, target, i + 1, Math.Max(1, line.IndexOf(target, StringComparison.Ordinal) + 1));
+                    dependency.DeclaredPurl = declaredPurl;
+                    dependencies.Add(dependency);
                 }
                 continue;
             }

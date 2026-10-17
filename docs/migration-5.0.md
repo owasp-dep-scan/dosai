@@ -91,6 +91,16 @@ worse for a scanner than a declaration the analyzed project's own target would n
   inventoried normally.
 - A `#:package Id@Version` directive surfaces in `Dependencies[]` with namespace `nuget` and
   module `FileBasedApp`, because a file-based app declares its NuGet references nowhere else.
+  An exact version is its `Purl` (`pkg:nuget/Id@Version`); a floating or ranged one is left to
+  the restore tables. The .NET 11 RC 2 trailing item metadata (`Aliases=...`) is ignored. F#
+  script references (`#r "nuget: Id, Version"`) pin their purl the same way.
+- A file-based app without a project gets the global usings of the virtual project the SDK
+  generates for it: `ImplicitUsings` enabled, the SDK's target framework (net11.0), and its
+  `#:sdk` and `#:property` directives, so `#:sdk Microsoft.NET.Sdk.Web` adds the web usings and
+  `#:property ImplicitUsings=disable` removes them. Before, every call through an implicit using
+  (`Console`, `List<T>`, `File`, LINQ) was `SourceUnresolved`. A file counts as a file-based app
+  when it sits outside every project's directory and opens with `#!` or `#:` directives, or holds
+  top-level statements.
 
 ### .NET 11 process-launch sinks
 
@@ -126,16 +136,33 @@ class name for them.
   ML-DSA (family `signature`, operation `sign`, standard FIPS 204), and `SlhDsa` → SLH-DSA
   (family `signature`, operation `sign`, standard FIPS 205). They appear in `Assets[]`,
   `Operations[]`, and the CBOM like any other primitive.
+- The composite post-quantum algorithms classify as their own strong assets: `CompositeMLKem` →
+  Composite ML-KEM (family `key-agreement`, operation `key-agreement/encapsulate`, standard
+  `draft-ietf-lamps-pq-composite-kem`) and `CompositeMLDsa` → Composite ML-DSA (family
+  `signature`, operation `sign`, standard `draft-ietf-lamps-pq-composite-sigs`). A
+  framework-qualified symbol matched by substring, so these were reported as ML-KEM and ML-DSA.
+- `Hpke`, `HpkeSender`, `HpkeRecipient` and `HpkeSuite` (.NET 11 RC 2) classify as an `HPKE`
+  asset: family `pke`, strength `strong`, operation `encrypt/decrypt`, standard `RFC 9180`. The
+  AES-GCM and X25519 that a suite names stay part of the HPKE asset.
+- `ChaCha20Poly1305` classifies as a `ChaCha20-Poly1305` asset: family `symmetric`, strength
+  `strong`, operation `encrypt/decrypt`, standard `RFC 8439`.
+- `CmsRecipient.CreateForKeyEncapsulation` (`EnvelopedCms` KEM recipients, pure ML-KEM in
+  .NET 11 RC 2) classifies as ML-KEM with standard `RFC 9629`; before, only the certificate
+  argument was reported, as X.509. The `EnvelopedCms.Decrypt` overloads classify by the
+  `MLKem` or `CompositeMLKem` key they take.
 - The experimental caller-driven TLS session types in `System.Net.Security` (`TlsContext`,
   `TlsSession`, `TlsBufferSession`, `TlsSocketSession`, `TlsOperationStatus`) classify as TLS
-  `protocol` assets and raise one new finding per line:
+  `protocol` assets. They and the other crypto APIs the .NET 11 reference pack marks
+  `[Experimental]` raise one new finding per line and diagnostic:
 
-| Rule id                             | Severity | Meaning                                                        |
-| ----------------------------------- | -------- | -------------------------------------------------------------- |
-| `DOSAI-CRYPTO-EXPERIMENTAL-TLS-API` | `Low`    | Experimental TLS session API in use (diagnostic `SYSLIB5007`). |
+| Rule id                             | Severity | Meaning                                                                                                    |
+| ----------------------------------- | -------- | ---------------------------------------------------------------------------------------------------------- |
+| `DOSAI-CRYPTO-EXPERIMENTAL-TLS-API` | `Low`    | Experimental TLS session API in use (diagnostic `SYSLIB5007`).                                             |
+| `DOSAI-CRYPTO-EXPERIMENTAL-HPKE`    | `Low`    | Experimental HPKE API in use (diagnostic `SYSLIB5009`).                                                    |
+| `DOSAI-CRYPTO-EXPERIMENTAL-PQC-API` | `Low`    | Composite ML-KEM or ML-DSA, SLH-DSA, or ML-DSA's mu and pre-hash members in use (diagnostic `SYSLIB5006`). |
 
-Consumers that enumerate rule ids, or that fail a build on any new finding, should expect this
-id. It is informational: the API works, its surface is not yet stable.
+Consumers that enumerate rule ids, or that fail a build on any new finding, should expect these
+ids. They are informational: the APIs work, their surface is not yet stable.
 
 ### F# 11
 
@@ -268,6 +295,200 @@ The following bugs are fixed. All of them could **remove** or corrupt results in
   skipped - so a symlinked source tree keeps contributing results. The metadata reference sweep
   and assembly discovery report the skipped directory in `Diagnostics[]`; the remaining discovery
   sites warn on stderr, leaving stdout to the MCP server's JSON-RPC stream.
+- **Assembly call-graph nodes for uncalled methods had line 0.** A method's node took its line
+  from the reflection inventory, which carries none, so it was placed only when another method
+  called it or a state machine named it as its kickoff. A runtime-async method (.NET 11,
+  `<Features>runtime-async=on</Features>`; the shared framework itself is built this way) has no
+  state machine, so an uncalled one lost its line. Nodes now take the method's first PDB
+  sequence point when the inventory has no line. Runtime-async bodies are otherwise read like any
+  method: their calls, `AsyncHelpers.Await` included, start at the method itself, and their
+  parameter sources reach sinks across awaits.
+
+## Data-flow precision changes (5.0.0-rc.2)
+
+These change which slices an unchanged input reports, in both directions:
+
+- **Property setters and conversion operators are sinks.** `cmd.CommandText = q`,
+  `psi.Arguments = q`, `message.RequestUri = uri` and `(MarkupString)html` now reach the sink
+  their setter or operator matches, directly and through helper summaries. An object
+  initializer's stores still report once, at the sink that consumes the object.
+- **Encoders are scoped to what they encode.** A sanitizer pattern can list
+  `SanitizesCategories`; the HTML encoders now stop only `xss` (plus `header`/`log` for
+  `TextEncoder`), so `Process.Start(HtmlEncoder.Default.Encode(q))` is reported as command
+  injection. `HtmlEncoder.Default.Encode` binds to `TextEncoder.Encode`, which the old
+  `HtmlEncoder.Encode` pattern never matched, so encoded XSS flows were reported before and are
+  `SanitizedFlows` entries now.
+- **Argument-specific sinks.** A sink pattern can list `SinkParameters`. `ExecuteSqlRaw`,
+  `FromSqlRaw`, `SqlQueryRaw` and Dapper flag only the SQL text, not bound parameter values; the
+  ReDoS patterns flag only a tainted `pattern` (a tainted input matched against a fixed regex
+  was a Low finding and is gone; a tainted pattern is now Medium and covers
+  `Replace`/`Split`/`Count`/`Matches`/`EnumerateMatches`/`EnumerateSplits`).
+- **Sinks and sources added:** `HttpClientJsonExtensions`, `HttpRequestMessage`, `WebRequest`,
+  `WebClient`; `FileInfo`/`DirectoryInfo`/`StreamReader`/`StreamWriter` by path,
+  `PhysicalFile`, `Results.File`; zip and tar extraction targets, with archive entry names as an
+  `archive` source (zip slip); `SqlQueryRaw`, `DbDataSource.CreateCommand`, `CommandText`
+  setters; `RedirectResult`; `HtmlString`, `AppendHtml`; `Activator.CreateInstance`,
+  `AssemblyLoadContext.LoadFrom*`, `Assembly.GetType(string)`; Roslyn `CSharpScript` and Dynamic
+  LINQ (`code-injection`).
+- **Sinks and sanitizers removed:** `LocalRedirect` (it rejects non-local URLs) and the route
+  redirects (`RedirectToAction` and friends matched the old `ControllerBase.Redirect` prefix) are
+  no longer redirect sinks; `Path.GetFullPath` is no longer a path sanitizer (it does not
+  confine a path).
+- **Sanitizers added:** `IsLocalUrl`, `Regex.Escape` (scoped to `redos`), numeric, date and
+  `Guid` `Parse`/`ParseExact`, `Convert.To<numeric>`.
+- **Validators and guards.** A validator's `out` value is clean (`int.TryParse(q, out var n)` no
+  longer taints `n`), and an early exit (`if (!Regex.IsMatch(q, …)) return;`, or `throw`,
+  `continue`, `break`) validates `q` for the rest of the block.
+- **Qualified member patterns match.** A property or field is matched as
+  `Namespace.Type.Member`; it used to be matched by its bare name, so qualified `Method`/`Symbol`
+  patterns on members (the WebForms control-value source, `Console.In`) never matched a bound
+  member.
+
+`Patterns.Sanitizers[]` and `Patterns.Sinks[]` entries gain the `SanitizesCategories` and
+`SinkParameters` fields (empty for the historic behavior). Assembly (IL) mode applies both (see
+below).
+
+- **Request-bound attributes are sources:** `[FromHeader]`, `[AsParameters]`, and on properties
+  `[BindProperty]` (and every public settable property of a `[BindProperties]` type) and Blazor's
+  `[SupplyParameterFromQuery]`/`[SupplyParameterFromForm]`. Reading such a property reads the
+  request. Blazor `[Parameter]` is not a source (the parent component supplies it).
+
+## Assembly (IL) data-flow parity (5.0.0-rc.2)
+
+Assembly-only inputs now report the flows source mode reports, where IL can express them:
+
+- **Top-level statements:** the compiler's `<Main>$` entry point's `args` is a `cli` source, as
+  `Main(string[] args)` was.
+- **Attribute sources** on parameters (`[FromHeader]`, `[AsParameters]`) and on properties
+  (`[BindProperty]`, `[SupplyParameterFrom*]`): a getter call on such a property is a source.
+  Properties are resolved in the assembly that declares them.
+- **Object state.** Method summaries record the fields a method returns and the parameters it
+  stores into fields, and the receiver (`this`) is a summarized input whenever that summary fits a 2,000-state budget (a larger method is summarized again without it, as before). `o.Command = q` then
+  `o.Command`, `new Options { Command = q }`, `r.Set(q)` then `r.Go()`, and a data object passed
+  to a helper (`Launch(job)`) carry the taint; a clean store (`o.Command = "fixed"`) clears it
+  for the rest of the method, and a clean sibling member stays clean. An opaque mutator
+  (`psi.Arguments = q`, `list.Add(q)`, an initializer's setters on a framework type) taints the
+  object it was called on, wherever that object was loaded from. Stored field taint is per
+  field for objects that escape, and a getter reads another method's store only for auto-property
+  backing fields (data holders); computing getters over shared state stay local, which keeps
+  large packages within the state budget.
+- **Object identity.** An object a method creates (`newobj`) is tracked by its creation site
+  through locals, arguments and the stack, and its members are its own: `r.Set(q); r.Go()`
+  reports at the `Go()` call (the callee summary lists the receiver members it sinks), while a
+  reassigned variable (`r = new Runner(); r.Go()`) or another instance does not inherit them.
+  An object that escapes (passed to a call, stored, returned) publishes its members as stored
+  field taints, as before.
+- **Inherited and referenced properties.** Attribute sources on properties are found up the base
+  types and in referenced assemblies (beside the input, framework references and packs, the NuGet
+  cache), so an override or a base component's `[SupplyParameterFromQuery]` property is a source.
+- **Helpers that return a source** are sources at their call sites (node `Properties.summaryMethod`
+  names the helper); a `bool` result is a decision, not the source.
+- **`SanitizesCategories` and `SinkParameters`** apply as in source mode; parameter names come
+  from the callee's definition (analyzed assembly, a referenced assembly beside it, or the
+  framework reference set, then the installed reference packs and shared frameworks, then the
+  NuGet global packages folder). Without a definition every argument stays dangerous, and a
+  diagnostic names the assembly (`SinkParameters could not be applied to calls into …`).
+- **Early-exit validator guards** (`if (!Valid(x)) return;`) in Release and Debug builds.
+- **IL nodes carry `Properties.methodId`** (the IL method id), so exploit chains resolve IL entry
+  points. `DataFlowMethodSummary` indexes stay parameter positions; the receiver is internal.
+
+## Crypto and CBOM changes (5.0.0-rc.2)
+
+- **Algorithm tokens match whole identifier words.** `Describe` no longer classifies as DES and
+  `UniversalTagNumber` no longer as RSA. MACs and KDFs come before the hashes they name, so
+  `HMACSHA256` is an HMAC asset (it was SHA-2) and `HMACMD5` no longer raises the MD5 hash rule.
+- **New assets:** SHA-3, SHAKE, KMAC, HKDF, KBKDF, PBKDF1 (`PasswordDeriveBytes`), DSA,
+  Rijndael, `X509CertificateLoader`, `SecurityProtocolType`.
+- **Findings carry their rule's CWE.** Every finding used to be CWE-327, CWE-321 or CWE-295;
+  weak hashes are now CWE-328, static IVs CWE-1204, PBKDF2 CWE-916, insecure RNG CWE-338, JWT
+  rules CWE-347 and the experimental-API rules CWE-1357. Hardcoded material stays CWE-321.
+- **New rules:** `DOSAI-CRYPTO-WEAK-KDF-PRF`, `DOSAI-CRYPTO-WEAK-KDF`, `DOSAI-CRYPTO-WEAK-SIGNATURE`,
+  `DOSAI-CRYPTO-WEAK-KEY-SIZE`, `DOSAI-CRYPTO-RSA-PKCS1-ENCRYPTION`,
+  `DOSAI-CRYPTO-JWT-VALIDATION-DISABLED`, `DOSAI-CRYPTO-NON-CONSTANT-TIME-COMPARE`,
+  `DOSAI-CRYPTO-TLS-CERT-VALIDATION-CUSTOM` and `DOSAI-CRYPTO-OBSOLETE-API` (SYSLIB0021, 0022,
+  0023, 0045, 0053, 0057, 0060). TLS 1.0 now raises `DOSAI-CRYPTO-LEGACY-TLS`, and `EncryptEcb`
+  raises `DOSAI-CRYPTO-ECB-MODE`.
+- **Certificate callbacks are told apart.** Only an always-true callback is
+  `DOSAI-CRYPTO-TLS-CERT-VALIDATION-DISABLED` (High); any other custom callback is
+  `DOSAI-CRYPTO-TLS-CERT-VALIDATION-CUSTOM` (Medium).
+- **PBKDF2 is read from the bound call in C# and VB.** Constants are folded, an omitted count is
+  the constructors' 1,000, and a salt size is no longer reported as the iteration count.
+- **Static IVs.** Zero and constant IVs are found through arguments and assignments; log and
+  exception messages that mention an IV are no longer reported as IV material.
+- **Comments are not code.** Commented-out C# and VB lines no longer produce assets or findings.
+- **One protocol per line.** A line seen by the classifier and by a TLS version check is one
+  `Protocols[]` entry with the version and the weaker strength.
+- **CycloneDX primitives follow the algorithm:** ML-KEM is `kem` (was `key-agree`), AES-GCM
+  `ae`, AES `block-cipher`, the CSPRNG `drbg`.
+
+## Endpoint changes (5.0.0-rc.2)
+
+- **`[AllowAnonymous]` decides exposure.** An endpoint with `[AllowAnonymous]` was reported
+  `authenticated-http` when a class-level `[Authorize(Roles = …)]` also applied.
+- **Roles are not policies.** `[Authorize(Roles = "Admin")]` put `Admin` in
+  `AuthorizationPolicies` as well as `Roles`; only the positional argument is a policy now.
+- **Inherited and convention-based authorization.** Base-controller authorization attributes,
+  minimal-API group conventions, handler attributes and application-wide authorization (fallback
+  policy, `MapControllers().RequireAuthorization()`, global `AuthorizeFilter`) now set
+  `AuthorizationRequired` on the endpoints they cover.
+- **New registrations:** minimal-API `Map`, `MapIdentityApi`, `MapOpenApi` endpoints and the
+  `MapStaticAssets` mount.
+- **Disabled antiforgery is a finding:** `StateChangingEndpointAntiforgeryDisabled`.
+- **Entry-point attribution.** A minimal-API method-group handler sets the entry point's
+  `MethodId`, and a flow is attributed to the nearest route registered above it (it took the
+  first entry point of the file, often the program's CLI entry point).
+- **SignalR mounts.** Each hub takes its own `MapHub<THub>` path; every hub used to take the
+  first one.
+- **Minimal-API lambda handlers have a `MethodId`:** the id the call graph and data flow give
+  the lambda (`Program.<<Main>$>lambda2(string):string`), and `MethodName` its
+  `<<Main>$>lambda2` name. Reachability walks start at the handler, and exploit chains,
+  weaknesses and the attack surface attribute a handler's flows to its route rather than to the
+  program's CLI entry point. Exploit chains now walk from the method holding the sink call (the
+  sink API stays the last frame): walking from the sink API let any other caller of that API win.
+- **Razor Pages are paired with their PageModel** (`@model X`, else the `X.cshtml.cs`
+  code-behind). Each public `On{Verb}[Handler][Async]` method is an endpoint (`MethodName`,
+  `ClassName`, `Namespace`), routed by every `@page` directive; a relative template
+  (`@page "{id:int}"`) is appended to the conventional route (`/Items/{id}`, with
+  `RouteParameters`). Authorization comes from the PageModel's attributes and from
+  `@attribute [Authorize(Roles = …, Policy = …)]` (roles and policies were not read before). The
+  entry point of a PageModel handler has the handler's `MethodId` and code-behind location, and
+  handler parameters are taint seeds (`razor-pages`) attributed to the route.
+- **Endpoints of assembly-only inputs.** Assemblies the tree does not build from source report
+  `ApiEndpoints` and `EntryPoints` from IL (`Framework: "assembly-il"`): controller actions
+  (`[Http*]`, `[Route]` with `[controller]`/`[action]`, `[Authorize]`/`[AllowAnonymous]` including
+  a base controller's, `[ApiController]`, `ControllerBase`/`Controller` bases, `[NonAction]`;
+  conventional `/{controller}/{action}` for unattributed MVC controllers) and minimal-API
+  `Map*` registrations (a route `ldstr` and handler `ldftn` feeding the call, with fluent
+  `RequireAuthorization`/`AllowAnonymous`). Unattributed MVC actions expand every registered
+  `MapControllerRoute`/`MapAreaControllerRoute`/`MapRoute` template and
+  `MapDefaultControllerRoute()` (`{controller=Home}/{action=Index}/{id?}` gives
+  `/Home/Index/{id}`), keeping their verb attributes; with none registered, `/{controller}/{action}`.
+  Compiled Razor Pages are endpoints too: `[assembly: RazorCompiledItem(type, "mvc.1.0.razor-page",
+  "/Pages/X.cshtml")]` with the page type's `RouteTemplate` metadata, and 2.x
+  `[assembly: RazorPage(path, type, routeTemplate)]`; the page's `Model` property names the
+  PageModel whose handlers are the endpoints (views are not). `MethodId` is the IL call graph's node id. In
+  `dataflows`, those handlers' parameters are `http` sources (`Properties.route`), so flows
+  attach to the route.
+- **Middleware misconfiguration findings** (`SecurityFindings[]`, see
+  [frameworks](frameworks.md)): `DeveloperExceptionPageUnguarded`, `HttpsRedirectionMissing`,
+  `HstsMissing`, `InsecureCookie`, `ForwardedHeadersTrustAll`, `RequestSizeLimitDisabled`.
+- **Endpoint findings for assembly-only inputs.** The endpoint rules
+  (`SensitiveUnauthenticatedEndpoint`, `StateChangingEndpointWithoutAntiforgery`,
+  `StateChangingEndpointAntiforgeryDisabled`, `MassAssignmentHint`, `DuplicateRouteAuthMismatch`
+  and the new `AllowAnonymousOverridesAuthorization`) run on the endpoints read from IL too:
+  sensitivity and mass-assignment shapes are classified from handler parameter names and the
+  public properties of request types the assembly declares; `[ValidateAntiForgeryToken]`,
+  `[IgnoreAntiforgeryToken]`, `DisableAntiforgery()` and a global
+  `AutoValidateAntiforgeryTokenAttribute` filter are read from metadata and IL.
+- **`AllowAnonymousOverridesAuthorization`** (low, CWE-862): `[AllowAnonymous]` on an endpoint
+  that also names roles or policies, which the opt-out disables.
+- **Antiforgery opt-ins are not "missing".** `StateChangingEndpointWithoutAntiforgery` tested
+  `AntiForgeryRequired != false`, so an action with `[ValidateAntiForgeryToken]` was reported; it
+  now requires the value to be unset.
+- **CORS findings name the open policy.** Each `AddPolicy`/`AddDefaultPolicy` is judged on its
+  own builder: `AddCors(o => { o.AddPolicy("Strict", …); o.AddPolicy("Open", …any origin and
+  credentials…); })` reported one unnamed "default policy" finding for the whole `AddCors`; it now
+  reports `Open` (constant names resolve), and nothing for `Strict`.
 
 ## Nothing to change in queries or exports
 

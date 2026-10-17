@@ -21,11 +21,28 @@ public sealed class SignalRProvider : IFrameworkProvider
     {
         try
         {
-            var hubMounts = ctx.MountPoints
-                .Where(mp => mp.Kind == "hub")
-                .Select(mp => mp.Path)
-                .Distinct(StringComparer.Ordinal)
-                .ToList();
+            var hubMountPoints = ctx.MountPoints.Where(mp => mp.Kind == "hub").ToList();
+
+            // `app.MapHub<ChatHub>("/chat")` names its hub: each hub takes its own mounts. A hub no
+            // mount names shares the untyped ones, or the only mount when there is just one.
+            List<string> MountsFor(string hubName)
+            {
+                static string LastSegment(string typeName) => typeName.Split('.').Last().Trim();
+                var typed = hubMountPoints.Where(mp => mp.TypeName is not null && LastSegment(mp.TypeName) == hubName).Select(mp => mp.Path).Distinct(StringComparer.Ordinal).ToList();
+                if (typed.Count > 0)
+                {
+                    return typed;
+                }
+
+                var untyped = hubMountPoints.Where(mp => mp.TypeName is null).Select(mp => mp.Path).Distinct(StringComparer.Ordinal).ToList();
+                if (untyped.Count > 0)
+                {
+                    return untyped;
+                }
+
+                var all = hubMountPoints.Select(mp => mp.Path).Distinct(StringComparer.Ordinal).ToList();
+                return all.Count == 1 ? all : [];
+            }
 
             var hubContextTypes = new HashSet<string>(StringComparer.Ordinal);
             var hubServices = new Dictionary<string, ServiceComponent>(StringComparer.Ordinal);
@@ -119,7 +136,8 @@ public sealed class SignalRProvider : IFrameworkProvider
                         service.TrustZone = TrustZones.Authenticated;
                     }
 
-                    // Mount points: attach all hub mounts (multiple hubs can share the same mount in some patterns)
+                    // Mount points: this hub's own mounts (one hub can be mapped at several paths).
+                    var hubMounts = MountsFor(hubName);
                     if (hubMounts.Count > 0)
                     {
                         foreach (var mountPath in hubMounts)

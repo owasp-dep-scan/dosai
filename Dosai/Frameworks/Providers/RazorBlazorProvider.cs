@@ -32,30 +32,38 @@ public sealed partial class RazorBlazorProvider : IFrameworkProvider
                 continue;
             }
 
-            var pageMatch = PageDirectiveRegex().Match(text);
-            var hasPageDirective = pageMatch.Success;
-            var pageRoute = hasPageDirective && pageMatch.Groups[1].Success && pageMatch.Groups[1].Length > 0
-                ? pageMatch.Groups[1].Value
-                : null;
+            var pageMatches = PageDirectiveRegex().Matches(text);
             var isBlazor = templateFile.EndsWith(".razor", StringComparison.OrdinalIgnoreCase) || text.Contains("@rendermode", StringComparison.Ordinal) || text.Contains("<PageTitle>", StringComparison.Ordinal);
             // Only @page-declared files are routable: _Imports.razor, App.razor, layouts, and
             // partials are reachable templates/components but never URL endpoints.
-            if (!hasPageDirective)
+            if (pageMatches.Count == 0)
             {
                 continue;
             }
 
-            // A bare `@page` routes by file location relative to the Pages/ root, with Index mapping
-            // to the directory itself. Derived, so confidence stays heuristic.
-            pageRoute ??= hasPageDirective ? ConventionalPageRoute(ctx.BasePath, templateFile) : null;
+            // Every @page directive is a route (a Blazor component may declare several). A bare
+            // `@page` routes by file location relative to the Pages/ root, with Index mapping to
+            // the directory itself; a Razor Page template that is not absolute (`@page "{id:int}"`)
+            // is appended to that conventional route. Derived, so confidence stays heuristic.
+            var conventional = ConventionalPageRoute(ctx.BasePath, templateFile);
+            var pageRoutes = pageMatches
+                .Select(match => match.Groups[1].Success && match.Groups[1].Length > 0 ? match.Groups[1].Value : null)
+                .Select(template => template is null ? (Template: (string?)null, Route: conventional)
+                    : template.StartsWith('/') || template.StartsWith("~/", StringComparison.Ordinal) || isBlazor ? (Template: template, Route: template.TrimStart('~'))
+                    : (Template: template, Route: conventional.TrimEnd('/') + "/" + template))
+                .DistinctBy(route => route.Route, StringComparer.Ordinal)
+                .ToList();
 
             var fileName = Path.GetFileName(templateFile);
             var rawUrls = ProviderHelpers.ExtractRawUrls(text);
+            // The page's PageModel (`@model X`, else the `X.cshtml.cs` code-behind): its handlers
+            // are the endpoints' methods, and its attributes their authorization.
+            var pageModel = isBlazor ? null : FindPageModel(ctx, templateFile, text);
             var authorize = text.Contains("[Authorize]", StringComparison.Ordinal) || Regex.IsMatch(text, @"@attribute\s*\[Authorize");
             var allowAnonymous = text.Contains("[AllowAnonymous]", StringComparison.Ordinal) || Regex.IsMatch(text, @"@attribute\s*\[AllowAnonymous");
             var renderMode = InteractiveRenderMode(text);
-            var pagePath = pageRoute is null ? null : RouteTemplateResolver.Resolve(pageRoute).Path;
-            var lineNumber = LineOf(text, pageRoute is null ? "@page" : pageRoute);
+            var firstTemplate = pageRoutes[0].Template;
+            var lineNumber = LineOf(text, firstTemplate is null ? "@page" : firstTemplate);
 
             var serviceId = FrameworkIds.Service("razor-blazor", Path.GetDirectoryName(Path.GetRelativePath(ctx.BasePath, templateFile)), Path.GetFileNameWithoutExtension(templateFile));
             var service = new ServiceComponent
@@ -67,9 +75,6 @@ public sealed partial class RazorBlazorProvider : IFrameworkProvider
                 Direction = ServiceDirections.Inbound,
                 Framework = "razor-blazor",
                 Confidence = ConfidenceTiers.Heuristic,
-                AllowAnonymous = allowAnonymous ? true : null,
-                Authenticated = allowAnonymous ? false : authorize ? true : null,
-                TrustZone = allowAnonymous ? TrustZones.Public : authorize ? TrustZones.Authenticated : TrustZones.Unknown,
                 Location = CodeLocation.From(ctx.BasePath, templateFile, lineNumber),
                 Evidence = new AnalysisEvidence { Kind = AnalysisEvidenceKind.FrameworkModel, Source = "razor-blazor", Description = $"@page directive in {fileName}.", Confidence = ConfidenceTiers.Heuristic, FileName = fileName, LineNumber = lineNumber }
             };
@@ -83,72 +88,116 @@ public sealed partial class RazorBlazorProvider : IFrameworkProvider
             }
 
             results.Services.Add(service);
-            if (pagePath is not null && !service.Endpoints.Contains(pagePath, StringComparer.Ordinal))
-            {
-                service.Endpoints.Add(pagePath);
-            }
 
             // Blazor component routes are reachable via any verb on first navigation; Razor Pages
-            // expose one endpoint per On{Verb} handler.
-            var handlers = HandlerVerbs(text);
-            if (handlers.Count == 0)
+            // expose one endpoint per On{Verb} handler, declared in the PageModel or in @functions.
+            var handlers = HandlerVerbs(text).Select(handler => (handler.Verb, handler.HandlerName, Method: (MethodDeclarationSyntax?)null)).ToList();
+            foreach (var handler in pageModel?.Handlers ?? [])
             {
-                handlers.Add(("ANY", null));
+                handlers.RemoveAll(existing => existing.Verb == handler.Verb && existing.HandlerName == handler.HandlerName && existing.Method is null);
+                handlers.Add(handler);
             }
 
-            foreach (var (verb, handlerName) in handlers)
+            if (handlers.Count == 0)
             {
-                var path = pagePath ?? "/" + Path.GetFileNameWithoutExtension(templateFile);
-                if (handlerName is not null && pageRoute is not null)
+                handlers.Add(("ANY", null, null));
+            }
+
+            foreach (var (template, pageRoute) in pageRoutes)
+            {
+                var resolved = RouteTemplateResolver.Resolve(pageRoute);
+                var pagePath = resolved.Path ?? pageRoute;
+                if (!service.Endpoints.Contains(pagePath, StringComparer.Ordinal))
                 {
-                    // Named handlers are reached with ?handler=name; reflect that in the emitted path.
-                    path = $"{path}?handler={handlerName}";
+                    service.Endpoints.Add(pagePath);
                 }
 
-                var operationId = FrameworkIds.Operation(serviceId, verb, path, handlerName ?? "page");
-                var endpoint = new ApiEndpoint
+                var routeLine = LineOf(text, template is null ? "@page" : template);
+                foreach (var (verb, handlerName, method) in handlers)
                 {
-                    Path = path,
-                    FilePath = CodeLocation.From(ctx.BasePath, templateFile).Path,
-                    FileName = fileName,
-                    HttpMethod = verb,
-                    Route = pageRoute,
-                    EndpointKind = "RazorPage",
-                    RoutingKind = isBlazor ? "Attribute" : "Template",
-                    Framework = "razor-blazor",
-                    ServiceId = serviceId,
-                    OperationId = operationId,
-                    Confidence = ConfidenceTiers.Heuristic,
-                    LineNumber = lineNumber,
-                    RawUrls = rawUrls,
-                    AuthorizationRequired = allowAnonymous ? false : authorize ? true : null,
-                    AllowAnonymous = allowAnonymous,
-                    Evidence = new AnalysisEvidence { Kind = AnalysisEvidenceKind.FrameworkModel, Source = "razor-blazor", Description = isBlazor ? "Blazor component route." : "Razor Page handler.", Confidence = ConfidenceTiers.Heuristic, FileName = fileName, LineNumber = lineNumber }
-                };
-                results.ApiEndpoints.Add(endpoint);
-                service.Operations.Add(new ServiceOperation
-                {
-                    Id = operationId,
-                    Name = handlerName ?? "page",
-                    HttpMethod = verb,
-                    Path = path,
-                    RouteTemplate = pageRoute,
-                    Authenticated = endpoint.AuthorizationRequired,
-                    Confidence = ConfidenceTiers.Heuristic,
-                    Location = CodeLocation.From(ctx.BasePath, templateFile, lineNumber)
-                });
-                results.EntryPoints.Add(new EntryPoint
-                {
-                    Id = $"ep:{operationId}",
-                    Kind = "HttpRazorPage",
-                    FileName = fileName,
-                    Path = endpoint.FilePath,
-                    LineNumber = lineNumber,
-                    HttpMethod = verb,
-                    Route = path,
-                    AuthorizationRequired = endpoint.AuthorizationRequired,
-                    AllowAnonymous = endpoint.AllowAnonymous
-                });
+                    var path = pagePath;
+                    if (handlerName is not null)
+                    {
+                        // Named handlers are reached with ?handler=name; reflect that in the emitted path.
+                        path = $"{path}?handler={handlerName}";
+                    }
+
+                    var methodSymbol = method is null || pageModel is null ? null : pageModel.Value.Model.GetDeclaredSymbol(method);
+                    var methodId = methodSymbol is null ? null : Depscan.Dosai.FormatMethodSignature(methodSymbol);
+                    var operationId = FrameworkIds.Operation(serviceId, verb, path, handlerName ?? "page");
+                    var endpoint = new ApiEndpoint
+                    {
+                        Path = path,
+                        FilePath = CodeLocation.From(ctx.BasePath, templateFile).Path,
+                        FileName = fileName,
+                        Namespace = methodSymbol?.ContainingType?.ContainingNamespace?.ToDisplayString(),
+                        ClassName = pageModel?.Type.Identifier.Text,
+                        MethodName = method?.Identifier.Text,
+                        HttpMethod = verb,
+                        Route = pageRoute,
+                        EndpointKind = "RazorPage",
+                        RoutingKind = isBlazor ? "Attribute" : "Template",
+                        Framework = "razor-blazor",
+                        ServiceId = serviceId,
+                        OperationId = operationId,
+                        Confidence = ConfidenceTiers.Heuristic,
+                        LineNumber = routeLine,
+                        RawUrls = rawUrls,
+                        RouteParameters = resolved.Parameters,
+                        Evidence = new AnalysisEvidence { Kind = AnalysisEvidenceKind.FrameworkModel, Source = "razor-blazor", Description = isBlazor ? "Blazor component route." : "Razor Page handler.", Confidence = ConfidenceTiers.Heuristic, FileName = fileName, LineNumber = routeLine }
+                    };
+                    ApplyPageAuthorization(endpoint, pageModel?.Attributes ?? [], text, authorize, allowAnonymous);
+                    results.ApiEndpoints.Add(endpoint);
+                    service.Operations.Add(new ServiceOperation
+                    {
+                        Id = operationId,
+                        Name = handlerName ?? "page",
+                        HttpMethod = verb,
+                        Path = path,
+                        RouteTemplate = pageRoute,
+                        RouteParameters = resolved.Parameters,
+                        Authenticated = endpoint.AuthorizationRequired,
+                        Confidence = ConfidenceTiers.Heuristic,
+                        Location = CodeLocation.From(ctx.BasePath, templateFile, routeLine)
+                    });
+
+                    // A PageModel handler's entry point is the handler method itself, so flows,
+                    // call paths and reachability start there; a template-only page keeps the
+                    // template's location.
+                    var handlerTree = method?.SyntaxTree;
+                    var handlerLine = method is null ? routeLine : method.Identifier.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
+                    results.EntryPoints.Add(new EntryPoint
+                    {
+                        Id = $"ep:{operationId}",
+                        Kind = "HttpRazorPage",
+                        MethodId = methodId,
+                        MethodName = method?.Identifier.Text,
+                        ClassName = endpoint.ClassName,
+                        Namespace = endpoint.Namespace,
+                        FileName = handlerTree is null ? fileName : Path.GetFileName(handlerTree.FilePath),
+                        Path = handlerTree is null ? endpoint.FilePath : CodeLocation.From(ctx.BasePath, handlerTree.FilePath).Path,
+                        LineNumber = handlerLine,
+                        HttpMethod = verb,
+                        Route = path,
+                        AuthorizationRequired = endpoint.AuthorizationRequired,
+                        AuthorizationPolicies = endpoint.AuthorizationPolicies,
+                        Roles = endpoint.Roles,
+                        AllowAnonymous = endpoint.AllowAnonymous
+                    });
+
+                    if (method is not null && methodSymbol is not null)
+                    {
+                        SeedHandlerParameters(results, method, methodSymbol, methodId, path, resolved.Parameters.Select(parameter => parameter.Name).ToList());
+                    }
+                }
+            }
+
+            if (pageRoutes.Count > 0)
+            {
+                var first = results.ApiEndpoints[^1];
+                service.AllowAnonymous = first.AllowAnonymous ? true : null;
+                service.Authenticated = first.AllowAnonymous ? false : first.AuthorizationRequired;
+                service.TrustZone = first.AllowAnonymous ? TrustZones.Public : first.AuthorizationRequired == true ? TrustZones.Authenticated : TrustZones.Unknown;
             }
         }
 
@@ -257,6 +306,146 @@ foreach (var tree in ctx.CSharpTrees)
         }
     }
 
+    /// <summary>A Razor Page's PageModel: its declaration, semantic model, class attributes and On{Verb} handlers.</summary>
+    private readonly record struct PageModelInfo(ClassDeclarationSyntax Type, SemanticModel Model, List<AttributeSyntax> Attributes, List<(string Verb, string? HandlerName, MethodDeclarationSyntax? Method)> Handlers);
+
+    /// <summary>
+    ///     The PageModel paired with a <c>.cshtml</c> page: the type its <c>@model</c> directive
+    ///     names (the code-behind's declaration first when several types share the name), else
+    ///     the type deriving from <c>PageModel</c> in the page's <c>X.cshtml.cs</c> code-behind.
+    /// </summary>
+    private static PageModelInfo? FindPageModel(FrameworkContext ctx, string templateFile, string text)
+    {
+        if (ctx.CSharp is null)
+        {
+            return null;
+        }
+
+        var modelMatch = ModelDirectiveRegex().Match(text);
+        var modelName = modelMatch.Success ? modelMatch.Groups[1].Value : null;
+        var modelSimpleName = modelName?.Split('.').Last();
+        var codeBehind = Path.GetFullPath(templateFile + ".cs");
+        (ClassDeclarationSyntax Type, SyntaxTree Tree)? found = null;
+        foreach (var tree in ctx.CSharpTrees)
+        {
+            var isCodeBehind = !string.IsNullOrEmpty(tree.FilePath) && string.Equals(Path.GetFullPath(tree.FilePath), codeBehind, SafeFileRead.PathComparison);
+            if (!isCodeBehind && (modelSimpleName is null || !ctx.TextContainsAny(tree, modelSimpleName)))
+            {
+                continue;
+            }
+
+            foreach (var type in FrameworkContext.Declarations<ClassDeclarationSyntax>(tree))
+            {
+                var matches = modelSimpleName is not null
+                    ? type.Identifier.Text == modelSimpleName && (modelName == modelSimpleName || $"{type.Ancestors().OfType<BaseNamespaceDeclarationSyntax>().FirstOrDefault()?.Name}.{type.Identifier.Text}".EndsWith(modelName!, StringComparison.Ordinal))
+                    : isCodeBehind && (type.BaseList?.Types.Any(baseType => baseType.Type.ToString().EndsWith("PageModel", StringComparison.Ordinal)) ?? false);
+                if (matches && (found is null || isCodeBehind))
+                {
+                    found = (type, tree);
+                }
+            }
+        }
+
+        if (found is not { } pageModel)
+        {
+            return null;
+        }
+
+        var model = ctx.CSharp.GetSemanticModel(pageModel.Tree);
+        var handlers = new List<(string, string?, MethodDeclarationSyntax?)>();
+        foreach (var method in pageModel.Type.Members.OfType<MethodDeclarationSyntax>())
+        {
+            var match = HandlerNameRegex().Match(method.Identifier.Text);
+            if (!match.Success || !method.Modifiers.Any(SyntaxKind.PublicKeyword))
+            {
+                continue;
+            }
+
+            var verb = match.Groups[1].Value.ToUpperInvariant();
+            var handlerName = match.Groups[2].Success && match.Groups[2].Length > 0 ? match.Groups[2].Value : null;
+            if (!handlers.Any(existing => existing.Item1 == verb && existing.Item2 == handlerName))
+            {
+                handlers.Add((verb, handlerName, method));
+            }
+        }
+
+        return new PageModelInfo(pageModel.Type, model, ProviderHelpers.AttributesOf(pageModel.Type.AttributeLists).ToList(), handlers);
+    }
+
+    /// <summary>
+    ///     Authorization from the PageModel's attributes and the page's <c>@attribute</c>
+    ///     directives (<c>@attribute [Authorize(Roles = "Admin")]</c>): roles, policies and
+    ///     <c>[AllowAnonymous]</c> follow ASP.NET Core's rules, anonymous winning.
+    /// </summary>
+    private static void ApplyPageAuthorization(ApiEndpoint endpoint, List<AttributeSyntax> modelAttributes, string text, bool authorize, bool allowAnonymous)
+    {
+        ProviderHelpers.ApplyAuthorizationMetadata(endpoint, modelAttributes);
+        foreach (Match directive in AuthorizeDirectiveRegex().Matches(text))
+        {
+            var arguments = directive.Groups[1].Value;
+            foreach (Match named in Regex.Matches(arguments, @"\b(Roles|Policy|AuthenticationSchemes)\s*=\s*""([^""]*)"""))
+            {
+                var values = named.Groups[2].Value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                var target = named.Groups[1].Value switch
+                {
+                    "Roles" => endpoint.Roles,
+                    "Policy" => endpoint.AuthorizationPolicies,
+                    _ => endpoint.AuthenticationSchemes
+                };
+                foreach (var value in values) ProviderHelpers.AddDistinct(target, value);
+            }
+
+            if (Regex.Match(arguments, @"^\s*""([^""]*)""") is { Success: true } positional)
+            {
+                ProviderHelpers.AddDistinct(endpoint.AuthorizationPolicies, positional.Groups[1].Value);
+            }
+        }
+
+        if (allowAnonymous || endpoint.AllowAnonymous)
+        {
+            endpoint.AllowAnonymous = true;
+            endpoint.AuthorizationRequired = false;
+        }
+        else if (authorize)
+        {
+            endpoint.AuthorizationRequired = true;
+        }
+    }
+
+    /// <summary>
+    ///     Taint seeds for a PageModel handler's bound parameters: route values, query and form
+    ///     input. Services (<c>[FromServices]</c>) and infrastructure types are not input.
+    /// </summary>
+    private static void SeedHandlerParameters(FrameworkResults results, MethodDeclarationSyntax method, IMethodSymbol methodSymbol, string? methodId, string path, List<string> routeParameters)
+    {
+        foreach (var parameter in methodSymbol.Parameters)
+        {
+            var typeName = parameter.Type.ToDisplayString();
+            if (parameter.GetAttributes().Any(attribute => attribute.AttributeClass?.Name is "FromServicesAttribute" or "FromKeyedServicesAttribute" or "BindNeverAttribute") ||
+                typeName is "System.Threading.CancellationToken" or "Microsoft.AspNetCore.Http.HttpContext" ||
+                typeName.StartsWith("Microsoft.Extensions.Logging.ILogger", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            results.TaintSeeds.Add(new FrameworkTaintSeed
+            {
+                MethodName = methodSymbol.Name,
+                ParameterName = parameter.Name,
+                ClassName = methodSymbol.ContainingType?.Name,
+                Namespace = methodSymbol.ContainingType?.ContainingNamespace?.ToDisplayString(),
+                FileName = Path.GetFileName(method.SyntaxTree.FilePath),
+                MethodSignature = methodId,
+                LineNumber = method.Identifier.GetLocation().GetLineSpan().StartLinePosition.Line + 1,
+                BindingSource = routeParameters.Contains(parameter.Name, StringComparer.OrdinalIgnoreCase) ? "http-route" : parameter.Type.IsValueType || parameter.Type.SpecialType == SpecialType.System_String ? "http-query" : "http-form",
+                TaintKind = "http",
+                FrameworkId = "razor-pages",
+                EndpointPath = path,
+                Confidence = ConfidenceTiers.Semantic
+            });
+        }
+    }
+
     /// <summary>
     ///     Route for a Razor Page whose <c>@page</c> directive carries no template: the path of the
     ///     file relative to the nearest <c>Pages</c> directory, minus the extension, with <c>Index</c>
@@ -339,4 +528,16 @@ foreach (var tree in ctx.CSharpTrees)
 
     [GeneratedRegex(@"@rendermode\s+([\w\.]+)", RegexOptions.Compiled)]
     private static partial Regex RenderModeRegex();
+
+    /// <summary>The <c>@model</c> directive's type name.</summary>
+    [GeneratedRegex(@"^\s*@model\s+([\w\.]+)", RegexOptions.Multiline | RegexOptions.Compiled)]
+    private static partial Regex ModelDirectiveRegex();
+
+    /// <summary>A page handler method's name: <c>On{Verb}{Handler}[Async]</c>, the handler name without the Async suffix.</summary>
+    [GeneratedRegex(@"^On(Get|Post|Put|Delete|Patch|Head|Options)([A-Z]\w*?)?(Async)?$", RegexOptions.Compiled)]
+    private static partial Regex HandlerNameRegex();
+
+    /// <summary>An <c>@attribute [Authorize(...)]</c> directive's argument text.</summary>
+    [GeneratedRegex(@"@attribute\s*\[\s*(?:Microsoft\.AspNetCore\.Authorization\.)?Authorize(?:Attribute)?\s*(?:\(([^\)]*)\))?", RegexOptions.Compiled)]
+    private static partial Regex AuthorizeDirectiveRegex();
 }

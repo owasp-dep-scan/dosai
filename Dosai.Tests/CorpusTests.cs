@@ -49,10 +49,13 @@ public class CorpusTests
         // Repeated call sites collapse into counted edges.
         Assert.Contains(slice.CallGraph!.Edges, edge => edge.CallSiteCount > 1);
 
-        // The endpoint security findings engine produces real findings on a real app
-        // (11 antiforgery findings at the release run).
-        var antiforgeryFindings = slice.SecurityFindings!.Count(finding => finding.Kind == "StateChangingEndpointWithoutAntiforgery");
-        Assert.True(antiforgeryFindings >= 10, $"expected >= 10 antiforgery findings, got {antiforgeryFindings}");
+        // The endpoint security findings engine produces real findings on a real app. The
+        // ManageController actions carry [ValidateAntiForgeryToken]; until 5.0.0-rc.2 the rule
+        // tested `!= false` and reported them too (11 findings), leaving UserController.Logout as
+        // the one state-changing MVC action that does not opt in.
+        var antiforgeryFindings = slice.SecurityFindings!.Where(finding => finding.Kind == "StateChangingEndpointWithoutAntiforgery").ToList();
+        Assert.Contains(antiforgeryFindings, finding => finding.Route == "/User");
+        Assert.DoesNotContain(antiforgeryFindings, finding => finding.Route?.StartsWith("/Manage/", StringComparison.Ordinal) == true);
 
         // A restored tree resolves package purls into the slice.
         Assert.True(slice.PackageReachability!.Count > 25, $"expected resolved purls, got {slice.PackageReachability.Count}");
@@ -193,18 +196,29 @@ public class CorpusTests
         // 174 slices at the calibration run: the 173 of the report plus one inside MailKit's NTLM
         // code that the summaries find now that array stores are modelled.
         Assert.True(result.Slices.Count >= 173, $"expected every package flow to be kept, got {result.Slices.Count}");
-        Assert.Equal(result.Slices.Count, result.Statistics.DependencySliceCount);
-        Assert.All(result.Slices, slice =>
+        // A slice is the package's own only when every node is: the repro's top-level `args`
+        // (`<Main>$`, a CLI source since 5.0.0-rc.2) reaching its own sink, or reaching package
+        // sinks through state it stored into package objects, is an application flow.
+        var nodes = result.Nodes.ToDictionary(node => node.Id);
+        bool TouchesTheApplication(DataFlowSlice slice) => slice.NodeIds.Any(id => !TransparencyBuilder.IsDependencyNode(nodes[id]));
+        var packageSlices = result.Slices.Where(slice => !TouchesTheApplication(slice)).ToList();
+        Assert.True(packageSlices.Count >= 173, $"expected every package flow to be kept, got {packageSlices.Count}");
+        Assert.Equal(packageSlices.Count, result.Statistics.DependencySliceCount);
+        Assert.All(packageSlices, slice =>
         {
             Assert.Equal(TransparencyBuilder.DependencyScope, slice.Scope);
             Assert.Contains(slice.Severity, new[] { "info", "low" });
         });
-        Assert.All(result.WeaknessCandidates, weakness => Assert.Equal(TransparencyBuilder.DependencyScope, weakness.Scope));
-        Assert.All(result.DangerousApiReachability, api => Assert.Equal("Low", api.Confidence));
+        Assert.All(result.Slices.Where(TouchesTheApplication), slice => Assert.Null(slice.Scope));
+        var packageSliceIds = packageSlices.Select(slice => slice.Id).ToHashSet(StringComparer.Ordinal);
+        Assert.All(result.WeaknessCandidates.Where(weakness => weakness.SliceId is { } id && packageSliceIds.Contains(id)), weakness => Assert.Equal(TransparencyBuilder.DependencyScope, weakness.Scope));
+        Assert.All(result.DangerousApiReachability.Where(api => api.NodeIds.All(id => TransparencyBuilder.IsDependencyNode(nodes[id]))), api => Assert.Equal("Low", api.Confidence));
+        // MimeKit is reached by the repro's own `args` flow (MailboxAddress.Parse), so its
+        // reachability is the application's, not only the package's.
         foreach (var name in new[] { "BouncyCastle.Cryptography", "MailKit", "MimeKit" })
         {
             var package = Assert.Single(result.PackageReachability, package => package.Purl.StartsWith($"pkg:nuget/{name}@", StringComparison.Ordinal));
-            Assert.Equal("Low", package.Confidence);
+            Assert.Equal(name == "MimeKit" ? "High" : "Low", package.Confidence);
         }
 
         // The generic `stelem` drift sent every typed-array loop into the state budget
@@ -232,7 +246,8 @@ public class CorpusTests
         Assert.Equal(excluded.Statistics.FindingCount, full.Statistics.FindingCount);
         Assert.Equal(excluded.Findings.Select(finding => (finding.RuleId, finding.Severity)), full.Findings.Select(finding => (finding.RuleId, finding.Severity)));
         Assert.True(full.Statistics.CryptoDataFlowSliceCount > 0);
-        Assert.Equal(full.Statistics.CryptoDataFlowSliceCount, full.Statistics.CryptoDependencyDataFlowSliceCount);
+        // The repro's own `args` flows (see the test above) are the only application slices.
+        Assert.InRange(full.Statistics.CryptoDataFlowSliceCount - full.Statistics.CryptoDependencyDataFlowSliceCount, 0, 8);
         Assert.Equal(0, excluded.Statistics.CryptoDataFlowSliceCount);
     }
 

@@ -30,8 +30,21 @@ public sealed class MinimalApiProvider : IFrameworkProvider
         ["MapControllers"] = "controllers",
         ["MapRazorPages"] = "razor-pages",
         ["MapODataRoute"] = "odata",
-        ["MapHangfireDashboard"] = "hangfire-dashboard"
+        ["MapHangfireDashboard"] = "hangfire-dashboard",
+        ["MapStaticAssets"] = "static-assets"
     };
+
+    /// <summary>
+    ///     The endpoints `MapIdentityApi&lt;TUser&gt;()` registers (.NET 8+), relative to its group;
+    ///     the `/manage` endpoints require an authenticated user.
+    /// </summary>
+    private static readonly (string Verb, string Path, bool Authenticated)[] IdentityApiEndpoints =
+    [
+        ("POST", "/register", false), ("POST", "/login", false), ("POST", "/refresh", false),
+        ("GET", "/confirmEmail", false), ("POST", "/resendConfirmationEmail", false),
+        ("POST", "/forgotPassword", false), ("POST", "/resetPassword", false),
+        ("POST", "/manage/2fa", true), ("GET", "/manage/info", true), ("POST", "/manage/info", true)
+    ];
 
     public string Id => "minimal-api";
 
@@ -56,6 +69,20 @@ public sealed class MinimalApiProvider : IFrameworkProvider
         }
 
         var emittedEndpointIds = new HashSet<string>(StringComparer.Ordinal);
+        // Authorization and antiforgery conventions applied to a group variable, in its fluent
+        // initializer (`app.MapGroup("/api").RequireAuthorization()`) or a later statement
+        // (`api.RequireAuthorization();`), keyed like the prefixes.
+        var groupMetadataByFile = new Dictionary<string, Dictionary<string, ApiEndpoint>>(StringComparer.Ordinal);
+        Dictionary<string, ApiEndpoint> MetadataFor(string filePath)
+        {
+            if (!groupMetadataByFile.TryGetValue(filePath, out var metadata))
+            {
+                metadata = new Dictionary<string, ApiEndpoint>(StringComparer.Ordinal);
+                groupMetadataByFile[filePath] = metadata;
+            }
+
+            return metadata;
+        }
 
         // Pass 1: collect MapGroup prefixes keyed by the variable they are assigned to, so
         // `var api = app.MapGroup("/api"); api.MapGet(...)` composes transitively. The initializer
@@ -85,6 +112,29 @@ public sealed class MinimalApiProvider : IFrameworkProvider
                 {
                     prefixes[declaration.Identifier.Text] = prefix;
                 }
+
+                if (IsGroupChain(invocation, prefixes) && declaration.Identifier.Text.Length > 0)
+                {
+                    MetadataFor(tree.FilePath)[declaration.Identifier.Text] = GroupMetadataOf(invocation, MetadataFor(tree.FilePath));
+                }
+            }
+
+            // `api.RequireAuthorization();` after the declaration: conventions apply to the whole
+            // group whatever the statement order.
+            var metadata = MetadataFor(tree.FilePath);
+            if (metadata.Count > 0)
+            {
+                foreach (var statement in root.DescendantNodes().OfType<ExpressionStatementSyntax>())
+                {
+                    if (statement.Expression is InvocationExpressionSyntax chain && RootIdentifier(chain) is { } groupName && metadata.TryGetValue(groupName, out var groupMetadata) &&
+                        !ReceiverChain(chain).Any(link => ProviderHelpers.InvocationName(link) is "MapGroup" || MapVerbs.ContainsKey(ProviderHelpers.InvocationName(link))))
+                    {
+                        foreach (var link in ReceiverChain(chain))
+                        {
+                            ApplyConvention(groupMetadata, link);
+                        }
+                    }
+                }
             }
         }
 
@@ -93,9 +143,39 @@ public sealed class MinimalApiProvider : IFrameworkProvider
         {
             var rawUrls = ctx.RawUrlsFor(tree);
             var groupPrefixes = PrefixesFor(tree.FilePath);
-            foreach (var invocation in ctx.InvocationsNamed(tree, static name => MountKinds.ContainsKey(name) || MapVerbs.ContainsKey(name) || name is "MapMethods" or "MapFallback" or "MapHealthChecks"))
+            var groupMetadata = MetadataFor(tree.FilePath);
+            foreach (var invocation in ctx.InvocationsNamed(tree, static name => MountKinds.ContainsKey(name) || MapVerbs.ContainsKey(name) || name is "MapMethods" or "MapFallback" or "MapHealthChecks" or "Map" or "MapIdentityApi" or "MapOpenApi"))
             {
                 var name = ProviderHelpers.InvocationName(invocation);
+                if (name == "Map")
+                {
+                    // IEndpointRouteBuilder.Map(pattern, handler) is an any-verb endpoint;
+                    // IApplicationBuilder.Map(path, branch) is middleware branching, and an
+                    // AutoMapper `mapper.Map<T>(source)` is no route at all.
+                    if (IsEndpointMap(ctx, invocation))
+                    {
+                        AddEndpoint(ctx, results, invocation, "ANY", groupPrefixes, rawUrls, emittedEndpointIds, groupMetadata: groupMetadata);
+                    }
+
+                    continue;
+                }
+
+                if (name == "MapIdentityApi")
+                {
+                    foreach (var (identityVerb, identityPath, authenticated) in IdentityApiEndpoints)
+                    {
+                        AddEndpoint(ctx, results, invocation, identityVerb, groupPrefixes, rawUrls, emittedEndpointIds, identityPath, groupMetadata, requireAuthorization: authenticated, seedHandler: false);
+                    }
+
+                    continue;
+                }
+
+                if (name == "MapOpenApi")
+                {
+                    AddEndpoint(ctx, results, invocation, "GET", groupPrefixes, rawUrls, emittedEndpointIds, FirstStringArgument(invocation) ?? "/openapi/{documentName}.json", groupMetadata, seedHandler: false);
+                    continue;
+                }
+
                 if (MountKinds.TryGetValue(name, out var mountKind))
                 {
                     var mountPath = FirstStringArgument(invocation);
@@ -122,7 +202,7 @@ public sealed class MinimalApiProvider : IFrameworkProvider
 
                     foreach (var declaredVerb in verbs)
                     {
-                        AddEndpoint(ctx, results, invocation, declaredVerb, groupPrefixes, rawUrls, emittedEndpointIds);
+                        AddEndpoint(ctx, results, invocation, declaredVerb, groupPrefixes, rawUrls, emittedEndpointIds, groupMetadata: groupMetadata);
                     }
 
                     continue;
@@ -131,20 +211,147 @@ public sealed class MinimalApiProvider : IFrameworkProvider
                 if (name == "MapFallback")
                 {
                     var template = FirstStringArgument(invocation) ?? "/{fallback:nonfile}";
-                    AddEndpoint(ctx, results, invocation, "ANY", groupPrefixes, rawUrls, emittedEndpointIds, template);
+                    AddEndpoint(ctx, results, invocation, "ANY", groupPrefixes, rawUrls, emittedEndpointIds, template, groupMetadata);
                     continue;
                 }
 
                 if (name == "MapHealthChecks" && !MountKinds.ContainsKey(name))
                 {
                     var path = FirstStringArgument(invocation) ?? "/health";
-                    AddEndpoint(ctx, results, invocation, "GET", groupPrefixes, rawUrls, emittedEndpointIds, path);
+                    AddEndpoint(ctx, results, invocation, "GET", groupPrefixes, rawUrls, emittedEndpointIds, path, groupMetadata);
                     continue;
                 }
 
-                AddEndpoint(ctx, results, invocation, httpMethod, groupPrefixes, rawUrls, emittedEndpointIds);
+                AddEndpoint(ctx, results, invocation, httpMethod, groupPrefixes, rawUrls, emittedEndpointIds, groupMetadata: groupMetadata);
             }
         }
+    }
+
+    /// <summary>Whether a `Map(...)` call registers an endpoint (pattern plus handler) rather than a middleware branch or a mapper call.</summary>
+    private static bool IsEndpointMap(FrameworkContext ctx, InvocationExpressionSyntax invocation)
+    {
+        if (invocation.ArgumentList.Arguments.Count < 2 || invocation.ArgumentList.Arguments[0].Expression is not LiteralExpressionSyntax { Token.Value: string })
+        {
+            return false;
+        }
+
+        if (ctx.CSharp?.GetSemanticModel(invocation.SyntaxTree).GetSymbolInfo(invocation).Symbol is IMethodSymbol bound)
+        {
+            return bound.ContainingType?.Name is not ("MapExtensions" or "IMapper" or "Mapper") &&
+                   !bound.Parameters.Any(parameter => parameter.Type.ToDisplayString().Contains("IApplicationBuilder", StringComparison.Ordinal));
+        }
+
+        // Unbound: a branch configures an application builder (`branch => branch.Run(...)`).
+        var handler = invocation.ArgumentList.Arguments[1].Expression;
+        return handler is not LambdaExpressionSyntax lambda ||
+               !lambda.Body.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>().Any(call => ProviderHelpers.InvocationName(call) is "Run" or "Use" or "UseRouting" or "UseEndpoints" or "UseMiddleware");
+    }
+
+    /// <summary>The invocation and the invocations below it on its receiver chain, outermost first.</summary>
+    private static IEnumerable<InvocationExpressionSyntax> ReceiverChain(InvocationExpressionSyntax invocation)
+    {
+        for (ExpressionSyntax? current = invocation; current is InvocationExpressionSyntax link; current = (link.Expression as MemberAccessExpressionSyntax)?.Expression)
+        {
+            yield return link;
+        }
+    }
+
+    private static string? RootIdentifier(InvocationExpressionSyntax invocation) =>
+        (ReceiverChain(invocation).Last().Expression as MemberAccessExpressionSyntax)?.Expression is IdentifierNameSyntax identifier ? identifier.Identifier.Text : null;
+
+    private static bool IsGroupChain(InvocationExpressionSyntax invocation, Dictionary<string, string> prefixes) =>
+        ReceiverChain(invocation).Any(link => ProviderHelpers.InvocationName(link) == "MapGroup") ||
+        RootIdentifier(invocation) is { } root && prefixes.ContainsKey(root);
+
+    /// <summary>The conventions a group's fluent chain applies, on top of those of the group it was made from.</summary>
+    private static ApiEndpoint GroupMetadataOf(InvocationExpressionSyntax invocation, Dictionary<string, ApiEndpoint> groupMetadata)
+    {
+        var metadata = new ApiEndpoint();
+        if (RootIdentifier(invocation) is { } parent && groupMetadata.TryGetValue(parent, out var parentMetadata))
+        {
+            MergeConventions(metadata, parentMetadata);
+        }
+
+        foreach (var link in ReceiverChain(invocation))
+        {
+            ApplyConvention(metadata, link);
+        }
+
+        return metadata;
+    }
+
+    private static void ApplyConvention(ApiEndpoint metadata, InvocationExpressionSyntax link)
+    {
+        switch (ProviderHelpers.InvocationName(link))
+        {
+            case "AllowAnonymous":
+                metadata.AllowAnonymous = true;
+                break;
+            case "RequireAuthorization":
+                metadata.AuthorizationRequired = true;
+                foreach (var policy in ProviderHelpers.StringArguments(link)) AddDistinct(metadata.AuthorizationPolicies, policy);
+                break;
+            case "RequireCors":
+                foreach (var policy in ProviderHelpers.StringArguments(link)) AddDistinct(metadata.CorsPolicies, policy);
+                break;
+            case "DisableAntiforgery":
+                metadata.AntiForgeryRequired = false;
+                break;
+            case "RequireAntiforgery":
+                metadata.AntiForgeryRequired = true;
+                break;
+        }
+    }
+
+    /// <summary>
+    ///     Folds inherited conventions (a group's, or a handler's attributes) into an endpoint:
+    ///     AllowAnonymous anywhere wins, as at runtime; a requirement anywhere else applies; an
+    ///     endpoint's own antiforgery choice beats the inherited one.
+    /// </summary>
+    private static void MergeConventions(ApiEndpoint endpoint, ApiEndpoint inherited)
+    {
+        endpoint.AllowAnonymous |= inherited.AllowAnonymous;
+        if (inherited.AuthorizationRequired == true)
+        {
+            endpoint.AuthorizationRequired = true;
+        }
+
+        foreach (var policy in inherited.AuthorizationPolicies) AddDistinct(endpoint.AuthorizationPolicies, policy);
+        foreach (var role in inherited.Roles) AddDistinct(endpoint.Roles, role);
+        foreach (var scheme in inherited.AuthenticationSchemes) AddDistinct(endpoint.AuthenticationSchemes, scheme);
+        foreach (var scope in inherited.RequiredScopes) AddDistinct(endpoint.RequiredScopes, scope);
+        foreach (var claim in inherited.RequiredClaims) AddDistinct(endpoint.RequiredClaims, claim);
+        foreach (var policy in inherited.CorsPolicies) AddDistinct(endpoint.CorsPolicies, policy);
+        endpoint.AntiForgeryRequired ??= inherited.AntiForgeryRequired;
+        if (endpoint.AllowAnonymous)
+        {
+            endpoint.AuthorizationRequired = false;
+        }
+    }
+
+    private static void AddDistinct(List<string> values, string value)
+    {
+        if (!values.Contains(value, StringComparer.Ordinal))
+        {
+            values.Add(value);
+        }
+    }
+
+    /// <summary>The group conventions above an endpoint: fluent links between it and its MapGroup, and the group variable it hangs off.</summary>
+    private static ApiEndpoint? InheritedGroupMetadata(InvocationExpressionSyntax invocation, Dictionary<string, ApiEndpoint>? groupMetadata)
+    {
+        var receiver = (invocation.Expression as MemberAccessExpressionSyntax)?.Expression;
+        if (receiver is IdentifierNameSyntax identifier)
+        {
+            return groupMetadata is not null && groupMetadata.TryGetValue(identifier.Identifier.Text, out var variableMetadata) ? variableMetadata : null;
+        }
+
+        if (receiver is not InvocationExpressionSyntax receiverInvocation || !ReceiverChain(receiverInvocation).Any(link => ProviderHelpers.InvocationName(link) == "MapGroup"))
+        {
+            return null;
+        }
+
+        return GroupMetadataOf(receiverInvocation, groupMetadata ?? []);
     }
 
     /// <summary>
@@ -293,6 +500,54 @@ public sealed class MinimalApiProvider : IFrameworkProvider
     }
 
     /// <summary>
+    ///     An inline handler's own method: the lambda the compiler emits, whose id
+    ///     (<see cref="Depscan.Dosai.FormatMethodSignature" />, named by
+    ///     <see cref="Depscan.Dosai.NestedFunctionName" /> as <c>&lt;&lt;Main&gt;$&gt;lambda2</c>) is
+    ///     the call graph's and the data flow's id for the handler body. The lambda symbol binds
+    ///     even when the Map* overload does not (unresolved framework references).
+    /// </summary>
+    private static IMethodSymbol? LambdaSymbol(FrameworkContext ctx, LambdaExpressionSyntax lambda) =>
+        ctx.CSharp?.GetSemanticModel(lambda.SyntaxTree).GetSymbolInfo(lambda).Symbol as IMethodSymbol is { MethodKind: MethodKind.AnonymousFunction } symbol ? symbol : null;
+
+    /// <summary>
+    ///     The handler argument of a Map* call: a lambda's attributes, or a method group's symbol
+    ///     and the attributes on its declaration.
+    /// </summary>
+    private static (IMethodSymbol? Method, List<AttributeSyntax> Attributes)? HandlerOf(FrameworkContext ctx, InvocationExpressionSyntax invocation)
+    {
+        foreach (var argument in invocation.ArgumentList.Arguments.Where(argument => argument.NameColon is null))
+        {
+            switch (argument.Expression)
+            {
+                case ParenthesizedLambdaExpressionSyntax lambda:
+                    return (LambdaSymbol(ctx, lambda), ProviderHelpers.AttributesOf(lambda.AttributeLists).ToList());
+                case SimpleLambdaExpressionSyntax simple:
+                    return (LambdaSymbol(ctx, simple), ProviderHelpers.AttributesOf(simple.AttributeLists).ToList());
+                case IdentifierNameSyntax or MemberAccessExpressionSyntax when ctx.CSharp is not null:
+                {
+                    var symbolInfo = ctx.CSharp.GetSemanticModel(invocation.SyntaxTree).GetSymbolInfo(argument.Expression);
+                    var name = argument.Expression is IdentifierNameSyntax identifier ? identifier.Identifier.Text : ((MemberAccessExpressionSyntax)argument.Expression).Name.Identifier.Text;
+                    var method = symbolInfo.Symbol as IMethodSymbol ??
+                                 symbolInfo.CandidateSymbols.OfType<IMethodSymbol>().Where(candidate => candidate.Name == name).GroupBy(candidate => candidate.ToDisplayString()).Select(group => group.First()).FirstOrDefault();
+                    if (method is null || method.MethodKind != MethodKind.Ordinary)
+                    {
+                        continue;
+                    }
+
+                    var attributes = method.DeclaringSyntaxReferences
+                        .Select(reference => reference.GetSyntax())
+                        .OfType<MethodDeclarationSyntax>()
+                        .SelectMany(declaration => ProviderHelpers.AttributesOf(declaration.AttributeLists))
+                        .ToList();
+                    return (method, attributes);
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
     ///     Syntax twin of <see cref="IsInfrastructureParameter" /> for inline lambda handlers,
     ///     whose parameter types often fail to resolve. Applies the same exclusions by type-name
     ///     text and written attributes, so a `CancellationToken ct`, an injected `ILogger<T>` or
@@ -424,7 +679,7 @@ public sealed class MinimalApiProvider : IFrameworkProvider
 
     private static string? FirstStringArgument(InvocationExpressionSyntax invocation) => ProviderHelpers.StringArguments(invocation).FirstOrDefault();
 
-    private static void AddEndpoint(FrameworkContext ctx, FrameworkResults results, InvocationExpressionSyntax invocation, string httpMethod, Dictionary<string, string> groupPrefixes, List<string> rawUrls, HashSet<string> emittedEndpointIds, string? explicitTemplate = null)
+    private static void AddEndpoint(FrameworkContext ctx, FrameworkResults results, InvocationExpressionSyntax invocation, string httpMethod, Dictionary<string, string> groupPrefixes, List<string> rawUrls, HashSet<string> emittedEndpointIds, string? explicitTemplate = null, Dictionary<string, ApiEndpoint>? groupMetadata = null, bool requireAuthorization = false, bool seedHandler = true)
     {
         var template = explicitTemplate ?? FirstStringArgument(invocation);
         if (template is null)
@@ -479,9 +734,32 @@ public sealed class MinimalApiProvider : IFrameworkProvider
             }
         };
         ProviderHelpers.ApplyMinimalApiMetadata(endpoint, invocation);
+        if (requireAuthorization)
+        {
+            endpoint.AuthorizationRequired = true;
+        }
+
+        // The handler's own attributes (`[Authorize] (int id) => …`, or a method group's
+        // `[AllowAnonymous]`) and the group's conventions are endpoint metadata too.
+        var handler = seedHandler ? HandlerOf(ctx, invocation) : null;
+        if (handler?.Attributes is { Count: > 0 } handlerAttributes)
+        {
+            var fromHandler = new ApiEndpoint();
+            ProviderHelpers.ApplyAuthorizationMetadata(fromHandler, handlerAttributes);
+            MergeConventions(endpoint, fromHandler);
+        }
+
+        if (InheritedGroupMetadata(invocation, groupMetadata) is { } inherited)
+        {
+            MergeConventions(endpoint, inherited);
+        }
+
         results.ApiEndpoints.Add(endpoint);
 
-        SeedHandlerParameters(ctx, results, invocation, resolved.Path ?? combined);
+        if (seedHandler)
+        {
+            SeedHandlerParameters(ctx, results, invocation, resolved.Path ?? combined);
+        }
 
         var service = results.Services.FirstOrDefault(existing => existing.Id == serviceId);
         if (service is null)
@@ -520,6 +798,13 @@ public sealed class MinimalApiProvider : IFrameworkProvider
         {
             Id = $"ep:{operationId}",
             Kind = "HttpMinimalApi",
+            // A method-group handler is a method of its own: name it so flows and call paths
+            // land on this route instead of the file's first entry point.
+            // A lambda handler is named the way the call graph and data flow name it.
+            MethodId = handler?.Method is { } handlerMethod ? Depscan.Dosai.FormatMethodSignature(handlerMethod) : null,
+            MethodName = handler?.Method is { } named ? Depscan.Dosai.IsNestedFunction(named) ? Depscan.Dosai.NestedFunctionName(named) : named.Name : null,
+            ClassName = handler?.Method?.ContainingType?.Name,
+            Namespace = handler?.Method?.ContainingType?.ContainingNamespace?.ToDisplayString(),
             FileName = fileName,
             Path = endpoint.FilePath,
             LineNumber = endpoint.LineNumber,

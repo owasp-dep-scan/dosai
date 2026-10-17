@@ -40,18 +40,20 @@ Property names are case-insensitive. The examples use lowercase collection names
 
 Each pattern supports these fields:
 
-| Field               | Required | Values                                                                            | Purpose                                                                                                                                                                                                                   |
-| ------------------- | -------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pattern`           | yes      | string                                                                            | Text or regex to match.                                                                                                                                                                                                   |
-| `kind`              | no       | `Symbol`, `Method`, `Type`, `Namespace`, `Name`, `Parameter`, `Attribute`, `Code` | Which semantic/code value to compare. Defaults to `Symbol`.                                                                                                                                                               |
-| `match`             | no       | `Contains`, `Exact`, `Prefix`, `Suffix`, `Regex`                                  | Match mode. Defaults to `Contains`.                                                                                                                                                                                       |
-| `category`          | no       | string                                                                            | Source/sink category emitted in nodes, slices, and weakness candidates.                                                                                                                                                   |
-| `purl`              | no       | package URL string                                                                | Optional package/package-like identity to attach to matching nodes.                                                                                                                                                       |
-| `description`       | no       | string                                                                            | Human-readable reason for the pattern.                                                                                                                                                                                    |
-| `taintKinds`        | no       | string array                                                                      | Labels carried with the taint trace, such as `user-input`, `secret`, or `path`.                                                                                                                                           |
-| `removesTaintKinds` | no       | string array                                                                      | Reserved for sanitizer metadata. Current sanitizer matching stops taint for the matched expression or validated guard branch.                                                                                             |
-| `confidence`        | no       | string                                                                            | Confidence label. Defaults to `Medium`; common values are `Low`, `Medium`, and `High`.                                                                                                                                    |
-| `severity`          | no       | string                                                                            | Severity override for the slices this pattern produces: `info`, `low`, `medium`, or `high` (schema 4.1.0). Without it, severity defaults by sink category, and a match from a Low-confidence pattern is demoted one rank. |
+| Field                 | Required | Values                                                                            | Purpose                                                                                                                                                                                                                   |
+| --------------------- | -------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pattern`             | yes      | string                                                                            | Text or regex to match.                                                                                                                                                                                                   |
+| `kind`                | no       | `Symbol`, `Method`, `Type`, `Namespace`, `Name`, `Parameter`, `Attribute`, `Code` | Which semantic/code value to compare. Defaults to `Symbol`.                                                                                                                                                               |
+| `match`               | no       | `Contains`, `Exact`, `Prefix`, `Suffix`, `Regex`                                  | Match mode. Defaults to `Contains`.                                                                                                                                                                                       |
+| `category`            | no       | string                                                                            | Source/sink category emitted in nodes, slices, and weakness candidates.                                                                                                                                                   |
+| `purl`                | no       | package URL string                                                                | Optional package/package-like identity to attach to matching nodes.                                                                                                                                                       |
+| `description`         | no       | string                                                                            | Human-readable reason for the pattern.                                                                                                                                                                                    |
+| `taintKinds`          | no       | string array                                                                      | Labels carried with the taint trace, such as `user-input`, `secret`, or `path`.                                                                                                                                           |
+| `removesTaintKinds`   | no       | string array                                                                      | Sanitizers only. The taint kinds the sanitizer strips (for example `insecure-random`); the rest keep flowing. Empty, with no `sanitizesCategories`, stops the whole flow.                                                 |
+| `sanitizesCategories` | no       | string array                                                                      | Sanitizers only. The sink categories the sanitizer neutralizes (`xss` for an HTML encoder). The flow stays live and is suppressed only at sinks of these categories, as a `SanitizedFlows` entry.                         |
+| `sinkParameters`      | no       | string array                                                                      | Sinks only. The parameter names whose argument is dangerous (`pattern` of `Regex.Replace`, `sql` of `ExecuteSqlRaw`); `this` names the receiver. Empty makes every argument a sink.                                       |
+| `confidence`          | no       | string                                                                            | Confidence label. Defaults to `Medium`; common values are `Low`, `Medium`, and `High`.                                                                                                                                    |
+| `severity`            | no       | string                                                                            | Severity override for the slices this pattern produces: `info`, `low`, `medium`, or `high` (schema 4.1.0). Without it, severity defaults by sink category, and a match from a Low-confidence pattern is demoted one rank. |
 
 `Regex` matching is case-sensitive. Use inline regex options such as `(?i)` when a custom pattern should be case-insensitive.
 
@@ -72,13 +74,44 @@ Prefer semantic kinds over `Code` when possible. Semantic matching is more accur
 
 `Parameter` patterns intentionally seed method parameters only; they do not match arbitrary local variables with the same name.
 
+`Method` and `Symbol` patterns compare a method as `Namespace.Type.Name(parameter types)` and a property, field or event as `Namespace.Type.Name`, so `^System\.IO\.Compression\.ZipArchiveEntry\.FullName$` matches the property read. A property store runs its setter (`Namespace.Type.set_Name(type)`) and a user-defined conversion runs its operator (`op_Explicit`/`op_Implicit`), so a sink pattern on either sees `cmd.CommandText = q` and `(MarkupString)html` like a call.
+
 ## Source and assembly matching behavior
 
-For source inputs, `Code` patterns match syntax text and are useful as a fallback for unresolved references or legacy source shapes. For assembly-only inputs, Dosai has metadata symbols and IL literals rather than original syntax. To keep binary analysis precise, assembly matching applies semantic `Method`, `Symbol`, `Type`, `Namespace`, and `Name` patterns to resolved metadata members; `Code` source patterns are applied only to literal IL evidence such as `ldstr` strings, not to arbitrary metadata names. `Parameter` source patterns still seed method parameters, including `Main(string[] args)` as `cli`, and portable PDBs are used for source locations when available.
+For source inputs, `Code` patterns match syntax text and are useful as a fallback for unresolved references or legacy source shapes. For assembly-only inputs, Dosai has metadata symbols and IL literals rather than original syntax. To keep binary analysis precise, assembly matching applies semantic `Method`, `Symbol`, `Type`, `Namespace`, and `Name` patterns to resolved metadata members; `Code` source patterns are applied only to literal IL evidence such as `ldstr` strings, not to arbitrary metadata names. `Parameter` source patterns still seed method parameters, including `Main(string[] args)` and the top-level-statement `<Main>$` entry point's `args` as `cli`, and portable PDBs are used for source locations when available.
 
 Short broad `Name`/`Contains` source patterns are intentionally filtered in assembly metadata mode to avoid noisy matches against compiler-generated members such as `get_Key`. Prefer `Method`, `Type`, or exact/regex `Parameter` patterns for binary-friendly custom rules.
 
-Sanitizer patterns also participate in simple guard reasoning. In source mode, a condition such as `if (AllowListedCommand(input))` suppresses taint for `input` in the validated true branch. Negated guards and common `&&` and `||` forms preserve the unvalidated path instead of globally clearing taint. This is intentionally conservative and pattern-driven. If a validator has unusual semantics, model it with a narrower custom pattern or leave it unmodeled for manual review.
+## Category-scoped sanitizers and argument-specific sinks
+
+An encoder neutralizes the sinks it encodes for and nothing else: `HtmlEncoder.Default.Encode(q)` stops cross-site scripting, but the encoded value still injects a shell command or a path. Give such a sanitizer `sanitizesCategories`; the flow keeps going and ends, as negative evidence in `SanitizedFlows`, only at sinks of those categories. A value built from a neutralized and a raw part (`Encode(a) + b`) stays live for every sink.
+
+```json
+{
+  "sanitizers": [
+    {
+      "kind": "Method",
+      "pattern": "MyCompany.Html.Sanitize",
+      "category": "html-sanitizer",
+      "sanitizesCategories": ["xss"]
+    }
+  ],
+  "sinks": [
+    {
+      "kind": "Method",
+      "pattern": "MyCompany.Data.RunSql",
+      "category": "sql",
+      "sinkParameters": ["sql"]
+    }
+  ]
+}
+```
+
+`sinkParameters` names the dangerous arguments of a sink, so `RunSql("select * from t where id = {0}", id)` reports nothing while `RunSql("select * from t where id = " + id)` reports the flow. The same field keeps `Regex.IsMatch(input, "^[a-z]+$")` (validation) apart from `Regex.IsMatch("x", pattern)` (ReDoS). Both modes apply both fields. Assembly (IL) mode reads the callee's parameter names from its definition: from the analyzed assembly when it declares the callee, else from the referenced assembly found beside it (a package in `bin/`), in the tree's framework reference set, in the installed reference packs and shared frameworks, or in the NuGet global packages folder (`NUGET_PACKAGES`, else `~/.nuget/packages`), following type forwarders. When no definition is found, the IL sink treats every tainted argument as dangerous, so a flow is never hidden by a missing reference, and a diagnostic names the assembly.
+
+A validator's `out` value is clean: after `int.TryParse(q, out var n)`, `n` carries no taint, and the call is recorded in `SanitizedFlows`.
+
+Sanitizer patterns also participate in simple guard reasoning. In source mode, a condition such as `if (AllowListedCommand(input))` suppresses taint for `input` in the validated true branch. Negated guards and common `&&` and `||` forms preserve the unvalidated path instead of globally clearing taint. An early exit guards the rest of its block: after `if (!Regex.IsMatch(q, "^[a-z]+$")) return;` (or `throw`, `continue`, `break`), `q` is validated until the block ends. Assembly (IL) mode reads the same guards from the branch on the validator's result: the validated edge suppresses the values that fed the validator, by the local or argument they were loaded from and by identity when a Release build keeps the value on the stack, so an early exit (`brtrue` past a `ret`/`throw`) leaves the rest of the method validated; Debug builds' negation (`ldc.i4.0; ceq`) and local forwarding are read through. A scoped validator marks the values sanitized for its categories instead. This is intentionally conservative and pattern-driven. If a validator has unusual semantics, model it with a narrower custom pattern or leave it unmodeled for manual review.
 
 ## Example: custom legacy source and sink wrappers
 

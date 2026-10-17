@@ -71,6 +71,15 @@ internal static partial class ProviderHelpers
     }
 
     /// <summary>Collects every string argument of an attribute, e.g. [AcceptVerbs("GET", "POST")] or [Authorize(Roles = "a,b")].</summary>
+    internal static List<string> PositionalStringArguments(AttributeSyntax attribute) =>
+        (attribute.ArgumentList?.Arguments ?? [])
+            .Where(argument => argument.NameEquals is null && argument.NameColon is null)
+            .Select(argument => argument.Expression)
+            .OfType<LiteralExpressionSyntax>()
+            .Where(literal => literal.Token.Value is string)
+            .Select(literal => (string)literal.Token.Value!)
+            .ToList();
+
     internal static List<string> AttributeStringArguments(AttributeSyntax attribute, string? namedArgument = null)
     {
         var values = new List<string>();
@@ -147,7 +156,8 @@ internal static partial class ProviderHelpers
 
         foreach (var attribute in authorizeAttributes)
         {
-            foreach (var policy in AttributeStringArguments(attribute)) AddDistinct(endpoint.AuthorizationPolicies, policy);
+            // Only the positional argument names a policy: `[Authorize(Roles = "Admin")]` is a role.
+            foreach (var policy in PositionalStringArguments(attribute)) AddDistinct(endpoint.AuthorizationPolicies, policy);
             foreach (var role in SplitCommaSeparated(AttributeStringArguments(attribute, "Roles"))) AddDistinct(endpoint.Roles, role);
             foreach (var scheme in SplitCommaSeparated(AttributeStringArguments(attribute, "AuthenticationSchemes"))) AddDistinct(endpoint.AuthenticationSchemes, scheme);
             foreach (var policy in AttributeStringArguments(attribute, "Policy")) AddDistinct(endpoint.AuthorizationPolicies, policy);
