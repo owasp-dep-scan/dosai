@@ -15,7 +15,7 @@
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
-    <Version>5.0.0-rc.1</Version>
+    <Version>5.0.0-rc.2</Version>
     <Title>OWASP Dosai</Title>
     <Authors>Team AppThreat &lt;cloud@appthreat.com&gt;</Authors>
     <Description>OWASP Dosai (Dotnet Source and Assembly Inspector) inspects .NET source code, assemblies, and NuGet packages to extract methods, dependencies, API endpoints, call graphs, data-flow slices, crypto evidence, and severity-tagged security findings for review.</Description>
