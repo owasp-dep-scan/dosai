@@ -456,8 +456,82 @@ internal static class FrameworkReferences
     }
 
     /// <summary>NuGet's global packages folder: <c>NUGET_PACKAGES</c> when set, else <c>~/.nuget/packages</c>.</summary>
+    private static readonly AsyncLocal<string?> NuGetRootOverride = new();
+
+    /// <summary>Test hook: the NuGet global packages folder for the current execution context and the threads it starts.</summary>
+    internal static IDisposable OverrideNuGetRootForTesting(string root)
+    {
+        var previous = NuGetRootOverride.Value;
+        NuGetRootOverride.Value = root;
+        return new Restore(() => NuGetRootOverride.Value = previous);
+    }
+
+    /// <summary>
+    ///     A metadata file for <paramref name="assemblyName" /> outside the analyzed tree: a
+    ///     reference pack (<c>packs/*/*/ref/*</c>), an installed shared framework, else the NuGet
+    ///     global packages folder (<c>&lt;id&gt;/&lt;version&gt;/lib|ref/&lt;tfm&gt;</c>, the package named
+    ///     like the assembly), newest version first. Used to read a callee's parameter names when
+    ///     only an assembly references it. Null when none is installed.
+    /// </summary>
+    internal static string? FindInstalledAssembly(string assemblyName)
+    {
+        var fileName = assemblyName + ".dll";
+        try
+        {
+            foreach (var packs in PackDirectories())
+            {
+                var hit = SafeEnumerate(packs, fileName, depth: 4).OrderByDescending(path => path, StringComparer.Ordinal).FirstOrDefault();
+                if (hit is not null) return hit;
+            }
+
+            foreach (var shared in Dosai.GetDotnetSharedRuntimeRoots().Where(Directory.Exists))
+            {
+                var hit = SafeEnumerate(shared, fileName, depth: 2).OrderByDescending(path => path, StringComparer.Ordinal).FirstOrDefault();
+                if (hit is not null) return hit;
+            }
+
+            foreach (var root in NuGetPackageRoots())
+            {
+                var package = Path.Combine(root, assemblyName.ToLowerInvariant());
+                if (!Directory.Exists(package)) continue;
+                var hit = Directory.EnumerateDirectories(package)
+                    .OrderByDescending(version => Version.TryParse(Path.GetFileName(version).Split('-')[0], out var parsed) ? parsed : new Version(0, 0))
+                    .SelectMany(version => new[] { "lib", "ref" }.Select(kind => Path.Combine(version, kind)).Where(Directory.Exists))
+                    .SelectMany(kind => Directory.EnumerateDirectories(kind).OrderByDescending(tfm => tfm, StringComparer.Ordinal))
+                    .Select(tfm => Path.Combine(tfm, fileName))
+                    .FirstOrDefault(File.Exists);
+                if (hit is not null) return hit;
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+
+        return null;
+
+        // <dir>/<a>/<b>/.../<file> up to depth levels below: pack and framework layouts are fixed-depth.
+        static IEnumerable<string> SafeEnumerate(string directory, string file, int depth)
+        {
+            IEnumerable<string> level = [directory];
+            for (var i = 0; i < depth; i++)
+            {
+                level = level.SelectMany(path => Directory.Exists(path) ? Directory.EnumerateDirectories(path) : []).ToList();
+                foreach (var candidate in level.Select(path => Path.Combine(path, file)).Where(File.Exists).ToList())
+                {
+                    yield return candidate;
+                }
+            }
+        }
+    }
+
     private static IEnumerable<string> NuGetPackageRoots()
     {
+        if (NuGetRootOverride.Value is { Length: > 0 } overridden)
+        {
+            return [overridden];
+        }
+
         if (Environment.GetEnvironmentVariable("NUGET_PACKAGES") is { Length: > 0 } configured)
         {
             return [configured];

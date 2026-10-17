@@ -544,28 +544,31 @@ public static partial class DataFlowAnalyzer
 
             if (TryGetLdargIndex(opCode, instruction.Operand, out var ldargIndex))
             {
-                state.Push(state.Arguments.TryGetValue(ldargIndex, out var taint) ? taint : null);
+                state.Push(state.Arguments.TryGetValue(ldargIndex, out var taint) ? taint : null, state.ArgumentOrigins.TryGetValue(ldargIndex, out var argumentOrigin) ? argumentOrigin : null);
                 EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
                 continue;
             }
 
             if (TryGetStargIndex(opCode, instruction.Operand, out var stargIndex))
             {
-                state.Arguments[stargIndex] = state.Pop();
+                var (storedArgument, storedOrigin) = state.PopWithOrigin();
+                state.Arguments[stargIndex] = storedArgument;
+                SetOrigin(state.ArgumentOrigins, stargIndex, storedOrigin);
                 EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
                 continue;
             }
 
             if (TryGetLdlocIndex(opCode, instruction.Operand, out var ldlocIndex))
             {
-                state.Push(state.Locals.TryGetValue(ldlocIndex, out var taint) ? taint : null);
+                state.Push(state.Locals.TryGetValue(ldlocIndex, out var taint) ? taint : null, state.LocalOrigins.TryGetValue(ldlocIndex, out var localOrigin) ? localOrigin : null);
                 EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
                 continue;
             }
 
             if (TryGetStlocIndex(opCode, instruction.Operand, out var stlocIndex))
             {
-                var localTaint = state.Pop();
+                var (localTaint, localOrigin) = state.PopWithOrigin();
+                SetOrigin(state.LocalOrigins, stlocIndex, localOrigin);
                 if (localTaint is { IsAddress: false })
                 {
                     var localName = sourceMap.GetLocalName(methodInfo.MetadataToken, stlocIndex, instruction.Offset) ?? $"local_{stlocIndex}";
@@ -597,10 +600,12 @@ public static partial class DataFlowAnalyzer
 
             if (opCode == OpCodes.Ldfld || opCode == OpCodes.Ldsfld)
             {
-                var instanceTaint = opCode == OpCodes.Ldfld ? state.Pop() : null;
+                var (instanceTaint, instanceOrigin) = opCode == OpCodes.Ldfld ? state.PopWithOrigin() : (null, null);
                 var fieldToken = instruction.Operand is int token ? token : 0;
                 var member = fieldToken != 0 ? ResolveMember(reader, fieldToken) : null;
-                var fieldTaint = member is not null && state.Fields.TryGetValue(member.Symbol, out var taint)
+                var fieldTaint = member is not null && instanceOrigin is { } readOrigin && state.InstanceFields.TryGetValue((readOrigin, member.Symbol), out var instanceField)
+                    ? instanceField.Taint
+                    : member is not null && state.Fields.TryGetValue(member.Symbol, out var taint)
                     ? taint
                     : member is not null && context.TryGetFieldTaint(FieldTaintKey(reader, fieldToken, member.Symbol), out var storedTaint)
                         ? storedTaint
@@ -612,12 +617,16 @@ public static partial class DataFlowAnalyzer
 
             if (opCode == OpCodes.Stfld || opCode == OpCodes.Stsfld)
             {
-                var valueTaint = state.Pop();
-                if (opCode == OpCodes.Stfld)
+                var (valueTaint, valueOrigin) = state.PopWithOrigin();
+                var (_, ownerOrigin) = opCode == OpCodes.Stfld ? state.PopWithOrigin() : (null, null);
+                // The stored object escapes into the heap: its members join the stored field taints.
+                FlushInstance(state, context, valueOrigin);
+                if (instruction.Operand is int ownedToken && ownerOrigin is { } owner && ResolveMember(reader, ownedToken) is { } ownedMember)
                 {
-                    _ = state.Pop();
+                    // A member of an object this method created: that object's state alone.
+                    state.InstanceFields[(owner, ownedMember.Symbol)] = (valueTaint, FieldTaintKey(reader, ownedToken, ownedMember.Symbol));
                 }
-                if (instruction.Operand is int fieldToken && ResolveMember(reader, fieldToken) is { } member)
+                else if (instruction.Operand is int fieldToken && ResolveMember(reader, fieldToken) is { } member)
                 {
                     state.Fields[member.Symbol] = valueTaint;
                     if (valueTaint is not null)
@@ -639,7 +648,7 @@ public static partial class DataFlowAnalyzer
 
             if (IsArrayElementStore(opCode))
             {
-                _ = state.Pop(); // value
+                FlushInstance(state, context, state.PopWithOrigin().Origin); // value
                 _ = state.Pop(); // index
                 _ = state.Pop(); // array
                 EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
@@ -743,7 +752,7 @@ public static partial class DataFlowAnalyzer
 
             if (opCode == OpCodes.Dup)
             {
-                state.Push(state.Stack.Count > 0 ? state.Stack[^1] : null);
+                state.Push(state.Stack.Count > 0 ? state.Stack[^1] : null, state.TopOrigin);
                 EnqueueSuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
                 continue;
             }
@@ -757,7 +766,9 @@ public static partial class DataFlowAnalyzer
 
             if (opCode == OpCodes.Ret)
             {
-                if (state.Stack.Count > 0 && state.Pop() is { } returnTaint)
+                var (returned, returnedOrigin) = state.Stack.Count > 0 ? state.PopWithOrigin() : (null, null);
+                FlushInstance(state, context, returnedOrigin);
+                if (returned is { } returnTaint)
                 {
                     var node = context.AddNode("Return", "return", methodInfo, assemblyPath, isSource: false, isSink: false, [], null, methodInfo.Symbol, methodInfo.ReturnType, "ret", instruction.Offset);
                     context.AddEdges(returnTaint.NodeIds, node.Id, "AssemblyReturn", methodInfo, assemblyPath, instruction.Offset, "returned value");
@@ -882,12 +893,32 @@ public static partial class DataFlowAnalyzer
         }
 
         var argumentTaints = new List<AssemblyTaint?>();
+        var argumentOrigins = new List<int?>();
         for (var i = 0; i < member.ParameterCount; i++)
         {
-            argumentTaints.Add(state.Pop());
+            var (argument, argumentOrigin) = state.PopWithOrigin();
+            argumentTaints.Add(argument);
+            argumentOrigins.Add(argumentOrigin);
         }
         argumentTaints.Reverse();
-        var receiverTaint = member.HasThis && opCode != OpCodes.Newobj ? state.Pop() : null;
+        argumentOrigins.Reverse();
+        var (receiverTaint, receiverOrigin) = member.HasThis && opCode != OpCodes.Newobj ? state.PopWithOrigin() : (null, null);
+        // A constructed object is a new identity (its newobj site); the constructor's stores are its state.
+        if (opCode == OpCodes.Newobj)
+        {
+            receiverOrigin = instruction.Offset;
+            foreach (var key in state.InstanceFields.Keys.Where(key => key.Origin == instruction.Offset).ToList())
+            {
+                state.InstanceFields.Remove(key);
+            }
+        }
+
+        // Objects passed to the callee escape: what it may read of them is their stored state.
+        foreach (var argumentOrigin in argumentOrigins)
+        {
+            FlushInstance(state, context, argumentOrigin);
+        }
+
         var resolvedArguments = argumentTaints.Select(taint => ResolveAddressTaint(taint, state)).ToList();
         var resolvedReceiver = ResolveAddressTaint(receiverTaint, state);
         var allTaints = resolvedArguments.Concat([resolvedReceiver]).Where(taint => taint is not null).Cast<AssemblyTaint>().ToList();
@@ -902,7 +933,7 @@ public static partial class DataFlowAnalyzer
             var sourceTaint = new AssemblyTaint([node.Id], ToTaintKinds(sourcePatterns), []);
             if (!member.ReturnsVoid || opCode == OpCodes.Newobj)
             {
-                state.Push(sourceTaint);
+                state.Push(sourceTaint, opCode == OpCodes.Newobj ? receiverOrigin : null);
             }
             return;
         }
@@ -975,6 +1006,13 @@ public static partial class DataFlowAnalyzer
         {
             foreach (var sinkParameterIndex in summary.SinkParameterIndexes)
             {
+                // An object this method created is tracked member by member (SinkFields below):
+                // its constructor arguments are not the value its methods sink.
+                if (sinkParameterIndex == ReceiverIndex && receiverOrigin is not null)
+                {
+                    continue;
+                }
+
                 if (TaintAt(sinkParameterIndex) is not { IsAddress: false } taint || summary.SinkCategories.Count > 0 && summary.SinkCategories.All(taint.IsSanitizedFor))
                 {
                     continue;
@@ -995,6 +1033,26 @@ public static partial class DataFlowAnalyzer
                 context.AddSlice(taint, sinkNode, summaryPattern, label, sinkParameterIndex);
             }
 
+            // Members of an object this method created that the callee sinks (`r.Set(q); r.Go()`):
+            // the sink is reached here, from this object's own state.
+            if (receiverOrigin is { } sinkOwner)
+            {
+                foreach (var (field, category) in summary.SinkFields)
+                {
+                    if (!state.InstanceFields.TryGetValue((sinkOwner, field.Symbol), out var held) || held.Taint is not { } fieldTaint || fieldTaint.IsSanitizedFor(category))
+                    {
+                        continue;
+                    }
+
+                    var memberPattern = new DataFlowPattern { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = member.Symbol, Category = category, Description = "Assembly IL sink reached through a summarized callee's receiver member" };
+                    var memberSink = context.AddNode("Sink", member.Name, currentMethod, assemblyPath, isSource: false, isSink: true, [memberPattern], category, member.Symbol, member.ContainingType, member.Symbol, instruction.Offset);
+                    memberSink.Properties["summaryMethod"] = summary.Method;
+                    memberSink.Properties["receiverMember"] = field.Symbol;
+                    context.AddEdges(fieldTaint.NodeIds, memberSink.Id, "AssemblyInterproceduralSink", currentMethod, assemblyPath, instruction.Offset, member.Name);
+                    context.AddSlice(fieldTaint, memberSink, memberPattern, "receiver", ReceiverIndex);
+                }
+            }
+
             // Object state written by the callee (a setter, `Set(x)`): the field takes the
             // argument's taint for the rest of this method and, through the stored field taints,
             // for every method that reads it. A property setter always writes, so a clean value
@@ -1003,7 +1061,12 @@ public static partial class DataFlowAnalyzer
             foreach (var (parameter, field) in summary.FieldStores)
             {
                 var stored = TaintAt(parameter) is { IsAddress: false } value ? value : null;
-                if (stored is not null)
+                if (receiverOrigin is { } owner && field.OnReceiver)
+                {
+                    // The object is one this method created: its own state, strongly updated.
+                    state.InstanceFields[(owner, field.Symbol)] = (stored, field.Key);
+                }
+                else if (stored is not null)
                 {
                     state.Fields[field.Symbol] = stored;
                     context.RecordFieldTaint(field.Key, stored);
@@ -1037,7 +1100,11 @@ public static partial class DataFlowAnalyzer
             // and run large package bodies into the state budget.
             foreach (var field in summary.ReturnFields)
             {
-                if (state.Fields.TryGetValue(field.Symbol, out var local))
+                if (field.OnReceiver && receiverOrigin is { } owner && state.InstanceFields.TryGetValue((owner, field.Symbol), out var instance))
+                {
+                    if (instance.Taint is not null) returnTaints.Add(instance.Taint);
+                }
+                else if (state.Fields.TryGetValue(field.Symbol, out var local))
                 {
                     if (local is not null) returnTaints.Add(local);
                 }
@@ -1059,14 +1126,15 @@ public static partial class DataFlowAnalyzer
             {
                 var callNode = context.AddNode("CallSummary", member.Name, currentMethod, assemblyPath, isSource: false, isSink: false, [], null, member.Symbol, member.ContainingType, member.Symbol, instruction.Offset);
                 context.AddEdges(returnCombined.NodeIds, callNode.Id, "AssemblyInterproceduralReturn", currentMethod, assemblyPath, instruction.Offset, member.Name);
-                state.Push(returnCombined.Append(callNode.Id));
+                state.Push(returnCombined.Append(callNode.Id), opCode == OpCodes.Newobj ? receiverOrigin : null);
                 return;
             }
         }
 
+        int? resultOrigin = opCode == OpCodes.Newobj ? receiverOrigin : null;
         if (combined is null)
         {
-            state.Push(null);
+            state.Push(null, resultOrigin);
             return;
         }
 
@@ -1075,11 +1143,43 @@ public static partial class DataFlowAnalyzer
         {
             var callNode = context.AddNode("Call", member.Name, currentMethod, assemblyPath, isSource: false, isSink: false, [], null, member.Symbol, member.ContainingType, member.Symbol, instruction.Offset);
             context.AddEdges(combined.NodeIds, callNode.Id, "AssemblyCallReturn", currentMethod, assemblyPath, instruction.Offset, member.Name);
-            state.Push(combined.Append(callNode.Id));
+            state.Push(combined.Append(callNode.Id), resultOrigin);
         }
         else
         {
-            state.Push(combined);
+            state.Push(combined, resultOrigin);
+        }
+    }
+
+    private static void SetOrigin(Dictionary<int, int> origins, int slot, int? origin)
+    {
+        if (origin is { } value)
+        {
+            origins[slot] = value;
+        }
+        else
+        {
+            origins.Remove(slot);
+        }
+    }
+
+    /// <summary>
+    ///     An object this method created escapes (passed to a call, stored, returned): its member
+    ///     taints become stored field taints every reader sees, as they were before identities.
+    /// </summary>
+    private static void FlushInstance(AssemblyMethodState state, AssemblyDataFlowContext context, int? origin)
+    {
+        if (origin is not { } escaped || state.InstanceFields.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var ((owner, _), (taint, key)) in state.InstanceFields)
+        {
+            if (owner == escaped && taint is not null)
+            {
+                context.RecordFieldTaint(key, taint);
+            }
         }
     }
 
@@ -1372,7 +1472,7 @@ public static partial class DataFlowAnalyzer
             {
                 var instance = opCode == OpCodes.Ldfld ? state.Pop() : null;
                 var read = instruction.Operand is int readToken && ResolveMember(reader, readToken) is { } readField
-                    ? new AssemblySummaryTaint([], [new AssemblyFieldRef(FieldTaintKey(reader, readToken, readField.Symbol), readField.Symbol)])
+                    ? new AssemblySummaryTaint([], [new AssemblyFieldRef(FieldTaintKey(reader, readToken, readField.Symbol), readField.Symbol, instance?.ParameterIndexes.Contains(ReceiverIndex) == true)])
                     : null;
                 state.Push(CombineSummaryTaints(new[] { instance, read }.OfType<AssemblySummaryTaint>()));
                 EnqueueSummarySuccessors(instructionIndex, instruction, instructions, instructionIndexByOffset, exceptionRegions, state, worklist);
@@ -1382,14 +1482,11 @@ public static partial class DataFlowAnalyzer
             if (opCode == OpCodes.Stfld || opCode == OpCodes.Stsfld)
             {
                 var stored = state.Pop();
-                if (opCode == OpCodes.Stfld)
-                {
-                    _ = state.Pop();
-                }
+                var owner = opCode == OpCodes.Stfld ? state.Pop() : null;
 
                 if (stored is { ParameterIndexes.Count: > 0 } && instruction.Operand is int storeToken && ResolveMember(reader, storeToken) is { } storeField)
                 {
-                    var field = new AssemblyFieldRef(FieldTaintKey(reader, storeToken, storeField.Symbol), storeField.Symbol);
+                    var field = new AssemblyFieldRef(FieldTaintKey(reader, storeToken, storeField.Symbol), storeField.Symbol, owner?.ParameterIndexes.Contains(ReceiverIndex) == true);
                     foreach (var index in stored.ParameterIndexes)
                     {
                         summary.AddFieldStore(index, field);
@@ -1511,6 +1608,10 @@ public static partial class DataFlowAnalyzer
             {
                 foreach (var index in sinkTaint.ParameterIndexes) currentSummary.AddSinkParameter(index);
                 foreach (var category in sinkPatterns.Select(pattern => pattern.Category).Where(category => !string.IsNullOrWhiteSpace(category))) currentSummary.AddSinkCategory(category!);
+                foreach (var field in (sinkTaint.Fields ?? []).Where(field => field.OnReceiver))
+                {
+                    currentSummary.AddSinkField(field, sinkPatterns.Select(pattern => pattern.Category).FirstOrDefault(category => !string.IsNullOrWhiteSpace(category)) ?? "interprocedural");
+                }
             }
         }
 
@@ -1521,6 +1622,12 @@ public static partial class DataFlowAnalyzer
                 if (TaintAt(sinkParameterIndex) is not { } taint) continue;
                 foreach (var index in taint.ParameterIndexes) currentSummary.AddSinkParameter(index);
                 foreach (var category in calleeSummary.SinkCategories) currentSummary.AddSinkCategory(category);
+            }
+
+            // A callee on this same receiver sinks its members: so does this method.
+            if (TaintAt(ReceiverIndex)?.ParameterIndexes.Contains(ReceiverIndex) == true)
+            {
+                foreach (var (field, category) in calleeSummary.SinkFields) currentSummary.AddSinkField(field, category);
             }
 
             // A helper that stores its argument stores the caller's parameter (transitive setters).
@@ -2847,13 +2954,14 @@ public static partial class DataFlowAnalyzer
         public IEnumerable<DataFlowPattern> MatchSourceCode(string code) => _patternIndex.SourceCode.Where(pattern => AssemblyPatternMatches(code, pattern));
         public IEnumerable<DataFlowPattern> MatchAttributeSource(IEnumerable<string> attributes) => _patternIndex.SourceAttributes.Where(pattern => attributes.Any(attribute => AssemblyPatternMatches(attribute, pattern)));
 
-        private readonly Dictionary<MetadataReader, Dictionary<MethodDefinitionHandle, List<string>>> _propertyAttributesByGetter = new(ReferenceEqualityComparer.Instance);
+        private readonly Dictionary<(MetadataReader Reader, int Type, string Property), List<string>> _propertyAttributes = [];
 
         /// <summary>
         ///     Attribute-source patterns of the property a getter belongs to: reading a
         ///     <c>[BindProperty]</c> or <c>[SupplyParameterFromQuery]</c> property reads the request.
-        ///     Only getters the analyzed assembly defines are resolved; a property of another
-        ///     assembly is matched when that assembly's own IL reads it.
+        ///     The property is found on the getter's declaring type, in this assembly or a referenced
+        ///     one (beside the input, the framework references, packs or the NuGet cache), and an
+        ///     override inherits the attributes of the property it overrides up the base types.
         /// </summary>
         public IEnumerable<DataFlowPattern> MatchPropertySource(MetadataReader reader, int token, AssemblyMemberInfo member)
         {
@@ -2863,31 +2971,101 @@ public static partial class DataFlowAnalyzer
             }
 
             var handle = MetadataTokens.EntityHandle(token);
-            if (handle.Kind != HandleKind.MethodDefinition)
+            EntityHandle type = handle.Kind switch
+            {
+                HandleKind.MethodDefinition => reader.GetMethodDefinition((MethodDefinitionHandle)handle).GetDeclaringType(),
+                HandleKind.MemberReference => reader.GetMemberReference((MemberReferenceHandle)handle).Parent,
+                _ => default
+            };
+            if (type.IsNil)
             {
                 return [];
             }
 
-            if (!_propertyAttributesByGetter.TryGetValue(reader, out var byGetter))
+            try
             {
-                byGetter = [];
-                foreach (var typeHandle in reader.TypeDefinitions)
-                {
-                    foreach (var propertyHandle in reader.GetTypeDefinition(typeHandle).GetProperties())
-                    {
-                        var property = reader.GetPropertyDefinition(propertyHandle);
-                        var getter = property.GetAccessors().Getter;
-                        if (!getter.IsNil && property.GetCustomAttributes().Count > 0)
-                        {
-                            byGetter[getter] = GetAttributeNames(reader, property.GetCustomAttributes()).ToList();
-                        }
-                    }
-                }
+                var attributes = PropertyAttributes(reader, type, member.Name[4..], depth: 0);
+                return attributes.Count == 0 ? [] : MatchAttributeSource(attributes);
+            }
+            catch (Exception ex) when (ex is BadImageFormatException or InvalidOperationException or ArgumentException)
+            {
+                return [];
+            }
+        }
 
-                _propertyAttributesByGetter[reader] = byGetter;
+        private List<string> PropertyAttributes(MetadataReader reader, EntityHandle type, string property, int depth)
+        {
+            if (depth > 16 || type.IsNil)
+            {
+                return [];
             }
 
-            return byGetter.TryGetValue((MethodDefinitionHandle)handle, out var attributes) ? MatchAttributeSource(attributes) : [];
+            switch (type.Kind)
+            {
+                case HandleKind.TypeSpecification:
+                {
+                    var blob = reader.GetBlobReader(reader.GetTypeSpecification((TypeSpecificationHandle)type).Signature);
+                    if (blob.ReadSignatureTypeCode() != SignatureTypeCode.GenericTypeInstance) return [];
+                    blob.ReadSignatureTypeCode();
+                    return PropertyAttributes(reader, blob.ReadTypeHandle(), property, depth + 1);
+                }
+                case HandleKind.TypeReference:
+                {
+                    var reference = reader.GetTypeReference((TypeReferenceHandle)type);
+                    if (reference.ResolutionScope.Kind == HandleKind.TypeReference || DeclaringAssemblyName(reader, type) is not { } assemblyName || ReferenceReader(assemblyName, reportMissing: false) is not { } target)
+                    {
+                        return [];
+                    }
+
+                    foreach (var definitionHandle in target.TypeDefinitions)
+                    {
+                        var definition = target.GetTypeDefinition(definitionHandle);
+                        if (target.StringComparer.Equals(definition.Name, reader.GetString(reference.Name)) && target.StringComparer.Equals(definition.Namespace, reader.GetString(reference.Namespace)))
+                        {
+                            return PropertyAttributes(target, definitionHandle, property, depth + 1);
+                        }
+                    }
+
+                    return [];
+                }
+                case HandleKind.TypeDefinition:
+                {
+                    var key = (reader, MetadataTokens.GetToken(type), property);
+                    if (_propertyAttributes.TryGetValue(key, out var cached))
+                    {
+                        return cached;
+                    }
+
+                    _propertyAttributes[key] = [];
+                    var definition = reader.GetTypeDefinition((TypeDefinitionHandle)type);
+                    var attributes = new List<string>();
+                    foreach (var propertyHandle in definition.GetProperties())
+                    {
+                        var candidate = reader.GetPropertyDefinition(propertyHandle);
+                        if (reader.StringComparer.Equals(candidate.Name, property))
+                        {
+                            attributes.AddRange(GetAttributeNames(reader, candidate.GetCustomAttributes()));
+                            // [BindProperties] on the type binds every public settable property.
+                            if (candidate.GetAccessors().Setter is { IsNil: false } setter &&
+                                (reader.GetMethodDefinition(setter).Attributes & MethodAttributes.MemberAccessMask) == MethodAttributes.Public &&
+                                GetAttributeNames(reader, definition.GetCustomAttributes()).Contains("BindPropertiesAttribute"))
+                            {
+                                attributes.Add("BindPropertyAttribute");
+                            }
+                        }
+                    }
+
+                    if (attributes.Count == 0)
+                    {
+                        attributes = PropertyAttributes(reader, definition.BaseType, property, depth + 1);
+                    }
+
+                    _propertyAttributes[key] = attributes;
+                    return attributes;
+                }
+                default:
+                    return [];
+            }
         }
 
         private readonly Dictionary<string, string[]?> _parameterNames = new(StringComparer.Ordinal);
@@ -2956,7 +3134,7 @@ public static partial class DataFlowAnalyzer
 
         private string[]? FindParameterNames(string assemblyName, string typeNamespace, string typeName, AssemblyMemberInfo member, int depth)
         {
-            if (depth > 4 || ReferenceReader(assemblyName) is not { } target)
+            if (depth > 4 || ReferenceReader(assemblyName, reportMissing: true) is not { } target)
             {
                 return null;
             }
@@ -3013,10 +3191,17 @@ public static partial class DataFlowAnalyzer
         }
 
         /// <summary>A referenced assembly's metadata: an analyzed tree's own copy first (packages in <c>bin/</c>), then the framework reference set.</summary>
-        private MetadataReader? ReferenceReader(string assemblyName)
+        private readonly HashSet<string> _reportedMissing = new(StringComparer.OrdinalIgnoreCase);
+
+        private MetadataReader? ReferenceReader(string assemblyName, bool reportMissing)
         {
             if (_referenceReaders.TryGetValue(assemblyName, out var cached))
             {
+                if (cached is null && reportMissing && _reportedMissing.Add(assemblyName))
+                {
+                    RecordMissingMetadata(assemblyName);
+                }
+
                 return cached;
             }
 
@@ -3025,6 +3210,10 @@ public static partial class DataFlowAnalyzer
             {
                 var fileName = assemblyName + ".dll";
                 var local = _analyzedDirectories.Select(directory => Path.Combine(directory, fileName)).FirstOrDefault(File.Exists);
+                var frameworkHit = local is null && FrameworkReferences.ForTree(basePath).References.Any(entry => string.Equals(Path.GetFileNameWithoutExtension(entry.Reference.FilePath ?? entry.Key), assemblyName, StringComparison.OrdinalIgnoreCase));
+                // Not beside the input and not in the tree's reference set: a reference pack, an
+                // installed shared framework, or the NuGet global packages folder.
+                local ??= frameworkHit ? null : FrameworkReferences.FindInstalledAssembly(assemblyName);
                 if (local is not null)
                 {
                     var stream = new FileStream(local, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
@@ -3061,7 +3250,19 @@ public static partial class DataFlowAnalyzer
             }
 
             _referenceReaders[assemblyName] = reader;
+            if (reader is null && reportMissing && _reportedMissing.Add(assemblyName))
+            {
+                RecordMissingMetadata(assemblyName);
+            }
+
             return reader;
+        }
+
+        private void RecordMissingMetadata(string assemblyName)
+        {
+            {
+                RecordDiagnostic($"SinkParameters could not be applied to calls into {assemblyName}: its metadata was not found beside the input, in the framework references or reference packs, or in the NuGet cache, so every tainted argument of those sink calls is treated as dangerous.");
+            }
         }
 
         private readonly SortedSet<string> _analyzedDirectories = new(StringComparer.Ordinal);
@@ -3403,6 +3604,16 @@ public static partial class DataFlowAnalyzer
         public List<AssemblyFieldRef> ReturnFields { get; } = [];
         /// <summary>Source patterns of the values the method returns (a helper that returns a source).</summary>
         public List<DataFlowPattern> ReturnSources { get; } = [];
+        /// <summary>Members of the receiver whose value reaches a sink, with the sink's category (<c>Go() =&gt; Process.Start(command)</c>).</summary>
+        public List<(AssemblyFieldRef Field, string Category)> SinkFields { get; } = [];
+
+        public bool AddSinkField(AssemblyFieldRef field, string category)
+        {
+            if (SinkFields.Any(existing => existing.Field.Key == field.Key && existing.Category == category)) return false;
+            SinkFields.Add((field, category));
+            return true;
+        }
+
         /// <summary>Parameter (or <see cref="ReceiverIndex" />) values the method stores into a field (a setter, <c>Set(x)</c>).</summary>
         public List<(int Parameter, AssemblyFieldRef Field)> FieldStores { get; } = [];
 
@@ -3441,6 +3652,7 @@ public static partial class DataFlowAnalyzer
             foreach (var field in other.ReturnFields) changed |= AddReturnField(field);
             foreach (var pattern in other.ReturnSources) changed |= AddReturnSource(pattern);
             foreach (var (parameter, field) in other.FieldStores) changed |= AddFieldStore(parameter, field);
+            foreach (var (field, category) in other.SinkFields) changed |= AddSinkField(field, category);
             foreach (var category in other.SinkCategories)
             {
                 if (!SinkCategories.Contains(category, StringComparer.OrdinalIgnoreCase))
@@ -3467,17 +3679,51 @@ public static partial class DataFlowAnalyzer
         public Dictionary<int, AssemblyTaint?> Locals { get; } = locals;
         public Dictionary<int, AssemblyTaint?> Arguments { get; } = arguments;
         public Dictionary<string, AssemblyTaint?> Fields { get; } = new(StringComparer.Ordinal);
-        public void Push(AssemblyTaint? taint) => Stack.Add(taint);
-        public AssemblyTaint? Pop()
+
+        // Object identity: the `newobj` site (its IL offset) a stack value, local or argument
+        // holds, and the member state of each such object, keyed like source mode's receiver
+        // members. A reassigned variable holds a new identity and none of the old one's state.
+        public List<int?> Origins { get; private init; } = [.. stack.Select(_ => (int?)null)];
+        public Dictionary<int, int> LocalOrigins { get; private init; } = [];
+        public Dictionary<int, int> ArgumentOrigins { get; private init; } = [];
+        public Dictionary<(int Origin, string Field), (AssemblyTaint? Taint, string Key)> InstanceFields { get; private init; } = [];
+
+        public void Push(AssemblyTaint? taint) => Push(taint, null);
+
+        public void Push(AssemblyTaint? taint, int? origin)
         {
-            if (Stack.Count == 0) return null;
+            Stack.Add(taint);
+            Origins.Add(origin);
+        }
+
+        public AssemblyTaint? Pop() => PopWithOrigin().Taint;
+
+        public (AssemblyTaint? Taint, int? Origin) PopWithOrigin()
+        {
+            if (Stack.Count == 0) return (null, null);
             var value = Stack[^1];
             Stack.RemoveAt(Stack.Count - 1);
-            return value;
+            int? origin = null;
+            if (Origins.Count > 0)
+            {
+                origin = Origins[^1];
+                Origins.RemoveAt(Origins.Count - 1);
+            }
+
+            return (value, origin);
         }
+
+        public int? TopOrigin => Origins.Count > 0 ? Origins[^1] : null;
+
         public AssemblyMethodState Clone()
         {
-            var clone = new AssemblyMethodState([.. Stack], new Dictionary<int, AssemblyTaint?>(Locals), new Dictionary<int, AssemblyTaint?>(Arguments));
+            var clone = new AssemblyMethodState([.. Stack], new Dictionary<int, AssemblyTaint?>(Locals), new Dictionary<int, AssemblyTaint?>(Arguments))
+            {
+                Origins = [.. Origins],
+                LocalOrigins = new Dictionary<int, int>(LocalOrigins),
+                ArgumentOrigins = new Dictionary<int, int>(ArgumentOrigins),
+                InstanceFields = new Dictionary<(int Origin, string Field), (AssemblyTaint? Taint, string Key)>(InstanceFields)
+            };
             foreach (var (key, value) in Fields) clone.Fields[key] = value;
             return clone;
         }
@@ -3523,7 +3769,11 @@ public static partial class DataFlowAnalyzer
     }
 
     /// <summary>A field a summary reads or writes: its <see cref="FieldTaintKey" /> and its symbol (the per-method state key).</summary>
-    private sealed record AssemblyFieldRef(string Key, string Symbol);
+    /// <summary>
+    ///     A field a summary reads or writes: its <see cref="FieldTaintKey" />, its symbol (the
+    ///     per-method state key), and whether it is a member of the method's own receiver.
+    /// </summary>
+    private sealed record AssemblyFieldRef(string Key, string Symbol, bool OnReceiver = false);
 
     /// <summary>The summary index standing for the receiver (<c>this</c>) of an instance method.</summary>
     private const int ReceiverIndex = -1;

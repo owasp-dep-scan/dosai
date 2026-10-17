@@ -36,9 +36,11 @@ public class IlDataFlowParityTests
     }
 
     /// <summary>Compiles <paramref name="source" /> into <c>Fixture.dll</c> plus its PDB in <paramref name="directory" />.</summary>
-    internal static string EmitAssembly(string directory, string source, OptimizationLevel optimization = OptimizationLevel.Release, OutputKind outputKind = OutputKind.DynamicallyLinkedLibrary, string assemblyName = "Fixture")
+    internal static string EmitAssembly(string directory, string source, OptimizationLevel optimization = OptimizationLevel.Release, OutputKind outputKind = OutputKind.DynamicallyLinkedLibrary, string assemblyName = "Fixture", IEnumerable<string>? extraReferences = null)
     {
-        var references = FrameworkReferences.Current.References.Select(entry => (MetadataReference)entry.Reference).ToList();
+        var references = FrameworkReferences.Current.References.Select(entry => (MetadataReference)entry.Reference)
+            .Concat((extraReferences ?? []).Select(path => (MetadataReference)MetadataReference.CreateFromFile(path)))
+            .ToList();
         var compilation = CSharpCompilation.Create(assemblyName,
             [CSharpSyntaxTree.ParseText(SourceText.From(source, Encoding.UTF8), new CSharpParseOptions(LanguageVersion.Preview), path: "/_/Fixture/Fixture.cs")],
             references,
@@ -349,5 +351,138 @@ public class Flows : ControllerBase
         Assert.True(Reaches(sinks, "NoExit", "command"));
         Assert.False(Reaches(sinks, "EarlyRedirect", "redirect"));
         Assert.False(sinks.ContainsKey("Parsed"));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void SinkParameters_ResolveThroughTheNuGetCache_OrReportTheFallback(bool packageInCache)
+    {
+        using var library = new TempDir();
+        using var cache = new TempDir();
+        using var fixture = new TempDir();
+        using var patterns = new TempDir();
+        var libraryPath = EmitAssembly(library.Path, "namespace IlSinkLib { public static class Db { public static void Exec(string sql, string arg) { } } }", assemblyName: "IlSinkLib");
+        if (packageInCache)
+        {
+            var packageDirectory = System.IO.Path.Combine(cache.Path, "ilsinklib", "1.2.0", "lib", "net8.0");
+            Directory.CreateDirectory(packageDirectory);
+            File.Copy(libraryPath, System.IO.Path.Combine(packageDirectory, "IlSinkLib.dll"));
+        }
+
+        EmitAssembly(fixture.Path, """
+using System;
+public static class Flows
+{
+    public static void Bound() { var q = Console.ReadLine()!; IlSinkLib.Db.Exec("select 1 where id = @id", q); }
+    public static void Text() { var q = Console.ReadLine()!; IlSinkLib.Db.Exec("select " + q, "x"); }
+}
+""", extraReferences: [libraryPath]);
+        var patternsPath = System.IO.Path.Combine(patterns.Path, "patterns.json");
+        File.WriteAllText(patternsPath, """
+{ "sinks": [ { "kind": "Method", "match": "Contains", "pattern": "IlSinkLib.Db.Exec", "category": "sql", "sinkParameters": ["sql"] } ] }
+""");
+
+        DataFlowResult result;
+        using (FrameworkReferences.OverrideNuGetRootForTesting(cache.Path))
+        {
+            result = DataFlowAnalyzer.Analyze(fixture.Path, patternsPath);
+        }
+
+        var sinks = SinksBySourceMethod(result);
+        Assert.True(Reaches(sinks, "Text", "sql"));
+        Assert.Equal(!packageInCache, Reaches(sinks, "Bound", "sql"));
+        Assert.Equal(!packageInCache, result.Diagnostics.Any(diagnostic => diagnostic.Contains("SinkParameters could not be applied to calls into IlSinkLib", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public void PropertyAttributeSources_FollowInheritanceAndReferencedAssemblies()
+    {
+        using var fixture = new TempDir();
+        using var build = new TempDir();
+        var libraryPath = EmitAssembly(build.Path, """
+using System;
+namespace Microsoft.AspNetCore.Components
+{
+    [AttributeUsage(AttributeTargets.Property)] public sealed class SupplyParameterFromQueryAttribute : Attribute { }
+    public abstract class ComponentBase { }
+}
+namespace Microsoft.AspNetCore.Mvc
+{
+    [AttributeUsage(AttributeTargets.Property)] public sealed class BindPropertyAttribute : Attribute { }
+}
+namespace Shared
+{
+    public abstract class SearchBase : Microsoft.AspNetCore.Components.ComponentBase
+    {
+        [Microsoft.AspNetCore.Components.SupplyParameterFromQuery] public string? Query { get; set; }
+        [Microsoft.AspNetCore.Mvc.BindProperty] public virtual string? Name { get; set; }
+        public string? Plain { get; set; }
+    }
+}
+""", assemblyName: "SharedComponents");
+        File.Copy(libraryPath, System.IO.Path.Combine(fixture.Path, "SharedComponents.dll"));
+        EmitAssembly(fixture.Path, """
+using System.Diagnostics;
+public class LocalBase { [Microsoft.AspNetCore.Mvc.BindProperty] public virtual string? Title { get; set; } }
+public class LocalDerived : LocalBase
+{
+    public override string? Title { get; set; }
+    public void FromOverride() => Process.Start(Title!);
+}
+public class SearchPage : Shared.SearchBase
+{
+    public override string? Name { get; set; }
+    public void FromBase() => Process.Start(Query!);
+    public void FromReferencedOverride() => Process.Start(Name!);
+    public void FromPlain() => Process.Start(Plain!);
+}
+""", extraReferences: [libraryPath]);
+
+        var sinks = SinksBySourceMethod(DataFlowAnalyzer.Analyze(fixture.Path));
+
+        Assert.True(Reaches(sinks, "FromOverride", "command"));
+        Assert.True(Reaches(sinks, "FromBase", "command"));
+        Assert.True(Reaches(sinks, "FromReferencedOverride", "command"));
+        Assert.False(sinks.ContainsKey("FromPlain"));
+    }
+
+    [Fact]
+    public void ObjectState_IsKeyedByInstance()
+    {
+        var sinks = Analyze(Header + """
+public class Runner
+{
+    private string command = "";
+    private readonly string fixedCommand;
+    private string other = "safe";
+    public string Field = "";
+    public Runner(string c) { fixedCommand = c; }
+    public void Set(string c) => command = c;
+    public void Go() => Process.Start(command);
+    public void GoFixed() => Process.Start(fixedCommand);
+    public void GoOther() => Process.Start(other);
+}
+
+public static class Flows
+{
+    public static void SetterThenGo() { var i = Console.ReadLine()!; var r = new Runner("x"); r.Set(i); r.Go(); }
+    public static void ConstructorThenGo() { var i = Console.ReadLine()!; var r = new Runner(i); r.GoFixed(); }
+    public static void ReassignedReceiver() { var i = Console.ReadLine()!; var r = new Runner("x"); r.Set(i); r = new Runner("y"); r.Go(); }
+    public static void OtherInstance() { var i = Console.ReadLine()!; var a = new Runner("x"); var b = new Runner("y"); a.Set(i); b.Go(); }
+    public static void UntaintedMember() { var i = Console.ReadLine()!; var r = new Runner(i); r.GoOther(); }
+    public static void PublicField() { var i = Console.ReadLine()!; var a = new Runner("x"); var b = new Runner("y"); a.Field = i; Process.Start(a.Field); Process.Start(b.Field); }
+    public static void OtherFieldInstance() { var i = Console.ReadLine()!; var a = new Runner("x"); var b = new Runner("y"); a.Field = i; Process.Start(b.Field); }
+}
+""" + Stubs);
+
+        Assert.True(Reaches(sinks, "SetterThenGo", "command"));
+        Assert.True(Reaches(sinks, "ConstructorThenGo", "command"));
+        Assert.True(Reaches(sinks, "PublicField", "command"));
+        // A new object in the variable, or another object, does not carry the first one's members.
+        Assert.False(sinks.ContainsKey("ReassignedReceiver"));
+        Assert.False(sinks.ContainsKey("OtherInstance"));
+        Assert.False(sinks.ContainsKey("UntaintedMember"));
+        Assert.False(sinks.ContainsKey("OtherFieldInstance"));
     }
 }
