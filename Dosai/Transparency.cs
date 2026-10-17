@@ -821,10 +821,30 @@ public static class TransparencyBuilder
         };
     }
 
+    /// <summary>
+    ///     The entry point a source belongs to: its own method's, else the nearest one declared
+    ///     above it in the file. An HTTP-seeded source (a minimal-API lambda parameter sits inside
+    ///     the top-level `Main`) prefers the nearest HTTP registration above it over the program's
+    ///     CLI entry point; the first entry point of the file was taken before, so every flow in
+    ///     a Program.cs was attributed to its first route.
+    /// </summary>
     private static EntryPoint? FindEntryPoint(IEnumerable<EntryPoint> entryPoints, DataFlowNode? source)
     {
         if (source is null) return null;
-        return entryPoints.FirstOrDefault(ep => string.Equals(ep.FileName, source.FileName, StringComparison.OrdinalIgnoreCase) && (ep.MethodName == source.MethodName || ep.LineNumber <= source.LineNumber));
+        var inFile = entryPoints.Where(ep => string.Equals(ep.FileName, source.FileName, StringComparison.OrdinalIgnoreCase)).ToList();
+        EntryPoint? NearestAbove(IEnumerable<EntryPoint> candidates) => candidates
+            .Where(ep => ep.LineNumber <= source.LineNumber)
+            .OrderByDescending(ep => ep.LineNumber)
+            .FirstOrDefault();
+
+        var sameMethod = inFile.Where(ep => ep.MethodName is not null && ep.MethodName == source.MethodName).ToList();
+        if (sameMethod.Count > 0 && sameMethod.All(ep => ep.Kind == "Cli") && source.Category is "http" &&
+            NearestAbove(inFile.Where(ep => ep.Kind is "HttpMinimalApi" or "HttpController" or "HttpRazorPage")) is { } http)
+        {
+            return http;
+        }
+
+        return sameMethod.Count > 0 ? NearestAbove(sameMethod) ?? sameMethod[0] : NearestAbove(inFile);
     }
 
     /// <summary>
@@ -1037,7 +1057,10 @@ public static class TransparencyBuilder
     /// </summary>
     public static string ExposureFor(EntryPoint entryPoint)
     {
-        var authenticated = entryPoint.AuthorizationRequired == true || entryPoint.Roles.Count > 0 || entryPoint.AuthorizationPolicies.Count > 0 || entryPoint.AuthenticationSchemes.Count > 0;
+        // [AllowAnonymous] bypasses every authorization requirement, inherited roles and
+        // policies included.
+        var authenticated = !entryPoint.AllowAnonymous && entryPoint.AuthorizationRequired != false &&
+                            (entryPoint.AuthorizationRequired == true || entryPoint.Roles.Count > 0 || entryPoint.AuthorizationPolicies.Count > 0 || entryPoint.AuthenticationSchemes.Count > 0);
         return entryPoint.Kind switch
         {
             "HttpController" or "HttpMinimalApi" or "HttpRazorPage" => authenticated ? "authenticated-http" : "anonymous-http",

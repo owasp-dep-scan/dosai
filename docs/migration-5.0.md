@@ -377,6 +377,25 @@ either field yet.
 - **CycloneDX primitives follow the algorithm:** ML-KEM is `kem` (was `key-agree`), AES-GCM
   `ae`, AES `block-cipher`, the CSPRNG `drbg`.
 
+## Endpoint changes (5.0.0-rc.2)
+
+- **`[AllowAnonymous]` decides exposure.** An endpoint with `[AllowAnonymous]` was reported
+  `authenticated-http` when a class-level `[Authorize(Roles = …)]` also applied.
+- **Roles are not policies.** `[Authorize(Roles = "Admin")]` put `Admin` in
+  `AuthorizationPolicies` as well as `Roles`; only the positional argument is a policy now.
+- **Inherited and convention-based authorization.** Base-controller authorization attributes,
+  minimal-API group conventions, handler attributes and application-wide authorization (fallback
+  policy, `MapControllers().RequireAuthorization()`, global `AuthorizeFilter`) now set
+  `AuthorizationRequired` on the endpoints they cover.
+- **New registrations:** minimal-API `Map`, `MapIdentityApi`, `MapOpenApi` endpoints and the
+  `MapStaticAssets` mount.
+- **Disabled antiforgery is a finding:** `StateChangingEndpointAntiforgeryDisabled`.
+- **Entry-point attribution.** A minimal-API method-group handler sets the entry point's
+  `MethodId`, and a flow is attributed to the nearest route registered above it (it took the
+  first entry point of the file, often the program's CLI entry point).
+- **SignalR mounts.** Each hub takes its own `MapHub<THub>` path; every hub used to take the
+  first one.
+
 ## Nothing to change in queries or exports
 
 Field names, identifier formats (`Metadata`, `SourceSignature`, method ids), severity and

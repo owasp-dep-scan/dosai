@@ -128,6 +128,29 @@ public static class SecurityAnalyzer
                 });
             }
 
+            // 4. Antiforgery switched off on a state-changing, cookie-capable endpoint
+            // ([IgnoreAntiforgeryToken], DisableAntiforgery()). An explicit opt-out overrides a
+            // global filter, so it is reported even when one exists.
+            if (mutating && !bearerOnly && endpoint.AntiForgeryRequired == false && !endpoint.AllowAnonymous &&
+                endpoint.EndpointKind is "Attribute" or "MinimalApi" or "HttpController" or "Conventional")
+            {
+                findings.Add(new SecurityFinding
+                {
+                    Id = ids.Next("StateChangingEndpointAntiforgeryDisabled", endpoint.FileName, endpoint.LineNumber),
+                    Kind = "StateChangingEndpointAntiforgeryDisabled",
+                    Title = $"{endpoint.HttpMethod} endpoint {DescribeEndpoint(endpoint)} disables antiforgery validation",
+                    Severity = "medium",
+                    Cwe = "CWE-352",
+                    EndpointId = endpoint.OperationId,
+                    Route = endpoint.Path ?? endpoint.Route,
+                    FileName = endpoint.FileName,
+                    LineNumber = endpoint.LineNumber,
+                    Evidence = "Mutating handler opts out of antiforgery ([IgnoreAntiforgeryToken] or DisableAntiforgery()).",
+                    Remediation = "Keep antiforgery validation for cookie-authenticated endpoints, or restrict the endpoint to bearer-token authentication.",
+                    Confidence = ConfidenceTiers.Syntactic
+                });
+            }
+
             // 5. Mass-assignment hint (informational, name-heuristic only).
             var dtoName = servicesById.GetValueOrDefault(endpoint.ServiceId ?? string.Empty)?.Data?
                 .FirstOrDefault(data => data.Flow is "inbound" or "bi-directional")?.Name;

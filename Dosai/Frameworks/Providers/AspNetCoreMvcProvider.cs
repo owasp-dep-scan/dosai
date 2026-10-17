@@ -375,7 +375,7 @@ public sealed class AspNetCoreMvcProvider : IFrameworkProvider
             };
             BindRouteParameters(endpoint, resolved.Parameters, method, methodAttributes, model);
             ApplyContentTypesAndVersion(endpoint, methodAttributes, controllerAttributes);
-            ProviderHelpers.ApplyAuthorizationMetadata(endpoint, controllerAttributes.Concat(methodAttributes));
+            ProviderHelpers.ApplyAuthorizationMetadata(endpoint, AuthorizationAttributesOf(controller).Concat(methodAttributes));
             results.ApiEndpoints.Add(endpoint);
 
             var operation = new ServiceOperation
@@ -646,6 +646,33 @@ public sealed class AspNetCoreMvcProvider : IFrameworkProvider
 
     private static List<AttributeSyntax> classAttributes(ControllerCandidate controller) => ProviderHelpers.AttributesOf(controller.Type.AttributeLists).ToList();
 
+    private static readonly string[] InheritedAuthorizationAttributes =
+        ["Authorize", "AllowAnonymous", "RequiredScope", "RequireClaim", "EnableCors", "ValidateAntiForgeryToken", "AutoValidateAntiforgeryToken", "IgnoreAntiforgeryToken"];
+
+    /// <summary>
+    ///     The controller's own attributes plus the authorization attributes of its source-declared
+    ///     base controllers: `[Authorize]` on an `ApiControllerBase` is inherited by every derived
+    ///     controller. A derived class's own attribute comes first, so it is the one a reader sees.
+    /// </summary>
+    private static List<AttributeSyntax> AuthorizationAttributesOf(ControllerCandidate controller)
+    {
+        var attributes = classAttributes(controller);
+        var visited = 0;
+        for (var baseType = controller.Model.GetDeclaredSymbol(controller.Type)?.BaseType; baseType is not null && visited++ < 16; baseType = baseType.BaseType)
+        {
+            foreach (var reference in baseType.DeclaringSyntaxReferences)
+            {
+                if (reference.GetSyntax() is TypeDeclarationSyntax declaration)
+                {
+                    attributes.AddRange(ProviderHelpers.AttributesOf(declaration.AttributeLists)
+                        .Where(attribute => InheritedAuthorizationAttributes.Any(name => ProviderHelpers.NormalizeAttributeName(attribute).Contains(name, StringComparison.OrdinalIgnoreCase))));
+                }
+            }
+        }
+
+        return attributes;
+    }
+
     private static string ActionNameFrom(List<AttributeSyntax> methodAttributes, string methodName)
     {
         var actionName = methodAttributes
@@ -748,7 +775,7 @@ public sealed class AspNetCoreMvcProvider : IFrameworkProvider
                                 LineNumber = lineSpan.Line + 1
                             }
                         };
-                        ProviderHelpers.ApplyAuthorizationMetadata(endpoint, ProviderHelpers.AttributesOf(controller.Type.AttributeLists).Concat(methodAttributes));
+                        ProviderHelpers.ApplyAuthorizationMetadata(endpoint, AuthorizationAttributesOf(controller).Concat(methodAttributes));
                         var methodSymbol = controller.Model.GetDeclaredSymbol(method);
                         var methodId = methodSymbol is null ? null : Depscan.Dosai.FormatMethodSignature(methodSymbol);
                         var serviceId = FrameworkIds.Service("aspnetcore-mvc", endpoint.Namespace, controllerName);

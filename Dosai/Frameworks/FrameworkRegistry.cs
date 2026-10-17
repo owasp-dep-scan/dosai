@@ -108,6 +108,7 @@ public static class FrameworkRegistry
         result.AiComponents.AddRange(providerResults.AiComponents);
         result.EntryPoints.AddRange(providerResults.EntryPoints);
         result.TaintSeeds.AddRange(providerResults.TaintSeeds);
+        ApplyGlobalAuthorization(result, ctx);
         LinkEntryPoints(result);
         ApplyDefaultTrustZones(result, ctx);
         Sort(result);
@@ -125,6 +126,65 @@ public static class FrameworkRegistry
     ///     entry-point set also makes the referential-integrity guarantee structural: an id is only ever
     ///     written if the entry point it names exists.
     /// </remarks>
+    private static readonly System.Text.RegularExpressions.Regex FallbackPolicy = new(@"\bFallbackPolicy\s*=", System.Text.RegularExpressions.RegexOptions.Compiled);
+    private static readonly System.Text.RegularExpressions.Regex ControllersRequireAuthorization = new(@"\bMap(?:Controllers|DefaultControllerRoute|ControllerRoute)\s*\([^;]*?\)\s*\.\s*RequireAuthorization\s*\(", System.Text.RegularExpressions.RegexOptions.Compiled | System.Text.RegularExpressions.RegexOptions.Singleline);
+    private static readonly System.Text.RegularExpressions.Regex PagesRequireAuthorization = new(@"\bMapRazorPages\s*\(\s*\)\s*\.\s*RequireAuthorization\s*\(", System.Text.RegularExpressions.RegexOptions.Compiled);
+    private static readonly System.Text.RegularExpressions.Regex GlobalAuthorizeFilter = new(@"\bFilters\s*\.\s*Add\s*(?:<\s*AuthorizeFilter\s*>|\(\s*new\s+AuthorizeFilter\b)", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>
+    ///     Authorization configured for the whole application rather than per endpoint: an
+    ///     authorization fallback policy (every endpoint without metadata of its own),
+    ///     `MapControllers().RequireAuthorization()` or a global `AuthorizeFilter` (every MVC
+    ///     action) and `MapRazorPages().RequireAuthorization()` (every page). An endpoint that
+    ///     says nothing itself then requires authorization; `[AllowAnonymous]` still opts out.
+    /// </summary>
+    private static void ApplyGlobalAuthorization(FrameworkAnalysisResult result, FrameworkContext ctx)
+    {
+        var fallback = false;
+        var controllers = false;
+        var pages = false;
+        foreach (var tree in ctx.CSharpTrees)
+        {
+            var text = ctx.TextFor(tree);
+            fallback |= text.Contains("FallbackPolicy", StringComparison.Ordinal) && FallbackPolicy.IsMatch(text) && !text.Contains("FallbackPolicy = null", StringComparison.Ordinal);
+            controllers |= text.Contains("RequireAuthorization", StringComparison.Ordinal) && ControllersRequireAuthorization.IsMatch(text) ||
+                           text.Contains("AuthorizeFilter", StringComparison.Ordinal) && GlobalAuthorizeFilter.IsMatch(text);
+            pages |= text.Contains("MapRazorPages", StringComparison.Ordinal) && PagesRequireAuthorization.IsMatch(text);
+        }
+
+        if (!fallback && !controllers && !pages)
+        {
+            return;
+        }
+
+        bool Covers(string? endpointKind, string? framework) =>
+            fallback && framework is "minimal-api" or "aspnetcore-mvc" or "razor-blazor" or "signalr" or "grpc" ||
+            controllers && framework == "aspnetcore-mvc" ||
+            pages && endpointKind is "RazorPage";
+
+        foreach (var endpoint in result.ApiEndpoints)
+        {
+            if (endpoint is { AllowAnonymous: false, AuthorizationRequired: null } && Covers(endpoint.EndpointKind, endpoint.Framework))
+            {
+                endpoint.AuthorizationRequired = true;
+            }
+        }
+
+        var coveredOperations = result.ApiEndpoints.Where(endpoint => endpoint.AuthorizationRequired == true && endpoint.OperationId is not null)
+            .Select(endpoint => $"ep:{endpoint.OperationId}")
+            .ToHashSet(StringComparer.Ordinal);
+        foreach (var entryPoint in result.EntryPoints)
+        {
+            if (entryPoint is { AllowAnonymous: false, AuthorizationRequired: null } && coveredOperations.Contains(entryPoint.Id))
+            {
+                entryPoint.AuthorizationRequired = true;
+            }
+        }
+
+        ctx.Diagnostics.Add(new FrameworkDiagnostic("authorization", $"Global authorization applied to endpoints without their own metadata ({string.Join(", ", new[] { fallback ? "fallback policy" : null, controllers ? "MVC controllers" : null, pages ? "Razor Pages" : null }.OfType<string>())})."));
+        result.Diagnostics.Add(ctx.Diagnostics[^1]);
+    }
+
     private static void LinkEntryPoints(FrameworkAnalysisResult result)
     {
         var entryPointIds = result.EntryPoints.Select(entryPoint => entryPoint.Id).ToHashSet(StringComparer.Ordinal);
