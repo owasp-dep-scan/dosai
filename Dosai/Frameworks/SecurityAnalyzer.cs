@@ -23,6 +23,7 @@ public static class SecurityAnalyzer
         SafeRun(context, "endpoint-security", ids => AnalyzeEndpoints(context, frameworkResult, endpointList, findings, ids));
         SafeRun(context, "mcp-transport", ids => McpTransportAnalyzer.Assess(frameworkResult.Services, findings, ids, context.McpAllowlist));
         SafeRun(context, "config-security", ids => ConfigSecurityAnalyzer.Assess(context.ConfigFiles, findings, ids, context.Diagnostics));
+        SafeRun(context, "middleware-security", ids => MiddlewareSecurityAnalyzer.Assess(context, endpointList, findings, ids));
 
         return findings
             .OrderBy(finding => SeverityRank(finding.Severity), Comparer<int>.Create((a, b) => b.CompareTo(a)))
@@ -350,16 +351,19 @@ public static class SecurityAnalyzer
                     continue;
                 }
 
-                // Report the outermost registration only: an AddCors(services) call whose argument
-                // chain also contains AddPolicy invocations would otherwise match twice.
-                if (invocation.Ancestors().OfType<InvocationExpressionSyntax>().Any(ancestor => IsCorsRegistrationName(ProviderHelpers.InvocationName(ancestor))))
+                // Report each policy at its own registration: an AddCors(options => { AddPolicy("a",
+                // ...); AddPolicy("b", ...); }) is judged per AddPolicy, so the finding names the
+                // policy that is open (the outermost call used to be judged on the text of every
+                // policy inside it, and named none). An AddCors with no policy registration inside
+                // is the registration itself.
+                if (invocation.ArgumentList.Arguments.Any(argument => argument.DescendantNodes().OfType<InvocationExpressionSyntax>().Any(inner => IsCorsRegistrationName(ProviderHelpers.InvocationName(inner)))))
                 {
                     continue;
                 }
 
                 string? policyName = null;
                 var arguments = invocation.ArgumentList.Arguments;
-                if (arguments.Count > 0 && arguments[0].Expression is LiteralExpressionSyntax { Token.Value: string name })
+                if (syntacticName != "AddDefaultPolicy" && arguments.Count > 1 && model.GetConstantValue(arguments[0].Expression) is { HasValue: true, Value: string name })
                 {
                     policyName = name;
                 }
@@ -720,5 +724,255 @@ public static class ConfigSecurityAnalyzer
 
                 break;
         }
+    }
+}
+
+/// <summary>
+///     ASP.NET Core pipeline and cookie misconfiguration read from code: the developer exception
+///     page outside an environment check, a web application with no HTTPS redirection or HSTS,
+///     cookies set insecure, forwarded-header trust opened to every proxy, and request body size
+///     limits removed. Each walk is gated on the file text and reads syntax; a member whose symbol
+///     resolves must belong to a cookie or forwarded-headers type, so a same-named property of an
+///     unrelated type is not reported.
+/// </summary>
+public static class MiddlewareSecurityAnalyzer
+{
+    public static void Assess(FrameworkContext context, IReadOnlyList<ApiEndpoint> endpoints, List<SecurityFinding> findings, SecurityAnalyzer.FindingIds ids)
+    {
+        if (context.CSharp is null)
+        {
+            return;
+        }
+
+        var pipelineFiles = new List<(string FileName, int Line)>();
+        var hasHttpsRedirection = false;
+        var hasHsts = false;
+        foreach (var tree in context.CSharpTrees)
+        {
+            var fileName = Path.GetFileName(tree.FilePath);
+            var model = context.CSharp.GetSemanticModel(tree);
+            foreach (var invocation in context.InvocationsNamed(tree, name => name is "UseDeveloperExceptionPage" or "UseHttpsRedirection" or "UseHsts" or "CreateBuilder" or "CreateSlimBuilder" or "CreateEmptyBuilder" or "Clear"))
+            {
+                var name = ProviderHelpers.InvocationName(invocation);
+                switch (name)
+                {
+                    case "UseHttpsRedirection":
+                        hasHttpsRedirection = true;
+                        break;
+                    case "UseHsts":
+                        hasHsts = true;
+                        break;
+                    case "CreateBuilder" or "CreateSlimBuilder" or "CreateEmptyBuilder" when invocation.Expression is MemberAccessExpressionSyntax { Expression: var receiver } && receiver.ToString().EndsWith("WebApplication", StringComparison.Ordinal):
+                        pipelineFiles.Add((fileName, Line(invocation)));
+                        break;
+                    case "UseDeveloperExceptionPage" when !IsInsideDevelopmentCheck(invocation):
+                        findings.Add(Finding(ids, "DeveloperExceptionPageUnguarded", "Developer exception page is enabled outside a development-environment check", "medium", "CWE-209", fileName, Line(invocation),
+                            "UseDeveloperExceptionPage() runs in every environment and returns stack traces, source lines and request details to clients.",
+                            "Call UseDeveloperExceptionPage() only inside `if (app.Environment.IsDevelopment())` and use UseExceptionHandler() elsewhere."));
+                        break;
+                    case "Clear" when invocation.Expression is MemberAccessExpressionSyntax { Expression: var cleared } && LastName(cleared) is "KnownProxies" or "KnownNetworks" or "KnownIPNetworks" &&
+                                      IsMemberOf(model, cleared, "ForwardedHeadersOptions"):
+                        findings.Add(Finding(ids, "ForwardedHeadersTrustAll", $"Forwarded headers are accepted from any proxy ({LastName(cleared)} cleared)", "medium", "CWE-348", fileName, Line(invocation),
+                            $"{LastName(cleared)}.Clear() removes the loopback default, so X-Forwarded-For/Proto from any client rewrites the remote address and scheme.",
+                            "List the real reverse proxies in KnownProxies/KnownNetworks instead of clearing them."));
+                        break;
+                }
+            }
+
+            // Pipeline shape of the Startup pattern: Configure(IApplicationBuilder app, ...).
+            if (context.TextContainsAny(tree, "IApplicationBuilder"))
+            {
+                foreach (var method in FrameworkContext.Declarations<MethodDeclarationSyntax>(tree))
+                {
+                    if (method.Identifier.Text == "Configure" && method.ParameterList.Parameters.Any(parameter => parameter.Type?.ToString() is "IApplicationBuilder" or "Microsoft.AspNetCore.Builder.IApplicationBuilder"))
+                    {
+                        pipelineFiles.Add((fileName, Line(method)));
+                    }
+                }
+            }
+
+            if (context.TextContainsAny(tree, "Secure", "HttpOnly", "SameSite", "MaxRequestBodySize"))
+            {
+                AssessAssignments(tree, model, fileName, findings, ids);
+            }
+
+            if (context.TextContainsAny(tree, "DisableRequestSizeLimit", "RequestSizeLimit"))
+            {
+                AssessSizeLimitAttributes(tree, fileName, endpoints, findings, ids);
+            }
+        }
+
+        // A web application with no HTTPS redirection or HSTS anywhere in its code.
+        if (pipelineFiles.Count > 0)
+        {
+            var (file, line) = pipelineFiles.OrderBy(entry => entry.FileName, StringComparer.Ordinal).ThenBy(entry => entry.Line).First();
+            if (!hasHttpsRedirection)
+            {
+                findings.Add(Finding(ids, "HttpsRedirectionMissing", "Web application does not redirect HTTP to HTTPS", "low", "CWE-319", file, line,
+                    "No UseHttpsRedirection() call was found in the application's request pipeline.",
+                    "Call app.UseHttpsRedirection() (or redirect at the reverse proxy and record that decision)."));
+            }
+
+            if (!hasHsts)
+            {
+                findings.Add(Finding(ids, "HstsMissing", "Web application does not send Strict-Transport-Security", "low", "CWE-319", file, line,
+                    "No UseHsts() call was found in the application's request pipeline.",
+                    "Call app.UseHsts() outside development (or send the header at the reverse proxy)."));
+            }
+        }
+    }
+
+    /// <summary>Insecure cookie settings and removed body size limits, from assignments and object initializers.</summary>
+    private static void AssessAssignments(SyntaxTree tree, SemanticModel model, string fileName, List<SecurityFinding> findings, SecurityAnalyzer.FindingIds ids)
+    {
+        foreach (var assignment in tree.GetRoot().DescendantNodes().OfType<AssignmentExpressionSyntax>())
+        {
+            var member = LastName(assignment.Left);
+            var value = assignment.Right.ToString().Replace(" ", string.Empty, StringComparison.Ordinal);
+            switch (member)
+            {
+                case "MaxRequestBodySize" when value == "null":
+                    findings.Add(Finding(ids, "RequestSizeLimitDisabled", "Request body size limit is removed (MaxRequestBodySize = null)", "medium", "CWE-770", fileName, Line(assignment),
+                        "A null MaxRequestBodySize lets a client stream an unbounded request body into the server.",
+                        "Keep a finite MaxRequestBodySize, raising it only on the endpoints that need it ([RequestSizeLimit(bytes)])."));
+                    continue;
+                case "SecurePolicy" or "Secure" when (value.EndsWith("CookieSecurePolicy.None", StringComparison.Ordinal) || (member == "Secure" && value == "false")) && IsCookieMember(model, assignment):
+                    findings.Add(Finding(ids, "InsecureCookie", "Cookie is not restricted to HTTPS", "medium", "CWE-614", fileName, Line(assignment),
+                        $"{member} = {assignment.Right} lets the cookie travel over plain HTTP.",
+                        "Use CookieSecurePolicy.Always (or Secure = true).", ("setting", member)));
+                    continue;
+                case "HttpOnly" when (value == "false" || value.EndsWith("HttpOnlyPolicy.None", StringComparison.Ordinal)) && IsCookieMember(model, assignment):
+                    findings.Add(Finding(ids, "InsecureCookie", "Cookie is readable from script (HttpOnly disabled)", "medium", "CWE-1004", fileName, Line(assignment),
+                        $"HttpOnly = {assignment.Right} exposes the cookie to any script running in the page.",
+                        "Keep HttpOnly = true (HttpOnlyPolicy.Always) for every cookie that carries session or auth state.", ("setting", member)));
+                    continue;
+                case "SameSite" or "MinimumSameSitePolicy" when value.EndsWith("SameSiteMode.None", StringComparison.Ordinal) && IsCookieMember(model, assignment):
+                    findings.Add(Finding(ids, "InsecureCookie", "Cookie is sent on cross-site requests (SameSite=None)", "low", "CWE-1275", fileName, Line(assignment),
+                        $"{member} = {assignment.Right} sends the cookie with cross-site requests, which re-enables CSRF for cookie-authenticated endpoints.",
+                        "Use SameSiteMode.Lax or Strict unless a cross-site flow requires None, and then require antiforgery.", ("setting", member)));
+                    continue;
+            }
+        }
+    }
+
+    /// <summary><c>[DisableRequestSizeLimit]</c> and a <c>[RequestSizeLimit]</c> of the type's maximum.</summary>
+    private static void AssessSizeLimitAttributes(SyntaxTree tree, string fileName, IReadOnlyList<ApiEndpoint> endpoints, List<SecurityFinding> findings, SecurityAnalyzer.FindingIds ids)
+    {
+        foreach (var attribute in tree.GetRoot().DescendantNodes().OfType<AttributeSyntax>())
+        {
+            var name = ProviderHelpers.NormalizeAttributeName(attribute);
+            var unlimited = name == "DisableRequestSizeLimit" ||
+                            name == "RequestSizeLimit" && attribute.ArgumentList?.Arguments.FirstOrDefault()?.Expression.ToString().Replace(" ", string.Empty, StringComparison.Ordinal) is "long.MaxValue" or "Int64.MaxValue" or "System.Int64.MaxValue" or "int.MaxValue" or "Int32.MaxValue";
+            if (!unlimited)
+            {
+                continue;
+            }
+
+            var method = attribute.Ancestors().OfType<MethodDeclarationSyntax>().FirstOrDefault();
+            var route = method is null
+                ? null
+                : endpoints.FirstOrDefault(endpoint => string.Equals(Path.GetFileName(endpoint.FilePath), fileName, StringComparison.OrdinalIgnoreCase) && endpoint.MethodName == method.Identifier.Text)?.Path;
+            var finding = Finding(ids, "RequestSizeLimitDisabled", $"Request body size limit is removed ([{attribute.Name}])", "medium", "CWE-770", fileName, Line(attribute),
+                $"[{attribute}] lets a client send an unbounded request body to this endpoint.",
+                "Use [RequestSizeLimit(bytes)] with the largest body the endpoint actually accepts.");
+            finding.Route = route;
+            findings.Add(finding);
+        }
+    }
+
+    /// <summary>
+    ///     Whether the call sits in the development branch of an environment check
+    ///     (<c>if (env.IsDevelopment())</c>, the <c>else</c> of <c>if (!env.IsDevelopment())</c>,
+    ///     <c>IsEnvironment("Development")</c>), or in a method or local function whose name says it
+    ///     configures development.
+    /// </summary>
+    private static bool IsInsideDevelopmentCheck(SyntaxNode node)
+    {
+        SyntaxNode child = node;
+        foreach (var ancestor in node.Ancestors())
+        {
+            if (ancestor is IfStatementSyntax ifStatement)
+            {
+                var condition = ifStatement.Condition.ToString().Replace(" ", string.Empty, StringComparison.Ordinal);
+                var checksDevelopment = condition.Contains("IsDevelopment(", StringComparison.Ordinal) || condition.Contains("IsEnvironment(", StringComparison.Ordinal) && condition.Contains("Development", StringComparison.Ordinal) ||
+                                        condition.Contains("IsDevelopment", StringComparison.Ordinal) || condition.Contains("\"Development\"", StringComparison.Ordinal);
+                if (checksDevelopment)
+                {
+                    var negated = condition.StartsWith('!') || condition.Contains("==false", StringComparison.Ordinal);
+                    var inThen = ifStatement.Statement == child;
+                    if (inThen != negated)
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            if (ancestor is ConditionalExpressionSyntax conditional && conditional.Condition.ToString().Contains("IsDevelopment", StringComparison.Ordinal) && conditional.WhenTrue == child)
+            {
+                return true;
+            }
+
+            if (ancestor is MethodDeclarationSyntax method && method.Identifier.Text.Contains("Development", StringComparison.Ordinal) ||
+                ancestor is LocalFunctionStatementSyntax local && local.Identifier.Text.Contains("Development", StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            child = ancestor;
+        }
+
+        return false;
+    }
+
+    /// <summary>The assigned member belongs to a cookie type (CookieOptions, CookieBuilder, CookiePolicyOptions, ...); syntax decides when the symbol does not resolve.</summary>
+    private static bool IsCookieMember(SemanticModel model, AssignmentExpressionSyntax assignment)
+    {
+        if (model.GetSymbolInfo(assignment.Left).Symbol is { ContainingType: { } type })
+        {
+            return type.Name.Contains("Cookie", StringComparison.Ordinal);
+        }
+
+        // Unresolved: the receiver (`options.Cookie.HttpOnly`) or the initialized object (`new CookieOptions { ... }`) names a cookie.
+        if (assignment.Left is MemberAccessExpressionSyntax access && access.Expression.ToString().Contains("Cookie", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return assignment.Parent is InitializerExpressionSyntax { Parent: ObjectCreationExpressionSyntax creation } && creation.Type.ToString().Contains("Cookie", StringComparison.Ordinal);
+    }
+
+    private static bool IsMemberOf(SemanticModel model, ExpressionSyntax expression, string typeName) =>
+        model.GetSymbolInfo(expression).Symbol is { ContainingType: { } type } ? type.Name == typeName : true;
+
+    private static string? LastName(ExpressionSyntax expression) => expression switch
+    {
+        MemberAccessExpressionSyntax access => access.Name.Identifier.Text,
+        IdentifierNameSyntax identifier => identifier.Identifier.Text,
+        _ => null
+    };
+
+    private static int Line(SyntaxNode node) => node.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
+
+    private static SecurityFinding Finding(SecurityAnalyzer.FindingIds ids, string kind, string title, string severity, string cwe, string fileName, int line, string evidence, string remediation, (string Key, string Value)? property = null)
+    {
+        var finding = new SecurityFinding
+        {
+            Id = ids.Next(kind, fileName, line),
+            Kind = kind,
+            Title = title,
+            Severity = severity,
+            Cwe = cwe,
+            FileName = fileName,
+            LineNumber = line,
+            Evidence = evidence,
+            Remediation = remediation,
+            Confidence = ConfidenceTiers.Syntactic
+        };
+        if (property is { } extra)
+        {
+            finding.Properties[extra.Key] = extra.Value;
+        }
+
+        return finding;
     }
 }

@@ -345,8 +345,41 @@ These change which slices an unchanged input reports, in both directions:
   member.
 
 `Patterns.Sanitizers[]` and `Patterns.Sinks[]` entries gain the `SanitizesCategories` and
-`SinkParameters` fields (empty for the historic behavior). Assembly (IL) mode does not apply
-either field yet.
+`SinkParameters` fields (empty for the historic behavior). Assembly (IL) mode applies both (see
+below).
+
+- **Request-bound attributes are sources:** `[FromHeader]`, `[AsParameters]`, and on properties
+  `[BindProperty]` (and every public settable property of a `[BindProperties]` type) and Blazor's
+  `[SupplyParameterFromQuery]`/`[SupplyParameterFromForm]`. Reading such a property reads the
+  request. Blazor `[Parameter]` is not a source (the parent component supplies it).
+
+## Assembly (IL) data-flow parity (5.0.0-rc.2)
+
+Assembly-only inputs now report the flows source mode reports, where IL can express them:
+
+- **Top-level statements:** the compiler's `<Main>$` entry point's `args` is a `cli` source, as
+  `Main(string[] args)` was.
+- **Attribute sources** on parameters (`[FromHeader]`, `[AsParameters]`) and on properties
+  (`[BindProperty]`, `[SupplyParameterFrom*]`): a getter call on such a property is a source.
+  Properties are resolved in the assembly that declares them.
+- **Object state.** Method summaries record the fields a method returns and the parameters it
+  stores into fields, and the receiver (`this`) is a summarized input of accessor-sized bodies (64 IL instructions or fewer). `o.Command = q` then
+  `o.Command`, `new Options { Command = q }`, `r.Set(q)` then `r.Go()`, and a data object passed
+  to a helper (`Launch(job)`) carry the taint; a clean store (`o.Command = "fixed"`) clears it
+  for the rest of the method, and a clean sibling member stays clean. An opaque mutator
+  (`psi.Arguments = q`, `list.Add(q)`, an initializer's setters on a framework type) taints the
+  object it was called on, wherever that object was loaded from. Stored field taint is per
+  field, not per instance, and a getter reads another method's store only for auto-property
+  backing fields (data holders); computing getters over shared state stay local, which keeps
+  large packages within the state budget.
+- **Helpers that return a source** are sources at their call sites (node `Properties.summaryMethod`
+  names the helper); a `bool` result is a decision, not the source.
+- **`SanitizesCategories` and `SinkParameters`** apply as in source mode; parameter names come
+  from the callee's definition (analyzed assembly, a referenced assembly beside it, or the
+  framework reference set). Without a definition every argument stays dangerous.
+- **Early-exit validator guards** (`if (!Valid(x)) return;`) in Release and Debug builds.
+- **IL nodes carry `Properties.methodId`** (the IL method id), so exploit chains resolve IL entry
+  points. `DataFlowMethodSummary` indexes stay parameter positions; the receiver is internal.
 
 ## Crypto and CBOM changes (5.0.0-rc.2)
 
@@ -395,6 +428,36 @@ either field yet.
   first entry point of the file, often the program's CLI entry point).
 - **SignalR mounts.** Each hub takes its own `MapHub<THub>` path; every hub used to take the
   first one.
+- **Minimal-API lambda handlers have a `MethodId`:** the id the call graph and data flow give
+  the lambda (`Program.<<Main>$>lambda2(string):string`), and `MethodName` its
+  `<<Main>$>lambda2` name. Reachability walks start at the handler, and exploit chains,
+  weaknesses and the attack surface attribute a handler's flows to its route rather than to the
+  program's CLI entry point. Exploit chains now walk from the method holding the sink call (the
+  sink API stays the last frame): walking from the sink API let any other caller of that API win.
+- **Razor Pages are paired with their PageModel** (`@model X`, else the `X.cshtml.cs`
+  code-behind). Each public `On{Verb}[Handler][Async]` method is an endpoint (`MethodName`,
+  `ClassName`, `Namespace`), routed by every `@page` directive; a relative template
+  (`@page "{id:int}"`) is appended to the conventional route (`/Items/{id}`, with
+  `RouteParameters`). Authorization comes from the PageModel's attributes and from
+  `@attribute [Authorize(Roles = …, Policy = …)]` (roles and policies were not read before). The
+  entry point of a PageModel handler has the handler's `MethodId` and code-behind location, and
+  handler parameters are taint seeds (`razor-pages`) attributed to the route.
+- **Endpoints of assembly-only inputs.** Assemblies the tree does not build from source report
+  `ApiEndpoints` and `EntryPoints` from IL (`Framework: "assembly-il"`): controller actions
+  (`[Http*]`, `[Route]` with `[controller]`/`[action]`, `[Authorize]`/`[AllowAnonymous]` including
+  a base controller's, `[ApiController]`, `ControllerBase`/`Controller` bases, `[NonAction]`;
+  conventional `/{controller}/{action}` for unattributed MVC controllers) and minimal-API
+  `Map*` registrations (a route `ldstr` and handler `ldftn` feeding the call, with fluent
+  `RequireAuthorization`/`AllowAnonymous`). `MethodId` is the IL call graph's node id. In
+  `dataflows`, those handlers' parameters are `http` sources (`Properties.route`), so flows
+  attach to the route.
+- **Middleware misconfiguration findings** (`SecurityFindings[]`, see
+  [frameworks](frameworks.md)): `DeveloperExceptionPageUnguarded`, `HttpsRedirectionMissing`,
+  `HstsMissing`, `InsecureCookie`, `ForwardedHeadersTrustAll`, `RequestSizeLimitDisabled`.
+- **CORS findings name the open policy.** Each `AddPolicy`/`AddDefaultPolicy` is judged on its
+  own builder: `AddCors(o => { o.AddPolicy("Strict", …); o.AddPolicy("Open", …any origin and
+  credentials…); })` reported one unnamed "default policy" finding for the whole `AddCors`; it now
+  reports `Open` (constant names resolve), and nothing for `Strict`.
 
 ## Nothing to change in queries or exports
 

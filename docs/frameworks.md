@@ -124,6 +124,28 @@ state-changing endpoint that opts out of antiforgery (`[IgnoreAntiforgeryToken]`
 `StateChangingEndpointAntiforgeryDisabled` (medium, CWE-352). Each SignalR hub takes the
 `MapHub<THub>` paths that name it.
 
+Pipeline and cookie configuration in code also raises findings: `DeveloperExceptionPageUnguarded`
+(medium, CWE-209: `UseDeveloperExceptionPage()` outside an `IsDevelopment()`/`IsEnvironment`
+branch), `HttpsRedirectionMissing` and `HstsMissing` (low, CWE-319: a web application, from
+`WebApplication.CreateBuilder` or a `Configure(IApplicationBuilder)` method, with no
+`UseHttpsRedirection()` / `UseHsts()` anywhere), `InsecureCookie` (`Secure = false` or
+`CookieSecurePolicy.None`: medium, CWE-614; `HttpOnly = false` or `HttpOnlyPolicy.None`: medium,
+CWE-1004; `SameSiteMode.None`: low, CWE-1275; `Properties.setting` names the member) on cookie
+types, `ForwardedHeadersTrustAll` (medium, CWE-348: `KnownProxies`/`KnownNetworks`/`KnownIPNetworks`
+cleared on `ForwardedHeadersOptions`), and `RequestSizeLimitDisabled` (medium, CWE-770:
+`MaxRequestBodySize = null`, `[DisableRequestSizeLimit]`, `[RequestSizeLimit(long.MaxValue)]`,
+with the endpoint's `Route` when the attribute is on an action). `CorsWildcardWithCredentials`
+judges each `AddPolicy`/`AddDefaultPolicy` on its own builder and names that policy.
+
+Razor Pages pair each `.cshtml` with its PageModel (`@model`, else the `.cshtml.cs`
+code-behind): `On{Verb}[Handler][Async]` methods are the endpoints, every `@page` directive is a
+route (a relative template is appended to the conventional route), and authorization comes from
+the PageModel's attributes and `@attribute [Authorize(...)]`. Handler parameters are taint seeds
+and `[BindProperty]`/`[BindProperties]` properties are sources.
+
+Assembly-only inputs get endpoints from IL (`Framework: "assembly-il"`): controller attributes
+and minimal-API `Map*` registrations, with the IL call graph's method ids.
+
 `TrustZone`: `public` (anonymous inbound), `authenticated`, `internal` (loopback/queue),
 `external` (outbound to non-loopback hosts), `unknown`. `CrossesTrustBoundary` is computed from
 the call graph, it is only set when a positive path exists from a public inbound service to an
