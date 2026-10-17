@@ -1,0 +1,19 @@
+Dosai/Dosai.csproj
+  s_5699db0b46928a::t_2050563e152f6c 18
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ff979afd5a378305d0c1b753e5bad7b486f342b3",
+  "prompts": {},
+  "sessions": {
+    "s_5699db0b46928a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f99d7e92-54a6-4d58-9a97-703168976b41",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
