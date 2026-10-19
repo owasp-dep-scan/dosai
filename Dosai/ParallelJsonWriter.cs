@@ -51,7 +51,7 @@ internal static class ParallelJsonWriter
     ///     The option shapes this writer reproduces exactly; anything else (indentation, other
     ///     ignore conditions, reference handling, number handling) goes to the serializer whole.
     /// </summary>
-    private static bool Supports(JsonSerializerOptions options) =>
+    internal static bool Supports(JsonSerializerOptions options) =>
         !options.WriteIndented &&
         options.ReferenceHandler is null &&
         options.NumberHandling == JsonNumberHandling.Strict &&
@@ -67,7 +67,7 @@ internal static class ParallelJsonWriter
     ///     per-property converter, number handling, or conditional ignore (a
     ///     <c>ShouldSerialize</c> predicate) this writer would have to reproduce.
     /// </summary>
-    private static bool IsPlainObject(JsonTypeInfo typeInfo)
+    internal static bool IsPlainObject(JsonTypeInfo typeInfo)
     {
         if (typeInfo.Kind != JsonTypeInfoKind.Object || typeInfo.PolymorphismOptions is not null || typeInfo.NumberHandling is not null ||
             typeInfo.Converter.GetType().Assembly != typeof(JsonSerializer).Assembly)

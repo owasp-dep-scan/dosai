@@ -172,6 +172,30 @@ public class CommandLine
             Description = "Optional file of policy-approved MCP stdio transport commands (one per line); commands listed here are not flagged by the MCP transport security assessment",
             Arity = ArgumentArity.ExactlyOne
         };
+        var sectionsOption = new Option<string?>("--sections")
+        {
+            Description = "Comma-separated top-level sections to write in the JSON output, e.g. 'Metadata,Dependencies,MethodCalls'. Names match case-insensitively, duplicates collapse, Metadata is always written, and the written sections keep contract order. Applies to the JSON only: analysis, diagnostics and --callgraph-format exports are unchanged, and Metadata.OmittedSections names what was left out.",
+            Arity = ArgumentArity.ExactlyOne
+        };
+        // Validated in the parser, like --crypto-dataflows's closed value set, so a typo fails
+        // before any analysis runs and no output file is created or truncated.
+        sectionsOption.Validators.Add(result =>
+        {
+            var value = result.GetValueOrDefault<string?>();
+            if (value is null)
+            {
+                return;
+            }
+
+            try
+            {
+                MethodsSections.Parse(value);
+            }
+            catch (ArgumentException ex)
+            {
+                result.AddError(ex.Message);
+            }
+        });
         var restoreOption = new Option<bool>("--restore")
         {
             Description = "Run 'dotnet restore' on the discovered solution or projects before analysis so package assemblies can be resolved from the NuGet cache without build output (opt-in: restore evaluates MSBuild from the target repository)"
@@ -188,6 +212,7 @@ public class CommandLine
             outputFileOption,
             callGraphFormatOption,
             callGraphOutputFileOption,
+            sectionsOption,
             classifyDataOption,
             noClassifyDataOption,
             maxConventionalRoutesOption,
@@ -300,6 +325,7 @@ public class CommandLine
                 var maxConventionalRoutes = parseResult.GetValue(maxConventionalRoutesOption);
                 var includePromptText = parseResult.GetValue(includePromptTextOption);
                 var mcpAllowlist = parseResult.GetValue(mcpAllowlistOption);
+                var sections = MethodsSections.Parse(parseResult.GetValue(sectionsOption));
                 var buildPreparation = ParseBuildPreparation(parseResult.GetValue(restoreOption), parseResult.GetValue(buildOption));
                 LogScanInput(path!, excludePatterns, outputFile!);
                 using var commandPhase = DebugLog.Phase("methods");
@@ -311,11 +337,11 @@ public class CommandLine
                 MethodsSlice methodsSlice;
                 if (Path.GetExtension(path)!.Equals(".nupkg", StringComparison.OrdinalIgnoreCase))
                 {
-                    methodsSlice = Dosai.WriteMethodsFromNupkg(path!, outputFile!);
+                    methodsSlice = Dosai.WriteMethodsFromNupkg(path!, outputFile!, sections);
                 }
                 else
                 {
-                    methodsSlice = Dosai.WriteMethods(path!, outputFile!, new Frameworks.FrameworkAnalysisOptions { ClassifyData = classifyData, MaxConventionalRoutes = maxConventionalRoutes, IncludePromptText = includePromptText, McpAllowlist = LoadMcpAllowlist(mcpAllowlist) }, buildPreparation);
+                    methodsSlice = Dosai.WriteMethods(path!, outputFile!, new Frameworks.FrameworkAnalysisOptions { ClassifyData = classifyData, MaxConventionalRoutes = maxConventionalRoutes, IncludePromptText = includePromptText, McpAllowlist = LoadMcpAllowlist(mcpAllowlist) }, buildPreparation, sections);
                 }
 
                 if (!string.IsNullOrWhiteSpace(callGraphFormat))

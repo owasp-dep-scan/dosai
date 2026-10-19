@@ -63,6 +63,63 @@ public partial class DosaiTests
         }
     }
 
+    [Fact]
+    public void ParallelJsonWriter_FilteredMethodsSectionsContract_IsByteIdenticalToTheSerializerForEveryWorkerCount()
+    {
+        // `--sections` filters the MethodsSlice contract by removing properties, which must keep
+        // the parallel fast path (a ShouldSerialize predicate would not), and Metadata carries a
+        // set OmittedSections, whose property-level ignore condition makes AnalysisMetadata a
+        // non-plain object the writer sends through the serializer whole. Both shapes must still
+        // match the serializer byte for byte, with lists above the threshold in the kept sections.
+        var rng = new Random(72);
+        string Text(int i) => $"Ns.T{i}.M(\"q\\u0001\")";
+        var nodes = Enumerable.Range(0, 5000).Select(i => new MethodNode { Id = Text(i), Name = $"M{i}", ClassName = "T", Namespace = "Ns", FileName = "/src/T.cs" }).ToList();
+        var slice = new MethodsSlice
+        {
+            Metadata = new AnalysisMetadata { InputPath = "/src" },
+            Methods = Enumerable.Range(0, 4097).Select(i => new Method { Name = Text(i), LineNumber = i }).ToList(),
+            MethodCalls = Enumerable.Range(0, 5000).Select(i => new MethodCalls { CalledMethod = Text(i), CallType = CallType.MethodCall, Arguments = [$"a{i}"] }).ToList(),
+            CallGraph = new CallGraph
+            {
+                Nodes = nodes,
+                Edges = Enumerable.Range(0, 8192).Select(i => new MethodCallEdge { SourceId = nodes[i % nodes.Count].Id, TargetId = nodes[rng.Next(nodes.Count)].Id, CallLocation = new CallLocation { FileName = "/src/T.cs", LineNumber = i } }).ToList()
+            },
+            Diagnostics = ["a \"quoted\" note"]
+        };
+
+        var sections = MethodsSections.Parse("metadata,callgraph");
+        var filtered = sections.FilterOptions(SliceJsonOptions());
+        // The filtered root is still a plain contract, so its lists keep the parallel path.
+        filtered.MakeReadOnly(populateMissingResolver: true);
+        Assert.True(ParallelJsonWriter.Supports(filtered));
+        Assert.True(ParallelJsonWriter.IsPlainObject(filtered.GetTypeInfo(typeof(MethodsSlice))));
+        Assert.True(ParallelJsonWriter.IsPlainObject(filtered.GetTypeInfo(typeof(CallGraph))));
+        slice.Metadata.OmittedSections = [.. sections.OmittedSections()];
+
+        using var document = JsonDocument.Parse(JsonSerializer.Serialize(slice, filtered));
+        Assert.Equal(["Metadata", "CallGraph"], document.RootElement.EnumerateObject().Select(property => property.Name).ToList());
+        Assert.Contains("Methods", document.RootElement.GetProperty("Metadata").GetProperty("OmittedSections").EnumerateArray().Select(value => value.GetString()));
+
+        var expected = JsonSerializer.SerializeToUtf8Bytes(slice, filtered);
+        foreach (var workers in new[] { 1, 4, 16 })
+        {
+            var actual = WithSymbolAnalysisWorkers(workers, () => WriteWithParallelWriter(slice, filtered));
+            Assert.True(expected.AsSpan().SequenceEqual(actual), $"{workers} workers: filtered output differs from JsonSerializer");
+        }
+
+        // Write names the omission only while it writes: the caller's slice comes back without it.
+        var written = string.Empty;
+        slice.Metadata.OmittedSections = null;
+        sections.Write(slice, SliceJsonOptions(), options => written = JsonSerializer.Serialize(slice, options));
+        Assert.Contains("\"OmittedSections\":[", written, StringComparison.Ordinal);
+        Assert.Null(slice.Metadata.OmittedSections);
+
+        // The unfiltered contract skips a null OmittedSections exactly like the serializer.
+        var expectedFull = JsonSerializer.SerializeToUtf8Bytes(slice, SliceJsonOptions());
+        Assert.DoesNotContain("OmittedSections"u8, expectedFull);
+        Assert.True(expectedFull.AsSpan().SequenceEqual(WriteWithParallelWriter(slice, SliceJsonOptions())), "unfiltered output differs from JsonSerializer");
+    }
+
     private sealed class ExplicitOrder
     {
         public string First { get; set; } = "first";

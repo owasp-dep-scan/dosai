@@ -12,6 +12,7 @@
     <Compile Remove="CSharp15Features.cs" />
     <Compile Remove="ExtensionMembers.cs" />
     <Compile Remove="FileBasedApp.cs" />
+    <Compile Remove="WebInventory.cs" />
   </ItemGroup>
 
 </Project>

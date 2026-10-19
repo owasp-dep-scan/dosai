@@ -46,6 +46,7 @@
   <None Include="./../Dosai.TestData/FSharp11MoreFeatures.fs" CopyToOutputDirectory="PreserveNewest" />
   <None Include="./../Dosai.TestData/FSharp11Language.fs" CopyToOutputDirectory="PreserveNewest" />
   <None Include="./../Dosai.TestData/FileBasedApp.cs" CopyToOutputDirectory="PreserveNewest" />
+  <None Include="./../Dosai.TestData/WebInventory.cs" CopyToOutputDirectory="PreserveNewest" />
   <None Include="./../Dosai.TestData/ModernRFeatures.R" CopyToOutputDirectory="PreserveNewest" />
   <None Include="./../Dosai.TestData/Notebook.Rmd" CopyToOutputDirectory="PreserveNewest" />
   <None Include="./../Dosai.TestData/FSharpScript.fsx" CopyToOutputDirectory="PreserveNewest" />

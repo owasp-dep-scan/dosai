@@ -16,6 +16,18 @@ dotnet run --project ./Dosai -- methods \
   --o dosai.json
 ```
 
+When only part of the report is needed, name the top-level sections to write with
+`--sections` (comma-separated, case-insensitive, `Metadata` always written,
+`Metadata.OmittedSections` names the rest; the JSON only - analysis and graph exports are
+unchanged). For the sections SBOM consumers read:
+
+```bash
+dotnet run --project ./Dosai -- methods \
+  --path ./path/to/repo \
+  --o dosai.json \
+  --sections Metadata,Dependencies,MethodCalls,AssemblyInformation,CallGraph,PackageReachability,Services,ApiEndpoints,AiComponents
+```
+
 ### Export call graph
 
 ```bash

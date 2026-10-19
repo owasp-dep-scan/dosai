@@ -246,6 +246,35 @@ The MCP `dosai.crypto` tool takes the same value as an optional `crypto_dataflow
 Consumers that read only `Assets`, `Operations`, and `Materials` (cdxgen's crypto path) should
 pass `none`.
 
+## `methods --sections` (issue #96)
+
+`methods` accepts a new option naming the top-level sections to write, additive like
+`--crypto-dataflows` above and for the same reason: a consumer that reads part of the report
+pays for the whole file otherwise. `--sections` takes one comma-separated list of section
+names, matched case-insensitively with duplicates collapsed; the valid names are the
+`MethodsSlice` sections in contract order, and an unknown name (or a list naming nothing)
+fails before any analysis runs, exit code 1, leaving `--o` untouched. Without the flag the
+output is byte-identical to before.
+
+- `Metadata` is always written, whether or not it is listed; the written sections keep contract
+  order whatever order the list gives.
+- The option is write-only: analysis, `Diagnostics` and every kept section are exactly what an
+  unfiltered run produces, `.nupkg` inputs honour it, and `--callgraph-format` exports the full
+  graph whatever the selection.
+- A new `Metadata.OmittedSections` (schema addition) lists the omitted section names in
+  contract order, present only when at least one section was omitted. The property-level ignore
+  condition keeps the key out of `agent-context`, `dataflows` and `crypto` output, which share
+  `AnalysisMetadata`; those outputs are byte-identical to before.
+
+Consumers that read the nine sections cdxgen reads should pass
+`--sections Metadata,Dependencies,MethodCalls,AssemblyInformation,CallGraph,PackageReachability,Services,ApiEndpoints,AiComponents`;
+on the issue's generated tree that cuts the report by 60%, and by 58-62% on real trees. See
+`docs/commands.md` ("Output size") for which sections reference ids in which others, so a
+consistent subset can be chosen.
+
+The MCP `dosai.methods` tool takes the same list as an optional `sections` argument (default:
+every section).
+
 ## Tree framework references and global usings (issue #74)
 
 Calls into ASP.NET Core, Windows Desktop and package APIs now bind on trees that reference

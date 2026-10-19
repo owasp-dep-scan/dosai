@@ -146,7 +146,7 @@ public static class McpServer
 
         object payload = name switch
         {
-            "dosai.methods" => JsonSerializer.Deserialize<object>(Dosai.GetMethods(RequirePath(path)), JsonOptions)!,
+            "dosai.methods" => JsonSerializer.Deserialize<object>(Dosai.GetMethods(RequirePath(path), MethodsSections.Parse(GetString(arguments, "sections"))), JsonOptions)!,
             "dosai.dataflows" => DataFlowAnalyzer.Analyze(RequirePath(path), localPatterns, localPatternPacks),
             "dosai.crypto" => JsonSerializer.Deserialize<object>(CryptoAnalyzer.GetCryptoAnalysis(RequirePath(path), GetString(arguments, "format") ?? "dosai", GetString(arguments, "crypto_dataflows")), JsonOptions)!,
             "dosai.agent_context" => TransparencyBuilder.BuildAgentContext(DataFlowAnalyzer.Analyze(RequirePath(path), localPatterns, localPatternPacks), RequirePath(path)),
@@ -227,6 +227,7 @@ public static class McpServer
                 ["patternPacks"] = new { type = "string", description = "Comma-separated built-in pattern packs." },
                 ["format"] = new { type = "string", description = "Output format for dosai.crypto: dosai, cyclonedx." },
                 ["crypto_dataflows"] = new { type = "string", description = "How much of the crypto data-flow graph to include in dosai.crypto output: full (default), slices, none. Agents that only need assets/operations/materials should pass none." },
+                ["sections"] = new { type = "string", description = "Comma-separated top-level sections to include in dosai.methods output, e.g. 'metadata,callgraph'. Metadata is always included, and Metadata.OmittedSections names what was left out." },
                 ["input"] = new { type = "string", description = "Existing Dosai JSON file for dosai.query." },
                 ["query"] = new { type = "string", description = "Query expression for dosai.query." },
                 ["nodeId"] = new { type = "string", description = "Optional node id to narrow dosai.reachability to a single call-graph node." }

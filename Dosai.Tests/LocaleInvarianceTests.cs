@@ -281,6 +281,9 @@ internal class Czech
                 Assert.Equal(0, CommandLine.Main(["methods", "--path", fixture, "--o", Out("methods.json"), "--callgraph-format", "graphml", "--callgraph-out", Out("callgraph.graphml")]));
                 Assert.Equal(0, CommandLine.Main(["methods", "--path", fixture, "--o", Out("methods-gexf.json"), "--callgraph-format", "gexf", "--callgraph-out", Out("callgraph.gexf")]));
                 Assert.Equal(0, CommandLine.Main(["methods", "--path", fixture, "--o", Out("methods-mmd.json"), "--callgraph-format", "mermaid", "--callgraph-out", Out("callgraph.mmd")]));
+                // --sections names sections case-insensitively against the serializer contract:
+                // Turkish dotted and dotless i must not change which sections match or their bytes.
+                Assert.Equal(0, CommandLine.Main(["methods", "--path", fixture, "--o", Out("methods-sections.json"), "--sections", "metadata,diagnostics,dependencies,fields"]));
                 Assert.Equal(0, CommandLine.Main(["dataflows", "--path", fixture, "--o", Out("dataflows.json"), "--graph-format", "graphml", "--graph-out", Out("dataflows.graphml")]));
                 Assert.Equal(0, CommandLine.Main(["dataflows", "--path", fixture, "--o", Out("dataflows-gexf.json"), "--graph-format", "gexf", "--graph-out", Out("dataflows.gexf")]));
                 Assert.Equal(0, CommandLine.Main(["dataflows", "--path", fixture, "--o", Out("dataflows-mmd.json"), "--graph-format", "mermaid", "--graph-out", Out("dataflows.mmd")]));
