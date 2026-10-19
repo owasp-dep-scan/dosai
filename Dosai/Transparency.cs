@@ -36,6 +36,16 @@ public sealed class AnalysisMetadata
     ///     already says everything.
     /// </summary>
     public List<ProjectGuardTarget>? ProjectGuardTargetFrameworks { get; set; }
+
+    /// <summary>
+    ///     Top-level sections the methods command left out of this report because the caller
+    ///     named a subset with <c>--sections</c>, in contract order; null when the report is
+    ///     complete. The property-level ignore condition keeps this key out of every other
+    ///     output that serializes an <see cref="AnalysisMetadata" /> (agent-context, dataflows,
+    ///     crypto), whose options carry no default ignore condition.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<string>? OmittedSections { get; set; }
 }
 
 /// <summary>One project's detected target frameworks and the one its files' guards resolved against.</summary>

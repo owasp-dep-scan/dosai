@@ -109,9 +109,9 @@ Available tools:
 
 | Tool                   | Purpose                                                                                      | Key arguments                                        |
 | ---------------------- | -------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
-| `dosai.methods`        | Method inventory, API endpoints, call graph, reachability, dead code, package reachability.  | `path`                                               |
+| `dosai.methods`        | Method inventory, API endpoints, call graph, reachability, dead code, package reachability.  | `path`, `sections`                                   |
 | `dosai.dataflows`      | Full source-to-sink data-flow analysis with severity, exploit chains, and attack surface.    | `path`, `patterns`, `patternPacks`                   |
-| `dosai.crypto`         | Crypto assets, operations, materials, protocols, findings, CBOM.                             | `path`, `format`                                     |
+| `dosai.crypto`         | Crypto assets, operations, materials, protocols, findings, CBOM.                             | `path`, `format`, `crypto_dataflows`                 |
 | `dosai.agent_context`  | Compact triage context for agents, including the bounded attack-surface view.                | `path`, `patterns`, `patternPacks`                   |
 | `dosai.services`       | `Services[]` with trust zones plus `Frameworks[]` and `ApiEndpoints[]`.                      | `path`                                               |
 | `dosai.ai_components`  | `AiComponents[]`: models, MCP tools with JSON Schemas, redacted prompts, agents, embeddings. | `path`                                               |

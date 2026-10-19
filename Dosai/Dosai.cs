@@ -413,7 +413,7 @@ public static class Dosai
 
     #endregion
 
-    private static readonly JsonSerializerOptions Options = new()
+    internal static readonly JsonSerializerOptions Options = new()
     {
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
@@ -485,9 +485,33 @@ public static class Dosai
     /// Get all assembly/source methods for the given path to assembly/source or directory of assemblies/source
     /// </summary>
     /// <param name="path">Filesystem path to assembly/source file or directory containing assembly/source files</param>
+    /// <param name="sections">
+    ///     Which top-level sections to write (see <see cref="MethodsSections" />); null writes
+    ///     every section. The slice built underneath is always complete - the filter applies to
+    ///     the serialized bytes only.
+    /// </param>
     /// <returns>JSON list of assembly/source methods</returns>
-    public static string GetMethods(string path)
-        => JsonSerializer.Serialize(GetMethodsSlice(path), Options);
+    public static string GetMethods(string path, MethodsSections? sections = null)
+    {
+        var slice = GetMethodsSlice(path);
+        return JsonSerializer.Serialize(slice, OptionsFor(slice, sections));
+    }
+
+    /// <summary>
+    ///     The options that serialize <paramref name="slice" /> for the requested sections: a
+    ///     contract-filtered copy when sections are omitted (after recording them on the
+    ///     metadata, so the file says it is partial), the shared options otherwise.
+    /// </summary>
+    private static JsonSerializerOptions OptionsFor(MethodsSlice slice, MethodsSections? sections)
+    {
+        if (sections is null || sections.IsAll)
+        {
+            return Options;
+        }
+
+        sections.StampOmitted(slice.Metadata);
+        return sections.FilterOptions(Options);
+    }
 
     /// <summary>
     /// Build the <see cref="MethodsSlice"/> for the given path without serializing it. Exposed so callers that
@@ -893,15 +917,20 @@ public static class Dosai
     /// <paramref name="outputFile"/>, returning the slice so the caller can reuse it (e.g. for graph export)
     /// without round-tripping through the serialized string. Streaming keeps the JSON out of a single
     /// contiguous string, which bounds peak memory on large assembly trees.
+    /// <para>
+    /// With <paramref name="sections" /> the file holds only the selected sections while the
+    /// returned slice stays complete: <c>--callgraph-format</c> reads the call graph from it
+    /// whatever the selection, and the analysis below is identical to an unfiltered run.
+    /// </para>
     /// </summary>
-    public static MethodsSlice WriteMethods(string path, string outputFile, Frameworks.FrameworkAnalysisOptions? frameworkOptions = null, BuildPreparationMode buildPreparation = BuildPreparationMode.None)
-        => StreamSlice(GetMethodsSlice(path, frameworkOptions, buildPreparation), outputFile);
+    public static MethodsSlice WriteMethods(string path, string outputFile, Frameworks.FrameworkAnalysisOptions? frameworkOptions = null, BuildPreparationMode buildPreparation = BuildPreparationMode.None, MethodsSections? sections = null)
+        => StreamSlice(GetMethodsSlice(path, frameworkOptions, buildPreparation), outputFile, sections);
 
-    private static MethodsSlice StreamSlice(MethodsSlice slice, string outputFile)
+    private static MethodsSlice StreamSlice(MethodsSlice slice, string outputFile, MethodsSections? sections)
     {
         using var phase = DebugLog.Phase("methods.serialization");
         using var stream = new FileStream(outputFile, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize: 65536);
-        ParallelJsonWriter.Serialize(stream, slice, Options);
+        ParallelJsonWriter.Serialize(stream, slice, OptionsFor(slice, sections));
         if (DebugLog.Enabled)
         {
             DebugLog.Log($"methods output: wrote {DebugLog.FormatBytes(stream.Length)} to '{outputFile}'");
@@ -919,10 +948,11 @@ public static class Dosai
 
     /// <summary>
     /// Build the methods slice for a .nupkg and stream it as JSON to <paramref name="outputFile"/>. See
-    /// <see cref="WriteMethods"/> for why the result is streamed rather than materialised as a string.
+    /// <see cref="WriteMethods"/> for why the result is streamed rather than materialised as a string, and for
+    /// how <paramref name="sections" /> shapes the file without changing the returned slice.
     /// </summary>
-    public static MethodsSlice WriteMethodsFromNupkg(string nupkgPath, string outputFile)
-        => StreamSlice(GetMethodsSliceFromNupkg(nupkgPath), outputFile);
+    public static MethodsSlice WriteMethodsFromNupkg(string nupkgPath, string outputFile, MethodsSections? sections = null)
+        => StreamSlice(GetMethodsSliceFromNupkg(nupkgPath), outputFile, sections);
 
     private static MethodsSlice GetMethodsSliceFromNupkg(string nupkgPath)
     {
