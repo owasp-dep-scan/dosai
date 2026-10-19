@@ -174,7 +174,7 @@ public class CommandLine
         };
         var sectionsOption = new Option<string?>("--sections")
         {
-            Description = "Comma-separated top-level sections to write in the JSON output, e.g. 'Metadata,Dependencies,MethodCalls'. Names match case-insensitively, duplicates collapse, Metadata is always written, and the written sections keep contract order. Applies to the JSON only: analysis, diagnostics and --callgraph-format exports are unchanged, and Metadata.OmittedSections names what was left out",
+            Description = "Comma-separated top-level sections to write in the JSON output, e.g. 'Metadata,Dependencies,MethodCalls'. Names match case-insensitively, duplicates collapse, Metadata is always written, and the written sections keep contract order. Applies to the JSON only: analysis, diagnostics and --callgraph-format exports are unchanged, and Metadata.OmittedSections names what was left out.",
             Arity = ArgumentArity.ExactlyOne
         };
         // Validated in the parser, like --crypto-dataflows's closed value set, so a typo fails

@@ -13,7 +13,7 @@ namespace Depscan;
 /// </summary>
 public sealed class MethodsSections
 {
-    /// <summary>The canonical section names in contract order, or null while unset ("every section").</summary>
+    /// <summary>The canonical names of the sections to write, or null for every section.</summary>
     private readonly HashSet<string>? writtenSections;
 
     private MethodsSections(HashSet<string>? writtenSections) => this.writtenSections = writtenSections;
@@ -156,15 +156,38 @@ public sealed class MethodsSections
     }
 
     /// <summary>
-    ///     Records the omission on the metadata so a consumer can tell the report is partial;
-    ///     sets nothing when every section is written, which keeps the default output unchanged.
+    ///     Runs <paramref name="write" /> with the options that serialize <paramref name="slice" />
+    ///     for these sections. When a section is omitted, the slice's metadata names the omission
+    ///     for the duration of the write only, so the file says it is partial while the slice the
+    ///     caller keeps stays a complete, unannotated result. When nothing is omitted, the write
+    ///     gets <paramref name="options" /> unchanged and the output is the default one.
     /// </summary>
-    public void StampOmitted(AnalysisMetadata? metadata)
+    public void Write(MethodsSlice slice, JsonSerializerOptions options, Action<JsonSerializerOptions> write)
     {
         var omitted = OmittedSections();
-        if (metadata is not null && omitted.Count > 0)
+        if (omitted.Count == 0)
+        {
+            write(options);
+            return;
+        }
+
+        var metadata = slice.Metadata;
+        var previous = metadata?.OmittedSections;
+        if (metadata is not null)
         {
             metadata.OmittedSections = [.. omitted];
+        }
+
+        try
+        {
+            write(FilterOptions(options));
+        }
+        finally
+        {
+            if (metadata is not null)
+            {
+                metadata.OmittedSections = previous;
+            }
         }
     }
 }

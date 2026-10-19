@@ -1,5 +1,5 @@
+using System.IO.Compression;
 using System.Text.Json;
-using System.Text.Json.Serialization.Metadata;
 using Depscan;
 using Xunit;
 
@@ -301,6 +301,31 @@ public partial class DosaiTests
         output = new StringWriter();
         McpServer.Run(tempDirectory.Path, null, null, null, new StringReader("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/list\"}\n"), output);
         Assert.Contains("\"sections\"", output.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MethodsSections_NupkgInput_WritesOnlyTheSelectedSections()
+    {
+        // A .nupkg goes through its own write path (extracted, then analyzed as assemblies).
+        using var output = new TemporaryDirectory();
+        var package = Path.Combine(output.Path, "Dosai.TestData.CSharp.1.0.0.nupkg");
+        using (var archive = ZipFile.Open(package, ZipArchiveMode.Create))
+        {
+            archive.CreateEntryFromFile(GetFilePath("Dosai.TestData.CSharp.dll"), "lib/net8.0/Dosai.TestData.CSharp.dll");
+        }
+
+        var baseline = RunMethodsOnPath(package, output.Path);
+        var filtered = RunMethodsOnPath(package, output.Path, "--sections", "methods,AssemblyInformation");
+        Assert.Equal(["Metadata", "Methods", "AssemblyInformation"], TopLevelKeys(filtered));
+        using var document = JsonDocument.Parse(filtered);
+        Assert.NotEmpty(document.RootElement.GetProperty("Methods").EnumerateArray());
+        Assert.Contains("CallGraph", document.RootElement.GetProperty("Metadata").GetProperty("OmittedSections").EnumerateArray().Select(value => value.GetString()));
+        // Each extraction lands in a fresh temporary directory, so the paths differ per run;
+        // the method inventory itself must not.
+        using var full = JsonDocument.Parse(baseline);
+        Assert.Equal(
+            full.RootElement.GetProperty("Methods").EnumerateArray().Select(method => $"{method.GetProperty("ClassName")}.{method.GetProperty("Name")}").ToList(),
+            document.RootElement.GetProperty("Methods").EnumerateArray().Select(method => $"{method.GetProperty("ClassName")}.{method.GetProperty("Name")}").ToList());
     }
 
     /// <summary>Fixture facts for the report: which sections the WebInventory tree fills at all.</summary>

@@ -494,23 +494,9 @@ public static class Dosai
     public static string GetMethods(string path, MethodsSections? sections = null)
     {
         var slice = GetMethodsSlice(path);
-        return JsonSerializer.Serialize(slice, OptionsFor(slice, sections));
-    }
-
-    /// <summary>
-    ///     The options that serialize <paramref name="slice" /> for the requested sections: a
-    ///     contract-filtered copy when sections are omitted (after recording them on the
-    ///     metadata, so the file says it is partial), the shared options otherwise.
-    /// </summary>
-    private static JsonSerializerOptions OptionsFor(MethodsSlice slice, MethodsSections? sections)
-    {
-        if (sections is null || sections.IsAll)
-        {
-            return Options;
-        }
-
-        sections.StampOmitted(slice.Metadata);
-        return sections.FilterOptions(Options);
+        var json = string.Empty;
+        (sections ?? MethodsSections.All).Write(slice, Options, options => json = JsonSerializer.Serialize(slice, options));
+        return json;
     }
 
     /// <summary>
@@ -930,7 +916,7 @@ public static class Dosai
     {
         using var phase = DebugLog.Phase("methods.serialization");
         using var stream = new FileStream(outputFile, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize: 65536);
-        ParallelJsonWriter.Serialize(stream, slice, OptionsFor(slice, sections));
+        (sections ?? MethodsSections.All).Write(slice, Options, options => ParallelJsonWriter.Serialize(stream, slice, options));
         if (DebugLog.Enabled)
         {
             DebugLog.Log($"methods output: wrote {DebugLog.FormatBytes(stream.Length)} to '{outputFile}'");

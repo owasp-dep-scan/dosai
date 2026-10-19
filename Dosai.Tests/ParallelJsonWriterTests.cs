@@ -88,12 +88,16 @@ public partial class DosaiTests
         };
 
         var sections = MethodsSections.Parse("metadata,callgraph");
-        sections.StampOmitted(slice.Metadata);
         var filtered = sections.FilterOptions(SliceJsonOptions());
+        // The filtered root is still a plain contract, so its lists keep the parallel path.
+        filtered.MakeReadOnly(populateMissingResolver: true);
+        Assert.True(ParallelJsonWriter.Supports(filtered));
+        Assert.True(ParallelJsonWriter.IsPlainObject(filtered.GetTypeInfo(typeof(MethodsSlice))));
+        Assert.True(ParallelJsonWriter.IsPlainObject(filtered.GetTypeInfo(typeof(CallGraph))));
+        slice.Metadata.OmittedSections = [.. sections.OmittedSections()];
 
         using var document = JsonDocument.Parse(JsonSerializer.Serialize(slice, filtered));
         Assert.Equal(["Metadata", "CallGraph"], document.RootElement.EnumerateObject().Select(property => property.Name).ToList());
-        Assert.NotNull(slice.Metadata.OmittedSections);
         Assert.Contains("Methods", document.RootElement.GetProperty("Metadata").GetProperty("OmittedSections").EnumerateArray().Select(value => value.GetString()));
 
         var expected = JsonSerializer.SerializeToUtf8Bytes(slice, filtered);
@@ -103,9 +107,14 @@ public partial class DosaiTests
             Assert.True(expected.AsSpan().SequenceEqual(actual), $"{workers} workers: filtered output differs from JsonSerializer");
         }
 
-        // The unfiltered contract still skips a null OmittedSections: the same writer path that
-        // writes an ordinary metadata object leaves the key out exactly like the serializer.
+        // Write names the omission only while it writes: the caller's slice comes back without it.
+        var written = string.Empty;
         slice.Metadata.OmittedSections = null;
+        sections.Write(slice, SliceJsonOptions(), options => written = JsonSerializer.Serialize(slice, options));
+        Assert.Contains("\"OmittedSections\":[", written, StringComparison.Ordinal);
+        Assert.Null(slice.Metadata.OmittedSections);
+
+        // The unfiltered contract skips a null OmittedSections exactly like the serializer.
         var expectedFull = JsonSerializer.SerializeToUtf8Bytes(slice, SliceJsonOptions());
         Assert.DoesNotContain("OmittedSections"u8, expectedFull);
         Assert.True(expectedFull.AsSpan().SequenceEqual(WriteWithParallelWriter(slice, SliceJsonOptions())), "unfiltered output differs from JsonSerializer");

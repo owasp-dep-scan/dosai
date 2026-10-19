@@ -61,10 +61,9 @@ Framework-analysis options:
 
 Output-shaping option:
 
-| Flag                    | Effect                                                                                                                                                                        |
-| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--sections <names>`    | Comma-separated top-level sections to write in the JSON, e.g. `Metadata,Dependencies,MethodCalls`; see [Output size](#output-size) for the full behaviour and cross-section references |
-
+| Flag                 | Effect                                                                                                                       |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `--sections <names>` | Comma-separated top-level sections to write in the JSON, e.g. `Metadata,Dependencies,MethodCalls`; see [Output size](#output-size) |
 
 Build-preparation options (also accepted by `dataflows`, `crypto`, and `agent-context`):
 
@@ -145,7 +144,7 @@ The primary output is `MethodsSlice`. Important collections include `Methods`, `
 
 ### Output size
 
-`--sections <names>` bounds the JSON the same way `--crypto-dataflows` bounds the crypto output. The value is one comma-separated list of top-level section names, matched case-insensitively with duplicates collapsed; the valid names are the section names above in contract order, and a typo fails before any analysis runs. `Metadata` is always written, whatever the list says: a report without it cannot be identified (Tool, SchemaVersion, AnalyzerVersion). Written sections keep contract order whatever order the list gives, and `Metadata.OmittedSections` names what was left out, in contract order. The option applies to the JSON only: analysis, `Diagnostics` and every kept section are exactly what an unfiltered run produces, and `--callgraph-format` exports the full graph whatever the selection.
+`--sections <names>` bounds the JSON the same way `--crypto-dataflows` bounds the crypto output. The value is one comma-separated list of top-level section names, matched case-insensitively with duplicates collapsed, and a typo fails before any analysis runs. The valid names, in the order they are written, are `Metadata`, `Dependencies`, `Methods`, `MethodCalls`, `AssemblyInformation`, `Properties`, `Fields`, `Events`, `Constructors`, `CallGraph`, `ApiEndpoints`, `EntryPoints`, `Reachability`, `RecursionClusters`, `DeadCode`, `SecurityFindings`, `PackageReachability`, `SourceAssemblyMapping`, `Services`, `AiComponents`, `Frameworks` and `Diagnostics`; the error message for an unknown name lists them too. `Metadata` is always written, whatever the list says: a report without it cannot be identified (Tool, SchemaVersion, AnalyzerVersion). Written sections keep contract order whatever order the list gives, and `Metadata.OmittedSections` names what was left out, in contract order. The option applies to the JSON only: analysis, `Diagnostics` and every kept section are exactly what an unfiltered run produces, and `--callgraph-format` exports the full graph whatever the selection.
 
 On the issue-#96 generated tree (400 files of 25 methods each) the report shrinks from 25,821,600 bytes to 10,277,337 (60.2% less) with the nine sections cdxgen reads: `Methods` alone is roughly half of the full report. On real trees the same selection cuts a similar share: `eShopOnWeb` 93,471,329 to 39,238,191 bytes (58.0%), `CleanArchitecture` 483,773,109 to 186,396,366 (61.5%).
 
@@ -158,10 +157,10 @@ Omitting a section drops its data but not the ids other sections carry, so a con
 
 - `PackageReachability[].NodeIds`/`EdgeIds` → `CallGraph.Nodes[].Id`/`CallGraph.Edges[].Id`, and `PackageReachability[].EntryPointIds` → `EntryPoints[].Id`
 - `Reachability[].NodeId` → `CallGraph.Nodes[].Id`, and `Reachability[].ReachableEntryPoints` → `EntryPoints[].Id`
-- `RecursionClusters[].MemberIds` → `CallGraph.Nodes[].Id`, and `Reachability[].SccId` → `RecursionClusters[].Id`
+- `RecursionClusters[].MemberIds` → `CallGraph.Nodes[].Id`; a non-negative `Reachability[].SccId` n is the cluster `RecursionClusters[].Id` `scc<n>`, while a self-recursive method has its own negative `SccId` and the cluster `scc-self-<node id>`
 - `DeadCode[].NodeId` → `CallGraph.Nodes[].Id`
-- `EntryPoints[].MethodId` → the method id (`Methods[]`/`CallGraph.Nodes[].Id` space)
-- `MethodCalls[].SourceId`/`TargetId` ↔ `CallGraph.Edges[].SourceId`/`TargetId`
+- `EntryPoints[].MethodId` → `CallGraph.Nodes[].Id` (an entry point whose method has no node, or no `MethodId`, reaches nothing)
+- `MethodCalls[].SourceId`/`TargetId` → `CallGraph.Nodes[].Id`
 
 The MCP `dosai.methods` tool takes the same list as an optional `sections` argument (default: every section); unknown values are rejected in both the CLI (parse error) and the MCP tool (JSON-RPC error).
 
