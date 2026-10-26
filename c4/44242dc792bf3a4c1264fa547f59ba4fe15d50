@@ -1,0 +1,27 @@
+docs/LESSON12.md
+  s_9b63de135363a8::t_2ef8d6cac39749 29
+Dosai/Dosai.csproj
+  s_9b63de135363a8::t_43bc060db94e4f 18,45,50
+docs/migration-5.0.md
+  s_9b63de135363a8::t_2ef8d6cac39749 23-30
+Dosai.TestData/Dosai.TestData.FSharp.fsproj
+  s_9b63de135363a8::t_43bc060db94e4f 11
+README.md
+  s_9b63de135363a8::t_2ef8d6cac39749 66
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c444242dc792bf3a4c1264fa547f59ba4fe15d50",
+  "prompts": {},
+  "sessions": {
+    "s_9b63de135363a8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0bf3c7d4-4b1c-44fa-abcf-831500b2df26",
+        "model": "claude-sonnet-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
