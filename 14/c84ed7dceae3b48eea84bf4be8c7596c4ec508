@@ -1,0 +1,21 @@
+AGENTS.md
+  s_9b63de135363a8::t_3e1c90f13e2af1 335-336
+Dosai.Tests/Issue74BindingTests.cs
+  s_9b63de135363a8::t_3e1c90f13e2af1 135-142
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "14c84ed7dceae3b48eea84bf4be8c7596c4ec508",
+  "prompts": {},
+  "sessions": {
+    "s_9b63de135363a8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0bf3c7d4-4b1c-44fa-abcf-831500b2df26",
+        "model": "claude-sonnet-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
