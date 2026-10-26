@@ -132,7 +132,14 @@ public class Issue74BindingTests
         using var net11 = new TempDir();
         Write(net11.Path, "blazor.csproj", string.Format(Net8Csproj, "Microsoft.NET.Sdk.BlazorWebAssembly").Replace("net8.0", "net11.0"));
         var net11Text = GlobalUsings.Resolve(net11.Path).Tree!.GetText().ToString();
-        Assert.Equal(1, net11Text.Split("System.Net.Http.Json", StringSplitOptions.RemoveEmptyEntries).Length - 1);
+        Assert.Equal(1, System.Text.RegularExpressions.Regex.Count(net11Text, "global using System\\.Net\\.Http\\.Json;"));
+        Assert.Equal(1, System.Text.RegularExpressions.Regex.Count(net11Text, "global using Microsoft\\.Extensions\\.DependencyInjection;"));
+
+        // Like every SDK list, it applies only while ImplicitUsings is on.
+        using var off = new TempDir();
+        Write(off.Path, "blazor.csproj", string.Format(Net8Csproj, "Microsoft.NET.Sdk.BlazorWebAssembly").Replace("<ImplicitUsings>enable</ImplicitUsings>", "<ImplicitUsings>disable</ImplicitUsings>"));
+        var offText = GlobalUsings.Resolve(off.Path).Tree?.GetText().ToString() ?? string.Empty;
+        Assert.DoesNotContain("Microsoft.Extensions.DependencyInjection", offText, StringComparison.Ordinal);
     }
 
     [Fact]

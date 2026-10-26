@@ -332,8 +332,8 @@ dotnet test ./Dosai.sln
   published `-full` build with no `dotnet` reachable (pack resolution then degrades to the
   process-wide set with a diagnostic).
 - Global usings come from `GlobalUsings` (issue #74), not a hardcoded list: per project, the
-  SDK lists verified on disk (base C#, Web, Worker, Windows Forms - see the provenance comment
-  in `Dosai/GlobalUsings.cs`; Razor, Blazor Web Assembly and WPF add none), the project's and
+  SDK lists verified on disk (base C#, Web, Worker, Blazor Web Assembly, Windows Forms - see the
+  provenance comment in `Dosai/GlobalUsings.cs`; Razor and WPF add none), the project's and
   nearest `Directory.Build.props/targets`' `<Using>` items (Include/Remove/Static/Alias;
   unevaluable conditions are applied with a diagnostic), and MSBuild's generated
   `obj/**/<Project>.GlobalUsings.g.cs` when it exists for the resolved target and is no older
