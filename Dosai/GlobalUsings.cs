@@ -17,6 +17,7 @@ namespace Depscan;
 ///         <item>base C#: <c>Sdks/Microsoft.NET.Sdk/targets/Microsoft.NET.Sdk.CSharp.props</c></item>
 ///         <item>Web: <c>Sdks/Microsoft.NET.Sdk.Web/Targets/Sdk.Server.props</c></item>
 ///         <item>Worker: <c>Sdks/Microsoft.NET.Sdk.Worker/targets/Microsoft.NET.Sdk.Worker.props</c></item>
+///         <item>Blazor WebAssembly: <c>Sdks/Microsoft.NET.Sdk.BlazorWebAssembly/Sdk/Sdk.props</c></item>
 ///         <item>Windows Forms: <c>Sdks/Microsoft.NET.Sdk.WindowsDesktop/targets/Microsoft.NET.Sdk.WindowsDesktop.WindowsForms.props</c></item>
 ///     </list>
 ///     <para>
@@ -26,8 +27,8 @@ namespace Depscan;
 ///         {10.0.400, 11.0.100-rc.1.26425.128}</c>, and unchanged in macOS
 ///         <c>~/.dotnet/sdk/11.0.100-rc.2.26504.105</c>, except that only the 11 SDKs add the
 ///         base <c>System.Net.Http.Json</c> using (gated on .NET 11+), which is applied by
-///         target framework here rather than by SDK version. The Razor, Blazor Web Assembly
-///         and WPF SDKs add no usings of their own on disk (Razor's
+///         target framework here rather than by SDK version. The Razor and WPF SDKs add no
+///         usings of their own on disk (Razor's
 ///         <c>Microsoft.Extensions.Validation.Embedded</c> using is opt-in through
 ///         <c>IncludeEmbeddedValidationGlobalUsing</c> and default-off, so it is not added).
 ///     </para>
@@ -76,6 +77,17 @@ internal static partial class GlobalUsings
         "Microsoft.Extensions.Configuration",
         "Microsoft.Extensions.DependencyInjection",
         "Microsoft.Extensions.Hosting",
+        "Microsoft.Extensions.Logging"
+    ];
+
+    /// <summary>
+    ///     Microsoft.NET.Sdk.BlazorWebAssembly's additions (Sdk.props, identical in the 10 and
+    ///     11 SDKs): gated on ImplicitUsings and C# like the Web list.
+    /// </summary>
+    private static readonly string[] BlazorWebAssemblySdkUsings =
+    [
+        "Microsoft.Extensions.Configuration",
+        "Microsoft.Extensions.DependencyInjection",
         "Microsoft.Extensions.Logging"
     ];
 
@@ -286,6 +298,14 @@ internal static partial class GlobalUsings
         if (sdks.Contains("Microsoft.NET.Sdk.Worker"))
         {
             foreach (var name in WorkerSdkUsings)
+            {
+                Add(name);
+            }
+        }
+
+        if (sdks.Contains("Microsoft.NET.Sdk.BlazorWebAssembly"))
+        {
+            foreach (var name in BlazorWebAssemblySdkUsings)
             {
                 Add(name);
             }
