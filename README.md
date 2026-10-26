@@ -63,7 +63,7 @@ dotnet run --project ./Dosai/Dosai.csproj -- methods \
 Example output, abridged from one real `methods --path ./Dosai --debug` run:
 
 ```
-[dosai +0.002s] dosai 5.0.0.0, .NET 11.0.0-rc.1.26425.128, macOS 26.6.2 Arm64, 14 processor(s)
+[dosai +0.002s] dosai 5.0.0.0, .NET 11.0.0-rc.3.26522.148, macOS 26.6.2 Arm64, 14 processor(s)
 [dosai +0.006s] input path: /Users/you/dosai/Dosai
 [dosai +0.006s] --exclude: <none>
 [dosai +0.006s] start methods

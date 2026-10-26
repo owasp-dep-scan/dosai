@@ -20,7 +20,14 @@ The one field every consumer sees change value is `Metadata.SchemaVersion`, whic
 
 While .NET 11 is prerelease, the `FSharp.Compiler.Service`, `FSharp.Core`, and
 `System.Reflection.MetadataLoadContext` references are pinned to the RC SDK's builds and move to
-the stable releases at GA.
+the stable releases at GA. 5.0.0-rc.3 pins the .NET 11 RC 3 builds (`11.0.0-rc.3.26522.148`).
+
+RC 3 is an out-of-band security update (a Brotli decoder fix, CVE-2026-111497) with no API or SDK
+file changes: the public surface of the `Microsoft.NETCore.App.Ref` and `Microsoft.AspNetCore.App.Ref`
+packs, including every `[Experimental]` and `[Obsolete]` marker, is identical to RC 2, so analysis
+output does not change. The advisory is fixed in the runtime; an application that references
+`Microsoft.AspNetCore.Components.WebAssembly.Server` or `.DevServer` must also move those package
+references to `11.0.0-rc.3.26522.148` (CVE-2026-102870).
 
 ## New analysis coverage
 

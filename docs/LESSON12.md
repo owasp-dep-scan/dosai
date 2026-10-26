@@ -26,7 +26,7 @@ dotnet run --project ./Dosai/Dosai.csproj -- methods \
 The log that matters looks like this, trimmed to the interesting lines:
 
 ```text
-[dosai +0.005s] dosai 5.0.0.0, .NET 11.0.0-rc.1..., macOS 15.8.1 Arm64, 14 processor(s)
+[dosai +0.005s] dosai 5.0.0.0, .NET 11.0.0-rc.3..., macOS 15.8.1 Arm64, 14 processor(s)
 [dosai +0.111s] discovered under '.../Dosai': 81 .cs; 6 skipped in obj/bin or generated
 [dosai +0.125s] framework metadata references (trusted-platform-assemblies): 181
 [dosai +0.194s] start methods.parse-csharp
