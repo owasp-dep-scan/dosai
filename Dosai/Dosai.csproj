@@ -15,7 +15,7 @@
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
-    <Version>5.0.0-rc.2</Version>
+    <Version>5.0.0-rc.3</Version>
     <Title>OWASP Dosai</Title>
     <Authors>Team AppThreat &lt;cloud@appthreat.com&gt;</Authors>
     <Description>OWASP Dosai (Dotnet Source and Assembly Inspector) inspects .NET source code, assemblies, and NuGet packages to extract methods, dependencies, API endpoints, call graphs, data-flow slices, crypto evidence, and severity-tagged security findings for review.</Description>
@@ -42,12 +42,12 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="FSharp.Compiler.Service" Version="43.13.101-rc2.26504.105" />
+    <PackageReference Include="FSharp.Compiler.Service" Version="43.13.101-rc3.26522.148" />
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.9.0" />
     <PackageReference Include="Microsoft.CodeAnalysis.VisualBasic" Version="5.9.0" />
     <PackageReference Include="System.CommandLine" Version="2.0.12" />
     <None Include="..\README.md" Pack="true" PackagePath="\" />
-    <PackageReference Include="System.Reflection.MetadataLoadContext" Version="11.0.0-rc.2.26504.105" />
+    <PackageReference Include="System.Reflection.MetadataLoadContext" Version="11.0.0-rc.3.26522.148" />
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="Dosai.Tests" />
