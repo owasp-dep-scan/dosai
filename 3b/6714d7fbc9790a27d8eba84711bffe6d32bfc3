@@ -1,0 +1,16 @@
+Dosai.Tests/Issue74BindingTests.cs
+  h_0926447d100ad2 116-137,274-362
+Dosai/GlobalUsings.cs
+  h_0926447d100ad2 20,30-31,83-93,306-313
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3b6714d7fbc9790a27d8eba84711bffe6d32bfc3",
+  "prompts": {},
+  "humans": {
+    "h_0926447d100ad2": {
+      "author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}

@@ -1,0 +1,42 @@
+Dosai/Transparency.cs
+  s_5699db0b46928a::t_d59fce2c749dee 840-842
+  s_5699db0b46928a::t_6cbeb1f9294824 824-830,834-839,843-847,1060-1063
+Dosai/Frameworks/Providers/AspNetCoreMvcProvider.cs
+  s_5699db0b46928a::t_6cbeb1f9294824 378,649-675,778
+Dosai/Frameworks/FrameworkRegistry.cs
+  s_5699db0b46928a::t_a0ce0757532fdb 111,129-160,162-187
+  s_5699db0b46928a::t_f815cc31fb464a 161
+Dosai.Tests/Roadmap/EndpointGapTests.cs
+  s_5699db0b46928a::t_40088aa9893fcf 182-203
+  s_5699db0b46928a::t_e702f296aedead 1-181,204-260
+Dosai/Frameworks/SecurityAnalyzer.cs
+  s_5699db0b46928a::t_6cbeb1f9294824 131-153
+Dosai/Frameworks/Providers/MinimalApiProvider.cs
+  s_5699db0b46928a::t_3793cf38deb38f 33-34,37-48,72-85,115-137,146-147,150-178,205,214,221,225,230-239,242-356,502-539,672,727-746,749-752,791-796
+  s_5699db0b46928a::t_f59610fadd8304 240-241
+Dosai/Frameworks/ProviderHelpers.cs
+  s_5699db0b46928a::t_6cbeb1f9294824 74-82,159-160
+Dosai/Frameworks/Providers/SignalRProvider.cs
+  s_5699db0b46928a::t_27810338ec69cc 24-45,139-140
+docs/migration-5.0.md
+  s_5699db0b46928a::t_41df4e0a3328c4 380-398
+docs/frameworks.md
+  s_5699db0b46928a::t_41df4e0a3328c4 66-72,114-125
+  s_5699db0b46928a::t_09d146df581db3 126
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6aadf1f6f9e2146267328a9ae18ad72699ee9e8e",
+  "prompts": {},
+  "sessions": {
+    "s_5699db0b46928a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f99d7e92-54a6-4d58-9a97-703168976b41",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}

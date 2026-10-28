@@ -1,0 +1,44 @@
+Dosai.TestData/Dosai.TestData.CSharp.csproj
+  h_0926447d100ad2 15
+Dosai.TestData/WebInventory.cs
+  h_0926447d100ad2 1-66
+Dosai.Tests/Dosai.Tests.csproj
+  h_0926447d100ad2 49
+Dosai.Tests/LocaleInvarianceTests.cs
+  h_0926447d100ad2 284-286
+Dosai.Tests/MethodsSectionsTests.cs
+  h_0926447d100ad2 1-323
+Dosai.Tests/ParallelJsonWriterTests.cs
+  h_0926447d100ad2 66-113
+Dosai/CommandLine.cs
+  h_0926447d100ad2 175-198,215,328,340,344
+Dosai/Dosai.cs
+  h_0926447d100ad2 416,488-492,494-514,920-924,926-927,929,933,951-952,954-955
+Dosai/McpServer.cs
+  h_0926447d100ad2 149,230
+Dosai/MethodsSections.cs
+  h_0926447d100ad2 1-170
+Dosai/Transparency.cs
+  h_0926447d100ad2 39-48
+SKILL.md
+  h_0926447d100ad2 19-30
+docs/agent-workflows.md
+  h_0926447d100ad2 112,114
+docs/commands.md
+  h_0926447d100ad2 62-68,146-167
+docs/compiler-engineering.md
+  h_0926447d100ad2 367-368
+docs/migration-5.1.0.md
+  h_0926447d100ad2 249-277
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3bc9e8cf619ad4e877da2b4c782ba3d098e7a33e",
+  "prompts": {},
+  "humans": {
+    "h_0926447d100ad2": {
+      "author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}

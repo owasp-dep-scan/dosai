@@ -1,0 +1,37 @@
+docs/commands.md
+  s_2a9ecad3a75870::t_fcc8ce906eaf0b 162
+  s_2a9ecad3a75870::t_406daec0e0ecda 64-66
+  s_2a9ecad3a75870::t_7f03aa9424e6a0 160,163
+  s_2a9ecad3a75870::t_ab54537cc35622 147
+Dosai/ParallelJsonWriter.cs
+  s_2a9ecad3a75870::t_f4f1938c4220cc 54,70
+Dosai/MethodsSections.cs
+  s_2a9ecad3a75870::t_fad21263a505cc 16
+  s_2a9ecad3a75870::t_e790ded95dd70a 159-163,165,168-176,180-191
+Dosai.Tests/MethodsSectionsTests.cs
+  s_2a9ecad3a75870::t_6589c2e9e862f9 306-330
+  s_2a9ecad3a75870::t_8456a4c9d5dabe 1
+Dosai.Tests/ParallelJsonWriterTests.cs
+  s_2a9ecad3a75870::t_a5d5fd14bf50f2 92-97,110-111,113-117
+Dosai/Dosai.cs
+  s_2a9ecad3a75870::t_4fe0461fb5c341 919
+  s_2a9ecad3a75870::t_b3c1ca2a5eda8b 497-499
+Dosai/CommandLine.cs
+  s_2a9ecad3a75870::t_d5b5e0fb01cbf3 177
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "65675e167d52804e0b8c30c00a2781e916b9c2fd",
+  "prompts": {},
+  "sessions": {
+    "s_2a9ecad3a75870": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c6b2208a-f0eb-4017-9266-9174359dc585",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}

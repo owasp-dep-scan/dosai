@@ -1,0 +1,29 @@
+docs/frameworks.md
+  s_5bad3094f7bc65::t_c772451495f020 127-148
+docs/migration-5.0.md
+  s_5bad3094f7bc65::t_6ed690e8781af1 366
+  s_5bad3094f7bc65::t_c772451495f020 348-365,367-382,431-460
+Dosai.Tests/Roadmap/MiddlewareSecurityTests.cs
+  s_5bad3094f7bc65::t_6351992f83cfb0 1-145,147-193
+  s_5bad3094f7bc65::t_4596d69583fed6 146
+Dosai/Frameworks/SecurityAnalyzer.cs
+  s_5bad3094f7bc65::t_9fc7a07053129b 941
+  s_5bad3094f7bc65::t_3e120e539aea09 26,354-359,366,729-940,942-977
+  s_5bad3094f7bc65::t_bdaf32bb8fa177 978
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "31cd6419edf5010b32b671a64a7d88746607c401",
+  "prompts": {},
+  "sessions": {
+    "s_5bad3094f7bc65": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c8058ad5-2c38-4556-995e-6d27935e4326",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
