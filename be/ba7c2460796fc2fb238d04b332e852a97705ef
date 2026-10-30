@@ -1,0 +1,34 @@
+Dosai/SafeFileRead.cs
+  s_9e5a3338ab7e3b::t_7e81f998f4543e 110-116
+Dosai/AssemblyScope.cs
+  s_9e5a3338ab7e3b::t_7e81f998f4543e 87
+Dosai/Dosai.cs
+  s_9e5a3338ab7e3b::t_7e81f998f4543e 1662
+Dosai/FrameworkReferences.cs
+  s_9e5a3338ab7e3b::t_7e81f998f4543e 499
+Dosai.Tests/CorpusTests.cs
+  s_9e5a3338ab7e3b::t_7f7f562e1c2776 216-219,223
+AGENTS.md
+  s_9e5a3338ab7e3b::t_57deaa772684a1 281-288
+Dosai.Tests/DosaiTests.cs
+  s_9e5a3338ab7e3b::t_d51866bdfeefc7 960-1022,2970-2996
+  s_9e5a3338ab7e3b::t_b9570c4a09903a 2997
+Dosai/BuildPreparation.cs
+  s_9e5a3338ab7e3b::t_7e81f998f4543e 90
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "beba7c2460796fc2fb238d04b332e852a97705ef",
+  "prompts": {},
+  "sessions": {
+    "s_9e5a3338ab7e3b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "434f6aff-cd8e-4383-a216-1c6a9f4be2af",
+        "model": "unknown"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
