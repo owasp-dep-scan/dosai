@@ -957,6 +957,69 @@ class Entry
         Assert.Contains(gexfDocument.Descendants(), element => element.Name.LocalName == "edge");
     }
 
+    // The same tree gives the same data flows wherever it is read. File systems list a directory
+    // in their own order, which used to become the order of the syntax trees and of every node,
+    // edge and slice id; discovery now sorts each directory by name. The files here are written
+    // in opposite orders into two directories and the two reports must match.
+    [Fact]
+    public void GetDataFlows_SameTreeWrittenInDifferentOrders_GivesTheSameReport()
+    {
+        var files = new (string Name, string Content)[]
+        {
+            ("Program.cs", """
+class Program
+{
+    static void Main(string[] args)
+    {
+        Relay.Store(args[0]);
+        new Runner().Run(Relay.Last);
+    }
+}
+"""),
+            ("Relay.cs", """
+static class Relay
+{
+    public static string Last = "";
+    public static void Store(string value) { Last = string.Concat(value, ""); }
+}
+"""),
+            ("Runner.cs", """
+using System.Diagnostics;
+
+class Runner
+{
+    public void Run(string command) { Process.Start(command); }
+}
+"""),
+            (Path.Combine("Tools", "Echo.cs"), """
+using System.Diagnostics;
+
+static class Echo
+{
+    public static void Main2(string[] args) { Process.Start("echo", args[0]); }
+}
+""")
+        };
+
+        string Report(IEnumerable<(string Name, string Content)> order)
+        {
+            using var tempDirectory = new TemporaryDirectory();
+            Directory.CreateDirectory(Path.Combine(tempDirectory.Path, "Tools"));
+            foreach (var (name, content) in order)
+            {
+                File.WriteAllText(Path.Combine(tempDirectory.Path, name), content);
+            }
+            var json = DataFlowAnalyzer.GetDataFlows(tempDirectory.Path);
+            return NormalizeGeneratedAt(json).Replace(tempDirectory.Path, "<root>", StringComparison.Ordinal);
+        }
+
+        var forward = Report(files);
+        var backward = Report(files.Reverse());
+
+        Assert.Contains("Process.Start", forward, StringComparison.Ordinal);
+        Assert.Equal(forward, backward);
+    }
+
     [Fact]
     public void GetDataFlows_CliSourceToProcessStart_ReturnsDetailedSliceAndExportsGraphs()
     {
@@ -2902,6 +2965,34 @@ public static class Linked
         var methodsSlice = ReadMethods(tree);
 
         Assert.Contains(methodsSlice.Methods!, method => method is { ClassName: "Linked", Name: "Run" });
+    }
+
+    // The file system hands back directory entries in its own order (hash order on ext4 and
+    // APFS), which differs between machines and even between two directories on one machine.
+    // Discovery sorts each directory by name, files before subdirectories, so the syntax tree
+    // order and everything reported from it are the same everywhere.
+    [Fact]
+    public void EnumerateAllFilesSafe_ReturnsEachDirectorySortedByName()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        string[] names = ["zeta.cs", "Program.cs", "mid.cs", "Main.cs", "beta.cs", "_first.cs", "Alpha.cs"];
+        foreach (var name in names)
+        {
+            File.WriteAllText(Path.Combine(tempDirectory.Path, name), "// order");
+        }
+        var nested = Path.Combine(tempDirectory.Path, "b");
+        Directory.CreateDirectory(nested);
+        File.WriteAllText(Path.Combine(nested, "Y.cs"), "// order");
+        File.WriteAllText(Path.Combine(nested, "X.cs"), "// order");
+        Directory.CreateDirectory(Path.Combine(tempDirectory.Path, "a"));
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "a", "Z.cs"), "// order");
+
+        var discovered = SafeFileRead.EnumerateAllFilesSafe(tempDirectory.Path)
+            .Select(file => Path.GetRelativePath(tempDirectory.Path, file).Replace('\\', '/'))
+            .ToList();
+
+        string[] expected = [.. names.Order(StringComparer.Ordinal), "a/Z.cs", "b/X.cs", "b/Y.cs"];
+        Assert.Equal(expected, discovered);
     }
 
     // A link pointing back at an ancestor is a cycle; enumeration must terminate and still

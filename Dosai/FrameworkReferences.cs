@@ -496,6 +496,7 @@ internal static class FrameworkReferences
                 if (!Directory.Exists(package)) continue;
                 var hit = Directory.EnumerateDirectories(package)
                     .OrderByDescending(version => Version.TryParse(Path.GetFileName(version).Split('-')[0], out var parsed) ? parsed : new Version(0, 0))
+                    .ThenByDescending(version => version, StringComparer.Ordinal)
                     .SelectMany(version => new[] { "lib", "ref" }.Select(kind => Path.Combine(version, kind)).Where(Directory.Exists))
                     .SelectMany(kind => Directory.EnumerateDirectories(kind).OrderByDescending(tfm => tfm, StringComparer.Ordinal))
                     .Select(tfm => Path.Combine(tfm, fileName))

@@ -107,9 +107,13 @@ internal static class SafeFileRead
         try
         {
             // Materialize inside the try: the lazy enumerators throw during iteration, and
-            // `yield return` cannot live inside a try that has a catch clause.
-            fileEntries = directory.EnumerateFiles(searchPattern, SearchOption.TopDirectoryOnly).ToList();
-            subdirectories = directory.EnumerateDirectories().ToList();
+            // `yield return` cannot live inside a try that has a catch clause. Sorted by name:
+            // file systems list a directory in their own order (hash order on ext4 and APFS,
+            // different from one machine to the next), and that order becomes the order of the
+            // syntax trees, the analyzed assemblies and every first-wins choice made from them,
+            // so the same tree has to be read in the same order everywhere.
+            fileEntries = directory.EnumerateFiles(searchPattern, SearchOption.TopDirectoryOnly).OrderBy(file => file.Name, StringComparer.Ordinal).ToList();
+            subdirectories = directory.EnumerateDirectories().OrderBy(subdirectory => subdirectory.Name, StringComparer.Ordinal).ToList();
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PathTooLongException or DirectoryNotFoundException)
         {

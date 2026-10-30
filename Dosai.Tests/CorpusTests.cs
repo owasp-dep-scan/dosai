@@ -213,12 +213,14 @@ public class CorpusTests
         var packageSliceIds = packageSlices.Select(slice => slice.Id).ToHashSet(StringComparer.Ordinal);
         Assert.All(result.WeaknessCandidates.Where(weakness => weakness.SliceId is { } id && packageSliceIds.Contains(id)), weakness => Assert.Equal(TransparencyBuilder.DependencyScope, weakness.Scope));
         Assert.All(result.DangerousApiReachability.Where(api => api.NodeIds.All(id => TransparencyBuilder.IsDependencyNode(nodes[id]))), api => Assert.Equal("Low", api.Confidence));
-        // MimeKit is reached by the repro's own `args` flow (MailboxAddress.Parse), so its
-        // reachability is the application's, not only the package's.
+        // MimeKit is reached by the repro's own `args` flow (MailboxAddress.Parse), and MailKit by
+        // flows that pass through the repro's code into SmtpClient, so their reachability is the
+        // application's. BouncyCastle only appears in flows confined to the packages. MailKit used
+        // to come out Low or High depending on the order the file system listed the tree.
         foreach (var name in new[] { "BouncyCastle.Cryptography", "MailKit", "MimeKit" })
         {
             var package = Assert.Single(result.PackageReachability, package => package.Purl.StartsWith($"pkg:nuget/{name}@", StringComparison.Ordinal));
-            Assert.Equal(name == "MimeKit" ? "High" : "Low", package.Confidence);
+            Assert.Equal(name == "BouncyCastle.Cryptography" ? "Low" : "High", package.Confidence);
         }
 
         // The generic `stelem` drift sent every typed-array loop into the state budget
