@@ -87,6 +87,7 @@ public static class BuildPreparation
         {
             var solutions = Directory.EnumerateFiles(root, "*.sln", SearchOption.TopDirectoryOnly)
                 .Concat(Directory.EnumerateFiles(root, "*.slnx", SearchOption.TopDirectoryOnly))
+                .Order(StringComparer.Ordinal)
                 .ToList();
             if (solutions.Count > 0)
             {

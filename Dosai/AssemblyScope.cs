@@ -84,7 +84,7 @@ internal static class AssemblyScope
             return names;
         }
 
-        foreach (var depsFile in Directory.EnumerateFiles(directory, "*.deps.json", SearchOption.TopDirectoryOnly))
+        foreach (var depsFile in Directory.EnumerateFiles(directory, "*.deps.json", SearchOption.TopDirectoryOnly).Order(StringComparer.Ordinal))
         {
             try
             {

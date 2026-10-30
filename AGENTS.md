@@ -278,7 +278,14 @@ dotnet test ./Dosai.sln
   and the call-graph walker follows the stack so long chains keep their head call.
 - Enumerate the scanned tree through `SafeFileRead.EnumerateAllFilesSafe` (or filter through
   `PathExclusions.IsExcluded`), so `--exclude` globs (`PathExclusions`, an ambient scope the CLI
-  applies per command) hold for every analyzer. Always parse with the scan root
+  applies per command) hold for every analyzer. It returns each directory's files, then its
+  subdirectories, sorted by name with an ordinal comparison. File systems list a directory in
+  hash order that differs between machines (ext4, APFS), and that order becomes the order of
+  the syntax trees, the analyzed assemblies, every id counter and every first-wins choice made
+  from them: the data-flow IL pass still keeps the first trace of a slice key and stops its
+  summary and field-taint rounds at a bound, so its flows are only reproducible because the
+  input order is. Any other directory listing whose order reaches the output must be sorted
+  the same way. Always parse with the scan root
   (`CSharpSourceParser.Parse(text, file, rootPath)`): the nearest-project walk is bounded by
   it and memoized per directory. Never go back to recursive TFM detection per source
   directory - one recursive enumeration per distinct directory, and a project's

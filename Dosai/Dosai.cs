@@ -1659,6 +1659,7 @@ public static class Dosai
             .OrderByDescending(directory => string.Equals(directory, runningVersionDirectory, StringComparison.Ordinal))
             .ThenByDescending(directory => runtimeConfigExactDirectories.Contains(directory))
             .ThenByDescending(directory => ParseFrameworkVersion(Path.GetFileName(directory)))
+            .ThenBy(directory => directory, StringComparer.Ordinal)
             .ToList();
     }
 
