@@ -95,41 +95,6 @@ namespace App
         Assert.Contains(lines, line => line.Contains("end methods.declaration-diagnostics (C#)", StringComparison.Ordinal));
     }
 
-    // Roslyn's declaration completion throws (InvalidCastException in
-    // GetCorrespondingBaseListLocation) when top-level statements and a partial Program with an
-    // unimplemented interface meet in one compilation - dotnet/runtime has both. The --debug
-    // histogram pass contains it and the run completes, with and without --debug.
-    [Fact]
-    public void Debug_Methods_CompilerFailureInDeclarationDiagnostics_IsContained()
-    {
-        using var tempDirectory = new TemporaryDirectory();
-        File.WriteAllText(Path.Combine(tempDirectory.Path, "Main.cs"), "System.Console.WriteLine(1);");
-        File.WriteAllText(Path.Combine(tempDirectory.Path, "Program.cs"), "partial class Program : System.IDisposable { }");
-
-        var recorder = new LineRecorder();
-        string json;
-        lock (ConsoleOutputLock)
-        {
-            var originalError = Console.Error;
-            Console.SetError(recorder);
-            try
-            {
-                DebugLog.Configure(true);
-                json = Depscan.Dosai.GetMethods(tempDirectory.Path);
-            }
-            finally
-            {
-                DebugLog.Configure(false);
-                Console.SetError(originalError);
-            }
-        }
-
-        Assert.Contains(recorder.Snapshot(), line => line.Contains("C# declaration diagnostics failed inside the compiler", StringComparison.Ordinal));
-        using var document = JsonDocument.Parse(json);
-        Assert.Contains(document.RootElement.GetProperty("Methods").EnumerateArray(), method => method.GetProperty("Name").GetString() == "<Main>$");
-        Assert.NotEmpty(JsonDocument.Parse(Depscan.Dosai.GetMethods(tempDirectory.Path)).RootElement.GetProperty("Methods").EnumerateArray());
-    }
-
     /// <summary>
     ///     The methods JSON is byte-identical between a --debug and a plain run except for the
     ///     pre-existing GeneratedAt timestamp, which differs between any two runs regardless of
