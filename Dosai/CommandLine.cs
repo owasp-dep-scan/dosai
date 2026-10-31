@@ -64,7 +64,7 @@ public class CommandLine
 
         var dependencyFlowsOption = new Option<string?>("--dependency-flows")
         {
-            Description = "Which dependency (package) assembly methods of a built tree the data-flow IL pass analyzes: all (default; every package flow stays in the graph, scoped as dependency) or reachable (only methods application code reaches: far faster on trees with large packages, application slices are identical). DOSAI_DEPENDENCY_FLOWS sets the default.",
+            Description = "Which dependency (package) assembly methods the data-flow IL pass analyzes: all (every package flow stays in the graph, scoped as dependency; the default for a built source tree) or reachable (only methods application code reaches, far faster when packages are large, with the same application slices; the default for an assembly-only input such as a publish directory). DOSAI_DEPENDENCY_FLOWS sets the default.",
             Arity = ArgumentArity.ExactlyOne
         };
 

@@ -367,25 +367,34 @@ public class CorpusTests
         var path = CorpusPathOrSkip("issue107-mailkit");
         using var copy = CorpusCopy.Of(path);
 
-        DataFlowResult Run()
+        DataFlowResult Run(DependencyFlowMode mode)
         {
-            // Reachable keeps the run to seconds; the application slices are the same as with all.
-            using var scope = DependencyFlowScope.Apply(DependencyFlowMode.Reachable);
+            using var scope = DependencyFlowScope.Apply(mode);
             return DataFlowAnalyzer.Analyze(copy.Path);
         }
 
-        string[] ApplicationSlices(DataFlowResult result) => result.Slices
-            .Where(slice => slice.Scope != "dependency")
-            .Select(slice => $"{result.Nodes.Single(node => node.Id == slice.SourceId).Name}->{result.Nodes.Single(node => node.Id == slice.SinkId).Name}:{slice.SinkArgumentIndex}")
-            .Order(StringComparer.Ordinal)
-            .ToArray();
+        // Each application slice with every node it passes through, by location and name.
+        string[] ApplicationSlices(DataFlowResult result)
+        {
+            var nodes = result.Nodes.ToDictionary(node => node.Id, node => $"{node.FileName}:{node.LineNumber}:{node.ColumnNumber}:{node.Name}", StringComparer.Ordinal);
+            return result.Slices
+                .Where(slice => slice.Scope != "dependency")
+                .Select(slice => $"{nodes[slice.SourceId]}->{nodes[slice.SinkId]}:{slice.SinkArgumentIndex}|{string.Join(",", slice.NodeIds.Select(id => nodes[id]))}")
+                .Order(StringComparer.Ordinal)
+                .ToArray();
+        }
 
-        var without = Run();
+        var without = Run(DependencyFlowMode.Reachable);
         Assert.Contains(without.Slices, slice => slice.Scope != "dependency" && without.Nodes.Single(node => node.Id == slice.SinkId).Name == "Parse");
         Assert.Contains(without.PackageReachability, package => package.Purl.StartsWith("pkg:nuget/MimeKit@", StringComparison.Ordinal));
 
+        // Reachable analyzes a fraction of the package bodies and still gives every application
+        // slice exactly as all does, nodes through generic package methods included.
+        var all = Run(DependencyFlowMode.All);
+        Assert.Equal(ApplicationSlices(all), ApplicationSlices(without));
+
         File.Copy(Directory.EnumerateFiles(Path.Combine(copy.Path, "Api", "bin"), "Api.deps.json", SearchOption.AllDirectories).First(), Path.Combine(copy.Path, "Api.deps.json"));
-        var with = Run();
+        var with = Run(DependencyFlowMode.Reachable);
         Assert.Equal(ApplicationSlices(without), ApplicationSlices(with));
         Assert.Equal(without.Statistics.FilesAnalyzed, with.Statistics.FilesAnalyzed);
         Assert.Equal(without.PackageReachability.Select(package => package.Purl), with.PackageReachability.Select(package => package.Purl));
