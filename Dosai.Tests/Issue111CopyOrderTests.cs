@@ -91,6 +91,9 @@ public sealed class Issue111CopyOrderTests
         Assert.DoesNotContain("FixedClock.Now", CoreMethods(slice));
         Assert.Contains("Greeting.Hello", CoreMethods(slice));
         Assert.Single(CoreMethods(slice), name => name == "Greeting.Hello");
+        // No directory holds the missing package, so no other copy can load more and none is
+        // read a second time (a missing shared framework costs no extra reads either).
+        Assert.DoesNotContain(slice.Diagnostics ?? [], line => line.Contains("did not load completely", StringComparison.Ordinal));
     }
 
     [Fact]

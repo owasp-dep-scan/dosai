@@ -1819,6 +1819,32 @@ public static class Dosai
 
         /// <summary>The identity to mark done: set once the first type is read.</summary>
         public string? Identity { get; set; }
+
+        /// <summary>Simple names of the referenced assemblies the load could not find.</summary>
+        public HashSet<string> MissingReferences { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+        public void NoteMissing(Exception? exception)
+        {
+            var missing = exception switch
+            {
+                FileNotFoundException notFound => notFound.FileName,
+                FileLoadException notLoaded => notLoaded.FileName,
+                _ => null
+            };
+            if (missing is not null)
+            {
+                try
+                {
+                    if (new AssemblyName(missing).Name is { Length: > 0 } name)
+                    {
+                        MissingReferences.Add(name);
+                    }
+                }
+                catch (Exception ex) when (ex is ArgumentException or FileLoadException)
+                {
+                }
+            }
+        }
     }
 
     private static List<Method> InspectAssemblyMethods(string path, ICollection<string> diagnostics)
@@ -1968,6 +1994,7 @@ public static class Dosai
             catch (Exception e) when (e is FileLoadException or FileNotFoundException or BadImageFormatException or TypeLoadException or NotSupportedException)
             {
                 read.Complete = false;
+                read.NoteMissing(e);
                 if (DebugLog.Enabled)
                 {
                     DebugLog.Log($"assembly '{Path.GetFileName(assemblyFilePath)}' failed to load: {e.GetType().Name}: {e.Message}");
@@ -2008,6 +2035,11 @@ public static class Dosai
                 warnings.Add($"Warning: Could not load all types from {fileName}. Some types will be skipped.");
                 if (ex.LoaderExceptions is not null)
                 {
+                    foreach (var loaderException in ex.LoaderExceptions)
+                    {
+                        read.NoteMissing(loaderException);
+                    }
+
                     var uniqueLoaderErrors = ex.LoaderExceptions
                         .Where(e => e is not null)
                         .Select(e => e?.Message)
@@ -2080,41 +2112,72 @@ public static class Dosai
 
         // The runtime type loader reads one copy of an assembly, and a class library's own bin
         // lacks the packages the application's output carries, so the types that need one cannot
-        // load there (issue #111). Which copy came first was an accident of directory names. A
-        // copy that loads completely wins; among the others, the one that loads most types, the
-        // earlier in AssemblyCopies' ranking on a tie, so the answer depends on the files alone.
+        // load there (issue #111). Which copy came first was an accident of directory names. Every
+        // copy is ranked as AssemblyCopies ranks them; a copy that loads completely wins, the
+        // earliest in rank, and otherwise the one that reads the most members, the earlier in
+        // rank on a tie. Only copies whose directory holds a reference the first load missed are
+        // read (they are the ones that can do better), so a missing shared framework, which no
+        // directory holds, costs no second read.
         AssemblyRead ReadBestOtherCopy(string assemblyFilePath, AssemblyName assemblyName, AssemblyRead first)
         {
-            var best = first;
-            foreach (var other in OtherCopiesOf(assemblyFilePath, assemblyName))
+            AssemblyRead? best = null;
+            foreach (var candidate in CopiesInRankOrder(assemblyName).DefaultIfEmpty(assemblyFilePath))
             {
-                var read = TryReadAssembly(other, assemblyName, ContextFor(Path.GetDirectoryName(other) ?? string.Empty));
-                if (read.Complete || (!best.Complete && read.Methods.Count > best.Methods.Count))
+                AssemblyRead read;
+                if (SafeFileRead.PathComparer.Equals(candidate, assemblyFilePath))
+                {
+                    read = first;
+                }
+                else if (CanResolveMore(candidate, first))
+                {
+                    read = TryReadAssembly(candidate, assemblyName, ContextFor(Path.GetDirectoryName(candidate) ?? string.Empty));
+                }
+                else
+                {
+                    continue;
+                }
+
+                if (best is null || (read.Complete && !best.Complete) || (!best.Complete && !read.Complete && read.Methods.Count > best.Methods.Count))
                 {
                     best = read;
                 }
 
-                if (read.Complete)
+                if (best.Complete)
                 {
                     break;
                 }
             }
 
+            best ??= first;
             if (!ReferenceEquals(best, first))
             {
                 var describe = (string file) => Path.GetRelativePath(File.Exists(path) ? (Path.GetDirectoryName(path) ?? string.Empty) : path, file).Replace('\\', '/');
                 diagnostics.Add(best.Complete
                     ? $"{Path.GetFileName(first.FilePath)} did not load completely from {describe(first.FilePath)}; its types were read from the complete copy in {describe(best.FilePath)}."
-                    : $"{Path.GetFileName(first.FilePath)} did not load completely from {describe(first.FilePath)}; the copy in {describe(best.FilePath)} loaded more of its types and was used.");
+                    : $"{Path.GetFileName(first.FilePath)} did not load completely from {describe(first.FilePath)}; the copy in {describe(best.FilePath)} read more of its members and was used.");
             }
 
             return best;
         }
 
-        // The other files of the same assembly identity, byte-identical copies first in the
-        // order the IL passes rank them (a PDB beside it, a project's own output, IL-only over
+        // A copy can load more only when its directory holds a reference the first load missed.
+        // When the failure named no file, every copy is worth a try.
+        static bool CanResolveMore(string candidate, AssemblyRead first)
+        {
+            if (first.MissingReferences.Count == 0)
+            {
+                return true;
+            }
+
+            var directory = Path.GetDirectoryName(candidate) ?? string.Empty;
+            return first.MissingReferences.Any(name =>
+                File.Exists(Path.Combine(directory, name + Constants.AssemblyExtension)) || File.Exists(Path.Combine(directory, name + Constants.ExeExtension)));
+        }
+
+        // Every file of the same assembly identity, byte-identical copies together, in the order
+        // the IL passes rank them (a PDB beside it, a project's own output, IL-only over
         // ReadyToRun, then tree order), then files of the same identity with other bytes.
-        IEnumerable<string> OtherCopiesOf(string assemblyFilePath, AssemblyName assemblyName)
+        IEnumerable<string> CopiesInRankOrder(AssemblyName assemblyName)
         {
             // Every managed file's identity is read once, on the first partial load, and only
             // when one happens: a tree where every assembly loads completely never pays for it.
@@ -2127,8 +2190,7 @@ public static class Dosai
             var collapsed = AssemblyCopies.Collapse(probeRoot, sameIdentity);
             var groupsByAnalyzed = collapsed.Groups.ToDictionary(group => group.Analyzed, SafeFileRead.PathComparer);
             return collapsed.Distinct
-                .SelectMany(file => groupsByAnalyzed.TryGetValue(file, out var group) ? new[] { file }.Concat(group.Copies) : [file])
-                .Where(file => !SafeFileRead.PathComparer.Equals(file, assemblyFilePath));
+                .SelectMany(file => groupsByAnalyzed.TryGetValue(file, out var group) ? new[] { file }.Concat(group.Copies) : [file]);
         }
 
         Dictionary<string, List<string>> IndexFilesByIdentity()
