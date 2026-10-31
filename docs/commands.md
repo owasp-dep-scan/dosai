@@ -189,7 +189,7 @@ dotnet run --project ./Dosai/Dosai.csproj -- dataflows \
   --graph-out /tmp/dosai-dataflows.gexf
 ```
 
-Common options are `--patterns`, `--pattern-packs`, `--graph-format`, `--graph-out`, `--print`, `--print-sources-sinks`, and `--suppress`. Supported graph formats are `mermaid`, `graphml`, and `gexf`. By default, `dataflows` writes the JSON and optional graph artifacts without printing flow details to stdout. Use `--print` for a human-readable path view, and use `--print-sources-sinks` only for source/sink pattern diagnostics.
+Common options are `--patterns`, `--pattern-packs`, `--dependency-flows` (`all`, the default, or `reachable`: analyze only the package methods application code calls, which is much faster on built trees with large packages and leaves the application's slices unchanged), `--graph-format`, `--graph-out`, `--print`, `--print-sources-sinks`, and `--suppress`. Supported graph formats are `mermaid`, `graphml`, and `gexf`. By default, `dataflows` writes the JSON and optional graph artifacts without printing flow details to stdout. Use `--print` for a human-readable path view, and use `--print-sources-sinks` only for source/sink pattern diagnostics.
 
 Use `--patterns` to merge project-specific source, sink, passthrough, and sanitizer patterns with Dosai's built-in patterns:
 

@@ -39,7 +39,7 @@ clone_at_commit \
     https://github.com/kgrzybek/modular-monolith-with-ddd \
     91c8ef24b4cb6ef558c95d8267fa07d68c7059f8 \
     "${CORPUS_ROOT}/modular-monolith-with-ddd"
-dotnet build "${CORPUS_ROOT}/modular-monolith-with-ddd/src/API/CompanyName.MyMeetings.API/CompanyName.MyMeetings.API.csproj" -v quiet
+dotnet build "${CORPUS_ROOT}/modular-monolith-with-ddd/src/API/CompanyName.MyMeetings.API/CompanyName.MyMeetings.API.csproj" -v quiet -p:NuGetAudit=false
 
 echo "==> grpc-dotnet Grpc.Net.Client (multi-target library: net462;netstandard2.0;netstandard2.1;net8.0;net9.0;net10.0)"
 clone_at_commit \
@@ -117,5 +117,61 @@ PROGRAM
         dotnet build "${ISSUE79}/Repro.csproj" -c Release -o "${ISSUE79}/out" -v quiet
     fi
 done
+
+echo "==> issue107-nodatime (issue #107 repro: an app and a class library, NodaTime copied into App/bin)"
+ISSUE107="${CORPUS_ROOT}/issue107-nodatime"
+if [ ! -d "${ISSUE107}/App" ]; then
+    mkdir -p "${ISSUE107}"
+    (
+        cd "${ISSUE107}"
+        dotnet new classlib -n Lib -o Lib > /dev/null
+        dotnet new console -n App -o App > /dev/null
+        sed -i.bak "s|<TargetFramework>[^<]*</TargetFramework>|<TargetFramework>net8.0</TargetFramework>|" Lib/Lib.csproj App/App.csproj
+        dotnet add App/App.csproj reference Lib/Lib.csproj > /dev/null
+        dotnet add App/App.csproj package NodaTime --version 3.2.0 > /dev/null
+        cat > App/Program.cs <<'PROGRAM'
+using NodaTime;
+
+Console.WriteLine(SystemClock.Instance.GetCurrentInstant());
+PROGRAM
+    )
+fi
+dotnet build "${ISSUE107}/App/App.csproj" -c Release -v quiet
+
+echo "==> issue107-mailkit (issue #107 dataflows repro: a minimal API with MailKit)"
+ISSUE107_MAIL="${CORPUS_ROOT}/issue107-mailkit"
+if [ ! -d "${ISSUE107_MAIL}/Api" ]; then
+    mkdir -p "${ISSUE107_MAIL}"
+    (
+        cd "${ISSUE107_MAIL}"
+        dotnet new web -n Api -o Api > /dev/null
+        sed -i.bak "s|<TargetFramework>[^<]*</TargetFramework>|<TargetFramework>net8.0</TargetFramework>|" Api/Api.csproj
+        dotnet add Api/Api.csproj package MailKit --version 4.8.0 > /dev/null
+        cat > Api/Program.cs <<'PROGRAM'
+using MailKit.Net.Smtp;
+using MimeKit;
+
+var builder = WebApplication.CreateBuilder(args);
+var app = builder.Build();
+
+app.MapPost("/send", (SendRequest request) =>
+{
+    var message = new MimeMessage();
+    message.From.Add(MailboxAddress.Parse(request.From));
+    message.To.Add(MailboxAddress.Parse(request.To));
+
+    using var client = new SmtpClient();
+    client.Connect(request.Host, 25);
+    client.Send(message);
+    return Results.Ok();
+});
+
+app.Run();
+
+public record SendRequest(string From, string To, string Host);
+PROGRAM
+    )
+fi
+dotnet build "${ISSUE107_MAIL}/Api/Api.csproj" -c Release -v quiet
 
 echo "==> Corpus ready at ${CORPUS_ROOT}"

@@ -40,9 +40,10 @@ public class CorpusTests
         Assert.Contains(slice.EntryPoints, entryPoint => entryPoint.Kind is "HttpController" or "HttpMinimalApi");
 
         // The reachability index is populated and graph-derived depths exist
-        // (12,062 indexed nodes at the release run).
+        // (12,062 indexed nodes at the release run, while the packages under bin/ counted as
+        // application code; 2,082 since issue #107 leaves them out).
         var reachability = slice.Reachability!;
-        Assert.True(reachability.Count > 10_000, $"expected a large reachability index, got {reachability.Count}");
+        Assert.True(reachability.Count > 1_500, $"expected a large reachability index, got {reachability.Count}");
         Assert.Contains(reachability, facts => facts.ReachableEntryPoints.Count > 0 && facts.DepthFromEntryPoint is > 0);
         Assert.Contains(reachability, facts => facts.FanIn > 0 && facts.FanOut > 0);
 
@@ -291,9 +292,12 @@ public class CorpusTests
         Assert.Equal(["net8.0"], slice.Metadata!.TargetFrameworks);
         Assert.DoesNotContain(slice.Diagnostics ?? [], diagnostic => diagnostic.Contains("No TargetFramework detected", StringComparison.Ordinal));
 
-        // 111 entry points / 72,108 methods / 9,806 edges at the calibration run.
+        // 111 entry points / 72,108 methods / 9,806 edges at the calibration run, while the
+        // packages under bin/ counted as application code; 115 / 10,020 / 10,178 since issue #107
+        // leaves them out.
         Assert.True(slice.EntryPoints!.Count >= 90, $"expected >= 90 entry points, got {slice.EntryPoints.Count}");
-        Assert.True(slice.Methods!.Count >= 60_000, $"expected >= 60k methods, got {slice.Methods.Count}");
+        Assert.True(slice.Methods!.Count >= 9_000, $"expected >= 9k methods, got {slice.Methods.Count}");
+        Assert.True(slice.Methods.Count < 20_000, $"packages under bin/ must not count as application code, got {slice.Methods.Count}");
         Assert.True(slice.CallGraph!.Edges.Count >= 8_000, $"expected >= 8k call-graph edges, got {slice.CallGraph.Edges.Count}");
 
         // The merged graph stays valid: every edge references an existing node.
@@ -331,5 +335,99 @@ public class CorpusTests
         Assert.True(slice.Methods!.Count >= 500, $"expected >= 500 methods, got {slice.Methods.Count}");
         Assert.True(slice.MethodCalls!.Count >= 1_650, $"expected >= 1.65k call sites, got {slice.MethodCalls.Count}");
         Assert.True(slice.CallGraph!.Edges.Count >= 1_200, $"expected >= 1.2k call-graph edges, got {slice.CallGraph.Edges.Count}");
+    }
+
+    // Issue #107: a source tree has no *.deps.json in its root, and `methods` took NodaTime's
+    // 2,581 methods for application code until one was copied there.
+    [SkippableFact]
+    public void Corpus_Issue107Nodatime_MethodsLeaveOutPackagesWithOrWithoutARootDepsJson()
+    {
+        var path = CorpusPathOrSkip("issue107-nodatime");
+        using var copy = CorpusCopy.Of(path);
+
+        var before = JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(copy.Path), JsonOptions)!;
+        Assert.DoesNotContain(before.Methods!, method => method.FileName == "NodaTime.dll");
+        Assert.Contains(before.Methods!, method => method.FileName == "App.dll");
+        Assert.Contains(before.Methods!, method => method.FileName == "Lib.dll");
+        Assert.True(before.Methods!.Count < 50, $"expected only the application's methods, got {before.Methods.Count}");
+
+        File.Copy(Directory.EnumerateFiles(Path.Combine(copy.Path, "App", "bin"), "App.deps.json", SearchOption.AllDirectories).First(), Path.Combine(copy.Path, "App.deps.json"));
+        var after = JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(copy.Path), JsonOptions)!;
+        Assert.Equal(
+            before.Methods!.Select(method => (method.FileName, method.ClassName, method.Name)).ToList(),
+            after.Methods!.Select(method => (method.FileName, method.ClassName, method.Name)).ToList());
+        Assert.Equal(before.MethodCalls!.Count, after.MethodCalls!.Count);
+    }
+
+    // Issue #107's second report: with no root *.deps.json `dataflows` read MimeKit and kept the
+    // application slices into it; with one, the packages and those slices were gone.
+    [SkippableFact]
+    public void Corpus_Issue107Mailkit_DataFlowsDoNotDependOnARootDepsJson()
+    {
+        var path = CorpusPathOrSkip("issue107-mailkit");
+        using var copy = CorpusCopy.Of(path);
+
+        DataFlowResult Run()
+        {
+            // Reachable keeps the run to seconds; the application slices are the same as with all.
+            using var scope = DependencyFlowScope.Apply(DependencyFlowMode.Reachable);
+            return DataFlowAnalyzer.Analyze(copy.Path);
+        }
+
+        string[] ApplicationSlices(DataFlowResult result) => result.Slices
+            .Where(slice => slice.Scope != "dependency")
+            .Select(slice => $"{result.Nodes.Single(node => node.Id == slice.SourceId).Name}->{result.Nodes.Single(node => node.Id == slice.SinkId).Name}:{slice.SinkArgumentIndex}")
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+
+        var without = Run();
+        Assert.Contains(without.Slices, slice => slice.Scope != "dependency" && without.Nodes.Single(node => node.Id == slice.SinkId).Name == "Parse");
+        Assert.Contains(without.PackageReachability, package => package.Purl.StartsWith("pkg:nuget/MimeKit@", StringComparison.Ordinal));
+
+        File.Copy(Directory.EnumerateFiles(Path.Combine(copy.Path, "Api", "bin"), "Api.deps.json", SearchOption.AllDirectories).First(), Path.Combine(copy.Path, "Api.deps.json"));
+        var with = Run();
+        Assert.Equal(ApplicationSlices(without), ApplicationSlices(with));
+        Assert.Equal(without.Statistics.FilesAnalyzed, with.Statistics.FilesAnalyzed);
+        Assert.Equal(without.PackageReachability.Select(package => package.Purl), with.PackageReachability.Select(package => package.Purl));
+    }
+
+    /// <summary>A throwaway copy of a corpus app, so a test can add files to the tree without touching the corpus.</summary>
+    private sealed class CorpusCopy : IDisposable
+    {
+        private CorpusCopy(string path) => Path = path;
+
+        public string Path { get; }
+
+        public static CorpusCopy Of(string source)
+        {
+            var target = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "dosai-corpus-" + Guid.NewGuid().ToString("N"));
+            CopyDirectory(source, target);
+            return new CorpusCopy(target);
+        }
+
+        private static void CopyDirectory(string source, string target)
+        {
+            Directory.CreateDirectory(target);
+            foreach (var file in Directory.EnumerateFiles(source))
+            {
+                File.Copy(file, System.IO.Path.Combine(target, System.IO.Path.GetFileName(file)));
+            }
+
+            foreach (var directory in Directory.EnumerateDirectories(source))
+            {
+                CopyDirectory(directory, System.IO.Path.Combine(target, System.IO.Path.GetFileName(directory)));
+            }
+        }
+
+        public void Dispose()
+        {
+            try
+            {
+                Directory.Delete(Path, recursive: true);
+            }
+            catch (IOException)
+            {
+            }
+        }
     }
 }

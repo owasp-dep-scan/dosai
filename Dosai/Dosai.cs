@@ -1809,20 +1809,16 @@ public static class Dosai
     private static List<Method> InspectAssemblyMethods(string path, ICollection<string> diagnostics)
     {
         var candidateAssemblies = GetFilesToInspect(path, Constants.AssemblyExtension, Constants.ExeExtension);
-        var assembliesToInspect = AssemblyScope.ScopeApplicationAssemblies(path, candidateAssemblies, message => Console.Error.WriteLine($"Warning: {message}"));
+        var scope = AssemblyScope.Scope(path, candidateAssemblies, message => Console.Error.WriteLine($"Warning: {message}"));
+        var assembliesToInspect = scope.Assemblies;
+        if (scope.Diagnostic is { } scopeDiagnostic)
+        {
+            diagnostics.Add(scopeDiagnostic);
+        }
+
         if (DebugLog.Enabled)
         {
-            // Re-derive the scoping basis (deps.json project libraries vs the name heuristic)
-            // purely for the debug line; the scoping decision itself was made above.
-            var applicationAssemblyNames = AssemblyScope.GetApplicationAssemblyNames(path);
-            var scopeReason = File.Exists(path)
-                ? "single-file input; no directory scoping"
-                : candidateAssemblies.Count == 0
-                    ? "no assembly candidates"
-                    : applicationAssemblyNames.Count > 0
-                        ? $"matched project libraries in deps.json ({applicationAssemblyNames.Count} project name(s))"
-                        : "heuristic name filter (System./Microsoft./Newtonsoft./FSharp./Humanizer prefixes; no deps.json project libraries)";
-            DebugLog.Log($"assembly scoping: kept {assembliesToInspect.Count}, dropped {candidateAssemblies.Count - assembliesToInspect.Count} of {candidateAssemblies.Count} candidates ({scopeReason})");
+            DebugLog.Log($"assembly scoping: kept {assembliesToInspect.Count}, dropped {scope.Dropped} of {candidateAssemblies.Count} candidates ({scope.Basis(File.Exists(path), candidateAssemblies.Count)})");
         }
         var assemblyMethods = new List<Method>();
         var processedAssemblyIdentities = new HashSet<string>();

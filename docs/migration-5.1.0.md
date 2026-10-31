@@ -502,3 +502,29 @@ stub fell back to the assembly file at line 1: the parameter sources of such met
   read and leaves every record of the assembly at the assembly file, and a Windows PDB
   (`DebugType` `full` or `pdbonly` on .NET Framework) gives a "Could not read portable PDB"
   diagnostic, as before.
+
+## Assembly scoping by build metadata, and `--dependency-flows` (issue #107, fix and additive option)
+
+`methods` and `dataflows` now tell an application's assemblies from its packages the same way.
+`methods` used to look for a `*.deps.json` only in the scanned directory and, in a source tree
+that has none there, fell back to a name-prefix heuristic, so a package such as NodaTime counted
+as application code until someone copied a `*.deps.json` into the root.
+
+- An assembly is classified by the nearest `*.deps.json` at or above it (within the scan root),
+  else by the restore metadata, and an assembly built from source is always the application's.
+  The name heuristic remains only for an assembly nothing names; when it decides, `Diagnostics`
+  says how many assemblies it decided. A copied root `*.deps.json` no longer changes the output.
+- `methods` (the inventory and the IL call graph) leaves dependency assemblies out, as it did
+  when a root `*.deps.json` existed. Trees that were scanned without one report far fewer methods
+  from `bin/`, and no package under `bin/` appears as application code.
+- `dataflows` keeps analyzing dependency assemblies (issue #78) whether or not a root
+  `*.deps.json` exists, where a root one used to drop them and the application slices that end
+  in package sinks with them. Its output for a tree with a root `*.deps.json` now equals the
+  output without one.
+- New option `--dependency-flows all|reachable` on `dataflows`, `crypto` and `agent-context`
+  (environment variable `DOSAI_DEPENDENCY_FLOWS`). `all` is the default and changes nothing.
+  `reachable` interprets a dependency method only when application code reaches it through
+  `call`, `callvirt`, `newobj` or `ldftn` targets: the application's slices are identical, flows
+  nothing in the application can start are not reported, and a diagnostic counts the method
+  bodies left out. On a minimal API with MailKit it took `dataflows` from 73 s and 144 MB to
+  3 s and 0.3 MB.
