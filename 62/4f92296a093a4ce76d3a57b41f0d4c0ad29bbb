@@ -1,0 +1,19 @@
+Dosai/Dosai.cs
+  s_33e216b52f7264::t_c9711bb40df23f 1809-1822,1896,1960-1992,1994,1997-1998,2006,2061,2090-2091
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "624f92296a093a4ce76d3a57b41f0d4c0ad29bbb",
+  "prompts": {},
+  "sessions": {
+    "s_33e216b52f7264": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7b5bd5ac-bfb2-42b7-9515-4155ee9ab246",
+        "model": "claude-sonnet-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
