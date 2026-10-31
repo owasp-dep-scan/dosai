@@ -1,0 +1,36 @@
+Dosai.Tests/Issue111CopyOrderTests.cs
+  s_33e216b52f7264::t_2325ae44d5b2d5 149
+  s_33e216b52f7264::t_ef3712539210e3 59-61
+  s_33e216b52f7264::t_ea0f404979ca2d 1-58,62-148,150-169
+Dosai.Tests/Corpus/setup.sh
+  s_33e216b52f7264::t_77dc7690f1be6d 177-216
+Dosai.Tests/Corpus/README.md
+  s_33e216b52f7264::t_77dc7690f1be6d 30,49-50
+Dosai.Tests/CorpusTests.cs
+  s_33e216b52f7264::t_77dc7690f1be6d 390-431
+Dosai/Dosai.cs
+  s_33e216b52f7264::t_0bc360ac2eaeff 1950-1956,1958-1962,1964,1966-1977,1979,1982,1984,1986,1988-1997,1999-2005,2007-2021,2024
+  s_33e216b52f7264::t_407c24b861eb34 1809-1810,1828-1831,1871,1883-1884,1886,1888-1889,1891,1894-1895,1897,1944-1949,1957,1965,1978,1980-1981,1983,1985,1987,1998,2006,2022-2023,2025-2110
+  s_33e216b52f7264::t_e8e9cf5b0ad870 1963
+  s_33e216b52f7264::t_fc802a1bf130cf 2111
+docs/compiler-engineering.md
+  s_33e216b52f7264::t_b03a4f0a5a4960 336-337
+docs/migration-5.1.0.md
+  s_33e216b52f7264::t_d539ef027cf795 531-549
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "72ae0914e80388950ab8fbdbc2cb4c7243a940cc",
+  "prompts": {},
+  "sessions": {
+    "s_33e216b52f7264": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7b5bd5ac-bfb2-42b7-9515-4155ee9ab246",
+        "model": "claude-sonnet-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
