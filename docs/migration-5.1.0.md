@@ -502,3 +502,125 @@ stub fell back to the assembly file at line 1: the parameter sources of such met
   read and leaves every record of the assembly at the assembly file, and a Windows PDB
   (`DebugType` `full` or `pdbonly` on .NET Framework) gives a "Could not read portable PDB"
   diagnostic, as before.
+
+## Assembly scoping by build metadata, and `--dependency-flows` (issue #107, fix and additive option)
+
+`methods` and `dataflows` now tell an application's assemblies from its packages the same way.
+`methods` used to look for a `*.deps.json` only in the scanned directory and, in a source tree
+that has none there, fell back to a name-prefix heuristic, so a package such as NodaTime counted
+as application code until someone copied a `*.deps.json` into the root.
+
+- An assembly is classified by the nearest `*.deps.json` at or above it (within the scan root),
+  else by the restore metadata, and an assembly built from source is always the application's.
+  The name heuristic remains only for an assembly nothing names; when it decides, `Diagnostics`
+  says how many assemblies it decided. A copied root `*.deps.json` no longer changes the output.
+- `methods` (the inventory and the IL call graph) leaves dependency assemblies out, as it did
+  when a root `*.deps.json` existed. Trees that were scanned without one report far fewer methods
+  from `bin/`, and no package under `bin/` appears as application code.
+- `dataflows` keeps analyzing dependency assemblies (issue #78) whether or not a root
+  `*.deps.json` exists, where a root one used to drop them and the application slices that end
+  in package sinks with them. Its output for a tree with a root `*.deps.json` now equals the
+  output without one.
+- New option `--dependency-flows all|reachable` on `dataflows`, `crypto` and `agent-context`
+  (environment variable `DOSAI_DEPENDENCY_FLOWS`). `reachable` interprets a dependency method
+  only when application code reaches it: a call, `newobj` or `ldftn` reaches every definition of
+  the member it names (generic arguments and arity removed, so a call to `M<int>` reaches `M<T>`),
+  a member reaches its type's static constructor, and a field read reaches every method that
+  stores the field. Overrides are not followed, because the interpreter takes a call's summary
+  from the member the call names. The application's slices are the same as with `all`, node for
+  node (a corpus test compares them on a MailKit app), flows that only start inside package code
+  are not reported, and a diagnostic counts the method bodies left out. On that MailKit app it
+  took `dataflows` from 70 s and 127 MB to 3.5 s and 0.3 MB.
+- **Default by input.** Without the option or the variable, a built source tree uses `all`, as
+  before, and an assembly-only input (a publish directory, a container file system, a `bin/`
+  folder scanned on its own) uses `reachable`. Such an input used to be scoped to the project
+  libraries of its root `*.deps.json`, so `dataflows` reported no flow into a package at all; it
+  now reports the application's flows into and through its packages, at a cost of seconds rather
+  than the minute `all` takes on the same folder (0.5 s before, 3.5 s now, 68 s with `all`).
+  `crypto` and `agent-context` follow the same default. Pass `--dependency-flows all` to analyze
+  every package method of an assembly-only input.
+
+## Methods read a library's types from a copy that loads (issue #111, fix)
+
+The methods inventory read an assembly's types from the first copy of it that it met. A class
+library's own `bin/` lacks the packages the application's output carries, so a type that needs a
+package (a class implementing NodaTime's `IClock`) could not load from there, and the complete
+copy in the application's `bin/` was skipped. Which copy came first followed directory names:
+renaming `src/API` to `src/ZAPI` on modular-monolith-with-ddd dropped 4,011 application methods.
+
+- A copy that does not load completely no longer ends the search. The other files of the same
+  assembly identity are tried in `AssemblyCopies` order (byte-identical copies, ranked by a PDB
+  beside them, a project's own output, IL-only over ReadyToRun, then tree order), and the first
+  one in that order that loads completely supplies the types. When none does, the copy that reads
+  the most members is used, the earlier in that order on a tie. Only copies whose directory holds
+  a reference the first load could not find are read again, so a reference no directory holds
+  (a shared framework missing on the machine) costs no extra reads.
+  The records then carry the path of the copy they were read from, and a `Diagnostics` line
+  names the copy that was set aside. The partial-load warning is printed only for the copy used.
+- The load context of a directory also probes the scanned directory itself (the directory of a
+  scanned file), where it used to probe the parent of the scan path. For `--path .` or a bare
+  relative name that parent is empty, which meant the current directory: the types that loaded
+  depended on where the process was started. A scan of a subdirectory (`--path app/plugins`) no
+  longer resolves references from its parent directory either; scan the parent to include them.
+
+## Each file compiles with its own project's global usings (issue #110, fix)
+
+The whole tree compiled with one synthetic global-usings tree holding every project's implicit
+usings, so one project's usings applied to the others: the Web SDK's
+`Microsoft.Extensions.Logging` made `ILogger` ambiguous (CS0104) in a class library that logs
+through Serilog, and its calls stayed `SourceUnresolved`.
+
+- When every project resolves to the same set of usings (or there is one project) nothing
+  changes and the output is byte-identical.
+- When they differ, the usings every project shares stay global, each file gets the rest of its
+  own project's set as file-local `using` directives, and a file outside every project gets the
+  union of the sets. A classic project (implicit usings off)
+  beside an implicit-usings project now compiles with no implicit usings, as it does on its own,
+  where it used to receive the other project's. Calls that bound only through another project's
+  usings no longer bind; calls that were lost to an ambiguity now do (`MethodCalls`, call graph
+  edges, data-flow nodes and crypto evidence).
+- The directives go right after the file's last `using` or `extern alias`, else at the start of a
+  blank or `//` comment line before its first attribute or member, so no code token moves. Only a
+  file with no using whose code starts on its first line (a top-level `Program.cs` from the
+  templates) gets them in front of that code, and the columns of that one line move by the
+  inserted text. Lines never move. `Dependencies` lists only the directives the file declares.
+- Only implicit and `<Using>` items are scoped per project. A hand-written `global using` in one
+  project's source still applies to every file of the tree, as it did before.
+- The `Diagnostics` line for disagreeing projects now says that each file uses its own project's
+  usings; it used to say that the compilation carried the union.
+
+## `crypto` reuses `methods` and `dataflows` reports (issue #106, additive)
+
+`crypto` rebuilt the methods slice and walked the data flows a second time with the crypto pack on
+trees that `methods` and `dataflows` had just analysed (cdxgen's research profile runs all three).
+
+- New `crypto` options `--methods-report <file>` and `--dataflows-report <file>`. A report is
+  used only when it parses, has a schema version of the same major, was written by this exact
+  build (`Metadata.AnalyzerBuild`, the informational version with its commit), was written for
+  the same scan root (`Metadata.InputFullPath`), and is complete for the use (`Methods`,
+  `CallGraph`, `EntryPoints` and `Reachability` present for a methods report; `crypto` among
+  `Patterns.PatternPacks`, patterns that record their pack, and no custom sanitizer or
+  passthrough for a data-flow report). Otherwise `Diagnostics` says why and crypto analyses the
+  tree itself. Reports written before this release carry neither field and are always refused.
+  Without the options nothing changes.
+- Additive metadata fields in every report: `AnalyzerBuild` (the informational version, such as
+  `5.0.0-rc.4+abc1234`; `AnalyzerVersion` stays the assembly version) and `InputFullPath`
+  (`InputPath` resolved to a full path when the report was written).
+- Each report line added to `Diagnostics` starts `The methods slice was taken from the report`,
+  `The crypto data flows were taken from the data-flow report`, or contains `was not reused`.
+- Additive fields in the data-flow report: `Slices[].Packs` (the pattern packs the slice needs,
+  sorted: the packs of the patterns its nodes matched, leaving out every node a base pattern also
+  matched; absent when the base patterns alone produce it) and `Patterns.Sources`,
+  `Sinks`, `Passthroughs` and `Sanitizers` entries carry `Pack` (the pack name, `custom` for a
+  `--patterns` file, absent for the base set). `Patterns.PatternPacks`, already part of the
+  report, is what a consumer checks for `crypto`. The default `dataflows` run already includes the
+  crypto pack, so its output changes only by these fields.
+- With a methods report the crypto output is byte-identical to a run without one apart from the
+  per-run timestamp and the reuse line. With a data-flow report the embedded `CryptoDataFlows` is
+  a view of the report: the slices every matched node of which a base or crypto pattern matched,
+  the nodes those slices use, the nodes a base or crypto pattern matched, what flows forward from
+  a source a crypto-only walk seeds, and the edges between them. It carries the report's ids, so
+  the dataFlowSliceIds on crypto evidence name the slices of the report, and leaves the derived
+  lists (weaknesses, package and dangerous-API reachability, exploit chains, attack surface)
+  empty. It is not byte-identical to a crypto-only walk: a sanitizer of another pack can stop a
+  flow that walk keeps.

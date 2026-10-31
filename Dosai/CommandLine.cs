@@ -62,6 +62,24 @@ public class CommandLine
             Arity = ArgumentArity.ExactlyOne
         };
 
+        var dependencyFlowsOption = new Option<string?>("--dependency-flows")
+        {
+            Description = "Which dependency (package) assembly methods the data-flow IL pass analyzes: all (every package flow stays in the graph, scoped as dependency; the default for a built source tree) or reachable (only methods application code reaches, far faster when packages are large, with the same application slices; the default for an assembly-only input such as a publish directory). DOSAI_DEPENDENCY_FLOWS sets the default.",
+            Arity = ArgumentArity.ExactlyOne
+        };
+
+        var methodsReportOption = new Option<string?>("--methods-report")
+        {
+            Description = "A methods report already written for the same --path (without --sections omissions). crypto reuses its slice instead of analysing the tree again when the report's path, schema version and sections check out, and says in Diagnostics when it does not.",
+            Arity = ArgumentArity.ExactlyOne
+        };
+
+        var dataFlowsReportOption = new Option<string?>("--dataflows-report")
+        {
+            Description = "A dataflows report already written for the same --path with a pattern pack set that includes crypto (the default, all). crypto takes its crypto-pack slices instead of walking the data flows again, and says in Diagnostics when the report cannot be used.",
+            Arity = ArgumentArity.ExactlyOne
+        };
+
         var suppressionsFileOption = new Option<string?>("--suppress")
         {
             Description = "Optional suppressions JSON file (file+line, sliceKey, weaknessId, or category entries, each with an optional expiry). Matching, non-expired suppressions remove slices and weakness candidates.",
@@ -230,6 +248,7 @@ public class CommandLine
             outputFileOption,
             patternsFileOption,
             patternPacksOption,
+            dependencyFlowsOption,
             dataFlowFormatOption,
             dataFlowGraphOutputFileOption,
             printDataFlowsOption,
@@ -247,6 +266,9 @@ public class CommandLine
             outputFileOption,
             cryptoFormatOption,
             cryptoDataFlowsOption,
+            methodsReportOption,
+            dataFlowsReportOption,
+            dependencyFlowsOption,
             cryptoGraphFormatOption,
             cryptoGraphOutputFileOption,
             restoreOption,
@@ -261,6 +283,7 @@ public class CommandLine
             outputFileOption,
             patternsFileOption,
             patternPacksOption,
+            dependencyFlowsOption,
             suppressionsFileOption,
             restoreOption,
             buildOption,
@@ -374,6 +397,7 @@ public class CommandLine
             var path = parseResult.GetValue(pathOption);
             var excludePatterns = parseResult.GetValue(excludeOption);
             using var exclusions = PathExclusions.Apply(path!, excludePatterns);
+            using var dependencyFlows = ApplyDependencyFlows(parseResult.GetValue(dependencyFlowsOption));
             var outputFile = parseResult.GetValue(outputFileOption);
             var patternsFile = parseResult.GetValue(patternsFileOption);
             var patternPacks = parseResult.GetValue(patternPacksOption);
@@ -423,6 +447,7 @@ public class CommandLine
             var path = parseResult.GetValue(pathOption)!;
             var excludePatterns = parseResult.GetValue(excludeOption);
             using var exclusions = PathExclusions.Apply(path, excludePatterns);
+            using var dependencyFlows = ApplyDependencyFlows(parseResult.GetValue(dependencyFlowsOption));
             var outputFile = parseResult.GetValue(outputFileOption)!;
             var format = parseResult.GetValue(cryptoFormatOption);
             var dataFlowDetailOption = parseResult.GetValue(cryptoDataFlowsOption);
@@ -434,7 +459,7 @@ public class CommandLine
             try
             {
                 var dataFlowDetail = CryptoAnalyzer.ParseDataFlowDetail(dataFlowDetailOption);
-                var result = CryptoAnalyzer.Analyze(path, buildPreparation);
+                var result = CryptoAnalyzer.Analyze(path, null, buildPreparation, CryptoDataFlowDetail.Full, parseResult.GetValue(methodsReportOption), parseResult.GetValue(dataFlowsReportOption));
                 // Graph sidecars are written from the full graph, before the detail option trims
                 // it: --crypto-dataflows controls the JSON only. The sidecar failure code still
                 // surfaces after the JSON is written, so a consumer never loses the primary
@@ -470,6 +495,7 @@ public class CommandLine
             var path = parseResult.GetValue(pathOption)!;
             var excludePatterns = parseResult.GetValue(excludeOption);
             using var exclusions = PathExclusions.Apply(path, excludePatterns);
+            using var dependencyFlows = ApplyDependencyFlows(parseResult.GetValue(dependencyFlowsOption));
             var outputFile = parseResult.GetValue(outputFileOption)!;
             var patternsFile = parseResult.GetValue(patternsFileOption);
             var patternPacks = parseResult.GetValue(patternPacksOption);
@@ -629,6 +655,21 @@ public class CommandLine
     }
 
     /// <summary>Build wins when both flags are given (build implies restore).</summary>
+    private static IDisposable ApplyDependencyFlows(string? value)
+    {
+        if (value is null)
+        {
+            return DependencyFlowScope.Apply(null);
+        }
+
+        if (!DependencyFlowScope.TryParse(value, out var mode))
+        {
+            throw new ArgumentException($"Unsupported --dependency-flows value: {value}. Supported values: all, reachable.");
+        }
+
+        return DependencyFlowScope.Apply(mode);
+    }
+
     private static BuildPreparationMode ParseBuildPreparation(bool restore, bool build)
         => build ? BuildPreparationMode.Build : restore ? BuildPreparationMode.Restore : BuildPreparationMode.None;
 

@@ -9,7 +9,29 @@ public sealed class AnalysisMetadata
     public string AnalyzerVersion { get; set; } = typeof(Dosai).Assembly.GetName().Version?.ToString() ?? "4.1.0";
     public DateTimeOffset GeneratedAt { get; set; } = DateTimeOffset.UtcNow;
     public string? InputPath { get; set; }
+
+    /// <summary>
+    ///     The exact build that wrote the report: the informational version, which carries the
+    ///     commit (<c>5.0.0-rc.4+abc1234</c>) where <see cref="AnalyzerVersion" /> is the same
+    ///     <c>5.0.0.0</c> for every 5.0.0 prerelease. A consumer reusing a report (issue #106)
+    ///     compares it, since another build can hold different results under the same schema.
+    ///     Set by <see cref="TransparencyBuilder.CreateMetadata" /> and not by an initializer, so a
+    ///     report from a build that did not write it reads back as null.
+    /// </summary>
+    public string? AnalyzerBuild { get; set; }
+
+    /// <summary>
+    ///     <see cref="InputPath" /> resolved to a full path when the report was written; the
+    ///     given path may be relative to a working directory a later reader does not share.
+    /// </summary>
+    public string? InputFullPath { get; set; }
+
     public string Tool { get; set; } = "Dosai";
+
+    internal static readonly string? CurrentAnalyzerBuild = typeof(Dosai).Assembly
+        .GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+        .OfType<System.Reflection.AssemblyInformationalVersionAttribute>()
+        .FirstOrDefault()?.InformationalVersion;
 
     /// <summary>
     ///     The target frameworks detected for the scan root (from csproj/fsproj/vbproj,
@@ -207,7 +229,19 @@ public sealed class AttackSurfaceGroup
 
 public static class TransparencyBuilder
 {
-    public static AnalysisMetadata CreateMetadata(string inputPath) => new() { InputPath = inputPath };
+    public static AnalysisMetadata CreateMetadata(string inputPath) => new() { InputPath = inputPath, InputFullPath = FullPathOrNull(inputPath), AnalyzerBuild = AnalysisMetadata.CurrentAnalyzerBuild };
+
+    private static string? FullPathOrNull(string path)
+    {
+        try
+        {
+            return string.IsNullOrWhiteSpace(path) ? null : Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return null;
+        }
+    }
 
     /// <summary>
     ///     Maps an endpoint kind (Attribute, MinimalApi, and the framework kinds added in schema

@@ -69,14 +69,20 @@ public static partial class DataFlowAnalyzer
                 }
             }
 
+            PruneUnreachableDependencyMethods(assemblies, context, result, DependencyFlowScope.For(assemblyOnlyInput: includeBuildArtifacts));
             CollectMethodSummaries(assemblies, context, summaries);
             var readsByMethod = new Dictionary<(int Assembly, MethodDefinitionHandle Method), Dictionary<string, int>>();
             for (var index = 0; index < assemblies.Count; index++)
             {
                 var assembly = assemblies[index];
-                PreseedAssemblyFieldTaints(assembly.PeReader, assembly.Reader, assembly.SourceMap, assembly.Path, context);
+                PreseedAssemblyFieldTaints(assembly, context);
                 foreach (var methodHandle in assembly.Reader.MethodDefinitions)
                 {
+                    if (!assembly.Analyzes(methodHandle))
+                    {
+                        continue;
+                    }
+
                     AnalyzeMethodBody(assembly, index, methodHandle, context, summaries, readsByMethod, result);
                 }
             }
@@ -202,6 +208,14 @@ public static partial class DataFlowAnalyzer
         public MetadataReader Reader { get; } = reader;
         public AssemblySourceMap SourceMap { get; } = sourceMap;
 
+        /// <summary>
+        ///     Metadata tokens of the methods the pass analyzes, or null for all of them. A
+        ///     dependency assembly (issue #107) is analyzed only as far as application code reaches.
+        /// </summary>
+        public HashSet<int>? ReachableMethods { get; set; }
+
+        public bool Analyzes(MethodDefinitionHandle handle) => ReachableMethods is null || ReachableMethods.Contains(MetadataTokens.GetToken(handle));
+
         public void Dispose()
         {
             PeReader.Dispose();
@@ -235,6 +249,312 @@ public static partial class DataFlowAnalyzer
             result.Diagnostics.Add($"Could not inspect assembly {assemblyPath}: {ex.Message}");
             return null;
         }
+    }
+
+    /// <summary>
+    ///     With <see cref="DependencyFlowMode.Reachable" />, a dependency assembly's methods are
+    ///     interpreted only when application code reaches them (issue #107). A build output
+    ///     carries every package whole (hundreds of assemblies and thousands of methods nothing
+    ///     calls), and the interpreter's cost is per method: on a minimal API with MailKit,
+    ///     analyzing all of it took over a minute and wrote 140 MB of flows that stay inside
+    ///     dependency code.
+    ///     <para>
+    ///         The walk starts at every method of the application's own assemblies and
+    ///         over-approximates what a run can execute, so that every method whose summary or
+    ///         stored field taint an analyzed body uses is analyzed too. A call, <c>newobj</c> or
+    ///         <c>ldftn</c> reaches each definition of the same member, matched by declaring type
+    ///         and name with generic arguments and arity removed and by parameter count, so a call
+    ///         to <c>M&lt;int&gt;</c> or through a constructed type reaches the open definition.
+    ///         Reaching a type's member reaches its static constructor, and reading a field reaches
+    ///         every method that stores it. Overrides and interface implementations are not
+    ///         followed: the interpreter takes a call's summary from the member the call names,
+    ///         never from the method dispatch would pick, so no analyzed body uses them, and
+    ///         following every same-named virtual method kept three quarters of MailKit's bodies.
+    ///         Flows that only start inside such an override are package-internal and left out.
+    ///         Reachability is a property of the metadata alone, so it does not depend on the
+    ///         order of the files.
+    ///     </para>
+    /// </summary>
+    private static void PruneUnreachableDependencyMethods(List<AnalyzedAssembly> assemblies, AssemblyDataFlowContext context, DataFlowResult result, DependencyFlowMode mode)
+    {
+        if (mode != DependencyFlowMode.Reachable)
+        {
+            return;
+        }
+
+        var isDependency = assemblies.Select(assembly => context.IsDependency(assembly.Path)).ToList();
+        // Without an application assembly among the files there is nothing to measure
+        // reachability from (the application is source, or the files are all packages): every
+        // dependency method stays in.
+        if (!isDependency.Contains(true) || !isDependency.Contains(false))
+        {
+            return;
+        }
+
+        var reach = new DependencyReachIndex();
+        var total = 0;
+        for (var index = 0; index < assemblies.Count; index++)
+        {
+            if (isDependency[index])
+            {
+                total += reach.AddDefinitions(index, assemblies[index]);
+            }
+        }
+
+        var reachable = new HashSet<int>[assemblies.Count];
+        var queue = new Queue<(int Assembly, MethodDefinitionHandle Method)>();
+        void Reach(IEnumerable<(int Assembly, MethodDefinitionHandle Method)> methods)
+        {
+            foreach (var (assemblyIndex, method) in methods)
+            {
+                if (reachable[assemblyIndex].Add(MetadataTokens.GetToken(method)))
+                {
+                    queue.Enqueue((assemblyIndex, method));
+                    // A type's static constructor runs before any of its members is used.
+                    Reach(reach.StaticConstructorsOf(assemblyIndex, method));
+                }
+            }
+        }
+
+        for (var index = 0; index < assemblies.Count; index++)
+        {
+            if (isDependency[index])
+            {
+                reachable[index] = [];
+                continue;
+            }
+
+            foreach (var handle in assemblies[index].Reader.MethodDefinitions)
+            {
+                queue.Enqueue((index, handle));
+            }
+        }
+
+        var scanned = new HashSet<(int, int)>();
+        var targets = new Dictionary<(int Assembly, int Token), AssemblyMemberInfo?>();
+        while (queue.Count > 0)
+        {
+            var (assemblyIndex, handle) = queue.Dequeue();
+            var assembly = assemblies[assemblyIndex];
+            var method = assembly.Reader.GetMethodDefinition(handle);
+            if (method.RelativeVirtualAddress == 0 || !scanned.Add((assemblyIndex, MetadataTokens.GetToken(handle))))
+            {
+                continue;
+            }
+
+            try
+            {
+                foreach (var instruction in DecodeInstructions(assembly.PeReader.GetMethodBody(method.RelativeVirtualAddress).GetILReader()))
+                {
+                    if (instruction.Operand is not int token || DependencyReachIndex.KindOf(instruction.OpCode) is not { } kind)
+                    {
+                        continue;
+                    }
+
+                    if (!targets.TryGetValue((assemblyIndex, token), out var member))
+                    {
+                        member = ResolveReachTarget(assembly.Reader, token);
+                        targets[(assemblyIndex, token)] = member;
+                    }
+
+                    if (member is not null)
+                    {
+                        Reach(reach.Targets(member, kind));
+                    }
+                }
+            }
+            catch (Exception ex) when (ex is BadImageFormatException or InvalidOperationException or ArgumentOutOfRangeException)
+            {
+                // A body that cannot be decoded names no callee; the analysis pass reports it.
+            }
+        }
+
+        var kept = 0;
+        for (var index = 0; index < assemblies.Count; index++)
+        {
+            if (isDependency[index])
+            {
+                assemblies[index].ReachableMethods = reachable[index];
+                kept += reachable[index].Count;
+            }
+        }
+
+        if (kept < total)
+        {
+            result.Diagnostics.Add(string.Create(CultureInfo.InvariantCulture, $"{total - kept} of {total} method bodies in dependency assemblies were not analyzed because no application code reaches them ({(DependencyFlowScope.Requested is null ? "the default for an assembly-only input; --dependency-flows all analyzes them" : "--dependency-flows reachable")}); flows that start inside them are not reported."));
+        }
+    }
+
+    /// <summary>A call or field target as the reach walk keys it: a method specification by its generic method.</summary>
+    private static AssemblyMemberInfo? ResolveReachTarget(MetadataReader reader, int token)
+    {
+        var handle = MetadataTokens.EntityHandle(token);
+        if (handle.Kind == HandleKind.MethodSpecification)
+        {
+            var method = reader.GetMethodSpecification((MethodSpecificationHandle)handle).Method;
+            return method.Kind is HandleKind.MemberReference or HandleKind.MethodDefinition ? ResolveMember(reader, MetadataTokens.GetToken(method)) : null;
+        }
+
+        return ResolveMember(reader, token);
+    }
+
+    /// <summary>
+    ///     The dependency members the reach walk can name, keyed without generic arguments or
+    ///     arity so that a call through a constructed type or a method instantiation meets its
+    ///     open definition. Keys over-approximate (overloads with the same parameter count
+    ///     share one), which can only keep more methods in.
+    /// </summary>
+    private sealed class DependencyReachIndex
+    {
+        internal enum ReachKind
+        {
+            Call,
+            FieldRead
+        }
+
+        private readonly Dictionary<string, List<(int, MethodDefinitionHandle)>> _methods = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, List<(int, MethodDefinitionHandle)>> _storesByField = new(StringComparer.Ordinal);
+        private readonly Dictionary<(int, TypeDefinitionHandle), List<(int, MethodDefinitionHandle)>> _staticConstructors = [];
+        private readonly Dictionary<(int, int), TypeDefinitionHandle> _declaringType = [];
+
+        public static ReachKind? KindOf(OpCode opCode)
+        {
+            if (opCode == OpCodes.Call || opCode == OpCodes.Callvirt || opCode == OpCodes.Newobj || opCode == OpCodes.Ldftn || opCode == OpCodes.Ldvirtftn)
+            {
+                return ReachKind.Call;
+            }
+
+            return opCode == OpCodes.Ldfld || opCode == OpCodes.Ldsfld || opCode == OpCodes.Ldflda || opCode == OpCodes.Ldsflda ? ReachKind.FieldRead : null;
+        }
+
+        /// <summary>Indexes one dependency assembly's methods; returns how many have a body.</summary>
+        public int AddDefinitions(int index, AnalyzedAssembly assembly)
+        {
+            var reader = assembly.Reader;
+            var bodies = 0;
+            foreach (var handle in reader.MethodDefinitions)
+            {
+                var definition = reader.GetMethodDefinition(handle);
+                var declaringType = definition.GetDeclaringType();
+                _declaringType[(index, MetadataTokens.GetToken(handle))] = declaringType;
+                if (definition.RelativeVirtualAddress == 0)
+                {
+                    continue;
+                }
+
+                bodies++;
+                if (ResolveMember(reader, MetadataTokens.GetToken(handle)) is not { } member)
+                {
+                    continue;
+                }
+
+                Add(_methods, MethodKey(member), (index, handle));
+
+                if (member.Name == ".cctor")
+                {
+                    if (!_staticConstructors.TryGetValue((index, declaringType), out var constructors))
+                    {
+                        _staticConstructors[(index, declaringType)] = constructors = [];
+                    }
+
+                    constructors.Add((index, handle));
+                }
+
+                IndexFieldStores(index, assembly, handle, definition);
+            }
+
+            return bodies;
+        }
+
+        public IEnumerable<(int, MethodDefinitionHandle)> Targets(AssemblyMemberInfo member, ReachKind kind)
+        {
+            if (kind == ReachKind.FieldRead)
+            {
+                return _storesByField.TryGetValue(FieldKey(member), out var stores) ? stores : [];
+            }
+
+            return _methods.TryGetValue(MethodKey(member), out var methods) ? methods : [];
+        }
+
+        public IEnumerable<(int, MethodDefinitionHandle)> StaticConstructorsOf(int index, MethodDefinitionHandle method) =>
+            _declaringType.TryGetValue((index, MetadataTokens.GetToken(method)), out var type) && _staticConstructors.TryGetValue((index, type), out var constructors)
+                ? constructors
+                : [];
+
+        private void IndexFieldStores(int index, AnalyzedAssembly assembly, MethodDefinitionHandle handle, MethodDefinition definition)
+        {
+            try
+            {
+                foreach (var instruction in DecodeInstructions(assembly.PeReader.GetMethodBody(definition.RelativeVirtualAddress).GetILReader()))
+                {
+                    if ((instruction.OpCode == OpCodes.Stfld || instruction.OpCode == OpCodes.Stsfld) && instruction.Operand is int token && ResolveMember(assembly.Reader, token) is { } field)
+                    {
+                        Add(_storesByField, FieldKey(field), (index, handle));
+                    }
+                }
+            }
+            catch (Exception ex) when (ex is BadImageFormatException or InvalidOperationException or ArgumentOutOfRangeException)
+            {
+                // A body that cannot be decoded stores nothing the walk can follow.
+            }
+        }
+
+        private static void Add(Dictionary<string, List<(int, MethodDefinitionHandle)>> index, string key, (int, MethodDefinitionHandle) method)
+        {
+            if (!index.TryGetValue(key, out var list))
+            {
+                index[key] = list = [];
+            }
+
+            list.Add(method);
+        }
+
+        private static string MethodKey(AssemblyMemberInfo member) =>
+            string.Create(CultureInfo.InvariantCulture, $"{OpenName(member.ContainingType)}\u001f{OpenName(member.Name)}\u001f{member.ParameterCount}");
+
+        private static string FieldKey(AssemblyMemberInfo member) => $"{OpenName(member.ContainingType)}\u001f{member.Name}";
+
+        /// <summary>A type or member name without generic argument lists or arity suffixes: <c>List`1</c> and <c>List&lt;int&gt;</c> are both <c>List</c>.</summary>
+        private static string OpenName(string name)
+        {
+            if (name.IndexOfAny(['<', '`']) < 0)
+            {
+                return name;
+            }
+
+            var builder = new System.Text.StringBuilder(name.Length);
+            var depth = 0;
+            for (var position = 0; position < name.Length; position++)
+            {
+                var character = name[position];
+                if (character == '<' && !IsCompilerGeneratedNameStart(name, position))
+                {
+                    depth++;
+                }
+                else if (character == '>' && depth > 0)
+                {
+                    depth--;
+                }
+                else if (depth == 0 && character == '`')
+                {
+                    while (position + 1 < name.Length && char.IsAsciiDigit(name[position + 1]))
+                    {
+                        position++;
+                    }
+                }
+                else if (depth == 0)
+                {
+                    builder.Append(character);
+                }
+            }
+
+            return builder.ToString();
+        }
+
+        // Compiler-generated names (<Main>$, <>c, <M>d__1) open with '<' at the start of a name
+        // segment; those angle brackets are part of the name, not a generic argument list.
+        private static bool IsCompilerGeneratedNameStart(string name, int position) =>
+            position == 0 || name[position - 1] is '.' or '+' or '/';
     }
 
     /// <summary>
@@ -291,7 +611,7 @@ public static partial class DataFlowAnalyzer
             foreach (var methodHandle in assembly.Reader.MethodDefinitions)
             {
                 var method = assembly.Reader.GetMethodDefinition(methodHandle);
-                if (method.RelativeVirtualAddress == 0)
+                if (method.RelativeVirtualAddress == 0 || !assembly.Analyzes(methodHandle))
                 {
                     continue;
                 }
@@ -422,10 +742,12 @@ public static partial class DataFlowAnalyzer
         }
     }
 
-    private static void PreseedAssemblyFieldTaints(PEReader peReader, MetadataReader reader, AssemblySourceMap sourceMap, string assemblyPath, AssemblyDataFlowContext context)
+    private static void PreseedAssemblyFieldTaints(AnalyzedAssembly assembly, AssemblyDataFlowContext context)
     {
+        var (peReader, reader, sourceMap, assemblyPath) = (assembly.PeReader, assembly.Reader, assembly.SourceMap, assembly.Path);
         foreach (var methodHandle in reader.MethodDefinitions)
         {
+            if (!assembly.Analyzes(methodHandle)) continue;
             var method = reader.GetMethodDefinition(methodHandle);
             if (method.RelativeVirtualAddress == 0) continue;
             try
@@ -2868,7 +3190,7 @@ public static partial class DataFlowAnalyzer
 
     private static List<string> GetAssemblyFiles(string path, bool includeBuildArtifacts, List<string> diagnostics)
     {
-        return AssemblyScope.GetAssemblyFiles(path, includeBuildArtifacts, excludeBinWhenSourceFilesPresent: false, diagnostics.Add);
+        return AssemblyScope.GetAssemblyFiles(path, includeBuildArtifacts, excludeBinWhenSourceFilesPresent: false, diagnostics.Add, includeDependencies: true);
     }
 
     private static string GetNamespace(string typeName)
@@ -2916,6 +3238,8 @@ public static partial class DataFlowAnalyzer
         private DependencyAssemblies? _dependencies;
         private readonly string? _treeRoot = SourceDocumentPaths.Root(basePath);
         private readonly Dictionary<(string Document, string Assembly), string> _treePaths = [];
+
+        public bool IsDependency(string assemblyPath) => Dependencies.IsDependency(assemblyPath);
 
         private DependencyAssemblies Dependencies => _dependencies ??= new DependencyAssemblies(basePath, _purlResolver);
 

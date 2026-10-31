@@ -92,11 +92,51 @@ from the SDKs' own .props files (base C#, Web's nine, Worker's four, Windows For
 11 SDKs add `System.Net.Http.Json` for .NET 11+ targets, and .NET Framework targets drop
 `System.Net.Http`), `<Using>` items with `Remove`/`Static`/`Alias` from the project and the
 nearest Directory.Build.props/targets, and MSBuild's generated `GlobalUsings.g.cs` as the
-authoritative set when it matches the resolved target and is no older than the project. One
-compilation carries the union of per-project sets (the documented granularity limitation); the
-resolver reports projects whose sets disagree and applies condition-carrying items
-unconditionally with a note - a using that resolves nowhere errors alone and never blocks other
-bindings.
+authoritative set when it matches the resolved target and is no older than the project.
+Condition-carrying items are applied unconditionally with a note - a using that resolves nowhere
+errors alone and never blocks other bindings.
+
+### Per-project usings in one compilation (issue #110)
+
+A `global using` applies to every tree of a compilation, and the tree is one compilation, so a
+single tree holding the union of every project's usings gave a class library the Web SDK's
+`Microsoft.Extensions.Logging`: `ILogger` became CS0104-ambiguous with Serilog's and the library's
+calls stayed `SourceUnresolved` (79 CS0104 errors and 86 lost Serilog calls on
+modular-monolith-with-ddd). Each file now compiles with the usings of its own project:
+
+- **Projects that agree** (one project, or every project resolving to the same set) keep the
+  single synthetic global-usings tree, and the output is byte-identical to before.
+- **Projects that disagree** (a Web SDK project beside a class library, or a classic project
+  beside an implicit-usings one) keep the usings every project shares in the global tree.
+  `GlobalUsings.Resolve` also returns a `PerFileUsings` map of the rest (project directory to
+  set, file-based app file to set, and the union for files outside every project), and
+  `CSharpSourceParser.Parse` writes the file's part into its own tree as file-local `using`
+  directives (`GlobalUsings.WithFileUsings`, an incremental `WithChangedText`). A directive the
+  file already declares is not repeated. The directives go right after the last `extern alias`
+  or `using` of the compilation unit, on that same line; else at the start of a blank or `//`
+  comment line before the first attribute or member (a line that begins in plain trivia, never
+  inside a block comment, disabled text or a directive); else before the first attribute or
+  member. Only that last case, a file with no using whose code starts on its first line (a
+  template `Program.cs`), moves code columns, and only on that line. Lines never move. The
+  inserted span is kept per tree (`GlobalUsings.InsertedSpan`, a `ConditionalWeakTable`), and the
+  `Dependencies` of `methods` leave out the directives inside it. A hand-written `global using`
+  in one project's source still applies tree-wide: only the implicit and `<Using>` sets are
+  scoped.
+
+The alternatives were weighed against symbol identity. One compilation per distinct set, each
+holding every tree, was rejected: a declaration binds with the usings of the compilation it is
+read in, so a class library's `ILogger` property would bind as an error type from the Web
+project's compilation and calls through it would still fail, and every symbol-keyed structure
+(the render cache, the dispatch index and its instantiation evidence, `memberFacts`, the
+framework providers' semantic models) would have had to canonicalise symbols across
+compilations to keep method ids and dispatch candidates stable. Resolving ambiguity per file
+inside one global set has no Roslyn mechanism. File-local directives keep exactly one
+compilation, so none of that changes, and a declaration binds with the usings of the file that
+declares it everywhere it is used. Methods, data-flow and crypto all parse through
+`CSharpSourceParser.Parse(text, file, root)`, so all three get the fix, and parsing does not
+depend on the worker count or directory order (the map is read-only after resolution). The
+compilations are dropped before the IL phase as before, since nothing extra is held. The
+resolution diagnostic names the projects whose sets differ.
 
 Assembly inspection's shared-framework probing reads the tree's runtimeconfig files: frameworks
 they name (ASP.NET Core, Windows Desktop) are probed at their exact named version, then
@@ -333,7 +373,9 @@ The data-flow IL pass is independent of the order it reads files and methods in.
 
 Assembly application scoping from `.deps.json` is best-effort. Malformed library entries, including null `type` values, should not fail analysis. Reachability confidence treats generated-state-machine and delegate-target evidence as direct observations because they are derived from IL or Roslyn semantics even though the edge is normalized to user code or callback targets.
 
-Assembly file discovery and application scoping are centralized in `AssemblyScope` so methods, assembly call graph, and assembly data-flow use the same `.deps.json` project-library filter and fallback application-name heuristic. The assembly call graph path folds source-file detection into the same recursive enumeration used to collect candidate assemblies, and methods identity enrichment reuses the source-mode result from source enumeration instead of walking the filesystem again.
+The methods inventory (`InspectAssemblyMethods`) reads each assembly identity once, but not from whichever copy a directory walk meets first (issue #111): the runtime type loader resolves a type's references from the copy's own directory, a class library's `bin/` lacks its packages, and the types that need one fail to load there. A copy that throws `ReflectionTypeLoadException` is set aside, the other files of the identity are tried in `AssemblyCopies` order, the first complete load in rank order wins and, when none is complete, the one that reads the most members (the earlier in rank on a tie); only copies whose directory holds a reference the first load could not find are read again, so a missing shared framework costs no extra reads, so the method set depends on the files and not on directory names. Alternatives were rejected: resolving missing references from other directories of the tree or from the NuGet cache would make the loaded version depend on which directory is probed first and could load a package version the output never shipped, and ranking by 'the copy beside a deps.json' alone cannot know that a type loads. Load contexts stay per directory (issue #76), created on demand for an alternative copy and released with the rest, and the probe root is the scanned directory (not its parent, which was the current directory for `--path .`).
+
+Assembly file discovery and application scoping are centralized in `AssemblyScope`, which asks the same `DependencyAssemblies` classification the data-flow pass uses (nearest `.deps.json` at or above the assembly, else restore metadata, else built from source) and falls back to the application-name heuristic only for an assembly nothing names (issue #107; a root `.deps.json` is no longer required, and a copy of one changes nothing). Methods and the assembly call graph drop dependency assemblies; the data-flow pass keeps them (`includeDependencies`) and tags their nodes. `DependencyFlowScope` (`--dependency-flows all|reachable`, `DOSAI_DEPENDENCY_FLOWS`) lets the data-flow pass interpret only the dependency methods that application code reaches (`PruneUnreachableDependencyMethods`: call, `newobj` and `ldftn` targets matched by open member name, static constructors of reached types, and the stores of fields that reached code reads; overrides are not followed because the interpreter's summary lookup never is; no pruning when no application assembly is among the files). A built source tree defaults to `all`, which keeps every package flow as issue #78 specified, and an assembly-only input defaults to `reachable` (`DependencyFlowScope.For`). The assembly call graph path folds source-file detection into the same recursive enumeration used to collect candidate assemblies, and methods identity enrichment reuses the source-mode result from source enumeration instead of walking the filesystem again.
 
 Assembly inspection loads the files of each inspected directory through one shared `InspectionAssemblyLoadContext`, released after that directory's last file rather than per assembly (issue #76). Loading stays by value — `LoadFromStream` under `FileShare.ReadWrite | FileShare.Delete` with the stream closed as soon as the load returns — so inspected files remain deletable and replaceable during and after the scan on every OS. Sharing removes the redundant dependency loads: a per-assembly context reloaded every shared dependency once per inspected file, and on Windows each in-memory load pays an `AmsiScanBuffer` scan (on the OrchardCore web-app corpus this phase loaded 6,048 assemblies per run where 542 suffice, and warm inspection dropped by the difference). Sharing is keyed by directory on purpose: a dependency reference probes its own directory first, so two directories that each carry a private build of the same dependency still resolve to their own copy, exactly as a per-assembly context would. `System.Reflection.MetadataLoadContext` was evaluated for the same problem and rejected: its metadata-only loading needs no AMSI scan, but it renders `Type.FullName` as null where the runtime loader returns a name, orders `GetInterfaces` and named attribute arguments differently, surfaces pseudo-custom attributes the runtime hides, and measured slower than the runtime loader on the same corpus — five byte-identity rewrites for a performance loss.
 

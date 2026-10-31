@@ -1,6 +1,10 @@
 using System.Globalization;
+using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
+using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.CodeAnalysis.Text;
 
 namespace Depscan;
 
@@ -33,11 +37,13 @@ namespace Depscan;
 ///         <c>IncludeEmbeddedValidationGlobalUsing</c> and default-off, so it is not added).
 ///     </para>
 ///     <para>
-///         Global usings are compilation-wide and Dosai compiles a tree in one compilation
-///         (the documented granularity limitation), so per-project sets merge by union. A
-///         using one project's set carries that does not resolve in the merged compilation is
-///         an error on that directive only and does not stop other bindings - pinned by test.
-///         Projects whose final sets disagree produce one diagnostic naming them.
+///         Global usings are compilation-wide and a tree is one compilation. Projects whose
+///         final sets agree share one synthetic global-usings tree. Projects that disagree get
+///         no such tree: each file receives its own project's set as file-local directives
+///         (<see cref="PerFileUsings" />, issue #110), so one project's usings never make
+///         another project's names ambiguous. A using that does not resolve in the
+///         compilation is an error on that directive only and does not stop other bindings -
+///         pinned by test. Projects whose sets differ produce one diagnostic naming them.
 ///     </para>
 /// </remarks>
 internal static partial class GlobalUsings
@@ -97,12 +103,17 @@ internal static partial class GlobalUsings
     private static readonly Lock ResolveLock = new();
     private static readonly Dictionary<string, GlobalUsingsDecision> DecisionsByRoot = new(SafeFileRead.PathComparer);
 
+    // The decision by the path a caller passed, read without the lock: the parse asks once per
+    // file from every worker (issue #110's per-file usings), always with the scan root.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, GlobalUsingsDecision> DecisionsByPath = new(StringComparer.Ordinal);
+
     /// <summary>Forgets every per-root decision (see <see cref="TargetFrameworkDetection.ResetCaches" />): a build writes GlobalUsings.g.cs and restore writes project.assets.json between two MCP calls.</summary>
     internal static void ResetCache()
     {
         lock (ResolveLock)
         {
             DecisionsByRoot.Clear();
+            DecisionsByPath.Clear();
         }
     }
 
@@ -111,6 +122,11 @@ internal static partial class GlobalUsings
         if (string.IsNullOrWhiteSpace(path))
         {
             return new GlobalUsingsDecision(false, null, []);
+        }
+
+        if (DecisionsByPath.TryGetValue(path, out var known))
+        {
+            return known;
         }
 
         string root;
@@ -127,11 +143,13 @@ internal static partial class GlobalUsings
         {
             if (DecisionsByRoot.TryGetValue(root, out var cached))
             {
+                DecisionsByPath[path] = cached;
                 return cached;
             }
 
             var decision = ResolveNoCache(root);
             DecisionsByRoot[root] = decision;
+            DecisionsByPath[path] = decision;
             return decision;
         }
     }
@@ -146,24 +164,16 @@ internal static partial class GlobalUsings
                 .Order(SafeFileRead.PathComparer)
                 .ToList();
             var projectSets = new List<(string Project, List<string> Directives)>();
-            void AddSet(string file, List<string> directives)
-            {
-                var normalized = new List<string>(directives.Count);
-                var unique = new HashSet<string>(StringComparer.Ordinal);
-                foreach (var directive in directives)
-                {
-                    if (NormalizeDirective(directive) is { Length: > 0 } spelled && unique.Add(spelled))
-                    {
-                        normalized.Add(spelled);
-                    }
-                }
-
-                projectSets.Add((Path.GetRelativePath(root, file), normalized));
-            }
+            // Every owner of files - each project, enabling implicit usings or not, and each
+            // file-based app - with the set its files compile with.
+            var owners = new List<(string Key, bool IsFile, List<string> Directives)>();
+            void AddSet(string file, List<string> directives) => projectSets.Add((Path.GetRelativePath(root, file), NormalizeSet(directives)));
 
             foreach (var project in projects)
             {
-                if (ProjectUsings(root, project, diagnostics) is { Count: > 0 } directives)
+                var directives = ProjectUsings(root, project, diagnostics);
+                owners.Add((Path.GetDirectoryName(project)!, false, NormalizeSet(directives)));
+                if (directives.Count > 0)
                 {
                     AddSet(project, directives);
                 }
@@ -171,7 +181,9 @@ internal static partial class GlobalUsings
 
             foreach (var app in FileBasedApps(root, projects))
             {
-                if (FileBasedAppUsings(root, app.File, app.Text, diagnostics) is { Count: > 0 } directives)
+                var directives = FileBasedAppUsings(root, app.File, app.Text, diagnostics);
+                owners.Add((app.File, true, NormalizeSet(directives)));
+                if (directives.Count > 0)
                 {
                     AddSet(app.File, directives);
                 }
@@ -182,44 +194,63 @@ internal static partial class GlobalUsings
                 return new GlobalUsingsDecision(false, null, diagnostics);
             }
 
-            // Union merge, first project's order first: the merged set is what one compilation
-            // sees, and a directive that fails to resolve errors alone.
-            var merged = new List<string>();
-            var seen = new HashSet<string>(StringComparer.Ordinal);
-            var disagreeing = new List<string>();
-            foreach (var (project, directives) in projectSets)
+            // Owners that disagree (a Web SDK project beside a class library, or a classic project
+            // beside an implicit-usings one): a global using is compilation-wide, so one union
+            // tree would hand each file the other projects' usings and make names such as
+            // ILogger ambiguous (issue #110). The usings every owner has stay global, and each
+            // file gets the rest of its own owner's set as file-local using directives (see
+            // PerFileUsings); the compilation stays one.
+            var distinctSets = owners.Select(owner => string.Join('\n', owner.Directives.Order(StringComparer.Ordinal))).Distinct(StringComparer.Ordinal).Count();
+            if (distinctSets > 1)
             {
-                var additions = directives.Where(directive => seen.Add(directive)).ToList();
-                if (additions.Count > 0)
+                var differing = owners
+                    .Where(owner => !owner.Directives.Order(StringComparer.Ordinal).SequenceEqual(owners[0].Directives.Order(StringComparer.Ordinal)))
+                    .Select(owner => Path.GetRelativePath(root, owner.Key).Replace('\\', '/'))
+                    .ToList();
+                diagnostics.Add($"Global usings differ between projects ({string.Join(", ", differing)}); the usings every project shares stay global, each file gets the rest of its own project's set as file-local using directives, and a file outside every project gets the union of every project's set. The directives are written after the file's last using, else on a blank or comment line before its code, else (code on the first line and no using) before that code, which shifts the columns of that one line.");
+                var union = new List<string>();
+                var unionSeen = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var (_, directives) in projectSets)
                 {
-                    merged.AddRange(additions);
+                    union.AddRange(directives.Where(directive => unionSeen.Add(directive)));
                 }
 
-                if (!directives.Order(StringComparer.Ordinal).SequenceEqual(projectSets[0].Directives.Order(StringComparer.Ordinal)))
-                {
-                    disagreeing.Add(project);
-                }
+                var common = owners[0].Directives
+                    .Where(directive => owners.All(owner => owner.Directives.Contains(directive, StringComparer.Ordinal)))
+                    .ToList();
+                var commonTree = common.Count == 0 ? null : GlobalTree(common);
+                return new GlobalUsingsDecision(true, commonTree, diagnostics) { PerFile = new PerFileUsings(root, owners, union, common) };
             }
 
-            if (disagreeing.Count > 0)
-            {
-                diagnostics.Add($"Global usings differ between projects ({string.Join(", ", disagreeing)}); the compilation carries the union of every project's set, so files of a project without a using can still bind names through it.");
-            }
+            // Every owner has the same set: one global tree carries it.
+            var merged = projectSets[0].Directives.Distinct(StringComparer.Ordinal).ToList();
+            return merged.Count == 0
+                ? new GlobalUsingsDecision(false, null, diagnostics)
+                : new GlobalUsingsDecision(true, GlobalTree(merged), diagnostics);
 
-            if (merged.Count == 0)
-            {
-                return new GlobalUsingsDecision(false, null, diagnostics);
-            }
-
-            var source = string.Join(Environment.NewLine, merged.Select(directive => $"global using {directive};"));
-            var tree = CSharpSourceParser.Parse(source, "<implicit-usings>", root);
-            return new GlobalUsingsDecision(true, tree, diagnostics);
+            CSharpSyntaxTree GlobalTree(List<string> directives) =>
+                CSharpSourceParser.ParseWithoutFileUsings(string.Join(Environment.NewLine, directives.Select(directive => $"global using {directive};")), "<implicit-usings>", root);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
         {
             // Best effort: analysis continues with explicit-usings semantics.
             return new GlobalUsingsDecision(false, null, diagnostics);
         }
+    }
+
+    private static List<string> NormalizeSet(List<string> directives)
+    {
+        var unique = new HashSet<string>(StringComparer.Ordinal);
+        var normalized = new List<string>(directives.Count);
+        foreach (var directive in directives)
+        {
+            if (NormalizeDirective(directive) is { Length: > 0 } spelled && unique.Add(spelled))
+            {
+                normalized.Add(spelled);
+            }
+        }
+
+        return normalized;
     }
 
     /// <summary>The using directives of one project: MSBuild's generated file when it is authoritative, else the SDK list plus the project's Using items.</summary>
@@ -367,7 +398,7 @@ internal static partial class GlobalUsings
         }
 
         bool HasTopLevelStatements(string text, string file) =>
-            CSharpSourceParser.Parse(text, file, root).GetRoot() is Microsoft.CodeAnalysis.CSharp.Syntax.CompilationUnitSyntax unit &&
+            CSharpSourceParser.ParseWithoutFileUsings(text, file, root).GetRoot() is Microsoft.CodeAnalysis.CSharp.Syntax.CompilationUnitSyntax unit &&
             unit.Members.Any(member => member is Microsoft.CodeAnalysis.CSharp.Syntax.GlobalStatementSyntax);
     }
 
@@ -567,6 +598,100 @@ internal static partial class GlobalUsings
 
     /// <summary>A project file's text with its XML comments blanked: a commented-out <c>&lt;Using&gt;</c> is not an item.</summary>
     internal static string WithoutXmlComments(string content) => XmlCommentRegex().Replace(content, string.Empty);
+
+    /// <summary>
+    ///     <paramref name="tree" /> with its project's global usings written in as file-local
+    ///     directives when the tree's projects disagree (see <see cref="PerFileUsings" />), else
+    ///     the same tree. Directives the file already declares are not repeated.
+    /// </summary>
+    internal static CSharpSyntaxTree WithFileUsings(CSharpSyntaxTree tree, string rootPath)
+    {
+        if (Resolve(rootPath).PerFile is not { } perFile || tree.GetRoot() is not CompilationUnitSyntax root || (root.Members.Count == 0 && root.AttributeLists.Count == 0))
+        {
+            return tree;
+        }
+
+        var declared = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var existing in root.Usings)
+        {
+            declared.Add(NormalizeDirective(DirectiveText(existing)));
+        }
+
+        var missing = perFile.SetFor(tree.FilePath).Where(directive => !declared.Contains(NormalizeDirective(directive))).ToList();
+        if (missing.Count == 0)
+        {
+            return tree;
+        }
+
+        var offset = InsertionOffset(root, tree.GetText());
+        var insertion = string.Concat(missing.Select(directive => $"using {directive};"));
+        var rewritten = (CSharpSyntaxTree)tree.WithChangedText(tree.GetText().WithChanges(new TextChange(new TextSpan(offset, 0), insertion)));
+        InsertedSpans.AddOrUpdate(rewritten, new InsertedUsings(new TextSpan(offset, insertion.Length)));
+        return rewritten;
+    }
+
+    /// <summary>
+    ///     The span of the using directives <see cref="WithFileUsings" /> wrote into <paramref name="tree" />,
+    ///     or null. A consumer that reports the file's own directives (the <c>Dependencies</c> of
+    ///     <c>methods</c>) leaves the directives inside it out: the file does not declare them.
+    /// </summary>
+    internal static TextSpan? InsertedSpan(SyntaxTree tree) => InsertedSpans.TryGetValue(tree, out var inserted) ? inserted.Span : null;
+
+    private static readonly ConditionalWeakTable<SyntaxTree, InsertedUsings> InsertedSpans = new();
+
+    private sealed record InsertedUsings(TextSpan Span);
+
+    /// <summary>
+    ///     Where the directives go, chosen so that no code token moves: right after the last
+    ///     <c>extern alias</c> or <c>using</c> (on its line); else at the start of a blank or
+    ///     <c>//</c>-comment line before the first assembly attribute or member; else before that
+    ///     attribute or member, which shifts the columns of that one line (a top-level
+    ///     <c>Program.cs</c> whose code starts on line 1). Lines never move.
+    /// </summary>
+    private static int InsertionOffset(CompilationUnitSyntax root, SourceText text)
+    {
+        if (root.Usings.Count > 0)
+        {
+            return root.Usings[^1].Span.End;
+        }
+
+        if (root.Externs.Count > 0)
+        {
+            return root.Externs[^1].Span.End;
+        }
+
+        var first = root.AttributeLists.Count > 0 ? root.AttributeLists[0].GetFirstToken() : root.Members[0].GetFirstToken();
+        var firstLine = text.Lines.GetLineFromPosition(first.SpanStart).LineNumber;
+        for (var line = 0; line < firstLine; line++)
+        {
+            var start = text.Lines[line].Start;
+            // The line must begin in plain leading trivia: not inside a block comment, disabled
+            // text or a directive, where a using would be commented out or break the directive.
+            var trivia = root.FindTrivia(start);
+            if (trivia.SpanStart != start && !trivia.IsKind(SyntaxKind.WhitespaceTrivia))
+            {
+                continue;
+            }
+
+            if (trivia.IsKind(SyntaxKind.EndOfLineTrivia) || trivia.IsKind(SyntaxKind.SingleLineCommentTrivia) || (trivia.IsKind(SyntaxKind.WhitespaceTrivia) && IsBlankOrComment(text.Lines[line].ToString())))
+            {
+                return start;
+            }
+        }
+
+        return first.SpanStart;
+
+        static bool IsBlankOrComment(string line)
+        {
+            var trimmed = line.TrimStart();
+            return trimmed.Length == 0 || (trimmed.StartsWith("//", StringComparison.Ordinal) && !trimmed.StartsWith("///", StringComparison.Ordinal));
+        }
+    }
+
+    private static string DirectiveText(UsingDirectiveSyntax directive) =>
+        (directive.StaticKeyword.RawKind == 0 ? string.Empty : "static ")
+        + (directive.Alias is { } alias ? $"{alias.Name} = " : string.Empty)
+        + directive.NamespaceOrType;
 
     /// <summary>
     ///     One spelling per directive: MSBuild's generated file writes <c>global::System</c>,
@@ -787,4 +912,98 @@ internal static partial class GlobalUsings
 }
 
 /// <summary>Whether a scan root's compilation carries global usings, the synthetic tree for them, and the diagnostics of the resolution.</summary>
-internal sealed record GlobalUsingsDecision(bool Enabled, CSharpSyntaxTree? Tree, IReadOnlyList<string> Diagnostics);
+internal sealed record GlobalUsingsDecision(bool Enabled, CSharpSyntaxTree? Tree, IReadOnlyList<string> Diagnostics)
+{
+    /// <summary>
+    ///     Set when the projects of the tree disagree on their global usings (issue #110): there is
+    ///     no <see cref="Tree" />, and each file receives its own project's set through
+    ///     <see cref="GlobalUsings.WithFileUsings" />.
+    /// </summary>
+    public PerFileUsings? PerFile { get; init; }
+}
+
+/// <summary>
+///     The global usings each file of a tree compiles with when its projects disagree. A file
+///     belongs to the nearest project directory at or above it within the scan root (a file-based
+///     app owns its own file); a file outside every project gets the union of the sets.
+/// </summary>
+/// <remarks>
+///     The sets reach the compilation as file-local <c>using</c> directives written into the
+///     file's own tree, because a <c>global using</c> applies to every tree of a compilation,
+///     which is what made one project's implicit usings ambiguous with another's names. The
+///     directives go on the line of an existing using (or of the first member), after any
+///     <c>extern alias</c>, so no line moves; only the columns after the insertion point on
+///     that one line do. The compilation stays one: symbol identity, the dispatch index, the
+///     render cache and every provider that binds a tree work unchanged, and a type's members
+///     bind with the usings of the file that declares them wherever they are used.
+/// </remarks>
+internal sealed class PerFileUsings
+{
+    private readonly string _root;
+    private readonly Dictionary<string, string[]> _setsByDirectory = new(SafeFileRead.PathComparer);
+    private readonly Dictionary<string, string[]> _setsByFile = new(SafeFileRead.PathComparer);
+    private readonly string[] _union;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string[]> _setByDirectoryMemo = new(SafeFileRead.PathComparer);
+
+    /// <param name="common">The usings every owner has, which stay in the global tree; the per-file sets leave them out.</param>
+    public PerFileUsings(string root, List<(string Key, bool IsFile, List<string> Directives)> owners, List<string> union, List<string> common)
+    {
+        _root = root;
+        var global = new HashSet<string>(common, StringComparer.Ordinal);
+        _union = [.. union.Where(directive => !global.Contains(directive))];
+        foreach (var (key, isFile, directives) in owners)
+        {
+            var target = isFile ? _setsByFile : _setsByDirectory;
+            var own = directives.Where(directive => !global.Contains(directive));
+            // Two projects in one directory: both apply to its files.
+            target[key] = target.TryGetValue(key, out var existing) ? [.. existing.Concat(own).Distinct(StringComparer.Ordinal)] : [.. own];
+        }
+    }
+
+    /// <summary>The file-local directives <paramref name="filePath" /> compiles with, beyond the global ones every project shares.</summary>
+    public IReadOnlyList<string> SetFor(string filePath)
+    {
+        string full;
+        try
+        {
+            full = Path.GetFullPath(filePath);
+        }
+        catch (ArgumentException)
+        {
+            return _union;
+        }
+
+        if (_setsByFile.TryGetValue(full, out var own))
+        {
+            return own;
+        }
+
+        var directory = Path.GetDirectoryName(full);
+        return directory is null ? _union : SetForDirectory(directory);
+    }
+
+    private string[] SetForDirectory(string directory)
+    {
+        if (_setByDirectoryMemo.TryGetValue(directory, out var memo))
+        {
+            return memo;
+        }
+
+        string[] set;
+        if (_setsByDirectory.TryGetValue(directory, out var own))
+        {
+            set = own;
+        }
+        else if (string.Equals(directory, _root, SafeFileRead.PathComparison) || Path.GetDirectoryName(directory) is not { } parent)
+        {
+            set = _union;
+        }
+        else
+        {
+            set = SetForDirectory(parent);
+        }
+
+        _setByDirectoryMemo[directory] = set;
+        return set;
+    }
+}

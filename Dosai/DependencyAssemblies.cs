@@ -29,20 +29,22 @@ namespace Depscan;
 internal sealed class DependencyAssemblies
 {
     private readonly string? _root;
-    private readonly PackageUrlResolver _resolver;
-    private readonly Dictionary<string, bool> _isDependencyByPath = new(SafeFileRead.PathComparer);
+    private readonly Lazy<PackageUrlResolver> _resolver;
+    private readonly Dictionary<string, AssemblyEvidence> _evidenceByPath = new(SafeFileRead.PathComparer);
     private readonly Dictionary<string, BuildOutput?> _outputByDirectory = new(SafeFileRead.PathComparer);
     private readonly Dictionary<string, string[]> _copiesByAnalyzedPath = new(SafeFileRead.PathComparer);
 
-    /// <summary>What a location says about an assembly: named the application's, named a dependency, or nothing.</summary>
-    private enum Evidence
+    public DependencyAssemblies(string analysisPath, PackageUrlResolver resolver)
+        : this(analysisPath, new Lazy<PackageUrlResolver>(resolver))
     {
-        Unknown,
-        Application,
-        Dependency
     }
 
-    public DependencyAssemblies(string analysisPath, PackageUrlResolver resolver)
+    /// <summary>
+    ///     The restore metadata is read only when an assembly has no <c>*.deps.json</c> at or above
+    ///     it, so a caller that never asks (<c>methods</c> on a tree of build outputs) never pays
+    ///     for the whole-tree package scan.
+    /// </summary>
+    public DependencyAssemblies(string analysisPath, Lazy<PackageUrlResolver> resolver)
     {
         _resolver = resolver;
         if (Directory.Exists(analysisPath))
@@ -72,44 +74,45 @@ internal sealed class DependencyAssemblies
         }
 
         _copiesByAnalyzedPath[analyzed] = [.. fullCopies];
-        _isDependencyByPath.Remove(analyzed);
+        _evidenceByPath.Remove(analyzed);
     }
 
     /// <summary>Whether <paramref name="assemblyPath" /> is a dependency of the scanned application rather than its own code.</summary>
-    public bool IsDependency(string assemblyPath)
+    public bool IsDependency(string assemblyPath) => EvidenceFor(assemblyPath) == AssemblyEvidence.Dependency;
+
+    /// <summary>
+    ///     What the tree's metadata says about <paramref name="assemblyPath" />: the one decision
+    ///     both <c>methods</c> (<see cref="AssemblyScope" />) and the data-flow IL pass use.
+    ///     <see cref="AssemblyEvidence.Unknown" /> means nothing in the tree names the assembly.
+    /// </summary>
+    public AssemblyEvidence EvidenceFor(string assemblyPath)
     {
-        if (_root is null || string.IsNullOrWhiteSpace(assemblyPath))
+        if (_root is null || string.IsNullOrWhiteSpace(assemblyPath) || !TryGetFullPath(assemblyPath, out var fullPath))
         {
-            return false;
+            return AssemblyEvidence.Unknown;
         }
 
-        if (!TryGetFullPath(assemblyPath, out var fullPath))
+        if (!_evidenceByPath.TryGetValue(fullPath, out var evidence))
         {
-            return false;
-        }
-
-        if (!_isDependencyByPath.TryGetValue(fullPath, out var isDependency))
-        {
-            var evidence = Classify(fullPath);
+            evidence = Classify(fullPath);
             if (_copiesByAnalyzedPath.TryGetValue(fullPath, out var copies))
             {
                 foreach (var copy in copies)
                 {
-                    if (evidence == Evidence.Application)
+                    if (evidence == AssemblyEvidence.Application)
                     {
                         break;
                     }
 
                     var copyEvidence = Classify(copy);
-                    evidence = copyEvidence == Evidence.Unknown ? evidence : copyEvidence == Evidence.Application ? Evidence.Application : Evidence.Dependency;
+                    evidence = copyEvidence == AssemblyEvidence.Unknown ? evidence : copyEvidence == AssemblyEvidence.Application ? AssemblyEvidence.Application : AssemblyEvidence.Dependency;
                 }
             }
 
-            isDependency = evidence == Evidence.Dependency;
-            _isDependencyByPath[fullPath] = isDependency;
+            _evidenceByPath[fullPath] = evidence;
         }
 
-        return isDependency;
+        return evidence;
     }
 
     private static bool TryGetFullPath(string path, out string fullPath)
@@ -126,19 +129,19 @@ internal sealed class DependencyAssemblies
         }
     }
 
-    private Evidence Classify(string fullPath)
+    private AssemblyEvidence Classify(string fullPath)
     {
         if (TreeFrameworks.IsBuiltFromSource(_root!, fullPath))
         {
-            return Evidence.Application;
+            return AssemblyEvidence.Application;
         }
 
         if (OutputFor(Path.GetDirectoryName(fullPath)) is { } output)
         {
-            return output.IsProjectAssembly(fullPath) ? Evidence.Application : Evidence.Dependency;
+            return output.IsProjectAssembly(fullPath) ? AssemblyEvidence.Application : AssemblyEvidence.Dependency;
         }
 
-        return _resolver.ResolvePackagedAssembly(fullPath) is not null ? Evidence.Dependency : Evidence.Unknown;
+        return _resolver.Value.ResolvePackagedAssembly(fullPath) is not null ? AssemblyEvidence.Dependency : AssemblyEvidence.Unknown;
     }
 
     /// <summary>The build output (a directory holding <c>*.deps.json</c>) at or above <paramref name="directory" /> within the scan root.</summary>
@@ -270,4 +273,12 @@ internal sealed class DependencyAssemblies
 
         private static string Normalize(string relativePath) => relativePath.Replace('\\', '/');
     }
+}
+
+/// <summary>What the scanned tree's metadata says about an assembly: named the application's, named a dependency, or nothing.</summary>
+internal enum AssemblyEvidence
+{
+    Unknown,
+    Application,
+    Dependency
 }

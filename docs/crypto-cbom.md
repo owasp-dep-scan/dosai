@@ -54,6 +54,10 @@ The option shapes the JSON only; crypto graph sidecars (`--graph-format`) always
 
 cdxgen should pass `--crypto-dataflows none`: `analyzeDosaiCrypto` reads only `Assets`, `Operations`, and `Materials`, and Node's `readFileSync`/`JSON.parse` path silently returns nothing for files past the ~512 MB string limit, which previously dropped all dosai crypto components from SBOM runs on large trees.
 
+## Reusing the methods and dataflows reports
+
+`crypto` accepts `--methods-report <file>` and `--dataflows-report <file>` (a `methods` and a `dataflows` report written for the same `--path`) and uses them instead of building the methods slice and walking the data flows with the crypto pack again, which is most of its time when cdxgen has just run both commands. Reports are checked (the exact build that wrote them, the full scan path, schema major, required sections, `crypto` among the recorded pattern packs) and a refused one is named in `Diagnostics` and replaced by a fresh analysis. A reused data-flow report contributes the slices a crypto-only walk would also find; their ids are the report's own. The full description, what is kept and the timings are in [the command reference](./commands.md#reusing-the-methods-and-dataflows-reports---methods-report---dataflows-report).
+
 ## Evidence model
 
 The native result has five main evidence collections. `assets` describe algorithms, crypto libraries, protocols, certificates, and key-related assets. `operations` capture source operations and API calls that use those assets. `materials` record source-visible key, certificate, IV, nonce, and secret-like values with redaction and fingerprints. `protocols` capture protocol observations such as TLS usage. `findings` record weak crypto, hardcoded material, TLS validation bypass, static IV or nonce use, insecure RNG, low PBKDF2 iteration counts, and legacy TLS references. `statistics` provides aggregate counts, including the number of reachable findings and crypto data-flow slices.

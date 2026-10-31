@@ -40,9 +40,10 @@ public class CorpusTests
         Assert.Contains(slice.EntryPoints, entryPoint => entryPoint.Kind is "HttpController" or "HttpMinimalApi");
 
         // The reachability index is populated and graph-derived depths exist
-        // (12,062 indexed nodes at the release run).
+        // (12,062 indexed nodes at the release run, while the packages under bin/ counted as
+        // application code; 2,082 since issue #107 leaves them out).
         var reachability = slice.Reachability!;
-        Assert.True(reachability.Count > 10_000, $"expected a large reachability index, got {reachability.Count}");
+        Assert.True(reachability.Count > 1_500, $"expected a large reachability index, got {reachability.Count}");
         Assert.Contains(reachability, facts => facts.ReachableEntryPoints.Count > 0 && facts.DepthFromEntryPoint is > 0);
         Assert.Contains(reachability, facts => facts.FanIn > 0 && facts.FanOut > 0);
 
@@ -291,9 +292,12 @@ public class CorpusTests
         Assert.Equal(["net8.0"], slice.Metadata!.TargetFrameworks);
         Assert.DoesNotContain(slice.Diagnostics ?? [], diagnostic => diagnostic.Contains("No TargetFramework detected", StringComparison.Ordinal));
 
-        // 111 entry points / 72,108 methods / 9,806 edges at the calibration run.
+        // 111 entry points / 72,108 methods / 9,806 edges at the calibration run, while the
+        // packages under bin/ counted as application code; 115 / 10,020 / 10,178 since issue #107
+        // leaves them out.
         Assert.True(slice.EntryPoints!.Count >= 90, $"expected >= 90 entry points, got {slice.EntryPoints.Count}");
-        Assert.True(slice.Methods!.Count >= 60_000, $"expected >= 60k methods, got {slice.Methods.Count}");
+        Assert.True(slice.Methods!.Count >= 9_000, $"expected >= 9k methods, got {slice.Methods.Count}");
+        Assert.True(slice.Methods.Count < 20_000, $"packages under bin/ must not count as application code, got {slice.Methods.Count}");
         Assert.True(slice.CallGraph!.Edges.Count >= 8_000, $"expected >= 8k call-graph edges, got {slice.CallGraph.Edges.Count}");
 
         // The merged graph stays valid: every edge references an existing node.
@@ -331,5 +335,210 @@ public class CorpusTests
         Assert.True(slice.Methods!.Count >= 500, $"expected >= 500 methods, got {slice.Methods.Count}");
         Assert.True(slice.MethodCalls!.Count >= 1_650, $"expected >= 1.65k call sites, got {slice.MethodCalls.Count}");
         Assert.True(slice.CallGraph!.Edges.Count >= 1_200, $"expected >= 1.2k call-graph edges, got {slice.CallGraph.Edges.Count}");
+    }
+
+    // Issue #107: a source tree has no *.deps.json in its root, and `methods` took NodaTime's
+    // 2,581 methods for application code until one was copied there.
+    [SkippableFact]
+    public void Corpus_Issue107Nodatime_MethodsLeaveOutPackagesWithOrWithoutARootDepsJson()
+    {
+        var path = CorpusPathOrSkip("issue107-nodatime");
+        using var copy = CorpusCopy.Of(path);
+
+        var before = JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(copy.Path), JsonOptions)!;
+        Assert.DoesNotContain(before.Methods!, method => method.FileName == "NodaTime.dll");
+        Assert.Contains(before.Methods!, method => method.FileName == "App.dll");
+        Assert.Contains(before.Methods!, method => method.FileName == "Lib.dll");
+        Assert.True(before.Methods!.Count < 50, $"expected only the application's methods, got {before.Methods.Count}");
+
+        File.Copy(Directory.EnumerateFiles(Path.Combine(copy.Path, "App", "bin"), "App.deps.json", SearchOption.AllDirectories).First(), Path.Combine(copy.Path, "App.deps.json"));
+        var after = JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(copy.Path), JsonOptions)!;
+        Assert.Equal(
+            before.Methods!.Select(method => (method.FileName, method.ClassName, method.Name)).ToList(),
+            after.Methods!.Select(method => (method.FileName, method.ClassName, method.Name)).ToList());
+        Assert.Equal(before.MethodCalls!.Count, after.MethodCalls!.Count);
+    }
+
+    // Issue #107's second report: with no root *.deps.json `dataflows` read MimeKit and kept the
+    // application slices into it; with one, the packages and those slices were gone.
+    [SkippableFact]
+    public void Corpus_Issue107Mailkit_DataFlowsDoNotDependOnARootDepsJson()
+    {
+        var path = CorpusPathOrSkip("issue107-mailkit");
+        using var copy = CorpusCopy.Of(path);
+
+        DataFlowResult Run(DependencyFlowMode mode)
+        {
+            using var scope = DependencyFlowScope.Apply(mode);
+            return DataFlowAnalyzer.Analyze(copy.Path);
+        }
+
+        // Each application slice with every node it passes through, by location and name.
+        string[] ApplicationSlices(DataFlowResult result)
+        {
+            var nodes = result.Nodes.ToDictionary(node => node.Id, node => $"{node.FileName}:{node.LineNumber}:{node.ColumnNumber}:{node.Name}", StringComparer.Ordinal);
+            return result.Slices
+                .Where(slice => slice.Scope != "dependency")
+                .Select(slice => $"{nodes[slice.SourceId]}->{nodes[slice.SinkId]}:{slice.SinkArgumentIndex}|{string.Join(",", slice.NodeIds.Select(id => nodes[id]))}")
+                .Order(StringComparer.Ordinal)
+                .ToArray();
+        }
+
+        var without = Run(DependencyFlowMode.Reachable);
+        Assert.Contains(without.Slices, slice => slice.Scope != "dependency" && without.Nodes.Single(node => node.Id == slice.SinkId).Name == "Parse");
+        Assert.Contains(without.PackageReachability, package => package.Purl.StartsWith("pkg:nuget/MimeKit@", StringComparison.Ordinal));
+
+        // Reachable analyzes a fraction of the package bodies and still gives every application
+        // slice exactly as all does, nodes through generic package methods included.
+        var all = Run(DependencyFlowMode.All);
+        Assert.Equal(ApplicationSlices(all), ApplicationSlices(without));
+
+        File.Copy(Directory.EnumerateFiles(Path.Combine(copy.Path, "Api", "bin"), "Api.deps.json", SearchOption.AllDirectories).First(), Path.Combine(copy.Path, "Api.deps.json"));
+        var with = Run(DependencyFlowMode.Reachable);
+        Assert.Equal(ApplicationSlices(without), ApplicationSlices(with));
+        Assert.Equal(without.Statistics.FilesAnalyzed, with.Statistics.FilesAnalyzed);
+        Assert.Equal(without.PackageReachability.Select(package => package.Purl), with.PackageReachability.Select(package => package.Purl));
+    }
+
+    // Issue #111: the class library's own bin comes before the app's in one tree and after it in
+    // the other, and NodaTime sits only in the app's bin.
+    [SkippableTheory]
+    [InlineData("App")]
+    [InlineData("Web")]
+    public void Corpus_Issue111Core_TheLibrarysTypesAreReadWhateverTheAppIsCalled(string app)
+    {
+        var path = CorpusPathOrSkip(Path.Combine("issue111-core", app));
+        var slice = JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(path), JsonOptions)!;
+
+        var core = slice.Methods!.Where(method => method.FileName == "Core.dll").Select(method => $"{method.ClassName}.{method.Name}").ToHashSet(StringComparer.Ordinal);
+        Assert.Contains("FixedClock.GetCurrentInstant", core);
+        Assert.Contains("FixedClock..ctor", core);
+        Assert.Contains("Greeting.Hello", core);
+        Assert.Contains(slice.SourceAssemblyMapping!, mapping => mapping.SourceId.StartsWith("Core.FixedClock.GetCurrentInstant", StringComparison.Ordinal));
+    }
+
+    // Issue #111 on a real tree: renaming src/API to src/ZAPI moved the app after its libraries
+    // and dropped 4,011 application methods. The two trees must now report the same methods;
+    // and issue #110's ambiguity count on the same tree.
+    [SkippableFact]
+    public void Corpus_ModularMonolith_MethodSetDoesNotDependOnADirectoryName()
+    {
+        var path = CorpusPathOrSkip("modular-monolith-with-ddd/src");
+        using var renamed = CorpusCopy.Of(path);
+        Directory.Move(Path.Combine(renamed.Path, "API"), Path.Combine(renamed.Path, "ZAPI"));
+
+        var original = JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(path), JsonOptions)!;
+        var moved = JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(renamed.Path), JsonOptions)!;
+
+        static List<string> Names(MethodsSlice slice) => slice.Methods!
+            .Select(method => $"{method.FileName}|{method.Namespace}|{method.ClassName}|{method.Name}|{method.MetadataToken}")
+            .Order(StringComparer.Ordinal)
+            .ToList();
+
+        Assert.Equal(Names(original).Count, Names(moved).Count);
+        Assert.Equal(Names(original), Names(moved));
+        Assert.Equal(original.SourceAssemblyMapping!.Count, moved.SourceAssemblyMapping!.Count);
+        Assert.Equal(original.CallGraph!.Nodes.Count, moved.CallGraph!.Nodes.Count);
+        Assert.True(original.Methods!.Count(method => (method.Namespace ?? "").StartsWith("CompanyName.", StringComparison.Ordinal)) > 8_000);
+    }
+
+    // Issue #110: the Web SDK API project's Microsoft.Extensions.Logging made `ILogger` ambiguous
+    // (79 CS0104 errors) in the libraries that log through Serilog, and their calls stayed
+    // unbound: 6 Serilog calls were bound, 92 once <Using Remove> took the using away.
+    [SkippableFact]
+    public void Corpus_ModularMonolith_SerilogCallsBindBesideTheWebProject()
+    {
+        var path = CorpusPathOrSkip("modular-monolith-with-ddd/src");
+        var slice = JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(path), JsonOptions)!;
+
+        var serilogCalls = slice.MethodCalls!.Count(call => call.CalledMethod.StartsWith("Serilog.ILogger.", StringComparison.Ordinal));
+        Assert.True(serilogCalls >= 90, $"expected the Serilog calls to bind, got {serilogCalls}");
+        Assert.DoesNotContain(slice.MethodCalls!, call => call.EvidenceKind == AnalysisEvidenceKind.SourceUnresolved && call.CalledMethod is "Information" or "Warning" or "Error" or "Debug");
+        Assert.Contains(slice.Diagnostics!, line => line.StartsWith("Global usings differ between projects", StringComparison.Ordinal));
+    }
+
+    // Issue #110's repro: with the app and the library in one tree the library's call binds
+    // as it does when the library is scanned alone.
+    [SkippableFact]
+    public void Corpus_Issue110Serilog_TheLibraryCallBindsLikeTheLibraryScannedAlone()
+    {
+        var path = CorpusPathOrSkip("issue110-serilog");
+
+        string Greet(string scanned) => Assert.Single(
+            JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(scanned), JsonOptions)!.MethodCalls!,
+            call => call.Path.EndsWith("Greeter.cs", StringComparison.Ordinal) && call.CalledMethod.Contains("Information", StringComparison.Ordinal)).CalledMethod;
+
+        Assert.Equal("Serilog.ILogger.Information<string>(string, string)", Greet(path));
+        Assert.Equal(Greet(Path.Combine(path, "Lib")), Greet(path));
+    }
+
+    // Issue #106: crypto takes the methods and data-flow reports written for the same tree
+    // instead of analysing it again; what it reports does not change.
+    [SkippableFact]
+    public void Corpus_ModularMonolithUserAccess_CryptoWithReusedReportsMatchesFromScratch()
+    {
+        var path = CorpusPathOrSkip("modular-monolith-with-ddd/src/Modules/UserAccess");
+        var directory = Path.Combine(Path.GetTempPath(), "dosai-corpus-reports-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var methodsReport = Path.Combine(directory, "methods.json");
+            var dataFlowsReport = Path.Combine(directory, "dataflows.json");
+            File.WriteAllText(methodsReport, Depscan.Dosai.GetMethods(path));
+            File.WriteAllText(dataFlowsReport, DataFlowAnalyzer.GetDataFlows(path));
+
+            var scratch = CryptoAnalyzer.Analyze(path);
+            var reused = CryptoAnalyzer.Analyze(path, null, BuildPreparationMode.None, CryptoDataFlowDetail.Full, methodsReport, dataFlowsReport);
+
+            Assert.Contains(reused.Diagnostics, line => line.StartsWith("The methods slice was taken from the report", StringComparison.Ordinal));
+            Assert.Contains(reused.Diagnostics, line => line.StartsWith("The crypto data flows were taken from the data-flow report", StringComparison.Ordinal));
+            Assert.True(scratch.Statistics.AssetCount > 0, "expected crypto evidence in the UserAccess module");
+            Assert.Equal(Issue106ReportReuseTests.Evidence(scratch), Issue106ReportReuseTests.Evidence(reused));
+            Assert.Equal(scratch.Statistics.CryptoDataFlowSliceCount, reused.Statistics.CryptoDataFlowSliceCount);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    /// <summary>A throwaway copy of a corpus app, so a test can add files to the tree without touching the corpus.</summary>
+    private sealed class CorpusCopy : IDisposable
+    {
+        private CorpusCopy(string path) => Path = path;
+
+        public string Path { get; }
+
+        public static CorpusCopy Of(string source)
+        {
+            var target = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "dosai-corpus-" + Guid.NewGuid().ToString("N"));
+            CopyDirectory(source, target);
+            return new CorpusCopy(target);
+        }
+
+        private static void CopyDirectory(string source, string target)
+        {
+            Directory.CreateDirectory(target);
+            foreach (var file in Directory.EnumerateFiles(source))
+            {
+                File.Copy(file, System.IO.Path.Combine(target, System.IO.Path.GetFileName(file)));
+            }
+
+            foreach (var directory in Directory.EnumerateDirectories(source))
+            {
+                CopyDirectory(directory, System.IO.Path.Combine(target, System.IO.Path.GetFileName(directory)));
+            }
+        }
+
+        public void Dispose()
+        {
+            try
+            {
+                Directory.Delete(Path, recursive: true);
+            }
+            catch (IOException)
+            {
+            }
+        }
     }
 }
