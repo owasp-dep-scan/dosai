@@ -1,0 +1,19 @@
+Dosai/Dosai.cs
+  s_9814f82717dc15::t_fb648dcb4d0551 1865,2119-2122,2124-2139,2146-2147,2149,2151-2152,2159
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8b926550b4b37f20370924c0271a90dd0d16e794",
+  "prompts": {},
+  "sessions": {
+    "s_9814f82717dc15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a9077832-8cfa-4f24-bcfd-c2361a4b84db",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
