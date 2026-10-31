@@ -70,6 +70,12 @@ public sealed class DataFlowPattern
     public string Confidence { get; set; } = "Medium";
     /// <summary>Optional severity override (info/low/medium/high/critical). Empty falls back to the per-category default.</summary>
     public string? Severity { get; set; }
+    /// <summary>
+    ///     The built-in pattern pack this pattern belongs to (<c>crypto</c>, <c>aspnet</c>, ...), or
+    ///     <c>custom</c> for a pattern from a <c>--patterns</c> file; null for the base patterns
+    ///     every run carries. Lets a report say which packs matched each slice (issue #106).
+    /// </summary>
+    public string? Pack { get; set; }
 }
 
 public sealed class DataFlowPatternSet
@@ -204,6 +210,12 @@ public sealed class DataFlowSlice
     ///     the package's own behaviour rather than an application finding. Absent otherwise.
     /// </summary>
     public string? Scope { get; set; }
+    /// <summary>
+    ///     The pattern packs whose patterns matched this slice's nodes, sorted; null when only the
+    ///     base patterns did (issue #106). A consumer that wants the flows of a subset of packs,
+    ///     such as <c>crypto</c>, keeps the slices whose packs lie within it.
+    /// </summary>
+    public List<string>? Packs { get; set; }
 }
 
 /// <summary>
@@ -506,6 +518,7 @@ public static partial class DataFlowAnalyzer
         result.Nodes = result.Nodes.OrderBy(n => n.FileName, StringComparer.Ordinal).ThenBy(n => n.LineNumber).ThenBy(n => n.ColumnNumber).ThenBy(n => n.Id, StringComparer.Ordinal).ToList();
         result.Edges = result.Edges.OrderBy(e => e.FileName, StringComparer.Ordinal).ThenBy(e => e.LineNumber).ThenBy(e => e.ColumnNumber).ThenBy(e => e.Id, StringComparer.Ordinal).ToList();
         result.Slices = result.Slices.OrderBy(s => s.Id, StringComparer.Ordinal).ToList();
+        TagSlicePacks(result, patterns);
         result.MethodSummaries = summaries.Values
             .Concat(result.MethodSummaries)
             .GroupBy(summary => $"{summary.Method}\u001f{summary.SummaryKind}\u001f{summary.EvidenceKind}", StringComparer.Ordinal)
@@ -683,10 +696,10 @@ public static partial class DataFlowAnalyzer
 
         var json = File.ReadAllText(patternsPath);
         var userPatterns = JsonSerializer.Deserialize<DataFlowPatternSet>(json, JsonOptions) ?? new DataFlowPatternSet();
-        defaults.Sources.AddRange(NormalizeTargets(userPatterns.Sources, DataFlowPatternTarget.Source));
-        defaults.Sinks.AddRange(NormalizeTargets(userPatterns.Sinks, DataFlowPatternTarget.Sink));
-        defaults.Passthroughs.AddRange(NormalizeTargets(userPatterns.Passthroughs, DataFlowPatternTarget.Passthrough));
-        defaults.Sanitizers.AddRange(NormalizeTargets(userPatterns.Sanitizers, DataFlowPatternTarget.Sanitizer));
+        defaults.Sources.AddRange(NormalizeTargets(userPatterns.Sources, DataFlowPatternTarget.Source, "custom"));
+        defaults.Sinks.AddRange(NormalizeTargets(userPatterns.Sinks, DataFlowPatternTarget.Sink, "custom"));
+        defaults.Passthroughs.AddRange(NormalizeTargets(userPatterns.Passthroughs, DataFlowPatternTarget.Passthrough, "custom"));
+        defaults.Sanitizers.AddRange(NormalizeTargets(userPatterns.Sanitizers, DataFlowPatternTarget.Sanitizer, "custom"));
         return defaults;
     }
 
@@ -713,6 +726,13 @@ public static partial class DataFlowAnalyzer
         }
         patterns.PatternPacks = requested.OrderBy(pack => pack, StringComparer.OrdinalIgnoreCase).ToList();
 
+        // Each pack's block below appends its patterns after the previous block's, so the
+        // pattern lists cut at the snapshots into one range per pack; what came before the first
+        // snapshot is the base set every run carries and has no pack.
+        var snapshots = new List<(string Pack, int Sources, int Sinks, int Passthroughs, int Sanitizers)>();
+        void Snapshot(string pack) => snapshots.Add((pack, patterns.Sources.Count, patterns.Sinks.Count, patterns.Passthroughs.Count, patterns.Sanitizers.Count));
+
+        Snapshot("aspnet");
         if (requested.Contains("aspnet"))
         {
             patterns.Sources.AddRange([
@@ -743,6 +763,7 @@ public static partial class DataFlowAnalyzer
             ]);
         }
 
+        Snapshot("data");
         if (requested.Contains("data"))
         {
             patterns.Sinks.AddRange([
@@ -765,6 +786,7 @@ public static partial class DataFlowAnalyzer
             ]);
         }
 
+        Snapshot("filesystem");
         if (requested.Contains("filesystem"))
         {
             patterns.Sanitizers.AddRange([
@@ -784,6 +806,7 @@ public static partial class DataFlowAnalyzer
             ]);
         }
 
+        Snapshot("serialization");
         if (requested.Contains("serialization"))
         {
             patterns.Sinks.AddRange([
@@ -793,6 +816,7 @@ public static partial class DataFlowAnalyzer
             ]);
         }
 
+        Snapshot("cloud");
         if (requested.Contains("cloud"))
         {
             patterns.Sources.AddRange([
@@ -802,6 +826,7 @@ public static partial class DataFlowAnalyzer
             ]);
         }
 
+        Snapshot("rpc");
         if (requested.Contains("rpc"))
         {
             patterns.Sources.AddRange([
@@ -810,6 +835,7 @@ public static partial class DataFlowAnalyzer
             ]);
         }
 
+        Snapshot("auth");
         if (requested.Contains("auth"))
         {
             patterns.Sinks.AddRange([
@@ -819,6 +845,7 @@ public static partial class DataFlowAnalyzer
             ]);
         }
 
+        Snapshot("crypto");
         if (requested.Contains("crypto"))
         {
             patterns.Sources.AddRange([
@@ -845,6 +872,7 @@ public static partial class DataFlowAnalyzer
             ]);
         }
 
+        Snapshot("grpc");
         if (requested.Contains("grpc"))
         {
             patterns.Sources.AddRange([
@@ -856,6 +884,7 @@ public static partial class DataFlowAnalyzer
             ]);
         }
 
+        Snapshot("messaging");
         if (requested.Contains("messaging"))
         {
             patterns.Sources.AddRange([
@@ -868,6 +897,7 @@ public static partial class DataFlowAnalyzer
             ]);
         }
 
+        Snapshot("ai");
         if (requested.Contains("ai"))
         {
             patterns.Sources.AddRange([
@@ -888,6 +918,7 @@ public static partial class DataFlowAnalyzer
             ]);
         }
 
+        Snapshot("mcp");
         if (requested.Contains("mcp"))
         {
             patterns.Sources.AddRange([
@@ -899,6 +930,7 @@ public static partial class DataFlowAnalyzer
             ]);
         }
 
+        Snapshot("xss");
         if (requested.Contains("xss"))
         {
             patterns.Sinks.AddRange([
@@ -914,6 +946,7 @@ public static partial class DataFlowAnalyzer
             // HtmlEncoder.Encode / WebUtility.HtmlEncode sanitizers ship in the default set already.
         }
 
+        Snapshot("xxe");
         if (requested.Contains("xxe"))
         {
             // Descriptions state the observed fact (a tainted document reaching an XML parser) and
@@ -941,6 +974,7 @@ public static partial class DataFlowAnalyzer
             ]);
         }
 
+        Snapshot("injection");
         if (requested.Contains("injection"))
         {
             patterns.Sinks.AddRange([
@@ -972,6 +1006,7 @@ public static partial class DataFlowAnalyzer
             ]);
         }
 
+        Snapshot("log");
         if (requested.Contains("log"))
         {
             patterns.Sinks.AddRange([
@@ -1005,6 +1040,7 @@ public static partial class DataFlowAnalyzer
             ]);
         }
 
+        Snapshot("redos");
         if (requested.Contains("redos"))
         {
             patterns.Sinks.AddRange([
@@ -1018,6 +1054,7 @@ public static partial class DataFlowAnalyzer
             ]);
         }
 
+        Snapshot("template");
         if (requested.Contains("template"))
         {
             patterns.Sinks.AddRange([
@@ -1028,13 +1065,71 @@ public static partial class DataFlowAnalyzer
                 new() { Target = DataFlowPatternTarget.Sink, Kind = DataFlowPatternKind.Method, Pattern = "DotLiquid.Template", Match = DataFlowMatchKind.Contains, Category = "template", Description = "DotLiquid template parse/render of tainted source" }
             ]);
         }
+
+        Snapshot(string.Empty);
+        for (var index = 0; index + 1 < snapshots.Count; index++)
+        {
+            var (pack, sources, sinks, passthroughs, sanitizers) = snapshots[index];
+            var next = snapshots[index + 1];
+            TagRange(patterns.Sources, sources, next.Sources, pack);
+            TagRange(patterns.Sinks, sinks, next.Sinks, pack);
+            TagRange(patterns.Passthroughs, passthroughs, next.Passthroughs, pack);
+            TagRange(patterns.Sanitizers, sanitizers, next.Sanitizers, pack);
+        }
+
+        static void TagRange(List<DataFlowPattern> list, int start, int end, string pack)
+        {
+            for (var position = start; position < end; position++)
+            {
+                list[position].Pack = pack;
+            }
+        }
     }
 
-    private static IEnumerable<DataFlowPattern> NormalizeTargets(IEnumerable<DataFlowPattern> patterns, DataFlowPatternTarget target)
+    /// <summary>
+    ///     Records on each slice the pattern packs that matched its nodes (<see cref="DataFlowSlice.Packs" />),
+    ///     by the pattern text each node carries: a text that more than one pack declares counts
+    ///     for the first, the base set before any pack, so a slice is attributed to a pack only
+    ///     for patterns that pack alone brought.
+    /// </summary>
+    private static void TagSlicePacks(DataFlowResult result, DataFlowPatternSet patterns)
+    {
+        var packByPattern = new Dictionary<string, string?>(StringComparer.Ordinal);
+        foreach (var pattern in patterns.Sources.Concat(patterns.Sinks).Concat(patterns.Passthroughs).Concat(patterns.Sanitizers))
+        {
+            packByPattern.TryAdd(pattern.Pattern, pattern.Pack);
+        }
+
+        var nodesById = result.Nodes.ToDictionaryFirstWins(node => node.Id, StringComparer.Ordinal);
+        foreach (var slice in result.Slices)
+        {
+            SortedSet<string>? packs = null;
+            foreach (var nodeId in slice.NodeIds)
+            {
+                if (!nodesById.TryGetValue(nodeId, out var node))
+                {
+                    continue;
+                }
+
+                foreach (var matched in node.MatchedPatterns)
+                {
+                    if (packByPattern.TryGetValue(matched, out var pack) && pack is not null)
+                    {
+                        (packs ??= new SortedSet<string>(StringComparer.Ordinal)).Add(pack);
+                    }
+                }
+            }
+
+            slice.Packs = packs?.ToList();
+        }
+    }
+
+    private static IEnumerable<DataFlowPattern> NormalizeTargets(IEnumerable<DataFlowPattern> patterns, DataFlowPatternTarget target, string pack)
     {
         foreach (var pattern in patterns)
         {
             pattern.Target = target;
+            pattern.Pack = pack;
             yield return pattern;
         }
     }

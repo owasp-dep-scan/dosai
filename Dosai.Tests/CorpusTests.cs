@@ -463,6 +463,36 @@ public class CorpusTests
         Assert.Equal(Greet(Path.Combine(path, "Lib")), Greet(path));
     }
 
+    // Issue #106: crypto takes the methods and data-flow reports written for the same tree
+    // instead of analysing it again; what it reports does not change.
+    [SkippableFact]
+    public void Corpus_ModularMonolithUserAccess_CryptoWithReusedReportsMatchesFromScratch()
+    {
+        var path = CorpusPathOrSkip("modular-monolith-with-ddd/src/Modules/UserAccess");
+        var directory = Path.Combine(Path.GetTempPath(), "dosai-corpus-reports-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var methodsReport = Path.Combine(directory, "methods.json");
+            var dataFlowsReport = Path.Combine(directory, "dataflows.json");
+            File.WriteAllText(methodsReport, Depscan.Dosai.GetMethods(path));
+            File.WriteAllText(dataFlowsReport, DataFlowAnalyzer.GetDataFlows(path));
+
+            var scratch = CryptoAnalyzer.Analyze(path);
+            var reused = CryptoAnalyzer.Analyze(path, null, BuildPreparationMode.None, CryptoDataFlowDetail.Full, methodsReport, dataFlowsReport);
+
+            Assert.Contains(reused.Diagnostics, line => line.StartsWith("The methods slice was taken from the report", StringComparison.Ordinal));
+            Assert.Contains(reused.Diagnostics, line => line.StartsWith("The crypto data flows were taken from the data-flow report", StringComparison.Ordinal));
+            Assert.True(scratch.Statistics.AssetCount > 0, "expected crypto evidence in the UserAccess module");
+            Assert.Equal(Issue106ReportReuseTests.Evidence(scratch), Issue106ReportReuseTests.Evidence(reused));
+            Assert.Equal(scratch.Statistics.CryptoDataFlowSliceCount, reused.Statistics.CryptoDataFlowSliceCount);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     /// <summary>A throwaway copy of a corpus app, so a test can add files to the tree without touching the corpus.</summary>
     private sealed class CorpusCopy : IDisposable
     {

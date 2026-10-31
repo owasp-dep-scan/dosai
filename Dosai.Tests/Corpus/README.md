@@ -51,3 +51,4 @@ than silently green.
 | modular-monolith-with-ddd (renamed) | a temporary copy of `modular-monolith-with-ddd/src` with `API` renamed to `ZAPI` | Issue #111: the method set of the renamed tree equals the original's (renaming used to drop 4,011 application methods) |
 | issue110-serilog | `issue110-serilog` | Issue #110: the library's Serilog `ILogger.Information` call binds in the tree (no CS0104 from the Web project's implicit usings), to the same method as when the library is scanned alone |
 | modular-monolith-with-ddd (usings) | `modular-monolith-with-ddd/src` | Issue #110: the Serilog calls bind beside the Web SDK API project (92 bound; 6 before the fix) |
+| modular-monolith-with-ddd UserAccess (crypto reports) | `modular-monolith-with-ddd/src/Modules/UserAccess` | Issue #106: `crypto` with a methods report and a data-flow report written for the same tree reports the same evidence, and the same crypto slice count, as `crypto` from scratch |

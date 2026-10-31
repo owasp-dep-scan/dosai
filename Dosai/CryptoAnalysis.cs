@@ -289,9 +289,23 @@ public static class CryptoAnalyzer
     ///     output does not need instead of pinning it through serialization.
     /// </param>
     public static CryptoAnalysisResult Analyze(string path, MethodsSlice? methodsSlice, BuildPreparationMode buildPreparation, CryptoDataFlowDetail dataFlowDetail)
-        => DedicatedStack.Run("Dosai crypto analysis", () => AnalyzeCore(path, methodsSlice, buildPreparation, dataFlowDetail));
+        => Analyze(path, methodsSlice, buildPreparation, dataFlowDetail, methodsReportPath: null, dataFlowsReportPath: null);
 
-    private static CryptoAnalysisResult AnalyzeCore(string path, MethodsSlice? methodsSlice, BuildPreparationMode buildPreparation, CryptoDataFlowDetail dataFlowDetail)
+    /// <param name="methodsReportPath">
+    ///     A <c>methods</c> report already written for <paramref name="path" /> (issue #106): used
+    ///     instead of building the methods slice when it is for this path, of a compatible schema
+    ///     version and complete; otherwise the slice is built and <c>Diagnostics</c> says why.
+    ///     Ignored when <paramref name="methodsSlice" /> is given.
+    /// </param>
+    /// <param name="dataFlowsReportPath">
+    ///     A <c>dataflows</c> report already written for <paramref name="path" /> whose pattern packs
+    ///     include <c>crypto</c>: its crypto-pack slices stand in for the second data-flow walk
+    ///     (see <see cref="ReportReuse.CryptoView" />); otherwise the walk runs and <c>Diagnostics</c> says why.
+    /// </param>
+    public static CryptoAnalysisResult Analyze(string path, MethodsSlice? methodsSlice, BuildPreparationMode buildPreparation, CryptoDataFlowDetail dataFlowDetail, string? methodsReportPath, string? dataFlowsReportPath)
+        => DedicatedStack.Run("Dosai crypto analysis", () => AnalyzeCore(path, methodsSlice, buildPreparation, dataFlowDetail, methodsReportPath, dataFlowsReportPath));
+
+    private static CryptoAnalysisResult AnalyzeCore(string path, MethodsSlice? methodsSlice, BuildPreparationMode buildPreparation, CryptoDataFlowDetail dataFlowDetail, string? methodsReportPath, string? dataFlowsReportPath)
     {
         if (!File.Exists(path) && !Directory.Exists(path))
         {
@@ -305,6 +319,11 @@ public static class CryptoAnalyzer
         CryptoReachability reachability;
         using (DebugLog.Phase("crypto.reachability"))
         {
+            if (methodsSlice is null && !string.IsNullOrWhiteSpace(methodsReportPath))
+            {
+                methodsSlice = ReportReuse.LoadMethods(methodsReportPath, path, result.Diagnostics);
+            }
+
             reachability = methodsSlice is null
                 ? BuildReachability(path, result.Diagnostics)
                 : CryptoReachability.From(methodsSlice, result.Diagnostics);
@@ -322,7 +341,7 @@ public static class CryptoAnalyzer
         var cryptoDataFlowSliceCount = 0;
         using (DebugLog.Phase("crypto.dataflow-correlation"))
         {
-            cryptoDataFlowSliceCount = AttachCryptoDataFlows(path, result);
+            cryptoDataFlowSliceCount = AttachCryptoDataFlows(path, result, dataFlowsReportPath);
         }
         var cryptoDependencyDataFlowSliceCount = result.CryptoDataFlows?.Statistics.DependencySliceCount ?? 0;
 
@@ -366,11 +385,12 @@ public static class CryptoAnalyzer
     ///     separate, explicit step (<see cref="ApplyDataFlowDetail" />) so callers that also want
     ///     graph sidecars can write them from the full graph first.
     /// </summary>
-    private static int AttachCryptoDataFlows(string path, CryptoAnalysisResult result)
+    private static int AttachCryptoDataFlows(string path, CryptoAnalysisResult result, string? dataFlowsReportPath)
     {
         try
         {
-            var dataFlows = DataFlowAnalyzer.Analyze(path, patternPacks: "crypto");
+            var dataFlows = (string.IsNullOrWhiteSpace(dataFlowsReportPath) ? null : ReportReuse.LoadDataFlows(dataFlowsReportPath, path, result.Diagnostics))
+                ?? DataFlowAnalyzer.Analyze(path, patternPacks: "crypto");
             result.CryptoDataFlows = dataFlows;
             CryptoDataFlowCorrelator.Attach(result, dataFlows);
             return dataFlows.Slices.Count;

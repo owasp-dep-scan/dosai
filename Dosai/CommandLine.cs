@@ -68,6 +68,18 @@ public class CommandLine
             Arity = ArgumentArity.ExactlyOne
         };
 
+        var methodsReportOption = new Option<string?>("--methods-report")
+        {
+            Description = "A methods report already written for the same --path (without --sections omissions). crypto reuses its slice instead of analysing the tree again when the report's path, schema version and sections check out, and says in Diagnostics when it does not.",
+            Arity = ArgumentArity.ExactlyOne
+        };
+
+        var dataFlowsReportOption = new Option<string?>("--dataflows-report")
+        {
+            Description = "A dataflows report already written for the same --path with a pattern pack set that includes crypto (the default, all). crypto takes its crypto-pack slices instead of walking the data flows again, and says in Diagnostics when the report cannot be used.",
+            Arity = ArgumentArity.ExactlyOne
+        };
+
         var suppressionsFileOption = new Option<string?>("--suppress")
         {
             Description = "Optional suppressions JSON file (file+line, sliceKey, weaknessId, or category entries, each with an optional expiry). Matching, non-expired suppressions remove slices and weakness candidates.",
@@ -254,6 +266,8 @@ public class CommandLine
             outputFileOption,
             cryptoFormatOption,
             cryptoDataFlowsOption,
+            methodsReportOption,
+            dataFlowsReportOption,
             dependencyFlowsOption,
             cryptoGraphFormatOption,
             cryptoGraphOutputFileOption,
@@ -445,7 +459,7 @@ public class CommandLine
             try
             {
                 var dataFlowDetail = CryptoAnalyzer.ParseDataFlowDetail(dataFlowDetailOption);
-                var result = CryptoAnalyzer.Analyze(path, buildPreparation);
+                var result = CryptoAnalyzer.Analyze(path, null, buildPreparation, CryptoDataFlowDetail.Full, parseResult.GetValue(methodsReportOption), parseResult.GetValue(dataFlowsReportOption));
                 // Graph sidecars are written from the full graph, before the detail option trims
                 // it: --crypto-dataflows controls the JSON only. The sidecar failure code still
                 // surfaces after the JSON is written, so a consumer never loses the primary

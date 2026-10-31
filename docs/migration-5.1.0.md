@@ -568,3 +568,28 @@ through Serilog, and its calls stayed `SourceUnresolved`.
   is none) move by the inserted text. Lines never move.
 - The `Diagnostics` line for disagreeing projects now says that each file uses its own project's
   usings; it used to say that the compilation carried the union.
+
+## `crypto` reuses `methods` and `dataflows` reports (issue #106, additive)
+
+`crypto` rebuilt the methods slice and walked the data flows a second time with the crypto pack on
+trees that `methods` and `dataflows` had just analysed (cdxgen's research profile runs all three).
+
+- New `crypto` options `--methods-report <file>` and `--dataflows-report <file>`. A report is
+  used only when it parses, has a schema version of the same major, was written by the same Dosai
+  build (`AnalyzerVersion`), names the same scan path, and is complete for the use (`Methods`, `CallGraph`, `EntryPoints` and `Reachability` present for a
+  methods report; `crypto` among `Patterns.PatternPacks` for a data-flow report). Otherwise
+  `Diagnostics` says why and crypto analyses the tree itself. Without the options nothing changes.
+- Each report line added to `Diagnostics` starts `The methods slice was taken from the report`,
+  `The crypto data flows were taken from the data-flow report`, or contains `was not reused`.
+- Additive fields in the data-flow report: `Slices[].Packs` (the pattern packs whose patterns
+  matched the slice, sorted; absent when only the base patterns did) and `Patterns.Sources`,
+  `Sinks`, `Passthroughs` and `Sanitizers` entries carry `Pack` (the pack name, `custom` for a
+  `--patterns` file, absent for the base set). `Patterns.PatternPacks`, already part of the
+  report, is what a consumer checks for `crypto`. The default `dataflows` run already includes the
+  crypto pack, so its output changes only by these fields.
+- With a methods report the crypto output is byte-identical to a run without one apart from the
+  per-run timestamp and the reuse line. With a data-flow report the embedded `CryptoDataFlows`
+  carries the report's ids and leaves the derived lists (weaknesses, package and dangerous-API
+  reachability, exploit chains, attack surface) empty; assets, operations, materials, protocols,
+  findings and statistics are unchanged, and the dataFlowSliceIds on crypto evidence name the
+  slices of the report.

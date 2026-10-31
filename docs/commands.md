@@ -357,6 +357,26 @@ dotnet run --project ./Dosai/Dosai.csproj -- crypto \
   --crypto-dataflows none
 ```
 
+## Reusing the methods and dataflows reports (`--methods-report`, `--dataflows-report`)
+
+A caller that runs `methods`, `dataflows` and `crypto` on one tree (cdxgen's research profile does) pays for the same analysis twice: `crypto` builds the methods slice and then walks the data flows again with the crypto pack. Two options let it use the reports already written:
+
+```bash
+dosai methods   --path ./tree --o methods.json
+dosai dataflows --path ./tree --o dataflows.json
+dosai crypto    --path ./tree --o crypto.json --crypto-dataflows none \
+  --methods-report methods.json --dataflows-report dataflows.json
+```
+
+- `--methods-report <file>` replaces building the methods slice. The report must parse, carry a schema version of the major this build writes and this build's `AnalyzerVersion`, have been written for the same `--path` (compared as full paths), and keep the sections crypto reads (`Methods`, `CallGraph`, `EntryPoints`, `Reachability`; a report written with `--sections` that keeps them is fine).
+- `--dataflows-report <file>` replaces the second walk. The report must pass the same path and schema checks and record the `crypto` pack in `Patterns.PatternPacks` (the default `--pattern-packs all` does), and must not have used custom `--patterns` for the slices it keeps. Each slice and pattern in a data-flow report records its pack: `Slices[].Packs` lists the packs whose patterns matched the slice (absent when only the base patterns did) and `Patterns.*[].Pack` names the pack of each pattern (absent for the base set, `custom` for a `--patterns` file). The crypto view keeps the slices whose packs lie within `crypto`, the nodes they use and the nodes that matched only base or crypto patterns, and the edges between kept nodes, with statistics recounted. Ids are the report's own, so `dataFlowSliceIds` on crypto evidence names the same slice in the report the caller holds. The derived lists of a data-flow result (weaknesses, package and dangerous-API reachability, exploit chains, attack surface) belong to the full pattern set and are left empty in the crypto view.
+
+A report that fails a check is not used: `Diagnostics` carries a line starting `Methods report ... was not reused` or `Data-flow report ... was not reused` with the reason, and crypto builds the slice or walks the flows itself, so the output is the one a run without the option gives. A used report adds one line, `The methods slice was taken from the report ...` or `The crypto data flows were taken from the data-flow report ...`. Apart from those lines and the per-run timestamp, a run with a methods report is byte-identical to one without. With a data-flow report the evidence (assets, operations, materials, protocols, findings, statistics) is the same and the embedded graph describes the same nodes, edges and slices; the ids of that graph follow the report, and flows that only a pack other than crypto brings to a source are not in the crypto view, as they are not in a crypto-only walk.
+
+The reports do not record `--exclude`, `--dependency-flows` or `--restore`/`--build`, so the checks cannot compare them: pass `crypto` the same options the reports were written with, and do not reuse a report after the tree has changed.
+
+On this repository's `Dosai` source tree `crypto` took 14.3 s from scratch and 5.2 s with both reports (a debug build; the report of a small tree is quick to build, so on trees where `methods` takes a few seconds alone the methods report saves less than the data-flow report does).
+
 ### Implementation flow
 
 ```text
