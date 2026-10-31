@@ -211,9 +211,11 @@ public sealed class DataFlowSlice
     /// </summary>
     public string? Scope { get; set; }
     /// <summary>
-    ///     The pattern packs whose patterns matched this slice's nodes, sorted; null when only the
-    ///     base patterns did (issue #106). A consumer that wants the flows of a subset of packs,
-    ///     such as <c>crypto</c>, keeps the slices whose packs lie within it.
+    ///     The pattern packs this slice needs, sorted (issue #106): the packs of the patterns its
+    ///     nodes matched, leaving out every node a base pattern also matched. Null when the base
+    ///     patterns alone produce it. A walk with a set of packs that contains these finds the
+    ///     slice; a node two packs both match lists both, so the test is sufficient, not exact
+    ///     (the nodes' <c>MatchedPatterns</c> and <c>Patterns.*[].Pack</c> give the exact answer).
     /// </summary>
     public List<string>? Packs { get; set; }
 }
@@ -696,10 +698,10 @@ public static partial class DataFlowAnalyzer
 
         var json = File.ReadAllText(patternsPath);
         var userPatterns = JsonSerializer.Deserialize<DataFlowPatternSet>(json, JsonOptions) ?? new DataFlowPatternSet();
-        defaults.Sources.AddRange(NormalizeTargets(userPatterns.Sources, DataFlowPatternTarget.Source, "custom"));
-        defaults.Sinks.AddRange(NormalizeTargets(userPatterns.Sinks, DataFlowPatternTarget.Sink, "custom"));
-        defaults.Passthroughs.AddRange(NormalizeTargets(userPatterns.Passthroughs, DataFlowPatternTarget.Passthrough, "custom"));
-        defaults.Sanitizers.AddRange(NormalizeTargets(userPatterns.Sanitizers, DataFlowPatternTarget.Sanitizer, "custom"));
+        defaults.Sources.AddRange(NormalizeTargets(userPatterns.Sources, DataFlowPatternTarget.Source, CustomPack));
+        defaults.Sinks.AddRange(NormalizeTargets(userPatterns.Sinks, DataFlowPatternTarget.Sink, CustomPack));
+        defaults.Passthroughs.AddRange(NormalizeTargets(userPatterns.Passthroughs, DataFlowPatternTarget.Passthrough, CustomPack));
+        defaults.Sanitizers.AddRange(NormalizeTargets(userPatterns.Sanitizers, DataFlowPatternTarget.Sanitizer, CustomPack));
         return defaults;
     }
 
@@ -1086,37 +1088,64 @@ public static partial class DataFlowAnalyzer
         }
     }
 
+    /// <summary>The pack name a <c>--patterns</c> file's patterns carry.</summary>
+    internal const string CustomPack = "custom";
+
     /// <summary>
-    ///     Records on each slice the pattern packs that matched its nodes (<see cref="DataFlowSlice.Packs" />),
-    ///     by the pattern text each node carries: a text that more than one pack declares counts
-    ///     for the first, the base set before any pack, so a slice is attributed to a pack only
-    ///     for patterns that pack alone brought.
+    ///     Every pattern text with the packs that declare it (null for the base set). A text more
+    ///     than one pack declares keeps all of them, so no pack's claim on it is lost.
+    /// </summary>
+    internal static Dictionary<string, List<string?>> PacksByPattern(DataFlowPatternSet patterns)
+    {
+        var packsByPattern = new Dictionary<string, List<string?>>(StringComparer.Ordinal);
+        foreach (var pattern in patterns.Sources.Concat(patterns.Sinks).Concat(patterns.Passthroughs).Concat(patterns.Sanitizers))
+        {
+            if (!packsByPattern.TryGetValue(pattern.Pattern, out var packs))
+            {
+                packsByPattern[pattern.Pattern] = packs = [];
+            }
+
+            if (!packs.Contains(pattern.Pack))
+            {
+                packs.Add(pattern.Pack);
+            }
+        }
+
+        return packsByPattern;
+    }
+
+    /// <summary>
+    ///     Records on each slice the pattern packs it needs (<see cref="DataFlowSlice.Packs" />): for
+    ///     each node of the slice that matched a pattern, the packs of its patterns, unless one of
+    ///     them is a base pattern, which every run carries. A node matched by the base
+    ///     <c>Deserialize</c> and the serialization pack's <c>JsonSerializer.Deserialize</c> needs
+    ///     no pack, so a walk without the serialization pack still finds the slice.
     /// </summary>
     private static void TagSlicePacks(DataFlowResult result, DataFlowPatternSet patterns)
     {
-        var packByPattern = new Dictionary<string, string?>(StringComparer.Ordinal);
-        foreach (var pattern in patterns.Sources.Concat(patterns.Sinks).Concat(patterns.Passthroughs).Concat(patterns.Sanitizers))
-        {
-            packByPattern.TryAdd(pattern.Pattern, pattern.Pack);
-        }
-
+        var packsByPattern = PacksByPattern(patterns);
         var nodesById = result.Nodes.ToDictionaryFirstWins(node => node.Id, StringComparer.Ordinal);
         foreach (var slice in result.Slices)
         {
             SortedSet<string>? packs = null;
             foreach (var nodeId in slice.NodeIds)
             {
-                if (!nodesById.TryGetValue(nodeId, out var node))
+                if (!nodesById.TryGetValue(nodeId, out var node) || node.MatchedPatterns.Count == 0)
                 {
                     continue;
                 }
 
-                foreach (var matched in node.MatchedPatterns)
+                var nodePacks = node.MatchedPatterns
+                    .SelectMany(matched => packsByPattern.TryGetValue(matched, out var declared) ? declared : [null])
+                    .ToList();
+                if (nodePacks.Contains(null))
                 {
-                    if (packByPattern.TryGetValue(matched, out var pack) && pack is not null)
-                    {
-                        (packs ??= new SortedSet<string>(StringComparer.Ordinal)).Add(pack);
-                    }
+                    continue;
+                }
+
+                foreach (var pack in nodePacks)
+                {
+                    (packs ??= new SortedSet<string>(StringComparer.Ordinal)).Add(pack!);
                 }
             }
 

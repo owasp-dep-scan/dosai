@@ -150,13 +150,34 @@ public sealed class Issue106ReportReuseTests
         var methodsJson = Depscan.Dosai.GetMethods(fixture.Path);
         AssertRefused(Depscan.Dosai.GetMethods(other.Path), null, "it analysed");
         AssertRefused(Edit(methodsJson, node => node["Metadata"]!["SchemaVersion"] = "4.1.0"), null, "schema version");
-        AssertRefused(Edit(methodsJson, node => node["Metadata"]!["AnalyzerVersion"] = "4.1.0.0"), null, "not by this build");
+        AssertRefused(Edit(methodsJson, node => node["Metadata"]!["AnalyzerBuild"] = "5.0.0-rc.3+8529edb"), null, "not by this build");
+        // A report from a build before the reuse options carries no AnalyzerBuild; the assembly
+        // version (5.0.0.0 for every prerelease) cannot tell it apart.
+        AssertRefused(Edit(methodsJson, node => node["Metadata"]!.AsObject().Remove("AnalyzerBuild")), null, "older build");
+        // The full path recorded at write time decides, not a relative InputPath.
+        AssertRefused(Edit(methodsJson, node => node["Metadata"]!["InputFullPath"] = other.Path), null, "it analysed");
         AssertRefused(Edit(methodsJson, node => node["Metadata"]!["OmittedSections"] = new JsonArray("Methods")), null, "without the sections Methods");
         AssertRefused("not json", null, "could not be read");
 
         var flowsJson = DataFlowAnalyzer.GetDataFlows(fixture.Path, patternPacks: "aspnet");
         AssertRefused(methodsJson, flowsJson, "which do not include crypto");
-        AssertRefused(methodsJson, Edit(DataFlowAnalyzer.GetDataFlows(fixture.Path), node => node["Metadata"]!["InputPath"] = other.Path), "it analysed");
+        var fullFlowsJson = DataFlowAnalyzer.GetDataFlows(fixture.Path);
+        AssertRefused(methodsJson, Edit(fullFlowsJson, node => node["Metadata"]!["InputFullPath"] = other.Path), "it analysed");
+        // A report whose patterns carry no pack would make every slice look like a base slice.
+        AssertRefused(methodsJson, Edit(fullFlowsJson, node =>
+        {
+            foreach (var role in new[] { "Sources", "Sinks", "Passthroughs", "Sanitizers" })
+            {
+                foreach (var pattern in node["Patterns"]![role]!.AsArray())
+                {
+                    pattern!.AsObject().Remove("Pack");
+                }
+            }
+        }), "do not record their pattern pack");
+        AssertRefused(methodsJson, Edit(fullFlowsJson, node => node["Patterns"]!["Sanitizers"]!.AsArray().Add(new JsonObject
+        {
+            ["Target"] = "Sanitizer", ["Kind"] = "Name", ["Pattern"] = "Scrub", ["Pack"] = "custom"
+        })), "custom sanitizers or passthroughs");
     }
 
     [Fact]
@@ -176,6 +197,74 @@ public sealed class Issue106ReportReuseTests
         var cryptoOnly = DataFlowAnalyzer.Analyze(fixture.Path, patternPacks: "crypto");
         var view = ReportReuse.CryptoView(result);
         Assert.Equal(Comparable(cryptoOnly), Comparable(view));
+    }
+
+    [Fact]
+    public void CryptoView_KeepsASliceWhoseNodeABasePatternAlsoMatched()
+    {
+        // The sink matched the base `Deserialize` and the serialization pack's own pattern: a
+        // crypto-only walk still matches it, so the slice needs no pack and stays in the view.
+        var patterns = new DataFlowPatternSet
+        {
+            Sources = [new DataFlowPattern { Target = DataFlowPatternTarget.Source, Pattern = "ReadKey", Pack = "crypto" }],
+            Sinks =
+            [
+                new DataFlowPattern { Target = DataFlowPatternTarget.Sink, Pattern = "Deserialize" },
+                new DataFlowPattern { Target = DataFlowPatternTarget.Sink, Pattern = "System.Text.Json.JsonSerializer.Deserialize", Pack = "serialization" },
+                new DataFlowPattern { Target = DataFlowPatternTarget.Sink, Pattern = "File.WriteAllText", Pack = "filesystem" }
+            ],
+            PatternPacks = ["crypto", "filesystem", "serialization"]
+        };
+        var report = new DataFlowResult
+        {
+            Patterns = patterns,
+            Nodes =
+            [
+                new DataFlowNode { Id = "source", Kind = "call", Name = "ReadKey", IsSource = true, MatchedPatterns = ["ReadKey"] },
+                new DataFlowNode { Id = "middle", Kind = "call", Name = "key" },
+                new DataFlowNode { Id = "both", Kind = "call", Name = "Deserialize", IsSink = true, MatchedPatterns = ["Deserialize", "System.Text.Json.JsonSerializer.Deserialize"] },
+                new DataFlowNode { Id = "file", Kind = "call", Name = "WriteAllText", IsSink = true, MatchedPatterns = ["File.WriteAllText"] },
+                new DataFlowNode { Id = "stray", Kind = "call", Name = "unrelated" }
+            ],
+            Edges =
+            [
+                new DataFlowEdge { Id = "e1", Kind = "flow", SourceId = "source", TargetId = "middle" },
+                new DataFlowEdge { Id = "e2", Kind = "flow", SourceId = "middle", TargetId = "both" },
+                new DataFlowEdge { Id = "e3", Kind = "flow", SourceId = "middle", TargetId = "file" }
+            ],
+            Slices =
+            [
+                new DataFlowSlice { Id = "kept", SourceId = "source", SinkId = "both", NodeIds = ["source", "middle", "both"], EdgeIds = ["e1", "e2"] },
+                new DataFlowSlice { Id = "dropped", SourceId = "source", SinkId = "file", NodeIds = ["source", "middle", "file"], EdgeIds = ["e1", "e3"] }
+            ]
+        };
+
+        var view = ReportReuse.CryptoView(report);
+
+        Assert.Equal(["kept"], view.Slices.Select(slice => slice.Id));
+        // Kept: the slice, and what flows from the crypto source. Left out: the sink only the
+        // filesystem pack matches, and a node no crypto flow reaches.
+        Assert.Equal(["source", "middle", "both"], view.Nodes.Select(node => node.Id));
+        Assert.Equal(["e1", "e2"], view.Edges.Select(edge => edge.Id));
+        Assert.Equal(["crypto"], view.Patterns.PatternPacks);
+        Assert.DoesNotContain(view.Patterns.Sinks, pattern => pattern.Pack is "serialization" or "filesystem");
+    }
+
+    [Fact]
+    public void PatternPacks_NoPatternTextIsDeclaredByTwoPacks()
+    {
+        // Pack attribution reads a node's matched pattern text; a text two packs declared would
+        // make the slice look like it needs both.
+        using var fixture = new TempDir();
+        File.WriteAllText(Path.Combine(fixture.Path, "Empty.cs"), "public static class Empty { }");
+
+        var patterns = DataFlowAnalyzer.Analyze(fixture.Path, patternPacks: "all").Patterns;
+
+        var shared = DataFlowAnalyzer.PacksByPattern(patterns)
+            .Where(entry => entry.Value.Count(pack => pack is not null) > 1)
+            .Select(entry => $"{entry.Key}: {string.Join(", ", entry.Value)}")
+            .ToList();
+        Assert.Empty(shared);
     }
 
     private static string Edit(string json, Action<JsonNode> edit)
