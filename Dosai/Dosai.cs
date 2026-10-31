@@ -2915,7 +2915,11 @@ public static class Dosai
             var csMethodDeclarations = csRoot?.DescendantNodes().OfType<MethodDeclarationSyntax>();
             var vbMethodDeclarations = vbRoot?.DescendantNodes().OfType<MethodStatementSyntax>();
 
-            var csUsingDirectives = csRoot?.DescendantNodes().OfType<UsingDirectiveSyntax>();
+            // The file's own directives: the ones the parser wrote in for its project's global
+            // usings (issue #110) are not declared by the file.
+            var insertedUsings = csRoot is null ? null : GlobalUsings.InsertedSpan(csRoot.SyntaxTree);
+            var csUsingDirectives = csRoot?.DescendantNodes().OfType<UsingDirectiveSyntax>()
+                .Where(directive => insertedUsings is not { } inserted || !inserted.Contains(directive.Span));
             var vbImportsDirectives = vbRoot?.DescendantNodes().OfType<SimpleImportsClauseSyntax>();
 
             var csPropertyDeclarations = csRoot?.DescendantNodes().OfType<PropertyDeclarationSyntax>();

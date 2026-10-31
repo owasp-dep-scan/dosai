@@ -86,6 +86,26 @@ public sealed class Issue110FileUsingsTests
     }
 
     [Fact]
+    public void Methods_InsertedUsings_MoveNoCodeTokenAndAreNotReportedAsDependencies()
+    {
+        using var fixture = new TempDir();
+        WriteTree(fixture.Path);
+        // No using of its own: the Web project's directives go on the blank line, not before
+        // the class, so the call keeps its column.
+        const string endpoint = "namespace App;\n\npublic static class Endpoint\n{\n    public static void Map(WebApplication app) => app.MapGet(\"/\", () => 1);\n}\n";
+        File.WriteAllText(Path.Combine(fixture.Path, "App", "Endpoint.cs"), endpoint);
+
+        var slice = Depscan.Dosai.GetMethodsSlice(fixture.Path);
+
+        var mapGet = Assert.Single(slice.MethodCalls!, call => call.Path.EndsWith("Endpoint.cs", StringComparison.Ordinal) && call.CalledMethod.Contains("MapGet", StringComparison.Ordinal));
+        Assert.NotEqual(AnalysisEvidenceKind.SourceUnresolved, mapGet.EvidenceKind);
+        Assert.Equal(5, mapGet.LineNumber);
+        Assert.Equal(endpoint.Split('\n')[4].IndexOf("app.MapGet", StringComparison.Ordinal) + 1, mapGet.ColumnNumber);
+        // Only the directives the files declare: Serilog in Greeter.cs, nothing the parser added.
+        Assert.Equal(["Serilog"], slice.Dependencies!.Select(dependency => dependency.Name?.Trim()).Distinct());
+    }
+
+    [Fact]
     public void Methods_TheSameTreeTwice_GivesTheSameJson()
     {
         using var fixture = new TempDir();
@@ -168,10 +188,13 @@ public sealed class Issue110FileUsingsTests
     [Theory]
     [InlineData("using System.Text;\nusing Foo;\n\nnamespace N;\npublic class C { }\n", 2, "using Foo;using ")]
     [InlineData("extern alias X;\n\nnamespace N;\npublic class C { }\n", 1, "extern alias X;using ")]
-    [InlineData("// header\n#nullable enable\nnamespace N;\npublic class C { }\n", 3, "using ")]
+    [InlineData("// header\n#nullable enable\nnamespace N;\npublic class C { }\n", 1, "using ")]
+    [InlineData("#nullable enable\n\nnamespace N;\npublic class C { }\n", 2, "using ")]
+    [InlineData("/* a\n   b */\nnamespace N;\npublic class C { }\n", 3, "using ")]
+    [InlineData("var builder = 1;\nSystem.Console.WriteLine(builder);\n", 1, "using ")]
     [InlineData("global using System.Text;\npublic class C { }\n", 1, "global using System.Text;using ")]
     [InlineData("[assembly: System.CLSCompliant(true)]\nnamespace N;\npublic class C { }\n", 1, "using ")]
-    [InlineData("// attributes only\n[assembly: System.CLSCompliant(true)]\n", 2, "using ")]
+    [InlineData("// attributes only\n[assembly: System.CLSCompliant(true)]\n", 1, "using ")]
     public void WithFileUsings_InsertsOnTheLineOfAnExistingDirective_AndNeverMovesALine(string source, int lineWithInsertion, string expectedStart)
     {
         using var fixture = new TempDir();
@@ -203,12 +226,15 @@ public sealed class Issue110FileUsingsTests
         WriteProject(fixture.Path, "App", WebProject);
         WriteProject(fixture.Path, "Lib", LibProject);
 
-        var tree = CSharpSourceParser.Parse("using System;\nusing System.Linq;\nnamespace N;\npublic class C { }\n", Path.Combine(fixture.Path, "Lib", "C.cs"), fixture.Path);
+        var tree = CSharpSourceParser.Parse("using Microsoft.AspNetCore.Builder;\nusing global::Microsoft.AspNetCore.Http;\nnamespace N;\npublic class C { }\n", Path.Combine(fixture.Path, "App", "C.cs"), fixture.Path);
 
         var text = tree.GetText().ToString();
-        Assert.Equal(1, System.Text.RegularExpressions.Regex.Matches(text, @"using System;").Count);
-        Assert.Equal(1, System.Text.RegularExpressions.Regex.Matches(text, @"using System\.Linq;").Count);
-        Assert.Contains("using System.IO;", text, StringComparison.Ordinal);
+        Assert.Equal(1, System.Text.RegularExpressions.Regex.Matches(text, @"using Microsoft\.AspNetCore\.Builder;").Count);
+        Assert.Equal(1, System.Text.RegularExpressions.Regex.Matches(text, @"Microsoft\.AspNetCore\.Http;").Count);
+        Assert.Contains("using Microsoft.Extensions.Logging;", text, StringComparison.Ordinal);
+        // The usings both projects share stay in the global tree and are not written per file.
+        Assert.DoesNotContain("using System.IO;", text, StringComparison.Ordinal);
+        Assert.Contains("global using System.IO;", GlobalUsings.Resolve(fixture.Path).Tree!.GetText().ToString(), StringComparison.Ordinal);
     }
 
     private static void WriteTree(string root)
