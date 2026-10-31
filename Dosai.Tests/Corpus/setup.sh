@@ -174,4 +174,44 @@ PROGRAM
 fi
 dotnet build "${ISSUE107_MAIL}/Api/Api.csproj" -c Release -v quiet
 
+echo "==> issue111-core (issue #111 repro: a class library implementing NodaTime's IClock, built under an app named App and one named Web)"
+for app in App Web; do
+    ISSUE111="${CORPUS_ROOT}/issue111-core/${app}"
+    if [ ! -d "${ISSUE111}/Core" ]; then
+        mkdir -p "${ISSUE111}"
+        (
+            cd "${ISSUE111}"
+            dotnet new classlib -n Core -o Core > /dev/null
+            dotnet new console -n "${app}" -o "${app}" > /dev/null
+            sed -i.bak "s|<TargetFramework>[^<]*</TargetFramework>|<TargetFramework>net8.0</TargetFramework>|" Core/Core.csproj "${app}/${app}.csproj"
+            dotnet add Core/Core.csproj package NodaTime --version 3.2.0 > /dev/null
+            dotnet add "${app}/${app}.csproj" reference Core/Core.csproj > /dev/null
+            rm Core/Class1.cs
+            cat > Core/FixedClock.cs <<'PROGRAM'
+using NodaTime;
+
+namespace Core;
+
+public class FixedClock(Instant now) : IClock
+{
+    public Instant GetCurrentInstant() => now;
+}
+PROGRAM
+            cat > Core/Greeting.cs <<'PROGRAM'
+namespace Core;
+
+public static class Greeting
+{
+    public static string Hello() => "hello";
+}
+PROGRAM
+            cat > "${app}/Program.cs" <<'PROGRAM'
+Console.WriteLine(new Core.FixedClock(NodaTime.Instant.FromUnixTimeSeconds(0)).GetCurrentInstant());
+Console.WriteLine(Core.Greeting.Hello());
+PROGRAM
+        )
+    fi
+    dotnet build "${ISSUE111}/${app}/${app}.csproj" -v quiet -p:NuGetAudit=false
+done
+
 echo "==> Corpus ready at ${CORPUS_ROOT}"

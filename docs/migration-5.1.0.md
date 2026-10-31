@@ -528,3 +528,22 @@ as application code until someone copied a `*.deps.json` into the root.
   nothing in the application can start are not reported, and a diagnostic counts the method
   bodies left out. On a minimal API with MailKit it took `dataflows` from 73 s and 144 MB to
   3 s and 0.3 MB.
+
+## Methods read a library's types from a copy that loads (issue #111, fix)
+
+The methods inventory read an assembly's types from the first copy of it that it met. A class
+library's own `bin/` lacks the packages the application's output carries, so a type that needs a
+package (a class implementing NodaTime's `IClock`) could not load from there, and the complete
+copy in the application's `bin/` was skipped. Which copy came first followed directory names:
+renaming `src/API` to `src/ZAPI` on modular-monolith-with-ddd dropped 4,011 application methods.
+
+- A copy that does not load completely no longer ends the search. The other files of the same
+  assembly identity are tried in `AssemblyCopies` order (byte-identical copies, ranked by a PDB
+  beside them, a project's own output, IL-only over ReadyToRun, then tree order), and the first
+  one that loads completely supplies the types. When none does, the copy with most types is used.
+  The records then carry the path of the copy they were read from, and a `Diagnostics` line
+  names the copy that was set aside. The partial-load warning is printed only for the copy used.
+- The load context of a directory also probes the scanned directory itself (the directory of a
+  scanned file), where it used to probe the parent of the scan path. For `--path .` or a bare
+  relative name that parent is empty, which meant the current directory: the types that loaded
+  depended on where the process was started.

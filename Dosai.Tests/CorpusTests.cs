@@ -391,6 +391,48 @@ public class CorpusTests
         Assert.Equal(without.PackageReachability.Select(package => package.Purl), with.PackageReachability.Select(package => package.Purl));
     }
 
+    // Issue #111: the class library's own bin comes before the app's in one tree and after it in
+    // the other, and NodaTime sits only in the app's bin.
+    [SkippableTheory]
+    [InlineData("App")]
+    [InlineData("Web")]
+    public void Corpus_Issue111Core_TheLibrarysTypesAreReadWhateverTheAppIsCalled(string app)
+    {
+        var path = CorpusPathOrSkip(Path.Combine("issue111-core", app));
+        var slice = JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(path), JsonOptions)!;
+
+        var core = slice.Methods!.Where(method => method.FileName == "Core.dll").Select(method => $"{method.ClassName}.{method.Name}").ToHashSet(StringComparer.Ordinal);
+        Assert.Contains("FixedClock.GetCurrentInstant", core);
+        Assert.Contains("FixedClock..ctor", core);
+        Assert.Contains("Greeting.Hello", core);
+        Assert.Contains(slice.SourceAssemblyMapping!, mapping => mapping.SourceId.StartsWith("Core.FixedClock.GetCurrentInstant", StringComparison.Ordinal));
+    }
+
+    // Issue #111 on a real tree: renaming src/API to src/ZAPI moved the app after its libraries
+    // and dropped 4,011 application methods. The two trees must now report the same methods;
+    // and issue #110's ambiguity count on the same tree.
+    [SkippableFact]
+    public void Corpus_ModularMonolith_MethodSetDoesNotDependOnADirectoryName()
+    {
+        var path = CorpusPathOrSkip("modular-monolith-with-ddd/src");
+        using var renamed = CorpusCopy.Of(path);
+        Directory.Move(Path.Combine(renamed.Path, "API"), Path.Combine(renamed.Path, "ZAPI"));
+
+        var original = JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(path), JsonOptions)!;
+        var moved = JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(renamed.Path), JsonOptions)!;
+
+        static List<string> Names(MethodsSlice slice) => slice.Methods!
+            .Select(method => $"{method.FileName}|{method.Namespace}|{method.ClassName}|{method.Name}|{method.MetadataToken}")
+            .Order(StringComparer.Ordinal)
+            .ToList();
+
+        Assert.Equal(Names(original).Count, Names(moved).Count);
+        Assert.Equal(Names(original), Names(moved));
+        Assert.Equal(original.SourceAssemblyMapping!.Count, moved.SourceAssemblyMapping!.Count);
+        Assert.Equal(original.CallGraph!.Nodes.Count, moved.CallGraph!.Nodes.Count);
+        Assert.True(original.Methods!.Count(method => (method.Namespace ?? "").StartsWith("CompanyName.", StringComparison.Ordinal)) > 8_000);
+    }
+
     /// <summary>A throwaway copy of a corpus app, so a test can add files to the tree without touching the corpus.</summary>
     private sealed class CorpusCopy : IDisposable
     {
