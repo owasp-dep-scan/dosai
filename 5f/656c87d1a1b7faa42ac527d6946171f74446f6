@@ -1,0 +1,45 @@
+Dosai.Tests/Issue106ReportReuseTests.cs
+  s_33e216b52f7264::t_543d9041e0df56 153
+  s_33e216b52f7264::t_34478664c0044f 103-121
+  s_33e216b52f7264::t_69a5707fa83e88 1-93,95-102,122-127,129-152,154-186,188-189,191-201,204-213,215-274
+  s_33e216b52f7264::t_ad51868e27bc6b 187,214
+  s_33e216b52f7264::t_8152d8a955e51f 94,128,202-203
+  s_33e216b52f7264::t_08a969e892768a 190
+Dosai/CommandLine.cs
+  s_33e216b52f7264::t_e8886ba35bc8ef 71-82,269-270,462
+docs/commands.md
+  s_33e216b52f7264::t_fa62b5122b3d4b 360-377
+Dosai/DataFlow.cs
+  s_33e216b52f7264::t_bb1b6a467b0c2b 73-78,213-218,729-735,766,789,809,819,829,838,848,875,887,900,921,933,949,977,1009,1043,1057
+  s_33e216b52f7264::t_662dae854cd5e5 521,699-702,1068-1124,1127,1132
+Dosai/CryptoAnalysis.cs
+  s_33e216b52f7264::t_e8886ba35bc8ef 292,294-308,322-326,344,388,392-393
+Dosai/ReportReuse.cs
+  s_33e216b52f7264::t_e8886ba35bc8ef 1-25,29-49,53,55-205
+  s_33e216b52f7264::t_543d9041e0df56 26-28,50-52,54
+docs/migration-5.1.0.md
+  s_33e216b52f7264::t_fa62b5122b3d4b 571-595
+Dosai.Tests/Corpus/README.md
+  s_33e216b52f7264::t_c6b30bf11a8e0a 54
+Dosai.Tests/CorpusTests.cs
+  s_33e216b52f7264::t_c6b30bf11a8e0a 469,471,486
+  s_33e216b52f7264::t_ad51868e27bc6b 466-468,470,472-485,487-495
+docs/crypto-cbom.md
+  s_33e216b52f7264::t_fa62b5122b3d4b 57-60
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5f656c87d1a1b7faa42ac527d6946171f74446f6",
+  "prompts": {},
+  "sessions": {
+    "s_33e216b52f7264": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7b5bd5ac-bfb2-42b7-9515-4155ee9ab246",
+        "model": "claude-sonnet-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
