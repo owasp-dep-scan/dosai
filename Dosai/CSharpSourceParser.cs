@@ -419,7 +419,18 @@ public static class CSharpSourceParser
     ///     falling back to the root's own detection; without one, those detected under the file's
     ///     directory.
     /// </summary>
-    public static CSharpSyntaxTree Parse(string content, string path, string? rootPath = null) =>
+    /// <remarks>
+    ///     When the scan root's projects disagree on their global usings, the tree also carries its
+    ///     own project's usings as file-local directives (issue #110, see <see cref="PerFileUsings" />).
+    /// </remarks>
+    public static CSharpSyntaxTree Parse(string content, string path, string? rootPath = null)
+    {
+        var tree = ParseWithoutFileUsings(content, path, rootPath);
+        return rootPath is null ? tree : GlobalUsings.WithFileUsings(tree, rootPath);
+    }
+
+    /// <summary>The parse alone: the global-usings resolution itself parses through this, since it cannot ask itself.</summary>
+    internal static CSharpSyntaxTree ParseWithoutFileUsings(string content, string path, string? rootPath = null) =>
         (CSharpSyntaxTree)CSharpSyntaxTree.ParseText(content,
             rootPath is null ? GetParseOptions(TryGetDirectory(path)) : GetParseOptionsForFile(rootPath, path), path);
 
@@ -520,13 +531,9 @@ public static class CSharpSourceParser
     ///     <see cref="GlobalUsings" />), the projects' <c>&lt;Using&gt;</c> items, or MSBuild's
     ///     generated <c>GlobalUsings.g.cs</c> when it is authoritative. Null when no project
     ///     enables implicit usings, so classic projects keep their explicit-usings semantics.
-    ///     Granularity limitation: <c>global using</c> directives are compilation-wide in
-    ///     Roslyn, and one compilation covers every scanned file, so the merged set applies to
-    ///     the whole tree - in a mixed monorepo where any project enables ImplicitUsings, files
-    ///     from classic sibling projects also receive the synthetic usings, and a BCL name their
-    ///     own compiler would reject can bind there. That rare false edge is accepted over the
-    ///     alternative (silently dropping every BCL call in the enabling projects, the common
-    ///     case); per-file semantics would need one compilation per project.
+    ///     Only when the projects agree on their sets: when they differ there is no such tree and
+    ///     each file carries its own project's usings as file-local directives instead
+    ///     (<see cref="PerFileUsings" />, issue #110), so this returns null.
     /// </summary>
     public static CSharpSyntaxTree? TryCreateImplicitUsingsTree(string? path) => GlobalUsings.Resolve(path).Tree;
 

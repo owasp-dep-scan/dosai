@@ -92,11 +92,44 @@ from the SDKs' own .props files (base C#, Web's nine, Worker's four, Windows For
 11 SDKs add `System.Net.Http.Json` for .NET 11+ targets, and .NET Framework targets drop
 `System.Net.Http`), `<Using>` items with `Remove`/`Static`/`Alias` from the project and the
 nearest Directory.Build.props/targets, and MSBuild's generated `GlobalUsings.g.cs` as the
-authoritative set when it matches the resolved target and is no older than the project. One
-compilation carries the union of per-project sets (the documented granularity limitation); the
-resolver reports projects whose sets disagree and applies condition-carrying items
-unconditionally with a note - a using that resolves nowhere errors alone and never blocks other
-bindings.
+authoritative set when it matches the resolved target and is no older than the project.
+Condition-carrying items are applied unconditionally with a note - a using that resolves nowhere
+errors alone and never blocks other bindings.
+
+### Per-project usings in one compilation (issue #110)
+
+A `global using` applies to every tree of a compilation, and the tree is one compilation, so a
+single tree holding the union of every project's usings gave a class library the Web SDK's
+`Microsoft.Extensions.Logging`: `ILogger` became CS0104-ambiguous with Serilog's and the library's
+calls stayed `SourceUnresolved` (79 CS0104 errors and 86 lost Serilog calls on
+modular-monolith-with-ddd). Each file now compiles with the usings of its own project:
+
+- **Projects that agree** (one project, or every project resolving to the same set) keep the
+  single synthetic global-usings tree, and the output is byte-identical to before.
+- **Projects that disagree** (a Web SDK project beside a class library, or a classic project
+  beside an implicit-usings one) get no global tree. `GlobalUsings.Resolve` returns a
+  `PerFileUsings` map instead (project directory to set, file-based app file to set, and the
+  union for files outside every project), and `CSharpSourceParser.Parse` writes the file's set
+  into its own tree as file-local `using` directives (`GlobalUsings.WithFileUsings`, an
+  incremental `WithChangedText`). A directive the file already declares is not repeated.
+  The directives go right after the last `extern alias` or `using` of the compilation unit, on
+  that same line, or before the first member's first token, so no line of the file moves; the
+  columns after the insertion point on that one line do.
+
+The alternatives were weighed against symbol identity. One compilation per distinct set, each
+holding every tree, was rejected: a declaration binds with the usings of the compilation it is
+read in, so a class library's `ILogger` property would bind as an error type from the Web
+project's compilation and calls through it would still fail, and every symbol-keyed structure
+(the render cache, the dispatch index and its instantiation evidence, `memberFacts`, the
+framework providers' semantic models) would have had to canonicalise symbols across
+compilations to keep method ids and dispatch candidates stable. Resolving ambiguity per file
+inside one global set has no Roslyn mechanism. File-local directives keep exactly one
+compilation, so none of that changes, and a declaration binds with the usings of the file that
+declares it everywhere it is used. Methods, data-flow and crypto all parse through
+`CSharpSourceParser.Parse(text, file, root)`, so all three get the fix, and parsing does not
+depend on the worker count or directory order (the map is read-only after resolution). The
+compilations are dropped before the IL phase as before, since nothing extra is held. The
+resolution diagnostic names the projects whose sets differ.
 
 Assembly inspection's shared-framework probing reads the tree's runtimeconfig files: frameworks
 they name (ASP.NET Core, Windows Desktop) are probed at their exact named version, then

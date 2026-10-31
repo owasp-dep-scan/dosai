@@ -547,3 +547,24 @@ renaming `src/API` to `src/ZAPI` on modular-monolith-with-ddd dropped 4,011 appl
   scanned file), where it used to probe the parent of the scan path. For `--path .` or a bare
   relative name that parent is empty, which meant the current directory: the types that loaded
   depended on where the process was started.
+
+## Each file compiles with its own project's global usings (issue #110, fix)
+
+The whole tree compiled with one synthetic global-usings tree holding every project's implicit
+usings, so one project's usings applied to the others: the Web SDK's
+`Microsoft.Extensions.Logging` made `ILogger` ambiguous (CS0104) in a class library that logs
+through Serilog, and its calls stayed `SourceUnresolved`.
+
+- When every project resolves to the same set of usings (or there is one project) nothing
+  changes and the output is byte-identical.
+- When they differ, each file gets its own project's set as file-local `using` directives, and a
+  file outside every project gets the union of the sets. A classic project (implicit usings off)
+  beside an implicit-usings project now compiles with no implicit usings, as it does on its own,
+  where it used to receive the other project's. Calls that bound only through another project's
+  usings no longer bind; calls that were lost to an ambiguity now do (`MethodCalls`, call graph
+  edges, data-flow nodes and crypto evidence).
+- Because the directives are written into the file's tree, the columns of tokens after the
+  insertion point on that one line (the last `using` of the file, or the first member when there
+  is none) move by the inserted text. Lines never move.
+- The `Diagnostics` line for disagreeing projects now says that each file uses its own project's
+  usings; it used to say that the compilation carried the union.

@@ -433,6 +433,36 @@ public class CorpusTests
         Assert.True(original.Methods!.Count(method => (method.Namespace ?? "").StartsWith("CompanyName.", StringComparison.Ordinal)) > 8_000);
     }
 
+    // Issue #110: the Web SDK API project's Microsoft.Extensions.Logging made `ILogger` ambiguous
+    // (79 CS0104 errors) in the libraries that log through Serilog, and their calls stayed
+    // unbound: 6 Serilog calls were bound, 92 once <Using Remove> took the using away.
+    [SkippableFact]
+    public void Corpus_ModularMonolith_SerilogCallsBindBesideTheWebProject()
+    {
+        var path = CorpusPathOrSkip("modular-monolith-with-ddd/src");
+        var slice = JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(path), JsonOptions)!;
+
+        var serilogCalls = slice.MethodCalls!.Count(call => call.CalledMethod.StartsWith("Serilog.ILogger.", StringComparison.Ordinal));
+        Assert.True(serilogCalls >= 90, $"expected the Serilog calls to bind, got {serilogCalls}");
+        Assert.DoesNotContain(slice.MethodCalls!, call => call.EvidenceKind == AnalysisEvidenceKind.SourceUnresolved && call.CalledMethod is "Information" or "Warning" or "Error" or "Debug");
+        Assert.Contains(slice.Diagnostics!, line => line.StartsWith("Global usings differ between projects", StringComparison.Ordinal));
+    }
+
+    // Issue #110's repro: with the app and the library in one tree the library's call binds
+    // as it does when the library is scanned alone.
+    [SkippableFact]
+    public void Corpus_Issue110Serilog_TheLibraryCallBindsLikeTheLibraryScannedAlone()
+    {
+        var path = CorpusPathOrSkip("issue110-serilog");
+
+        string Greet(string scanned) => Assert.Single(
+            JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(scanned), JsonOptions)!.MethodCalls!,
+            call => call.Path.EndsWith("Greeter.cs", StringComparison.Ordinal) && call.CalledMethod.Contains("Information", StringComparison.Ordinal)).CalledMethod;
+
+        Assert.Equal("Serilog.ILogger.Information<string>(string, string)", Greet(path));
+        Assert.Equal(Greet(Path.Combine(path, "Lib")), Greet(path));
+    }
+
     /// <summary>A throwaway copy of a corpus app, so a test can add files to the tree without touching the corpus.</summary>
     private sealed class CorpusCopy : IDisposable
     {

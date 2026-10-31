@@ -214,4 +214,32 @@ PROGRAM
     dotnet build "${ISSUE111}/${app}/${app}.csproj" -v quiet -p:NuGetAudit=false
 done
 
+echo "==> issue110-serilog (issue #110 repro: a Web SDK app and a class library that logs through Serilog)"
+ISSUE110="${CORPUS_ROOT}/issue110-serilog"
+if [ ! -d "${ISSUE110}/Lib" ]; then
+    mkdir -p "${ISSUE110}"
+    (
+        cd "${ISSUE110}"
+        dotnet new web -n App -o App > /dev/null
+        dotnet new classlib -n Lib -o Lib > /dev/null
+        dotnet add Lib/Lib.csproj package Serilog --version 4.0.2 > /dev/null
+        dotnet add App/App.csproj reference Lib/Lib.csproj > /dev/null
+        rm Lib/Class1.cs
+        cat > Lib/Greeter.cs <<'PROGRAM'
+using Serilog;
+
+namespace Lib;
+
+public static class Greeter
+{
+    public static void Greet(ILogger logger, string name)
+    {
+        logger.Information("Hello {Name}", name);
+    }
+}
+PROGRAM
+    )
+fi
+dotnet restore "${ISSUE110}/App/App.csproj" -v quiet -p:NuGetAudit=false
+
 echo "==> Corpus ready at ${CORPUS_ROOT}"
