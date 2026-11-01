@@ -624,3 +624,51 @@ trees that `methods` and `dataflows` had just analysed (cdxgen's research profil
   lists (weaknesses, package and dangerous-API reachability, exploit chains, attack surface)
   empty. It is not byte-identical to a crypto-only walk: a sanitizer of another pack can stop a
   flow that walk keeps.
+
+## Calls in `.razor` and `.cshtml` files (issue #98, additive)
+
+`methods` on a project directory now lists the calls made in `.razor` components, Razor Pages
+and MVC views. They were missing: the source analysis reads `.cs` files only, the build writes
+the compiled component nowhere but into an assembly, and the call graph leaves a source tree's
+`bin/` out so that every `.cs` call is not listed a second time from IL.
+
+The call graph now also reads the tree's own builds under `bin/` whose PDB names a `.razor` or
+`.cshtml` file that the tree holds, and keeps from them only the call sites placed in such files.
+The change is additive: `MethodCalls` and `CallGraph.Edges` gain rows with `EvidenceKind`
+`AssemblyIlDirect` (`AssemblyIlGeneratedState` in an async view, `AssemblyIlDelegateTarget` for
+a handler bound by `@onclick`), `Path` relative to the scan root
+(`Components/Pages/Counter.razor`), `FileName` the template's name, and the generated member
+(`BuildRenderTree`, `ExecuteAsync`, the `@code` method) as the caller; a call into a `.cs` member
+names that member's source node, and the call graph gains the nodes the rows name. No schema
+field changes. A tree without a built Razor project, or with none of its Razor builds under
+`bin/`, gives the same report as before (the `Dosai` tree is byte-identical apart from the
+timestamp and the build id).
+
+Things to know when you read the new rows:
+
+- The tree must be built. A template the tree no longer holds (a stale build) or one outside the
+  scanned directory adds nothing, and `Diagnostics` counts each, along with templates changed
+  after their build.
+- Lines come from the Razor compiler's PDB mapping, which differs between SDKs. Code the compiler
+  leaves unmapped (an `@onclick` handler, a plain HTML attribute value, a component parameter;
+  dotnet/razor#11432, #13056) is listed at the line of the mapped code before it when it calls the
+  application or a package, and is left out when it calls the framework or ASP.NET Core, since the
+  compiler's own render-tree and tag-helper plumbing is unmapped in the same way.
+- Debug and Release builds of one template list each call once.
+- A `.razor.cs` code-behind call is still one source row; its IL copy is not added.
+- A call from a `.cs` file into a member declared in a template stays `SourceUnresolved`.
+- Rows for mapped expressions include the builder call that writes them (`AddContent`,
+  `RazorPageBase.Write`) beside the application's own call.
+
+In template builds, an IL id names a nested type through its declaring chain
+(`App.Components.Counter.<>c.<BuildRenderTree>b__0_0()`, with `Namespace` the outer type's):
+every component's `<>c` and `<>c__DisplayClass0_0` used to share one id, so the lambdas of
+unrelated components shared a node. Other assemblies read from IL keep the unqualified name.
+
+One fix changes reports for every assembly read from IL, including assembly-only scans of a
+`bin/` or publish directory. A state machine maps to its method by the type's declaring chain:
+two classes' nested `<Run>d__0` were one name, and the second class's async calls took a caller
+named after the nested type alone (visible in any assembly holding two async methods of the same
+name, and in every Razor Pages view, each of which has an `ExecuteAsync`). On the API output of
+modular-monolith-with-ddd that moves the caller of 3,693 of the 14,114 call records and adds
+1,297 edges and 49 nodes, with no edge left without its endpoints.

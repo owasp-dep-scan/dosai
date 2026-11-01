@@ -27,14 +27,24 @@ internal static class AssemblyCallGraphAnalyzer
         // A built tree holds a copy of each referenced assembly in every referencing project's
         // output, and each copy gave every call in it once more (issue #83, the same pass
         // shape as the data-flow one): each distinct file is analyzed once.
-        var copies = AssemblyCopies.Collapse(path, GetAssemblyFiles(path));
+        var (wholeAssemblies, binAssemblies) = AssemblyScope.SplitAssemblyFiles(path, includeBuildArtifacts: false, excludeBinWhenSourceFilesPresent: true);
+        var razorBuilds = RazorBuilds.Find(path, binAssemblies, diagnostics);
+        var copies = AssemblyCopies.Collapse(path, [.. wholeAssemblies, .. razorBuilds]);
         if (copies.Diagnostic(path, "each call in them is reported once") is { } copiesDiagnostic)
         {
             diagnostics.Add(copiesDiagnostic);
         }
 
         var assemblyPaths = copies.Distinct;
-        var context = new AnalysisContext(path, knownMethods, copies.AnalyzedByFullPath());
+        var analyzedByFullPath = copies.AnalyzedByFullPath();
+        var context = new AnalysisContext(path, knownMethods, analyzedByFullPath);
+        // A copy group with a member outside bin/ (an out/ directory, issue #79) is read whole
+        // whichever copy is analyzed: only a group living entirely in bin/ is left to the source
+        // analysis, apart from its Razor call sites.
+        var readWhole = wholeAssemblies
+            .Select(Path.GetFullPath)
+            .Select(file => analyzedByFullPath.GetValueOrDefault(file, file))
+            .ToHashSet(SafeFileRead.PathComparer);
         var calls = new List<MethodCalls>();
         var nodes = new Dictionary<string, MethodNode>(StringComparer.Ordinal);
         var edges = new List<MethodCallEdge>();
@@ -51,7 +61,7 @@ internal static class AssemblyCallGraphAnalyzer
         // cross-assembly call-site de-duplication come out exactly as the sequential loop
         // produced them, for every worker count.
         DedicatedStack.ForEachInOrder("Dosai assembly call graph", Math.Max(1, Dosai.MaxSymbolAnalysisWorkers), assemblyPaths.Count,
-            index => AnalyzeAssembly(assemblyPaths[index], context),
+            index => AnalyzeAssembly(assemblyPaths[index], context, readWhole.Contains(Path.GetFullPath(assemblyPaths[index])) ? CallSites.All : CallSites.InRazorFiles),
             fragment => fragment.MergeInto(calls, nodes, edges, edgeKeys));
 
         GraphAssembly.SortEdgesInPlace(edges);
@@ -66,17 +76,18 @@ internal static class AssemblyCallGraphAnalyzer
     ///     fragment and per-assembly caches, and reads the shared context. A failure keeps what
     ///     the assembly produced before it, as the sequential loop did.
     /// </summary>
-    private static AssemblyFragment AnalyzeAssembly(string assemblyPath, AnalysisContext context)
+    private static AssemblyFragment AnalyzeAssembly(string assemblyPath, AnalysisContext context, CallSites callSites)
     {
         // Only managed assemblies reach here: the copy collapse drops every other file.
-        var fragment = new AssemblyFragment();
+        var fragment = new AssemblyFragment { TemplateSites = callSites == CallSites.InRazorFiles };
+        QualifyNestedTypes = fragment.TemplateSites;
         try
         {
             using var stream = new FileStream(assemblyPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
             using var peReader = new PEReader(stream);
             if (!peReader.HasMetadata) return fragment;
             var reader = peReader.GetMetadataReader();
-            var sourceMap = LoadPortablePdbSourceMap(assemblyPath);
+            var sourceMap = LoadPortablePdbSourceMap(assemblyPath, templateBuild: callSites == CallSites.InRazorFiles, peReader);
             var scan = new AssemblyScan(reader, assemblyPath, Path.GetFullPath(assemblyPath), sourceMap, context);
             var stateMachineMethods = BuildStateMachineMethodMap(reader, assemblyPath, sourceMap);
             var instantiatedTypes = CollectInstantiatedTypes(peReader, scan);
@@ -89,6 +100,17 @@ internal static class AssemblyCallGraphAnalyzer
         catch
         {
             // Methods already best-effort skips unloadable assemblies; keep call graph extraction equally non-fatal.
+        }
+        finally
+        {
+            QualifyNestedTypes = false;
+        }
+
+        if (callSites == CallSites.InRazorFiles)
+        {
+            var held = new Dictionary<string, bool>(StringComparer.Ordinal);
+            fragment.KeepCallSites(call => call.Path is { } templatePath && RazorBuilds.IsTemplate(templatePath)
+                && (held.TryGetValue(templatePath, out var exists) ? exists : held[templatePath] = context.RelativeRoot is { } root && File.Exists(Path.Join(root, templatePath))));
         }
 
         fragment.CompleteAnalysis();
@@ -110,7 +132,7 @@ internal static class AssemblyCallGraphAnalyzer
             : CreateFallbackMethod(reader, methodHandle, methodDefinition, assemblyPath, scan.SourceMap);
         var sourceId = sourceMethod.AssemblySignature ?? BuildMethodSymbol(reader, methodHandle, methodDefinition, assemblyPath).Symbol;
         var (lineNumber, columnNumber) = (sourceMethod.LineNumber, sourceMethod.ColumnNumber);
-        if (lineNumber <= 0 && !isGeneratedStateMachine && scan.SourceMap.Resolve(methodToken, 1, assemblyPath) is { LineNumber: > 0 } first)
+        if (lineNumber <= 0 && !isGeneratedStateMachine && scan.SourceMap.ResolvePlacement(methodToken, 1, assemblyPath) is { LineNumber: > 0 } first)
         {
             // The reflection inventory carries no source line, so a method nothing calls kept
             // line 0 unless a state machine named it as its kickoff. A runtime-async method
@@ -128,7 +150,10 @@ internal static class AssemblyCallGraphAnalyzer
             if (TrackDelegateInstruction(scan, instruction, delegateState) is { } resolvedDelegate)
             {
                 location = scan.SourceMap.Resolve(methodToken, instruction.Offset, assemblyPath);
-                AddResolvedDelegateEdge(scan, fragment, sourceMethod, sourceId, resolvedDelegate, location);
+                if (!location.IsHidden || KeepsHiddenCall(location, resolvedDelegate.Target.Member))
+                {
+                    AddResolvedDelegateEdge(scan, fragment, sourceMethod, sourceId, resolvedDelegate, location);
+                }
             }
 
             if (instruction.OpCode != OpCodes.Call && instruction.OpCode != OpCodes.Callvirt && instruction.OpCode != OpCodes.Newobj && instruction.OpCode != OpCodes.Ldftn && instruction.OpCode != OpCodes.Ldvirtftn)
@@ -142,6 +167,11 @@ internal static class AssemblyCallGraphAnalyzer
             }
 
             location ??= scan.SourceMap.Resolve(methodToken, instruction.Offset, assemblyPath);
+            if (location.IsHidden && !KeepsHiddenCall(location, resolved.Member))
+            {
+                continue;
+            }
+
             var target = resolved.Member;
             var callType = instruction.OpCode == OpCodes.Newobj
                 ? CallType.ConstructorCall
@@ -180,7 +210,7 @@ internal static class AssemblyCallGraphAnalyzer
                 EvidenceKind = evidenceKind,
                 Evidence = [CreateEvidence(evidenceKind, location, evidenceDescription)]
             };
-            var edgeKey = GraphAssembly.EdgeSiteKey.Tagged(sourceId, targetId, location.FilePath, location.LineNumber, location.ColumnNumber, GraphAssembly.CallTypeName(callType), GraphAssembly.EvidenceKindName(evidenceKind));
+            var edgeKey = GraphAssembly.EdgeSiteKey.Tagged(fragment.SiteId(sourceId), fragment.SiteId(targetId), location.FilePath, location.LineNumber, location.ColumnNumber, GraphAssembly.CallTypeName(callType), GraphAssembly.EvidenceKindName(evidenceKind));
             var edgeHash = edgeKey.GetHashCode();
             MethodCallEdge? edge = null;
             if (fragment.Keys.Add(edgeKey, edgeHash))
@@ -212,7 +242,7 @@ internal static class AssemblyCallGraphAnalyzer
                 {
                     var candidateId = candidate.AssemblySignature!;
                     AddNode(fragment.Nodes, candidateId, candidate.Name ?? candidateId, candidate.ClassName, candidate.Namespace, candidate.FileName, candidate.Assembly, candidate.Module, "Method", candidate.LineNumber, candidate.ColumnNumber, isExternal: false);
-                    var candidateKey = GraphAssembly.EdgeSiteKey.Tagged(sourceId, candidateId, location.FilePath, location.LineNumber, location.ColumnNumber, GraphAssembly.CallTypeName(CallType.MethodCall), "VirtualCandidate");
+                    var candidateKey = GraphAssembly.EdgeSiteKey.Tagged(fragment.SiteId(sourceId), fragment.SiteId(candidateId), location.FilePath, location.LineNumber, location.ColumnNumber, GraphAssembly.CallTypeName(CallType.MethodCall), "VirtualCandidate");
                     var candidateHash = candidateKey.GetHashCode();
                     if (!fragment.Keys.Add(candidateKey, candidateHash))
                     {
@@ -380,7 +410,7 @@ internal static class AssemblyCallGraphAnalyzer
             EvidenceKind = AnalysisEvidenceKind.AssemblyIlDelegateTarget,
             Evidence = [CreateEvidence(AnalysisEvidenceKind.AssemblyIlDelegateTarget, location, resolved.Description)]
         };
-        var edgeKey = GraphAssembly.EdgeSiteKey.Tagged(sourceId, targetId, location.FilePath, location.LineNumber, location.ColumnNumber, GraphAssembly.CallTypeName(resolved.CallType), "ResolvedDelegate");
+        var edgeKey = GraphAssembly.EdgeSiteKey.Tagged(fragment.SiteId(sourceId), fragment.SiteId(targetId), location.FilePath, location.LineNumber, location.ColumnNumber, GraphAssembly.CallTypeName(resolved.CallType), "ResolvedDelegate");
         var edgeHash = edgeKey.GetHashCode();
         MethodCallEdge? edge = null;
         if (fragment.Keys.Add(edgeKey, edgeHash))
@@ -489,7 +519,10 @@ internal static class AssemblyCallGraphAnalyzer
         foreach (var typeHandle in reader.TypeDefinitions)
         {
             var type = reader.GetTypeDefinition(typeHandle);
-            AddTypeAlias(typeByName, GetFullTypeName(reader, type).FullName, typeHandle);
+            // The declaring chain is part of the name: a state machine is a nested type, and
+            // two classes' <Run>d__0 are two types (every Razor view of an assembly has its own
+            // <ExecuteAsync>d__0). The simple name stays as the fallback alias, first one wins.
+            AddTypeAlias(typeByName, QualifiedTypeName(reader, type), typeHandle);
             AddTypeAlias(typeByName, reader.GetString(type.Name), typeHandle);
         }
 
@@ -511,7 +544,7 @@ internal static class AssemblyCallGraphAnalyzer
                 }
 
                 var ownerSymbol = BuildMethodSymbol(reader, methodHandle, method, assemblyPath);
-                var ownerLocation = sourceMap.Resolve(MetadataTokens.GetToken(methodHandle), 1, assemblyPath);
+                var ownerLocation = sourceMap.ResolvePlacement(MetadataTokens.GetToken(methodHandle), 1, assemblyPath);
                 var owner = new AssemblyStateMachineOwner(ownerSymbol.Symbol, ownerSymbol.Name, ownerSymbol.ClassName, ownerSymbol.Namespace, ownerSymbol.AssemblyName, ownerSymbol.ReturnType, ownerLocation.LineNumber, ownerLocation.ColumnNumber);
                 foreach (var generatedMethodHandle in reader.GetTypeDefinition(stateMachineTypeHandle).GetMethods())
                 {
@@ -526,6 +559,45 @@ internal static class AssemblyCallGraphAnalyzer
 
         return result;
     }
+
+    /// <summary>
+    ///     A type's name with its declaring types, nested ones joined by '.' as
+    ///     <see cref="NormalizeStateMachineTypeName" /> writes them. The chain is walked without
+    ///     recursion and stops at a cycle or after <see cref="MaxNestingDepth" /> levels: the metadata
+    ///     of an inspected assembly is untrusted, and a NestedClass cycle would otherwise recurse
+    ///     until the process crashes.
+    /// </summary>
+    private static string QualifiedTypeName(MetadataReader reader, TypeDefinition type) => QualifiedTypeNameParts(reader, type).FullName;
+
+    /// <summary><see cref="QualifiedTypeName" />, with the namespace of the outermost declaring type.</summary>
+    private static (string FullName, string Namespace) QualifiedTypeNameParts(MetadataReader reader, TypeDefinition type)
+    {
+        var parts = new List<string> { reader.GetString(type.Name) };
+        var seen = new HashSet<TypeDefinitionHandle>();
+        var outermost = type;
+        for (var declaring = type.GetDeclaringType(); !declaring.IsNil && parts.Count < MaxNestingDepth && seen.Add(declaring); declaring = outermost.GetDeclaringType())
+        {
+            outermost = reader.GetTypeDefinition(declaring);
+            parts.Add(reader.GetString(outermost.Name));
+        }
+
+        parts.Reverse();
+        var ns = reader.GetString(outermost.Namespace);
+        var name = string.Join('.', parts);
+        return (string.IsNullOrWhiteSpace(ns) ? name : $"{ns}.{name}", ns);
+    }
+
+    /// <summary>
+    ///     Set while a template build is analyzed (issue #98): its IL ids name a nested type through
+    ///     its declaring chain. Other builds keep the unqualified name, which the data-flow IL pass
+    ///     and the endpoint handler ids also use; qualifying those too is a change of its own. Per
+    ///     thread, because each worker analyzes one assembly from start to end.
+    /// </summary>
+    [ThreadStatic]
+    private static bool QualifyNestedTypes;
+
+    /// <summary>Nesting levels <see cref="QualifiedTypeName" /> follows; compilers nest a handful deep.</summary>
+    private const int MaxNestingDepth = 64;
 
     private static void AddTypeAlias(Dictionary<string, TypeDefinitionHandle> typeByName, string typeName, TypeDefinitionHandle handle)
     {
@@ -633,7 +705,7 @@ internal static class AssemblyCallGraphAnalyzer
     private static Method CreateFallbackMethod(MetadataReader reader, MethodDefinitionHandle methodHandle, MethodDefinition methodDefinition, string assemblyPath, AssemblyCallSourceMap sourceMap)
     {
         var symbol = BuildMethodSymbol(reader, methodHandle, methodDefinition, assemblyPath);
-        var location = sourceMap.Resolve(MetadataTokens.GetToken(methodHandle), 1, assemblyPath);
+        var location = sourceMap.ResolvePlacement(MetadataTokens.GetToken(methodHandle), 1, assemblyPath);
         return new Method
         {
             Path = location.FilePath,
@@ -790,7 +862,7 @@ internal static class AssemblyCallGraphAnalyzer
     {
         var method = reader.GetMethodDefinition(handle);
         var symbol = BuildMethodSymbol(reader, handle, method, assemblyPath);
-        var location = sourceMap.Resolve(MetadataTokens.GetToken(handle), 1, assemblyPath);
+        var location = sourceMap.ResolvePlacement(MetadataTokens.GetToken(handle), 1, assemblyPath);
         var signature = ReadSignatureInfo(reader, method.Signature, method.Attributes);
         return new AssemblyCallMember(symbol.Symbol, symbol.Name, symbol.ClassName, symbol.Namespace, symbol.AssemblyName, assemblyPath, symbol.ParameterCount, MetadataTokens.GetToken(handle), true, symbol.ReturnType, location.LineNumber, location.ColumnNumber, signature.ReturnsVoid, signature.HasThis);
     }
@@ -863,8 +935,17 @@ internal static class AssemblyCallGraphAnalyzer
 
     private static AssemblyCallType GetFullTypeName(MetadataReader reader, TypeDefinition type)
     {
-        var ns = reader.GetString(type.Namespace);
         var name = reader.GetString(type.Name).Replace('/', '.');
+        if (QualifyNestedTypes && !type.GetDeclaringType().IsNil)
+        {
+            // A nested type has no namespace of its own: without its declaring chain, every
+            // class's <>c or <>c__DisplayClass0_0 gives one id, and the lambdas of every Razor
+            // component's BuildRenderTree (issue #98) shared a node.
+            var (qualified, outerNamespace) = QualifiedTypeNameParts(reader, type);
+            return new AssemblyCallType(qualified, name, outerNamespace, string.Empty);
+        }
+
+        var ns = reader.GetString(type.Namespace);
         var fullName = string.IsNullOrWhiteSpace(ns) ? name : $"{ns}.{name}";
         return new AssemblyCallType(fullName, name, ns, string.Empty);
     }
@@ -1093,28 +1174,46 @@ internal static class AssemblyCallGraphAnalyzer
         return targets;
     }
 
-    private static AssemblyCallSourceMap LoadPortablePdbSourceMap(string assemblyPath)
+    /// <param name="templateBuild">
+    ///     A build read only for its template call sites (issue #98): an embedded PDB is read when no
+    ///     PDB file sits beside it, and hidden sequence points stay in the map, as the visible
+    ///     location before them marked <see cref="AssemblyCallSourceLocation.IsHidden" /> (or
+    ///     <see cref="AssemblyCallSourceMap.Hidden" /> when none comes before), so that
+    ///     <see cref="KeepsHiddenCall" /> can tell the compiler's plumbing from the template's calls.
+    ///     Other builds place a hidden call at the point before it, as they always have.
+    /// </param>
+    private static AssemblyCallSourceMap LoadPortablePdbSourceMap(string assemblyPath, bool templateBuild, PEReader peReader)
     {
-        var pdbPath = Path.ChangeExtension(assemblyPath, ".pdb");
-        if (!File.Exists(pdbPath)) return new AssemblyCallSourceMap([], assemblyPath);
         try
         {
-            using var pdbStream = new FileStream(pdbPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            using var provider = MetadataReaderProvider.FromPortablePdbStream(pdbStream);
-            var reader = provider.GetMetadataReader();
+            using var pdb = RazorBuilds.OpenPdb(assemblyPath, templateBuild ? peReader : null);
+            if (pdb is null) return new AssemblyCallSourceMap([], assemblyPath);
+            var reader = pdb.Reader;
             var locations = new Dictionary<int, AssemblyCallSequencePoint[]>();
             // One path string and one file-name string per document: every call record and edge
             // of the assembly shares them instead of holding its own copies.
             var documents = new Dictionary<DocumentHandle, (string Path, string FileName)>();
             var points = new List<AssemblyCallSequencePoint>();
+            AssemblyCallSourceLocation? lastVisible = null, lastHidden = null;
             var kickoffEntries = new List<(int KickoffToken, AssemblyCallSequencePoint Start)>();
             foreach (var methodDebugHandle in reader.MethodDebugInformation)
             {
                 var rowNumber = MetadataTokens.GetRowNumber(methodDebugHandle);
                 var methodDebugInfo = reader.GetMethodDebugInformation(methodDebugHandle);
                 points.Clear();
+                (lastVisible, lastHidden) = (null, null);
                 foreach (var sequencePoint in methodDebugInfo.GetSequencePoints())
                 {
+                    if (sequencePoint.IsHidden && templateBuild)
+                    {
+                        // One hidden location per visible one: the hidden run after a point shares it.
+                        lastHidden = lastVisible is null ? AssemblyCallSourceMap.Hidden
+                            : lastHidden is { } shared && shared.FilePath == lastVisible.FilePath && shared.LineNumber == lastVisible.LineNumber && shared.ColumnNumber == lastVisible.ColumnNumber ? shared
+                            : lastVisible with { IsHidden = true };
+                        points.Add(new AssemblyCallSequencePoint(sequencePoint.Offset, lastHidden));
+                        continue;
+                    }
+
                     if (sequencePoint.IsHidden || sequencePoint.Document.IsNil) continue;
                     if (!documents.TryGetValue(sequencePoint.Document, out var document))
                     {
@@ -1125,14 +1224,16 @@ internal static class AssemblyCallGraphAnalyzer
 
                     var location = new AssemblyCallSourceLocation(document.Path, Math.Max(1, sequencePoint.StartLine), Math.Max(1, sequencePoint.StartColumn)) { FileName = document.FileName };
                     points.Add(new AssemblyCallSequencePoint(sequencePoint.Offset, location));
+                    lastVisible = location;
                 }
                 if (points.Count > 0)
                 {
                     AssemblyCallSequencePoint[] ordered = [.. points.OrderBy(point => point.Offset)];
                     locations[MetadataTokens.GetToken(MetadataTokens.MethodDefinitionHandle(rowNumber))] = ordered;
-                    if (methodDebugInfo.GetStateMachineKickoffMethod() is { IsNil: false } kickoff)
+                    if (methodDebugInfo.GetStateMachineKickoffMethod() is { IsNil: false } kickoff
+                        && Array.Find(ordered, point => !point.Location.IsHidden) is { } start)
                     {
-                        kickoffEntries.Add((MetadataTokens.GetToken(kickoff), ordered[0]));
+                        kickoffEntries.Add((MetadataTokens.GetToken(kickoff), start));
                     }
                 }
             }
@@ -1140,9 +1241,14 @@ internal static class AssemblyCallGraphAnalyzer
             // An async or iterator stub has no sequence point of its own; it resolves to its
             // state machine's MoveNext entry (issue #84, same rule as the data-flow IL pass), so
             // the call-graph node it owns is placed in the source, not at the assembly's line 1.
+            // In a template build the stub's own calls (the builder's Create and Start) are the
+            // compiler's, not the template's: they resolve to a hidden point listed before the entry,
+            // which still places the stub's node.
             foreach (var (kickoffToken, start) in kickoffEntries)
             {
-                locations.TryAdd(kickoffToken, [start with { Offset = 0 }]);
+                locations.TryAdd(kickoffToken, templateBuild
+                    ? [new AssemblyCallSequencePoint(0, AssemblyCallSourceMap.Hidden), start with { Offset = 0 }]
+                    : [start with { Offset = 0 }]);
             }
 
             return new AssemblyCallSourceMap(locations, assemblyPath);
@@ -1153,9 +1259,14 @@ internal static class AssemblyCallGraphAnalyzer
         }
     }
 
-    private static List<string> GetAssemblyFiles(string path)
+    /// <summary>Which of an assembly's call sites the pass keeps.</summary>
+    private enum CallSites
     {
-        return AssemblyScope.GetAssemblyFiles(path, includeBuildArtifacts: false, excludeBinWhenSourceFilesPresent: true);
+        /// <summary>Every call site: the source analysis does not cover this assembly.</summary>
+        All,
+
+        /// <summary>Only call sites placed in <c>.razor</c> and <c>.cshtml</c> files (issue #98): the source analysis covers the rest.</summary>
+        InRazorFiles
     }
 
     private sealed record AssemblyCallInstruction(int Offset, OpCode OpCode, object? Operand);
@@ -1204,6 +1315,43 @@ internal static class AssemblyCallGraphAnalyzer
     {
         /// <summary>The file name of <see cref="FilePath" />; built once per document and shared.</summary>
         public required string FileName { get; init; }
+
+        /// <summary>
+        ///     The instruction sits under a hidden sequence point of a template build; the rest of
+        ///     the location is the visible point before it.
+        /// </summary>
+        public bool IsHidden { get; init; }
+    }
+
+    /// <summary>
+    ///     Whether a call under a hidden sequence point of a template build gives a row. The Razor
+    ///     compiler hides the code it generates around the template's own (render-tree builder
+    ///     calls, tag-helper scopes, the async builder of a view), and also some of the template's
+    ///     code: an event handler bound by <c>@onclick</c>, a plain HTML attribute value or a
+    ///     component parameter (dotnet/razor#11432). A call into the application or a package is
+    ///     the template's, so it stays, at the visible line before it. The compiler's plumbing does
+    ///     not: a call into the shared framework or ASP.NET Core (by assembly, or by namespace for a
+    ///     generic instantiation, which names no assembly), or into a member Razor generates on the
+    ///     page (<c>__tagHelperScopeManager</c> and the other <c>__</c> names). Nothing stays when no
+    ///     visible point comes before.
+    /// </summary>
+    private static bool KeepsHiddenCall(AssemblyCallSourceLocation location, AssemblyCallMember target)
+    {
+        if (ReferenceEquals(location, AssemblyCallSourceMap.Hidden))
+        {
+            return false;
+        }
+
+        if (target.IsInternal)
+        {
+            var name = target.Name.StartsWith("get_", StringComparison.Ordinal) || target.Name.StartsWith("set_", StringComparison.Ordinal) ? target.Name[4..] : target.Name;
+            return !name.StartsWith("__", StringComparison.Ordinal);
+        }
+
+        return !(FrameworkReferences.IsFrameworkAssemblyName(target.AssemblyName)
+            || target.AssemblyName.StartsWith("Microsoft.AspNetCore.", StringComparison.Ordinal)
+            || target.Namespace is "System" || target.Namespace.StartsWith("System.", StringComparison.Ordinal)
+            || target.Namespace.StartsWith("Microsoft.AspNetCore.", StringComparison.Ordinal));
     }
 
     /// <summary>
@@ -1215,9 +1363,25 @@ internal static class AssemblyCallGraphAnalyzer
     /// </summary>
     private sealed class AssemblyCallSourceMap(Dictionary<int, AssemblyCallSequencePoint[]> pointsByToken, string assemblyPath)
     {
+        /// <summary>
+        ///     The location of an instruction under a hidden sequence point of a template build that
+        ///     no visible point comes before: no file, line 0. A call placed here gives no row.
+        /// </summary>
+        public static readonly AssemblyCallSourceLocation Hidden = new(string.Empty, 0, 0) { FileName = string.Empty, IsHidden = true };
+
         private readonly string _assemblyFileName = Path.GetFileName(assemblyPath);
 
-        public AssemblyCallSourceLocation Resolve(int methodToken, int ilOffset, string inspectedAssemblyPath)
+        public AssemblyCallSourceLocation Resolve(int methodToken, int ilOffset, string inspectedAssemblyPath) =>
+            Resolve(methodToken, ilOffset, inspectedAssemblyPath, skipHidden: false);
+
+        /// <summary>
+        ///     <see cref="Resolve(int, int, string)" /> for placing a method rather than a call: a
+        ///     <see cref="Hidden" /> point is passed over, as if the map held only visible points.
+        /// </summary>
+        public AssemblyCallSourceLocation ResolvePlacement(int methodToken, int ilOffset, string inspectedAssemblyPath) =>
+            Resolve(methodToken, ilOffset, inspectedAssemblyPath, skipHidden: true);
+
+        private AssemblyCallSourceLocation Resolve(int methodToken, int ilOffset, string inspectedAssemblyPath, bool skipHidden)
         {
             if (pointsByToken.TryGetValue(methodToken, out var points))
             {
@@ -1238,10 +1402,21 @@ internal static class AssemblyCallGraphAnalyzer
                     }
                 }
 
-                if (found >= 0)
+                // The first of the points sharing the found offset; placement passes over hidden
+                // points, to the first visible one of that offset or of an earlier one.
+                for (var last = found; last >= 0;)
                 {
-                    while (found > 0 && points[found - 1].Offset == points[found].Offset) found--;
-                    return points[found].Location;
+                    var first = last;
+                    while (first > 0 && points[first - 1].Offset == points[last].Offset) first--;
+                    for (var i = first; i <= last; i++)
+                    {
+                        if (!skipHidden || !points[i].Location.IsHidden)
+                        {
+                            return points[i].Location;
+                        }
+                    }
+
+                    last = first - 1;
                 }
             }
 
@@ -1383,6 +1558,17 @@ internal static class AssemblyCallGraphAnalyzer
 
         public Dictionary<string, MethodNode> Nodes { get; } = new(StringComparer.Ordinal);
 
+        /// <summary>
+        ///     The fragment keeps only template call sites (issue #98). Their site keys compare ids
+        ///     by <see cref="GraphIdNormalizer.SignatureKey" />: of two builds of one template, the one
+        ///     the method inventory read names a member <c>Render():System.String</c> and the other
+        ///     <c>Render():string</c>, and the second build's sites must still match the first's.
+        /// </summary>
+        public bool TemplateSites { get; init; }
+
+        /// <summary>The id a call-site key holds for <paramref name="id" />.</summary>
+        public string SiteId(string id) => TemplateSites ? GraphIdNormalizer.SignatureKey(id) : id;
+
         /// <summary>The assembly's own call-site keys; released once the assembly is analyzed.</summary>
         public GraphAssembly.EdgeSiteIndex Keys { get; private set; } = new();
 
@@ -1395,6 +1581,41 @@ internal static class AssemblyCallGraphAnalyzer
             _emissions.Add(new Emission(call, edge, key, hash, callNeedsNewSite));
 
         public void CompleteAnalysis() => Keys = null!;
+
+        /// <summary>
+        ///     Drops the call sites <paramref name="keep" /> rejects, and the nodes no call site left
+        ///     names. A kept site's record also drops when an earlier assembly emitted the site: two
+        ///     builds of one template (Debug and Release, or two target frameworks) place every call
+        ///     on the same template line, and each would list it again (the rows of issue #79).
+        /// </summary>
+        public void KeepCallSites(Predicate<MethodCalls> keep)
+        {
+            _emissions.RemoveAll(emission => !keep(emission.Call));
+            for (var i = 0; i < _emissions.Count; i++)
+            {
+                if (_emissions[i].Edge is not null)
+                {
+                    _emissions[i] = _emissions[i] with { CallNeedsNewSite = true };
+                }
+            }
+
+            var named = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var emission in _emissions)
+            {
+                named.Add(emission.Call.SourceId!);
+                named.Add(emission.Call.TargetId!);
+                if (emission.Edge is { } edge)
+                {
+                    named.Add(edge.SourceId);
+                    named.Add(edge.TargetId);
+                }
+            }
+
+            foreach (var id in Nodes.Keys.Where(id => !named.Contains(id)).ToList())
+            {
+                Nodes.Remove(id);
+            }
+        }
 
         public void MergeInto(List<MethodCalls> calls, Dictionary<string, MethodNode> nodes, List<MethodCallEdge> edges, GraphAssembly.EdgeSiteIndex edgeKeys)
         {

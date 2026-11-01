@@ -28,6 +28,43 @@ internal static partial class GraphIdNormalizer
         return GenericArityMarkerRegex().Replace(current, string.Empty);
     }
 
+    [GeneratedRegex(@"(?<![\w.])System\.(Boolean|Byte|SByte|Char|Decimal|Double|Single|Int16|UInt16|Int32|UInt32|Int64|UInt64|Object|String|Void|IntPtr|UIntPtr)(?![\w.`])", RegexOptions.Compiled)]
+    private static partial Regex PredefinedTypeNameRegex();
+
+    /// <summary>
+    ///     A method id with the spellings that IL and source rendering choose differently made
+    ///     alike: predefined types by their C# keyword (<c>System.Int32</c> and <c>int</c>), generic
+    ///     arity markers dropped (<c>List`1&lt;T&gt;</c> and <c>List&lt;T&gt;</c>) and nullable
+    ///     annotations dropped (<c>string?</c>, which IL does not record). Two ids with one key name
+    ///     the same member unless the key is ambiguous among the ids compared.
+    /// </summary>
+    public static string SignatureKey(string id)
+    {
+        var key = GenericArityMarkerRegex().Replace(id, string.Empty);
+        key = PredefinedTypeNameRegex().Replace(key, match => match.Groups[1].Value switch
+        {
+            "Boolean" => "bool",
+            "Byte" => "byte",
+            "SByte" => "sbyte",
+            "Char" => "char",
+            "Decimal" => "decimal",
+            "Double" => "double",
+            "Single" => "float",
+            "Int16" => "short",
+            "UInt16" => "ushort",
+            "Int32" => "int",
+            "UInt32" => "uint",
+            "Int64" => "long",
+            "UInt64" => "ulong",
+            "Object" => "object",
+            "String" => "string",
+            "Void" => "void",
+            "IntPtr" => "nint",
+            _ => "nuint"
+        });
+        return key.Replace("?", string.Empty, StringComparison.Ordinal);
+    }
+
     public static bool HasGenericInstantiation(string id) => id.Contains('<', StringComparison.Ordinal) || id.Contains('`', StringComparison.Ordinal);
 
     /// <summary>

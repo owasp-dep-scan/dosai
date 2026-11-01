@@ -99,16 +99,32 @@ internal static class AssemblyScope
     ///     pass analyzes them and scopes their findings (issue #78), while the methods inventory
     ///     and its call graph are the application's own.
     /// </param>
-    public static List<string> GetAssemblyFiles(string path, bool includeBuildArtifacts, bool excludeBinWhenSourceFilesPresent, Action<string>? diagnostics = null, bool includeDependencies = false)
+    public static List<string> GetAssemblyFiles(string path, bool includeBuildArtifacts, bool excludeBinWhenSourceFilesPresent, Action<string>? diagnostics = null, bool includeDependencies = false) =>
+        SplitAssemblyFiles(path, includeBuildArtifacts, excludeBinWhenSourceFilesPresent, diagnostics, includeDependencies).Files;
+
+    /// <summary>
+    ///     <see cref="GetAssemblyFiles" />, with the application assemblies that sit under a
+    ///     <c>bin/</c> directory of a tree holding source returned apart instead of dropped:
+    ///     <c>ExcludedBin</c> is empty unless the exclusion applied. Both lists are scoped by the
+    ///     same classification, so the call graph can still read the tree's own builds for what the
+    ///     source analysis cannot see (the calls in <c>.razor</c> and <c>.cshtml</c> templates,
+    ///     issue #98).
+    /// </summary>
+    /// <param name="includeDependencies">
+    ///     Keep the packages copied into a build output, bar the platform's own: the data-flow IL
+    ///     pass analyzes them and scopes their findings (issue #78), while the methods inventory
+    ///     and its call graph are the application's own.
+    /// </param>
+    public static (List<string> Files, List<string> ExcludedBin) SplitAssemblyFiles(string path, bool includeBuildArtifacts, bool excludeBinWhenSourceFilesPresent, Action<string>? diagnostics = null, bool includeDependencies = false)
     {
         if (!File.Exists(path) && !Directory.Exists(path))
         {
-            return [];
+            return ([], []);
         }
 
         if (!File.GetAttributes(path).HasFlag(FileAttributes.Directory))
         {
-            return IsAssemblyExtension(Path.GetExtension(path)) ? [path] : [];
+            return (IsAssemblyExtension(Path.GetExtension(path)) ? [path] : [], []);
         }
 
         var candidates = new List<string>();
@@ -138,12 +154,22 @@ internal static class AssemblyScope
             candidates.Add(file);
         }
 
-        var files = candidates
-            .Where(file => includeBuildArtifacts || !excludeBinWhenSourceFilesPresent || !hasSourceFiles || !HasDirectorySegment(Path.GetRelativePath(path, file), BinSegment))
+        var excludesBin = !includeBuildArtifacts && excludeBinWhenSourceFilesPresent && hasSourceFiles;
+        var all = candidates
             .ToDictionary(file => Path.GetFullPath(file), file => file, StringComparer.OrdinalIgnoreCase)
             .Values
             .ToList();
-        return includeDependencies ? WithoutPlatformAssemblies(path, files) : Scope(path, files, diagnostics).Assemblies;
+        // One classification of everything, then the split: the classifier reads the restore
+        // tables, which one pass should do once.
+        var scoped = includeDependencies ? WithoutPlatformAssemblies(path, all) : Scope(path, all, diagnostics).Assemblies;
+        var files = new List<string>();
+        var excludedBin = new List<string>();
+        foreach (var file in scoped)
+        {
+            (excludesBin && HasDirectorySegment(Path.GetRelativePath(path, file), BinSegment) ? excludedBin : files).Add(file);
+        }
+
+        return (files, excludedBin);
     }
 
     public static bool IsLikelyApplicationAssembly(string fileName) =>
