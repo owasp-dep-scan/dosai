@@ -3,7 +3,13 @@
 # Run once before executing CorpusTests; see README.md for what each app covers.
 set -euo pipefail
 
-CORPUS_ROOT="${HOME}/sandbox/dosai-corpus"
+# DOSAI_CORPUS_DIR picks the corpus directory (a leading ~ is expanded, as CorpusLocation does
+# for the tests); unset or empty means ~/sandbox/dosai-corpus.
+CORPUS_ROOT="${DOSAI_CORPUS_DIR:-${HOME}/sandbox/dosai-corpus}"
+case "${CORPUS_ROOT}" in
+    "~") CORPUS_ROOT="${HOME}" ;;
+    "~/"*) CORPUS_ROOT="${HOME}/${CORPUS_ROOT#\~/}" ;;
+esac
 mkdir -p "${CORPUS_ROOT}"
 
 clone_at_commit() {

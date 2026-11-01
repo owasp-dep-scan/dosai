@@ -1,7 +1,9 @@
 # Dosai test corpus
 
 `Dosai.Tests/CorpusTests.cs` runs integration analysis against **real sample applications** kept
-outside the repository in `~/sandbox/dosai-corpus`. The tests self-skip when the corpus is absent,
+outside the repository, by default in `~/sandbox/dosai-corpus`. Set `DOSAI_CORPUS_DIR` to keep
+the corpus somewhere else; both the tests and `setup.sh` read it, and a leading `~` in the value is
+expanded to your home directory. An unset or empty variable means the default. The tests self-skip when the corpus is absent,
 so CI environments without the corpus stay green - but new analysis features should be validated
 against these apps before release.
 

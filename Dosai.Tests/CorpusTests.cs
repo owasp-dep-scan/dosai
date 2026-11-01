@@ -5,7 +5,7 @@ using Xunit;
 namespace Dosai.Tests;
 
 /// <summary>
-///     Integration tests against the real sample apps in ~/sandbox/dosai-corpus (cloned from GitHub
+///     Integration tests against the real sample apps in the corpus directory (<c>DOSAI_CORPUS_DIR</c>, default ~/sandbox/dosai-corpus; cloned from GitHub
 ///     at pinned commits and built; run <c>Dosai.Tests/Corpus/setup.sh</c>). Tests SKIP (not pass)
 ///     when the corpus is absent, so a green CI run cannot hide a corpus that was never analyzed.
 ///     The numeric floors are pinned from the baseline runs recorded when these tests were added,
@@ -13,8 +13,7 @@ namespace Dosai.Tests;
 /// </summary>
 public class CorpusTests
 {
-    private static readonly string CorpusRoot = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "sandbox", "dosai-corpus");
+    private static readonly string CorpusRoot = CorpusLocation.Root;
 
     private static string CorpusPathOrSkip(string relative)
     {
