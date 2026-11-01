@@ -624,3 +624,39 @@ trees that `methods` and `dataflows` had just analysed (cdxgen's research profil
   lists (weaknesses, package and dangerous-API reachability, exploit chains, attack surface)
   empty. It is not byte-identical to a crypto-only walk: a sanitizer of another pack can stop a
   flow that walk keeps.
+
+## Calls in `.razor` and `.cshtml` files (issue #98, additive)
+
+`methods` on a project directory now lists the calls made in `.razor` components, Razor Pages
+and MVC views. They were missing: the source analysis reads `.cs` files only, the build writes
+the compiled component nowhere but into an assembly, and the call graph leaves a source tree's
+`bin/` out so that every `.cs` call is not listed a second time from IL.
+
+The call graph now also reads the tree's own builds under `bin/` whose PDB names a `.razor` or
+`.cshtml` file that the tree holds, and keeps from them only the call sites placed in such files.
+The change is additive: `MethodCalls` and `CallGraph.Edges` gain rows with `EvidenceKind`
+`AssemblyIlDirect` (`AssemblyIlGeneratedState` in an async view), `Path` relative to the scan
+root (`Components/Pages/Counter.razor`), `FileName` the template's name, and the generated member
+(`BuildRenderTree`, `ExecuteAsync`, the `@code` method) as the caller; the call graph gains the
+nodes those rows name. No schema field changes. A tree without a built Razor project, or with
+none of its Razor builds under `bin/`, gives the same report as before (the `Dosai` tree is
+byte-identical apart from the timestamp and the build id).
+
+Things to know when you read the new rows:
+
+- The tree must be built. A PDB naming a template the tree no longer holds (a stale build) adds
+  nothing, and a `Diagnostics` line counts its documents.
+- Lines come from the Razor compiler's PDB mapping, which differs between SDKs: in builds from
+  10.0.402 and 11.0.100-rc.2 a call in a plain HTML attribute value or a component parameter takes
+  the line of the code before it (dotnet/razor#11432, #13056).
+- A `.razor.cs` code-behind call is still one source row; its IL copy is not added.
+- A call from a `.cs` file into a member declared in a template stays `SourceUnresolved`.
+- Razor compiles each markup element into `RenderTreeBuilder` calls, so a component's rows are
+  mostly `AddContent`, `OpenElement` and the like beside the application's own calls.
+
+Two fixes ride along. A state machine of a build read from IL now names its method by the type's
+declaring chain: two classes' nested `<Run>d__0` were one name, and the second class's async calls
+took a caller named after the nested type alone (visible in any assembly holding two async
+methods of the same name, and in every Razor Pages view, each of which has an `ExecuteAsync`).
+`AssemblyScope.SplitAssemblyFiles` returns the application assemblies under `bin/` that the
+call graph used to drop.

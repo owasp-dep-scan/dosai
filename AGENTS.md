@@ -152,6 +152,25 @@ dotnet test ./Dosai.sln
   arrays). Resolve members through `AssemblyScan.Resolve` (memoized per token, so call sites
   share one id string) and source locations through the per-assembly source map (binary search,
   one path and file-name string per document) - never per instruction.
+- The call graph leaves a source tree's `bin/` to the source analysis, except the tree's own builds
+  whose PDB names a `.razor` or `.cshtml` file that the tree still holds (issue #98; no source
+  file holds a template, so its calls exist only in the build). `AssemblyScope.SplitAssemblyFiles`
+  returns the application assemblies under `bin/` apart (the same #107 classification as every
+  other pass, not a second notion of "the tree's own build"), `RazorBuilds.Find` picks the ones
+  whose PDB names a template in the tree, and `AssemblyFragment.KeepCallSites` keeps from them
+  only the call sites whose relative `Path` is such a template that exists, plus the nodes those
+  sites name. Calls the Razor compiler maps to `#line hidden` or leaves in a generated
+  `*.g.cs` document are never template rows, and a `.razor.cs` code-behind is a `.cs` file the
+  source analysis already read, so its IL copy is dropped. A copy group with any member outside
+  `bin/` is read whole whichever copy is analyzed, so a build copied to `out/` keeps the rows of
+  issue #79. The embedded portable PDB is read for these builds only (the rest of the call graph
+  places calls from a PDB file alone). A PDB naming a template the tree no longer holds is a
+  stale build: no rows, and a `Diagnostics` line counts the documents. Reading `bin/` whole lists
+  most source call sites a second time from IL and nearly quadrupled `MethodCalls` on the
+  `Dosai` tree. A state machine maps to its method through the type's declaring chain
+  (`QualifiedTypeName`): every Razor view has its own nested `<ExecuteAsync>d__0`, and a simple-name
+  alias sent the second view's calls to a caller named after the nested type alone. Lines are the
+  Razor compiler's own (dotnet/razor#11432, #13056); never re-derive them from the template text.
 - An async or iterator method's IL is a stub with no sequence points; both PDB source maps
   (`DataFlowAssembly`, `AssemblyCallGraphAnalyzer`) resolve it to its `MoveNext`'s first point
   through `MethodDebugInformation.GetStateMachineKickoffMethod` (issue #84). Never fall back to

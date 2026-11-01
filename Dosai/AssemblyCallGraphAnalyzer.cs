@@ -27,14 +27,24 @@ internal static class AssemblyCallGraphAnalyzer
         // A built tree holds a copy of each referenced assembly in every referencing project's
         // output, and each copy gave every call in it once more (issue #83, the same pass
         // shape as the data-flow one): each distinct file is analyzed once.
-        var copies = AssemblyCopies.Collapse(path, GetAssemblyFiles(path));
+        var (wholeAssemblies, binAssemblies) = AssemblyScope.SplitAssemblyFiles(path, includeBuildArtifacts: false, excludeBinWhenSourceFilesPresent: true);
+        var razorBuilds = RazorBuilds.Find(path, binAssemblies, diagnostics);
+        var copies = AssemblyCopies.Collapse(path, [.. wholeAssemblies, .. razorBuilds]);
         if (copies.Diagnostic(path, "each call in them is reported once") is { } copiesDiagnostic)
         {
             diagnostics.Add(copiesDiagnostic);
         }
 
         var assemblyPaths = copies.Distinct;
-        var context = new AnalysisContext(path, knownMethods, copies.AnalyzedByFullPath());
+        var analyzedByFullPath = copies.AnalyzedByFullPath();
+        var context = new AnalysisContext(path, knownMethods, analyzedByFullPath);
+        // A copy group with a member outside bin/ (an out/ directory, issue #79) is read whole
+        // whichever copy is analyzed: only a group living entirely in bin/ is left to the source
+        // analysis, apart from its Razor call sites.
+        var readWhole = wholeAssemblies
+            .Select(Path.GetFullPath)
+            .Select(file => analyzedByFullPath.GetValueOrDefault(file, file))
+            .ToHashSet(SafeFileRead.PathComparer);
         var calls = new List<MethodCalls>();
         var nodes = new Dictionary<string, MethodNode>(StringComparer.Ordinal);
         var edges = new List<MethodCallEdge>();
@@ -51,7 +61,7 @@ internal static class AssemblyCallGraphAnalyzer
         // cross-assembly call-site de-duplication come out exactly as the sequential loop
         // produced them, for every worker count.
         DedicatedStack.ForEachInOrder("Dosai assembly call graph", Math.Max(1, Dosai.MaxSymbolAnalysisWorkers), assemblyPaths.Count,
-            index => AnalyzeAssembly(assemblyPaths[index], context),
+            index => AnalyzeAssembly(assemblyPaths[index], context, readWhole.Contains(Path.GetFullPath(assemblyPaths[index])) ? CallSites.All : CallSites.InRazorFiles),
             fragment => fragment.MergeInto(calls, nodes, edges, edgeKeys));
 
         GraphAssembly.SortEdgesInPlace(edges);
@@ -66,7 +76,7 @@ internal static class AssemblyCallGraphAnalyzer
     ///     fragment and per-assembly caches, and reads the shared context. A failure keeps what
     ///     the assembly produced before it, as the sequential loop did.
     /// </summary>
-    private static AssemblyFragment AnalyzeAssembly(string assemblyPath, AnalysisContext context)
+    private static AssemblyFragment AnalyzeAssembly(string assemblyPath, AnalysisContext context, CallSites callSites)
     {
         // Only managed assemblies reach here: the copy collapse drops every other file.
         var fragment = new AssemblyFragment();
@@ -76,7 +86,7 @@ internal static class AssemblyCallGraphAnalyzer
             using var peReader = new PEReader(stream);
             if (!peReader.HasMetadata) return fragment;
             var reader = peReader.GetMetadataReader();
-            var sourceMap = LoadPortablePdbSourceMap(assemblyPath);
+            var sourceMap = LoadPortablePdbSourceMap(assemblyPath, embeddedFallback: callSites == CallSites.InRazorFiles, peReader);
             var scan = new AssemblyScan(reader, assemblyPath, Path.GetFullPath(assemblyPath), sourceMap, context);
             var stateMachineMethods = BuildStateMachineMethodMap(reader, assemblyPath, sourceMap);
             var instantiatedTypes = CollectInstantiatedTypes(peReader, scan);
@@ -89,6 +99,13 @@ internal static class AssemblyCallGraphAnalyzer
         catch
         {
             // Methods already best-effort skips unloadable assemblies; keep call graph extraction equally non-fatal.
+        }
+
+        if (callSites == CallSites.InRazorFiles)
+        {
+            var held = new Dictionary<string, bool>(StringComparer.Ordinal);
+            fragment.KeepCallSites(call => call.Path is { } templatePath && RazorBuilds.IsTemplate(templatePath)
+                && (held.TryGetValue(templatePath, out var exists) ? exists : held[templatePath] = context.RelativeRoot is { } root && File.Exists(Path.Join(root, templatePath))));
         }
 
         fragment.CompleteAnalysis();
@@ -489,7 +506,10 @@ internal static class AssemblyCallGraphAnalyzer
         foreach (var typeHandle in reader.TypeDefinitions)
         {
             var type = reader.GetTypeDefinition(typeHandle);
-            AddTypeAlias(typeByName, GetFullTypeName(reader, type).FullName, typeHandle);
+            // The declaring chain is part of the name: a state machine is a nested type, and
+            // two classes' <Run>d__0 are two types (every Razor view of an assembly has its own
+            // <ExecuteAsync>d__0). The simple name stays as the fallback alias, first one wins.
+            AddTypeAlias(typeByName, QualifiedTypeName(reader, type), typeHandle);
             AddTypeAlias(typeByName, reader.GetString(type.Name), typeHandle);
         }
 
@@ -525,6 +545,20 @@ internal static class AssemblyCallGraphAnalyzer
         }
 
         return result;
+    }
+
+    /// <summary>A type's name with its declaring types, nested ones joined by '.' as <see cref="NormalizeStateMachineTypeName" /> writes them.</summary>
+    private static string QualifiedTypeName(MetadataReader reader, TypeDefinition type)
+    {
+        var name = reader.GetString(type.Name);
+        var declaring = type.GetDeclaringType();
+        if (!declaring.IsNil)
+        {
+            return $"{QualifiedTypeName(reader, reader.GetTypeDefinition(declaring))}.{name}";
+        }
+
+        var ns = reader.GetString(type.Namespace);
+        return string.IsNullOrWhiteSpace(ns) ? name : $"{ns}.{name}";
     }
 
     private static void AddTypeAlias(Dictionary<string, TypeDefinitionHandle> typeByName, string typeName, TypeDefinitionHandle handle)
@@ -1093,15 +1127,13 @@ internal static class AssemblyCallGraphAnalyzer
         return targets;
     }
 
-    private static AssemblyCallSourceMap LoadPortablePdbSourceMap(string assemblyPath)
+    private static AssemblyCallSourceMap LoadPortablePdbSourceMap(string assemblyPath, bool embeddedFallback, PEReader peReader)
     {
-        var pdbPath = Path.ChangeExtension(assemblyPath, ".pdb");
-        if (!File.Exists(pdbPath)) return new AssemblyCallSourceMap([], assemblyPath);
         try
         {
-            using var pdbStream = new FileStream(pdbPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            using var provider = MetadataReaderProvider.FromPortablePdbStream(pdbStream);
-            var reader = provider.GetMetadataReader();
+            using var pdb = RazorBuilds.OpenPdb(assemblyPath, embeddedFallback ? peReader : null);
+            if (pdb is null) return new AssemblyCallSourceMap([], assemblyPath);
+            var reader = pdb.Reader;
             var locations = new Dictionary<int, AssemblyCallSequencePoint[]>();
             // One path string and one file-name string per document: every call record and edge
             // of the assembly shares them instead of holding its own copies.
@@ -1153,9 +1185,14 @@ internal static class AssemblyCallGraphAnalyzer
         }
     }
 
-    private static List<string> GetAssemblyFiles(string path)
+    /// <summary>Which of an assembly's call sites the pass keeps.</summary>
+    private enum CallSites
     {
-        return AssemblyScope.GetAssemblyFiles(path, includeBuildArtifacts: false, excludeBinWhenSourceFilesPresent: true);
+        /// <summary>Every call site: the source analysis does not cover this assembly.</summary>
+        All,
+
+        /// <summary>Only call sites placed in <c>.razor</c> and <c>.cshtml</c> files (issue #98): the source analysis covers the rest.</summary>
+        InRazorFiles
     }
 
     private sealed record AssemblyCallInstruction(int Offset, OpCode OpCode, object? Operand);
@@ -1395,6 +1432,28 @@ internal static class AssemblyCallGraphAnalyzer
             _emissions.Add(new Emission(call, edge, key, hash, callNeedsNewSite));
 
         public void CompleteAnalysis() => Keys = null!;
+
+        /// <summary>Drops the call sites <paramref name="keep" /> rejects, and the nodes no call site left names.</summary>
+        public void KeepCallSites(Predicate<MethodCalls> keep)
+        {
+            _emissions.RemoveAll(emission => !keep(emission.Call));
+            var named = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var emission in _emissions)
+            {
+                named.Add(emission.Call.SourceId!);
+                named.Add(emission.Call.TargetId!);
+                if (emission.Edge is { } edge)
+                {
+                    named.Add(edge.SourceId);
+                    named.Add(edge.TargetId);
+                }
+            }
+
+            foreach (var id in Nodes.Keys.Where(id => !named.Contains(id)).ToList())
+            {
+                Nodes.Remove(id);
+            }
+        }
 
         public void MergeInto(List<MethodCalls> calls, Dictionary<string, MethodNode> nodes, List<MethodCallEdge> edges, GraphAssembly.EdgeSiteIndex edgeKeys)
         {

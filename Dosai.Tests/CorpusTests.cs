@@ -501,6 +501,139 @@ public class CorpusTests
         }
     }
 
+    // Issue #98: calls in .razor and .cshtml files exist only in the build. The calls below are the
+    // ones the issue's repros add; the lines come from the Razor compiler's PDB mapping, so they
+    // are pinned for the SDK that built the corpus (see Corpus/README.md).
+    [SkippableTheory]
+    [InlineData("issue98/blazor", "Components/Pages/Counter.razor", 10, 14, "ToString", "BuildRenderTree", 21, 9, "SerializeObject", "IncrementCount")]
+    [InlineData("issue98/blazorwasm", "Pages/Counter.razor", 9, 14, "ToString", "BuildRenderTree", 20, 9, "SerializeObject", "IncrementCount")]
+    [InlineData("issue98/webapp", "Pages/Privacy.cshtml", 10, 14, "ToString", "ExecuteAsync", 17, 9, "SerializeObject", "Snapshot")]
+    [InlineData("issue98/mvc", "Views/Home/Privacy.cshtml", 8, 14, "ToString", "ExecuteAsync", 9, 12, "SerializeObject", "ExecuteAsync")]
+    public void Corpus_Issue98_TemplateCallsAreListedBesideTheSourceCall(string app, string template, int markupLine, int markupColumn, string markupCall, string markupCaller, int codeLine, int codeColumn, string codeCall, string codeCaller)
+    {
+        var path = CorpusPathOrSkip(app);
+        var slice = JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(path), JsonOptions)!;
+        var convert = slice.MethodCalls!.Where(call => call.ClassName == "JsonConvert").ToList();
+
+        // The .cs call the source analysis always listed, once, and exactly the two the issue misses.
+        var parse = Assert.Single(convert, call => call.Path == "Services/CountParser.cs");
+        Assert.Equal((8, 9, AnalysisEvidenceKind.SourceRoslynDirect), (parse.LineNumber, parse.ColumnNumber, parse.EvidenceKind));
+        var rows = convert.Where(call => call.Path == template).OrderBy(call => call.LineNumber).ToList();
+        Assert.Equal(2, convert.Count - 1);
+        Assert.Equal(
+            [(markupLine, markupColumn, markupCall, markupCaller), (codeLine, codeColumn, codeCall, codeCaller)],
+            rows.Select(call => (call.LineNumber, call.ColumnNumber, call.CalledMethod, call.CallerMethod)));
+        // A view's ExecuteAsync is an async method: its calls come from the generated state machine.
+        Assert.All(rows, call => Assert.Equal(
+            (call.CallerMethod == "ExecuteAsync" ? AnalysisEvidenceKind.AssemblyIlGeneratedState : AnalysisEvidenceKind.AssemblyIlDirect, Path.GetFileName(template), "pkg:nuget/Newtonsoft.Json@13.0.3"),
+            (call.EvidenceKind, call.FileName, call.Purl)));
+        // The call graph carries the same rows, on existing nodes.
+        foreach (var call in rows)
+        {
+            Assert.Contains(slice.CallGraph!.Edges, edge => edge.SourceId == call.SourceId && edge.TargetId == call.TargetId && edge.Path == template && edge.CallLocation.LineNumber == call.LineNumber);
+        }
+
+        AssertEveryEdgeEndpointExists(slice);
+    }
+
+    // Issue #98: a component library copied into the app's bin/ gives its template calls once, a
+    // component's .razor.cs code-behind stays a source call listed once, and a method declared
+    // in a template has one node.
+    [SkippableFact]
+    public void Corpus_Issue98Components_LibraryCopiesAndCodeBehindGiveEachCallOnce()
+    {
+        var path = CorpusPathOrSkip("issue98/components");
+        var slice = JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(path), JsonOptions)!;
+        var calls = slice.MethodCalls!;
+
+        var behind = Assert.Single(calls, call => call.Path == "Host/Components/Pages/Behind.razor.cs" && call.CalledMethod.Contains("SerializeObject", StringComparison.Ordinal));
+        Assert.Equal((11, AnalysisEvidenceKind.SourceRoslynDirect), (behind.LineNumber, behind.EvidenceKind));
+        Assert.DoesNotContain(calls, call => call.Path == "Host/Components/Pages/Behind.razor.cs" && call.EvidenceKind.ToString().StartsWith("AssemblyIl", StringComparison.Ordinal));
+
+        (int Line, string Called, string Caller)[] Rows(string template) => calls
+            .Where(call => call.Path == template && call.ClassName == "JsonConvert")
+            .OrderBy(call => call.LineNumber)
+            .Select(call => (call.LineNumber, call.CalledMethod, call.CallerMethod))
+            .ToArray();
+        Assert.Equal([(8, "ToString", "BuildRenderTree"), (12, "SerializeObject", "Label")], Rows("Host/Components/Pages/Behind.razor"));
+        Assert.Equal([(3, "ToString", "BuildRenderTree"), (8, "SerializeObject", "Describe")], Rows("Widgets/Badge.razor"));
+
+        // One node for each method a template declares, whichever copy of the library was read.
+        Assert.Single(slice.CallGraph!.Nodes, node => node.Id == "Host.Components.Pages.Behind.Label():string");
+        Assert.Single(slice.CallGraph.Nodes, node => node.Id.StartsWith("Widgets.Badge.Describe()", StringComparison.Ordinal));
+        AssertEveryEdgeEndpointExists(slice);
+    }
+
+    // Issue #98 on real apps: the template pass adds Razor rows and moves nothing else, whatever the
+    // worker count.
+    [SkippableTheory]
+    [InlineData("eShopOnWeb/src/Web")]
+    [InlineData("eShopOnWeb/src/BlazorAdmin")]
+    public void Corpus_Issue98RealApps_TemplateRowsAddToTheSourceRowsAndMoveNothing(string app)
+    {
+        var path = CorpusPathOrSkip(app);
+        static bool IsTemplateRow(MethodCalls call) => call.Path is { } p && (p.EndsWith(".razor", StringComparison.OrdinalIgnoreCase) || p.EndsWith(".cshtml", StringComparison.OrdinalIgnoreCase));
+        static string Key(MethodCalls call) => $"{call.Path}|{call.LineNumber}|{call.ColumnNumber}|{call.SourceId}|{call.TargetId}|{call.EvidenceKind}";
+
+        var with = JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(path), JsonOptions)!;
+        MethodsSlice without;
+        using (RazorBuilds.DisableForTesting())
+        {
+            without = JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(path), JsonOptions)!;
+        }
+
+        Assert.DoesNotContain(without.MethodCalls!, IsTemplateRow);
+        Assert.True(with.MethodCalls!.Count(IsTemplateRow) >= 1_000, $"expected template rows, got {with.MethodCalls!.Count(IsTemplateRow)}");
+        Assert.Equal(without.MethodCalls!.Select(Key), with.MethodCalls!.Where(call => !IsTemplateRow(call)).Select(Key));
+        AssertEveryEdgeEndpointExists(with);
+
+        var previous = Depscan.Dosai.MaxSymbolAnalysisWorkers;
+        try
+        {
+            string Run(int workers)
+            {
+                Depscan.Dosai.MaxSymbolAnalysisWorkers = workers;
+                return System.Text.RegularExpressions.Regex.Replace(Depscan.Dosai.GetMethods(path), "\"GeneratedAt\":\"[^\"]*\"", "\"GeneratedAt\":\"\"");
+            }
+
+            Assert.Equal(Run(1), Run(Math.Max(2, Environment.ProcessorCount)));
+        }
+        finally
+        {
+            Depscan.Dosai.MaxSymbolAnalysisWorkers = previous;
+        }
+    }
+
+    // Issue #98: `methods` and `dataflows` place a call of a template alike. The data-flow IL pass
+    // reads bin/ whole, so its nodes on a template are there already; each one that names a call
+    // sits where the methods row for that call sits, on the same relative path.
+    [SkippableTheory]
+    [InlineData("issue98/blazor")]
+    [InlineData("issue98/webapp")]
+    public void Corpus_Issue98_DataFlowNodesOnATemplateSitWhereTheMethodsRowsSit(string app)
+    {
+        var path = CorpusPathOrSkip(app);
+        var slice = JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(path), JsonOptions)!;
+        var flows = JsonSerializer.Deserialize<DataFlowResult>(DataFlowAnalyzer.GetDataFlows(path), JsonOptions)!;
+        static bool IsTemplate(string? p) => RazorBuilds.IsTemplate(p);
+
+        var rows = slice.MethodCalls!.Where(call => IsTemplate(call.Path)).Select(call => (call.Path, call.LineNumber, call.ColumnNumber, call.CalledMethod)).ToHashSet();
+        var calledNames = rows.Select(row => row.CalledMethod).ToHashSet(StringComparer.Ordinal);
+        var nodes = flows.Nodes
+            .Where(node => IsTemplate(node.Path) && node.Properties.GetValueOrDefault("analysis") == "assembly-il" && calledNames.Contains(node.Name))
+            .Select(node => (node.Path, node.LineNumber, node.ColumnNumber, node.Name))
+            .ToList();
+
+        Assert.NotEmpty(nodes);
+        Assert.All(nodes, node => Assert.Contains(node, rows));
+    }
+
+    private static void AssertEveryEdgeEndpointExists(MethodsSlice slice)
+    {
+        var nodeIds = slice.CallGraph!.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
+        Assert.All(slice.CallGraph.Edges, edge => Assert.True(nodeIds.Contains(edge.SourceId) && nodeIds.Contains(edge.TargetId), $"{edge.SourceId} -> {edge.TargetId}"));
+    }
+
     /// <summary>A throwaway copy of a corpus app, so a test can add files to the tree without touching the corpus.</summary>
     private sealed class CorpusCopy : IDisposable
     {

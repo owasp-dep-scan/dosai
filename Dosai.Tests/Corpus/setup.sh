@@ -248,4 +248,200 @@ PROGRAM
 fi
 dotnet restore "${ISSUE110}/App/App.csproj" -v quiet -p:NuGetAudit=false
 
+echo "==> issue98 (issue #98 repros: calls in .razor and .cshtml files; built with $(dotnet --version))"
+ISSUE98="${CORPUS_ROOT}/issue98"
+mkdir -p "${ISSUE98}"
+
+# The issue's CountParser.cs: a call in a .cs file, which the source analysis already lists once.
+write_issue98_count_parser() {
+    local project="$1" namespace="$2"
+    mkdir -p "${project}/Services"
+    cat > "${project}/Services/CountParser.cs" <<PROGRAM
+using Newtonsoft.Json;
+
+namespace ${namespace}.Services;
+
+public static class CountParser
+{
+    public static Dictionary<string, int>? Parse(string json) =>
+        JsonConvert.DeserializeObject<Dictionary<string, int>>(json);
+}
+PROGRAM
+}
+
+if [ ! -d "${ISSUE98}/blazor" ]; then
+    (
+        cd "${ISSUE98}"
+        dotnet new blazor -n RazorCalls -o blazor > /dev/null
+        dotnet add blazor/RazorCalls.csproj package Newtonsoft.Json --version 13.0.3 > /dev/null
+        # The exact Counter.razor of the issue: one call in markup, one in @code.
+        cat > blazor/Components/Pages/Counter.razor <<'RAZOR'
+@page "/counter"
+@rendermode InteractiveServer
+@using Newtonsoft.Json
+
+<PageTitle>Counter</PageTitle>
+
+<h1>Counter</h1>
+
+<p role="status">Current count: @currentCount</p>
+<p>As JSON: @JsonConvert.ToString(currentCount)</p>
+
+<button class="btn btn-primary" @onclick="IncrementCount">Click me</button>
+
+@code {
+    private int currentCount = 0;
+    private string snapshot = "";
+
+    private void IncrementCount()
+    {
+        currentCount++;
+        snapshot = JsonConvert.SerializeObject(new { currentCount });
+    }
+}
+RAZOR
+        write_issue98_count_parser blazor RazorCalls
+    )
+fi
+dotnet build "${ISSUE98}/blazor/RazorCalls.csproj" -v quiet -p:NuGetAudit=false
+
+if [ ! -d "${ISSUE98}/webapp" ]; then
+    (
+        cd "${ISSUE98}"
+        dotnet new webapp -n RazorCalls -o webapp > /dev/null
+        dotnet add webapp/RazorCalls.csproj package Newtonsoft.Json --version 13.0.3 > /dev/null
+        # One call in the markup and one in an @functions block.
+        cat > webapp/Pages/Privacy.cshtml <<'RAZOR'
+@page
+@using Newtonsoft.Json
+@model PrivacyModel
+@{
+    ViewData["Title"] = "Privacy Policy";
+}
+<h1>@ViewData["Title"]</h1>
+
+<p>Use this page to detail your site's privacy policy.</p>
+<p>As JSON: @JsonConvert.ToString(visits)</p>
+
+@functions {
+    private int visits = 3;
+
+    private string Snapshot()
+    {
+        return JsonConvert.SerializeObject(new { visits });
+    }
+}
+RAZOR
+        write_issue98_count_parser webapp RazorCalls
+    )
+fi
+dotnet build "${ISSUE98}/webapp/RazorCalls.csproj" -v quiet -p:NuGetAudit=false
+
+if [ ! -d "${ISSUE98}/mvc" ]; then
+    (
+        cd "${ISSUE98}"
+        dotnet new mvc -n RazorCalls -o mvc > /dev/null
+        dotnet add mvc/RazorCalls.csproj package Newtonsoft.Json --version 13.0.3 > /dev/null
+        cat > mvc/Views/Home/Privacy.cshtml <<'RAZOR'
+@using Newtonsoft.Json
+@{
+    ViewData["Title"] = "Privacy Policy";
+}
+<h1>@ViewData["Title"]</h1>
+
+<p>Use this page to detail your site's privacy policy.</p>
+<p>As JSON: @JsonConvert.ToString(ViewData["Title"])</p>
+<p>Again: @JsonConvert.SerializeObject(new { Title = ViewData["Title"] })</p>
+RAZOR
+        write_issue98_count_parser mvc RazorCalls
+    )
+fi
+dotnet build "${ISSUE98}/mvc/RazorCalls.csproj" -v quiet -p:NuGetAudit=false
+
+if [ ! -d "${ISSUE98}/blazorwasm" ]; then
+    (
+        cd "${ISSUE98}"
+        dotnet new blazorwasm -n RazorCalls -o blazorwasm > /dev/null
+        dotnet add blazorwasm/RazorCalls.csproj package Newtonsoft.Json --version 13.0.3 > /dev/null
+        cat > blazorwasm/Pages/Counter.razor <<'RAZOR'
+@page "/counter"
+@using Newtonsoft.Json
+
+<PageTitle>Counter</PageTitle>
+
+<h1>Counter</h1>
+
+<p role="status">Current count: @currentCount</p>
+<p>As JSON: @JsonConvert.ToString(currentCount)</p>
+
+<button class="btn btn-primary" @onclick="IncrementCount">Click me</button>
+
+@code {
+    private int currentCount = 0;
+    private string snapshot = "";
+
+    private void IncrementCount()
+    {
+        currentCount++;
+        snapshot = JsonConvert.SerializeObject(new { currentCount });
+    }
+}
+RAZOR
+        write_issue98_count_parser blazorwasm RazorCalls
+    )
+fi
+dotnet build "${ISSUE98}/blazorwasm/RazorCalls.csproj" -v quiet -p:NuGetAudit=false
+
+# A Razor component library referenced by an app (the library's assembly is copied into the app's
+# bin/, issue #83), and a component whose partial class has a .razor.cs code-behind.
+if [ ! -d "${ISSUE98}/components/Host" ]; then
+    mkdir -p "${ISSUE98}/components"
+    (
+        cd "${ISSUE98}/components"
+        dotnet new razorclasslib -n Widgets -o Widgets > /dev/null
+        dotnet new blazor -n Host -o Host > /dev/null
+        dotnet add Widgets/Widgets.csproj package Newtonsoft.Json --version 13.0.3 > /dev/null
+        dotnet add Host/Host.csproj package Newtonsoft.Json --version 13.0.3 > /dev/null
+        dotnet add Host/Host.csproj reference Widgets/Widgets.csproj > /dev/null
+        find Widgets -maxdepth 1 \( -name '*.razor' -o -name '*.razor.css' \) -delete
+        cat > Widgets/Badge.razor <<'RAZOR'
+@using Newtonsoft.Json
+
+<span class="badge">@JsonConvert.ToString(Count)</span>
+
+@code {
+    [Parameter] public int Count { get; set; }
+
+    public string Describe() => JsonConvert.SerializeObject(new { Count });
+}
+RAZOR
+        cat > Host/Components/Pages/Behind.razor <<'RAZOR'
+@page "/behind"
+@using Newtonsoft.Json
+@using Widgets
+
+<h1>Code behind</h1>
+
+<Badge Count="@total" />
+<p>@JsonConvert.ToString(total)</p>
+RAZOR
+        cat > Host/Components/Pages/Behind.razor.cs <<'PROGRAM'
+using Newtonsoft.Json;
+
+namespace Host.Components.Pages;
+
+public partial class Behind
+{
+    private int total = 7;
+
+    protected override void OnInitialized()
+    {
+        _ = JsonConvert.SerializeObject(new { total });
+    }
+}
+PROGRAM
+    )
+fi
+dotnet build "${ISSUE98}/components/Host/Host.csproj" -v quiet -p:NuGetAudit=false
+
 echo "==> Corpus ready at ${CORPUS_ROOT}"
