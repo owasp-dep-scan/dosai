@@ -1,0 +1,54 @@
+Dosai/AssemblyCallGraphAnalyzer.cs
+  s_f7223a866076b5::t_7c133b8e1f1251 106-108
+  s_f7223a866076b5::t_f7066849ef23ae 509-512,550-561
+  s_f7223a866076b5::t_8e4be902fcce16 30-32,39-47,64,79,89,104-105,109-110,1130,1134-1136,1188-1189,1191-1195,1436-1456
+  s_f7223a866076b5::t_48d81b90f4fd23 562-563,1457
+Dosai/RazorBuilds.cs
+  s_f7223a866076b5::t_7c133b8e1f1251 102
+  s_f7223a866076b5::t_1a10749596f781 1-24,42-53,55-58,60-71,73-101,103-171
+  s_f7223a866076b5::t_63c3365f2496d5 25-41,54
+  s_f7223a866076b5::t_2d1cfed4ff97c4 59,72
+Dosai.Tests/Issue98RazorCallSiteTests.cs
+  s_f7223a866076b5::t_7c133b8e1f1251 93
+  s_f7223a866076b5::t_2d1cfed4ff97c4 157,164
+  s_f7223a866076b5::t_ce70220b651216 176
+  s_f7223a866076b5::t_ee1869edc9d96c 1-92,94-156,158-163,165-175,177-463
+docs/ARCHITECTURE.md
+  s_f7223a866076b5::t_ba820653743428 111
+docs/frameworks.md
+  s_f7223a866076b5::t_ba820653743428 177-192
+Dosai/AssemblyScope.cs
+  s_f7223a866076b5::t_2d99df46189bbc 158,162-164,167,172
+  s_f7223a866076b5::t_4cce2614718184 102-118,122,127,157,165-166,168-169
+  s_f7223a866076b5::t_a0c17d7af44e7e 170-171
+docs/migration-5.1.0.md
+  s_f7223a866076b5::t_ba820653743428 627-662
+Dosai.Tests/Corpus/setup.sh
+  s_f7223a866076b5::t_f86331ceaf62fc 406
+  s_f7223a866076b5::t_49016bb128baea 251-396,398-401,403,407-417,419-427,429-430,432-444,446
+  s_f7223a866076b5::t_3ff56f9690ad33 397,402,404-405,418,428,431,445
+Dosai.Tests/Corpus/README.md
+  s_f7223a866076b5::t_ba820653743428 34-39,63-65
+AGENTS.md
+  s_f7223a866076b5::t_ba820653743428 155-173
+Dosai.Tests/CorpusTests.cs
+  s_f7223a866076b5::t_8999474acab635 607-630
+  s_f7223a866076b5::t_3f8e99fe1a7bb0 504-525,530-606,631-636
+  s_f7223a866076b5::t_5ec47e6813569b 526-529
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "84fcf7222073815a422c93c433ab225628f59895",
+  "prompts": {},
+  "sessions": {
+    "s_f7223a866076b5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d902415e-9d6a-409b-b05f-a6b5ba8839dd",
+        "model": "claude-sonnet-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
