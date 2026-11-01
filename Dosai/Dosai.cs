@@ -584,6 +584,7 @@ public static class Dosai
         DebugLog.Count("call graph (assembly IL) nodes", assemblyCallGraph.Nodes.Count);
         DebugLog.Count("call graph (assembly IL) edges", assemblyCallGraph.Edges.Count);
         NormalizeAssemblyGraphToSourceIds(assemblyMethodCalls, assemblyCallGraph, sourceAssemblyMapping);
+        NormalizeTemplateCallsToSourceIds(assemblyMethodCalls, assemblyCallGraph, callGraph);
         DebugLog.Count("assembly IL call sites normalized to source ids", assemblyMethodCalls.Count);
         methodCalls.AddRange(assemblyMethodCalls);
         MergeCallGraph(callGraph, assemblyCallGraph);
@@ -1285,6 +1286,79 @@ public static class Dosai
     }
 
     private static string? FirstNonBlank(string? preferred, string? fallback) => string.IsNullOrWhiteSpace(preferred) ? fallback : preferred;
+
+    /// <summary>
+    ///     Moves the endpoints of call sites in <c>.razor</c> and <c>.cshtml</c> templates (issue
+    ///     #98) onto the source graph's node for the same member. Those sites come from a build the
+    ///     method inventory did not map, so a call from a template into a <c>.cs</c> file named the
+    ///     member as IL renders it (<c>get_Total():System.Decimal</c>) beside the source node
+    ///     (<c>get_Total():decimal</c>), and the template did not reach it. Matching goes by
+    ///     <see cref="GraphIdNormalizer.SignatureKey" />, and a key that names two source nodes maps
+    ///     nothing. Only template sites move: every other IL site keeps the ids it had. A node the
+    ///     move leaves unnamed is dropped unless the inventory listed it.
+    /// </summary>
+    internal static void NormalizeTemplateCallsToSourceIds(List<MethodCalls> assemblyMethodCalls, CallGraph assemblyCallGraph, CallGraph sourceCallGraph)
+    {
+        if (!assemblyMethodCalls.Any(call => RazorBuilds.IsTemplate(call.Path)))
+        {
+            return;
+        }
+
+        var sourceIdByKey = new Dictionary<string, string?>(StringComparer.Ordinal);
+        foreach (var node in sourceCallGraph.Nodes)
+        {
+            var key = GraphIdNormalizer.SignatureKey(node.Id);
+            if (!sourceIdByKey.TryAdd(key, node.Id) && !string.Equals(sourceIdByKey[key], node.Id, StringComparison.Ordinal))
+            {
+                sourceIdByKey[key] = null;
+            }
+        }
+
+        var moved = new HashSet<string>(StringComparer.Ordinal);
+        string Resolve(string id)
+        {
+            if (sourceIdByKey.TryGetValue(GraphIdNormalizer.SignatureKey(id), out var sourceId) && sourceId is not null && !string.Equals(sourceId, id, StringComparison.Ordinal))
+            {
+                moved.Add(id);
+                return sourceId;
+            }
+
+            return id;
+        }
+
+        foreach (var call in assemblyMethodCalls.Where(call => RazorBuilds.IsTemplate(call.Path)))
+        {
+            call.SourceId = call.SourceId is null ? null : Resolve(call.SourceId);
+            call.TargetId = call.TargetId is null ? null : Resolve(call.TargetId);
+        }
+
+        foreach (var edge in assemblyCallGraph.Edges.Where(edge => RazorBuilds.IsTemplate(edge.Path)))
+        {
+            edge.SourceId = Resolve(edge.SourceId);
+            edge.TargetId = Resolve(edge.TargetId);
+        }
+
+        if (moved.Count == 0)
+        {
+            return;
+        }
+
+        var named = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var edge in assemblyCallGraph.Edges)
+        {
+            named.Add(edge.SourceId);
+            named.Add(edge.TargetId);
+        }
+
+        foreach (var call in assemblyMethodCalls)
+        {
+            if (call.SourceId is not null) named.Add(call.SourceId);
+            if (call.TargetId is not null) named.Add(call.TargetId);
+        }
+
+        assemblyCallGraph.Nodes.RemoveAll(node => moved.Contains(node.Id) && !named.Contains(node.Id)
+            && !node.Evidence.Any(evidence => evidence.Kind == AnalysisEvidenceKind.AssemblyReflection));
+    }
 
     internal static void NormalizeAssemblyGraphToSourceIds(List<MethodCalls> assemblyMethodCalls, CallGraph assemblyCallGraph, List<SourceAssemblyMapping> sourceAssemblyMappings)
     {

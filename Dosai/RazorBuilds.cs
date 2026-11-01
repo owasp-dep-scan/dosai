@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Reflection.Metadata;
 using System.Reflection.PortableExecutable;
 
@@ -16,9 +17,11 @@ namespace Depscan;
 ///     classifies it by the same rule as every other pass: nearest <c>*.deps.json</c>, restore
 ///     metadata, projects built from source) and its PDB names a template that the tree still
 ///     holds. A document is placed through <see cref="SourceDocumentPaths" />, which also resolves
-///     a <c>/_/</c>-mapped or foreign-file-system path. A stale build, whose PDB names a template
-///     that was deleted or renamed since, is not read for it: a row on a file the tree does not
-///     have cannot be followed to anything, and the diagnostic says how many were left out.
+///     a <c>/_/</c>-mapped or foreign-file-system path. A template the tree no longer holds (a
+///     stale build) or one outside the scan root (a referenced project's build copied into this
+///     one's output) gives no rows: a row on a file the scan does not have cannot be followed to
+///     anything. Diagnostics count each case, and the templates changed after their build, by
+///     distinct document.
 /// </remarks>
 internal static class RazorBuilds
 {
@@ -30,13 +33,14 @@ internal static class RazorBuilds
     /// </summary>
     internal static IDisposable DisableForTesting()
     {
+        var previous = Off.Value;
         Off.Value = true;
-        return new Scope();
+        return new Scope(previous);
     }
 
-    private sealed class Scope : IDisposable
+    private sealed class Scope(bool previous) : IDisposable
     {
-        public void Dispose() => Off.Value = false;
+        public void Dispose() => Off.Value = previous;
     }
 
     /// <summary>A path of a template file: <c>.razor</c> or <c>.cshtml</c>.</summary>
@@ -56,27 +60,42 @@ internal static class RazorBuilds
             return builds;
         }
 
-        var staleDocuments = 0;
+        // Distinct documents, so the copies of one build in several outputs count once.
+        var missing = new SortedSet<string>(StringComparer.Ordinal);
+        var outside = new SortedSet<string>(StringComparer.Ordinal);
+        var newer = new SortedSet<string>(StringComparer.Ordinal);
         foreach (var assembly in binAssemblies)
         {
-            var (inTree, stale) = Probe(root, assembly);
-            staleDocuments += stale;
-            if (inTree > 0)
+            if (Probe(root, assembly, missing, outside, newer))
             {
                 builds.Add(assembly);
             }
         }
 
-        if (staleDocuments > 0)
+        if (missing.Count > 0)
         {
-            diagnostics.Add($"{staleDocuments} .razor/.cshtml document(s) named by PDBs under bin/ are not in the tree (a stale build, or a build of another tree); the calls placed in them are not reported.");
+            diagnostics.Add(string.Create(CultureInfo.InvariantCulture, $"{missing.Count} .razor/.cshtml file(s) named by the PDB of a build under bin/ no longer exist in the tree (a stale build); the calls placed in them are not reported."));
+        }
+
+        if (outside.Count > 0)
+        {
+            diagnostics.Add(string.Create(CultureInfo.InvariantCulture, $"{outside.Count} .razor/.cshtml file(s) named by the PDB of a build under bin/ lie outside the scanned directory (a referenced project, or a build of another tree); the calls placed in them are not reported. Scan the directory that holds them to list them."));
+        }
+
+        if (newer.Count > 0)
+        {
+            diagnostics.Add(string.Create(CultureInfo.InvariantCulture, $"{newer.Count} .razor/.cshtml file(s) changed after the build that compiled them; the calls placed in them come from that build and their lines may be out of date. Rebuild the project for current lines."));
         }
 
         return builds;
     }
 
-    /// <summary>How many templates the assembly's PDB names that the tree holds, and how many it does not.</summary>
-    private static (int InTree, int Stale) Probe(string root, string assemblyPath)
+    /// <summary>
+    ///     Whether the assembly's PDB names a template the tree holds. Templates it names that the
+    ///     tree does not hold, that sit outside the scan root, or that changed after the build are
+    ///     added to the matching set, by their path as the PDB writes it.
+    /// </summary>
+    private static bool Probe(string root, string assemblyPath, ISet<string> missing, ISet<string> outside, ISet<string> newer)
     {
         try
         {
@@ -85,12 +104,13 @@ internal static class RazorBuilds
             using var pdb = OpenPdb(assemblyPath, peReader);
             if (pdb is null)
             {
-                return (0, 0);
+                return false;
             }
 
             var reader = pdb.Reader;
             var builtFromSource = TreeFrameworks.IsBuiltFromSource(root, assemblyPath);
-            int inTree = 0, stale = 0;
+            var builtAt = File.GetLastWriteTimeUtc(assemblyPath);
+            var inTree = false;
             foreach (var handle in reader.Documents)
             {
                 var name = reader.GetString(reader.GetDocument(handle).Name);
@@ -99,28 +119,36 @@ internal static class RazorBuilds
                     continue;
                 }
 
-                if (SourceDocumentPaths.InTree(root, name, builtFromSource) is not { } relative || !File.Exists(Path.Join(root, relative)))
+                if (SourceDocumentPaths.InTree(root, name, builtFromSource) is not { } relative)
                 {
-                    stale++;
+                    outside.Add(name);
+                }
+                else if (Path.Join(root, relative) is var template && !File.Exists(template))
+                {
+                    missing.Add(name);
                 }
                 else
                 {
-                    inTree++;
+                    inTree = true;
+                    if (File.GetLastWriteTimeUtc(template) > builtAt)
+                    {
+                        newer.Add(name);
+                    }
                 }
             }
 
-            return (inTree, stale);
+            return inTree;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or BadImageFormatException or InvalidOperationException)
         {
-            return (0, 0);
+            return false;
         }
     }
 
     /// <summary>
     ///     The portable PDB beside <paramref name="assemblyPath" />; when there is none and
     ///     <paramref name="embeddedIn" /> is given, the one embedded in that assembly (a build with
-    ///     <c>DebugType=embedded</c>). Null when neither exists or the file is not a portable PDB.
+    ///     <c>DebugType=embedded</c>, or a Windows PDB beside it). Null when there is no portable PDB.
     ///     The embedded form is read only for the builds this class picks: the rest of the call
     ///     graph keeps placing calls from a PDB file alone.
     /// </summary>
@@ -138,8 +166,8 @@ internal static class RazorBuilds
             }
             catch (BadImageFormatException)
             {
+                // A Windows PDB, not a portable one: the embedded form may still be there.
                 stream?.Dispose();
-                return null;
             }
         }
 

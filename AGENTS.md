@@ -159,18 +159,29 @@ dotnet test ./Dosai.sln
   other pass, not a second notion of "the tree's own build"), `RazorBuilds.Find` picks the ones
   whose PDB names a template in the tree, and `AssemblyFragment.KeepCallSites` keeps from them
   only the call sites whose relative `Path` is such a template that exists, plus the nodes those
-  sites name. Calls the Razor compiler maps to `#line hidden` or leaves in a generated
-  `*.g.cs` document are never template rows, and a `.razor.cs` code-behind is a `.cs` file the
-  source analysis already read, so its IL copy is dropped. A copy group with any member outside
-  `bin/` is read whole whichever copy is analyzed, so a build copied to `out/` keeps the rows of
-  issue #79. The embedded portable PDB is read for these builds only (the rest of the call graph
-  places calls from a PDB file alone). A PDB naming a template the tree no longer holds is a
-  stale build: no rows, and a `Diagnostics` line counts the documents. Reading `bin/` whole lists
-  most source call sites a second time from IL and nearly quadrupled `MethodCalls` on the
-  `Dosai` tree. A state machine maps to its method through the type's declaring chain
-  (`QualifiedTypeName`): every Razor view has its own nested `<ExecuteAsync>d__0`, and a simple-name
-  alias sent the second view's calls to a caller named after the nested type alone. Lines are the
-  Razor compiler's own (dotnet/razor#11432, #13056); never re-derive them from the template text.
+  sites name. A kept site an earlier assembly already emitted gives no second record: Debug and
+  Release (or two target frameworks) of one template place every call on the same line. In these
+  builds hidden sequence points stay in the source map as boundaries (`IsHidden`): a call under
+  one keeps a row, at the visible line before it, only when it calls the application or a package
+  (`KeepsHiddenCall`); calls into the framework, ASP.NET Core or a Razor-generated `__` member are
+  the compiler's plumbing, and a hidden call with no visible point before it (an async stub's
+  builder calls) gives none. Every other build keeps placing a hidden call at the point before it.
+  `Dosai.NormalizeTemplateCallsToSourceIds` moves a template call's endpoints onto the source node
+  of the same member (`GraphIdNormalizer.SignatureKey`: `System.Int32` and `int`, arity markers
+  and nullable annotations made alike), so a template reaches the `.cs` member it calls. A
+  `.razor.cs` code-behind is a `.cs` file the source analysis already read, so its IL copy is
+  dropped. A copy group with any member outside `bin/` is read whole whichever copy is analyzed,
+  so a build copied to `out/` keeps the rows of issue #79. The embedded portable PDB is read for
+  these builds only. A template the tree no longer holds or one outside the scan root gives no
+  rows, and `Diagnostics` counts each case by distinct document, along with templates changed
+  after their build. Reading `bin/` whole lists most source call sites a second time from IL and
+  nearly quadrupled `MethodCalls` on the `Dosai` tree. The IL ids of these builds name a nested type
+  through its declaring chain (`QualifiedTypeName`, iterative and bounded: inspected metadata is
+  untrusted and a NestedClass cycle must not recurse), so two components' `<>c` lambdas are two
+  nodes; other builds keep the unqualified name, which the data-flow IL pass and endpoint handler
+  ids share. The state-machine map uses the qualified name for every build, so two classes'
+  `<Run>d__0` are two types. Lines are the Razor
+  compiler's own (dotnet/razor#11432, #13056); never re-derive them from the template text.
 - An async or iterator method's IL is a stub with no sequence points; both PDB source maps
   (`DataFlowAssembly`, `AssemblyCallGraphAnalyzer`) resolve it to its `MoveNext`'s first point
   through `MethodDebugInformation.GetStateMachineKickoffMethod` (issue #84). Never fall back to

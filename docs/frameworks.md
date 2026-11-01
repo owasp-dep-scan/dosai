@@ -177,19 +177,22 @@ and `McpToolInjectionCandidate` (CWE-1427).
 - Calls inside `.razor` and `.cshtml` files come from the build: `methods` reads them from the
   assemblies under `bin/` that the tree builds from source and whose PDB (a PDB file, or an
   embedded one) names a template the tree still holds, so a tree that has not been built lists
-  none of them. Markup, `@code`, `@functions`, `@if`/`@foreach` bodies, attribute values and
-  component parameters all give rows, with `EvidenceKind` `AssemblyIlDirect` (or
-  `AssemblyIlGeneratedState` in an async `ExecuteAsync`), `Path` relative to the scan root, and
-  the caller named after the generated member (`BuildRenderTree`, `ExecuteAsync` or the `@code`
-  method). Calls in the compiler's generated documents are not listed, nor are a code-behind's
-  IL copies (a `.razor.cs` call is one source row). A call from a `.cs` file into a member a
-  template declares stays `SourceUnresolved`: the generated partial class is not source. A line
-  is the PDB's, so it is only as exact as the Razor compiler's line mapping: in builds from the
-  .NET SDKs 10.0.402 and 11.0.100-rc.2 a call in a plain HTML attribute value or a component
-  parameter takes the line of the code before it, and in builds from 8.0.426 so do most
-  expressions in markup, or one is not listed when no mapped code comes before it
-  (dotnet/razor#11432, dotnet/razor#13056). A build whose PDB names a template the tree no
-  longer holds is stale and adds nothing; `Diagnostics` counts its documents.
+  none of them. Markup, `@code`, `@functions` and `@if`/`@foreach` bodies give rows, with
+  `EvidenceKind` `AssemblyIlDirect` (or `AssemblyIlGeneratedState` in an async `ExecuteAsync`),
+  `Path` relative to the scan root, and the caller named after the generated member
+  (`BuildRenderTree`, `ExecuteAsync` or the `@code` method). A call into a `.cs` member lands on
+  that member's source node. The Razor compiler maps some template code to no line at all (an
+  event handler bound by `@onclick`, a plain HTML attribute value, a component parameter; see
+  dotnet/razor#11432 and dotnet/razor#13056): such a call is listed at the line of the mapped code
+  before it when it calls the application or a package, and not at all when it calls the
+  framework or ASP.NET Core, because the compiler's own generated plumbing (render-tree builder
+  calls, tag-helper scopes) looks the same. In builds from the .NET SDK 8.0.426 most markup
+  expressions are unmapped. Calls in the compiler's generated documents are not listed, nor are a
+  code-behind's IL copies (a `.razor.cs` call is one source row), and Debug and Release builds of
+  one template list each call once. A call from a `.cs` file into a member a template declares
+  stays `SourceUnresolved`: the generated partial class is not source. A template the tree no
+  longer holds (a stale build) or one outside the scanned directory adds nothing, and
+  `Diagnostics` counts each, along with templates changed after their build.
 
 ## CLI
 

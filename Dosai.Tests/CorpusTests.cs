@@ -583,7 +583,9 @@ public class CorpusTests
         }
 
         Assert.DoesNotContain(without.MethodCalls!, IsTemplateRow);
-        Assert.True(with.MethodCalls!.Count(IsTemplateRow) >= 1_000, $"expected template rows, got {with.MethodCalls!.Count(IsTemplateRow)}");
+        Assert.True(with.MethodCalls!.Count(IsTemplateRow) >= 300, $"expected template rows, got {with.MethodCalls!.Count(IsTemplateRow)}");
+        // The compiler's hidden plumbing (element and attribute writes, tag-helper scopes) gives no row.
+        Assert.DoesNotContain(with.MethodCalls!.Where(IsTemplateRow), call => call.CalledMethod is "OpenElement" or "CloseElement" or "get___tagHelperScopeManager");
         Assert.Equal(without.MethodCalls!.Select(Key), with.MethodCalls!.Where(call => !IsTemplateRow(call)).Select(Key));
         AssertEveryEdgeEndpointExists(with);
 

@@ -1,3 +1,4 @@
+using System.Reflection.Metadata;
 using System.Text;
 using Depscan;
 using Microsoft.CodeAnalysis;
@@ -154,14 +155,58 @@ public sealed class Issue98RazorCallSiteTests
     [Fact]
     public void Methods_ABuildWhosePdbNamesADeletedTemplate_IsReportedAsStaleAndAddsNothing()
     {
-        // Two stale documents: Counter.razor, deleted here, and the vendor assembly's Widget.razor.
+        // Counter.razor, deleted here, is stale; the vendor assembly's /_/src/Vendor/Shared/Widget.razor
+        // is not a build of this tree, so it lies outside. A byte-identical copy of the build in a
+        // second output names both again, and each still counts once.
         using var fixture = BuildFixture("{root}/", CounterTemplate);
         File.Delete(Path.Combine(fixture.Path, "src", "App", CounterTemplate));
+        var copy = Path.Combine(fixture.Path, "src", "App", "bin", "Debug", "net9.0");
+        Directory.CreateDirectory(copy);
+        foreach (var file in Directory.GetFiles(BinDirectory(fixture.Path)))
+        {
+            File.Copy(file, Path.Combine(copy, Path.GetFileName(file)));
+        }
 
         var slice = Depscan.Dosai.GetMethodsSlice(fixture.Path);
 
         Assert.DoesNotContain(slice.MethodCalls ?? [], IsIlCall);
-        Assert.Contains(slice.Diagnostics ?? [], diagnostic => diagnostic.Contains("not in the tree (a stale build", StringComparison.Ordinal) && diagnostic.StartsWith("2 .razor/.cshtml", StringComparison.Ordinal));
+        Assert.Contains(slice.Diagnostics ?? [], diagnostic => diagnostic.StartsWith("1 .razor/.cshtml file(s) named by the PDB of a build under bin/ lie outside the scanned directory", StringComparison.Ordinal));
+        Assert.True((slice.Diagnostics ?? []).Any(diagnostic => diagnostic.StartsWith("1 .razor/.cshtml file(s) named by the PDB of a build under bin/ no longer exist in the tree", StringComparison.Ordinal)), string.Join(Environment.NewLine, slice.Diagnostics ?? []));
+    }
+
+    [Fact]
+    public void Methods_ABuildOfTemplatesOutsideTheScannedDirectory_IsReportedApartFromAStaleBuild()
+    {
+        // A referenced project's build, copied into this output, names templates the scan does not
+        // hold; so does the vendor assembly (/_/src/Vendor/Shared/Widget.razor), not a build of this tree.
+        using var fixture = BuildFixture("{root}/", CounterTemplate);
+        var elsewhere = Path.Combine(Path.GetTempPath(), "dosai-issue98-elsewhere", "Widgets", "Badge.razor").Replace('\\', '/');
+        var generated = TemplateGeneratedSource.Replace("namespace App.Components", "namespace Widgets", StringComparison.Ordinal)
+            .Replace("{line}", "3", StringComparison.Ordinal).Replace("{document}", elsewhere, StringComparison.Ordinal);
+        EmitAssembly(BinDirectory(fixture.Path), "Widgets", [(generated, GeneratedDocument)], Path.Combine(BinDirectory(fixture.Path), "Vendor.dll"));
+
+        var slice = Depscan.Dosai.GetMethodsSlice(fixture.Path);
+
+        Assert.DoesNotContain(slice.MethodCalls ?? [], call => call.FileName == "Badge.razor");
+        Assert.True((slice.Diagnostics ?? []).Any(diagnostic => diagnostic.StartsWith("2 .razor/.cshtml file(s) named by the PDB of a build under bin/ lie outside the scanned directory", StringComparison.Ordinal)), string.Join(Environment.NewLine, slice.Diagnostics ?? []));
+        Assert.Single(slice.MethodCalls ?? [], call => call.FileName == "Counter.razor" && call.CalledMethod == "Serialize");
+    }
+
+    [Fact]
+    public void Methods_DebugAndReleaseBuildsOfOneTemplate_ListEachCallOnce()
+    {
+        // Two builds of an unchanged template place the call on the same line: one row, not two.
+        using var fixture = BuildFixture("{root}/", CounterTemplate);
+        var release = Path.Combine(fixture.Path, "src", "App", "bin", "Release", "net10.0");
+        Directory.CreateDirectory(release);
+        var document = fixture.Path.Replace('\\', '/') + "/src/App/" + CounterTemplate.Replace('\\', '/');
+        EmitAssembly(release, "App", [(TemplateGeneratedSource.Replace("{line}", TemplateSerializeLine.ToString(System.Globalization.CultureInfo.InvariantCulture), StringComparison.Ordinal).Replace("{document}", document, StringComparison.Ordinal).Replace("return json;", "return json + \"!\";", StringComparison.Ordinal), GeneratedDocument)], Path.Combine(BinDirectory(fixture.Path), "Vendor.dll"));
+
+        var slice = Depscan.Dosai.GetMethodsSlice(fixture.Path);
+
+        var rows = (slice.MethodCalls ?? []).Where(call => call.CalledMethod == "Serialize" && call.FileName == "Counter.razor").ToList();
+        Assert.True(rows.Count == 1, string.Join(Environment.NewLine, rows.Select(call => $"{call.Path}:{call.LineNumber}:{call.ColumnNumber} {call.SourceId} -> {call.TargetId} {call.EvidenceKind}")));
+        Assert.Single(slice.CallGraph!.Edges, edge => edge.CalledMethodName == "Serialize" && edge.CallLocation.FileName == "Counter.razor");
     }
 
     [Fact]
@@ -344,6 +389,157 @@ public sealed class Issue98RazorCallSiteTests
         static string Strip(string json) => System.Text.RegularExpressions.Regex.Replace(json, "\"GeneratedAt\":\"[^\"]*\"", "\"GeneratedAt\":\"\"");
     }
 
+    // A hidden region after a mapped line: the Razor compiler hides its own plumbing there, and
+    // also some template code (an @onclick handler, an attribute value, a component parameter).
+    private const string HiddenRegionGeneratedSource = """
+        #pragma warning disable 1591
+        namespace App.Components
+        {
+            #line hidden
+            public partial class Template
+            {
+                private int currentCount;
+
+                public string Render()
+                {
+        #nullable restore
+        #line {line} "{document}"
+                    var json = Vendor.Json.Serialize(currentCount);
+        #line default
+        #line hidden
+        #nullable disable
+                    System.GC.KeepAlive(json);
+                    __Write(json);
+                    Handler(Vendor.Json.Serialize(currentCount + 1));
+                    return json;
+                }
+
+                private void __Write(string value) => System.GC.KeepAlive(value);
+
+                private void Handler(string value) => System.GC.KeepAlive(value);
+            }
+        }
+        """;
+
+    [Fact]
+    public void Methods_AHiddenCallAfterAMappedLine_IsListedOnlyWhenItCallsTheApplicationOrAPackage()
+    {
+        using var fixture = BuildFixture("{root}/", CounterTemplate, generatedSource: HiddenRegionGeneratedSource);
+        var slice = Depscan.Dosai.GetMethodsSlice(fixture.Path);
+
+        var rows = (slice.MethodCalls ?? []).Where(call => call.FileName == "Counter.razor").ToList();
+        // The package call and the application's handler stay, at the mapped line before them.
+        Assert.Equal(2, rows.Count(call => call.CalledMethod == "Serialize" && call.LineNumber == TemplateSerializeLine));
+        Assert.Single(rows, call => call.CalledMethod == "Handler" && call.LineNumber == TemplateSerializeLine);
+        // The framework call and the generated __ member are the compiler's plumbing.
+        Assert.DoesNotContain(rows, call => call.CalledMethod is "KeepAlive" or "__Write");
+        AssertNoDanglingEdges(slice);
+    }
+
+    [Fact]
+    public void Methods_ACallFromATemplateIntoACsFile_LandsOnTheSourceNode()
+    {
+        const string helpers = """
+            namespace App;
+
+            public static class Helpers
+            {
+                public static string Describe(int value, string? label) => label + value;
+            }
+            """;
+        var generated = TemplateGeneratedSource.Replace("var json = Vendor.Json.Serialize(currentCount);", "var json = App.Helpers.Describe(currentCount, null);", StringComparison.Ordinal);
+        using var fixture = BuildFixture("{root}/", CounterTemplate, generatedSource: generated, appSource: ("Helpers.cs", helpers));
+        var slice = Depscan.Dosai.GetMethodsSlice(fixture.Path);
+
+        var call = Assert.Single(slice.MethodCalls ?? [], call => call.CalledMethod == "Describe" && call.FileName == "Counter.razor");
+        var sourceNode = Assert.Single(slice.CallGraph!.Nodes, node => node.Name == "Describe");
+        Assert.Equal(sourceNode.Id, call.TargetId);
+        Assert.Equal("Helpers.cs", sourceNode.FileName);
+        Assert.Contains(slice.CallGraph.Edges, edge => edge.TargetId == sourceNode.Id && edge.CallLocation.FileName == "Counter.razor");
+        AssertNoDanglingEdges(slice);
+    }
+
+    [Fact]
+    public void Methods_LambdasOfTwoTemplates_HaveTheirOwnCaller()
+    {
+        // Each class's lambdas live in its own nested <>c; without the declaring type both were one id.
+        const string twoTemplates = """
+            #pragma warning disable 1591
+            namespace App.Components
+            {
+                public static class Runner
+                {
+                    public static string Run(System.Func<string> body) => body();
+                }
+
+                public partial class First
+                {
+                    public string Render() => Runner.Run(() =>
+            #line 10 "{root}/src/App/Components/Pages/Counter.razor"
+                        Vendor.Json.Serialize(1)
+            #line default
+                    );
+                }
+
+                public partial class Second
+                {
+                    public string Render() => Runner.Run(() =>
+            #line 11 "{root}/src/App/Components/Pages/Counter.razor"
+                        Vendor.Json.Serialize(2)
+            #line default
+                    );
+                }
+            }
+            """;
+        using var fixture = BuildFixture("{root}/", CounterTemplate);
+        EmitAssembly(BinDirectory(fixture.Path), "App", [(ProgramSource, fixture.Path.Replace('\\', '/') + "/src/App/Program.cs"), (twoTemplates.Replace("{root}", fixture.Path.Replace('\\', '/'), StringComparison.Ordinal), GeneratedDocument)], Path.Combine(BinDirectory(fixture.Path), "Vendor.dll"));
+
+        var slice = Depscan.Dosai.GetMethodsSlice(fixture.Path);
+
+        var callers = (slice.MethodCalls ?? []).Where(call => call.CalledMethod == "Serialize" && call.FileName == "Counter.razor").Select(call => call.SourceId).ToList();
+        Assert.Equal(2, callers.Count);
+        Assert.Contains(callers, id => id!.StartsWith("App.Components.First.<>c.", StringComparison.Ordinal));
+        Assert.Contains(callers, id => id!.StartsWith("App.Components.Second.<>c.", StringComparison.Ordinal));
+        AssertNoDanglingEdges(slice);
+    }
+
+    [Fact]
+    public void Methods_AnAssemblyWhoseNestedTypesFormACycle_DoesNotCrash()
+    {
+        // Two types each nested in the other: malformed metadata an inspected file can carry. The
+        // declaring-chain walk used to recurse until the process overflowed its stack.
+        using var fixture = new TempDir();
+        var path = Path.Combine(fixture.Path, "Cycle.dll");
+        WriteNestingCycleAssembly(path);
+
+        var slice = Depscan.Dosai.GetMethodsSlice(path);
+
+        Assert.NotNull(slice);
+    }
+
+    private static void WriteNestingCycleAssembly(string path)
+    {
+        var metadata = new System.Reflection.Metadata.Ecma335.MetadataBuilder();
+        var name = metadata.GetOrAddString("Cycle");
+        metadata.AddModule(0, name, metadata.GetOrAddGuid(Guid.NewGuid()), default, default);
+        metadata.AddAssembly(name, new Version(1, 0, 0, 0), default, default, default, System.Reflection.AssemblyHashAlgorithm.Sha1);
+        var corlib = metadata.AddAssemblyReference(metadata.GetOrAddString("System.Runtime"), new Version(8, 0, 0, 0), default, default, default, default);
+        var objectType = metadata.AddTypeReference(corlib, metadata.GetOrAddString("System"), metadata.GetOrAddString("Object"));
+        var fields = System.Reflection.Metadata.Ecma335.MetadataTokens.FieldDefinitionHandle(1);
+        var methods = System.Reflection.Metadata.Ecma335.MetadataTokens.MethodDefinitionHandle(1);
+        metadata.AddTypeDefinition(default, default, metadata.GetOrAddString("<Module>"), default, fields, methods);
+        var first = metadata.AddTypeDefinition(System.Reflection.TypeAttributes.NestedPublic | System.Reflection.TypeAttributes.Class, default, metadata.GetOrAddString("A"), objectType, fields, methods);
+        var second = metadata.AddTypeDefinition(System.Reflection.TypeAttributes.NestedPublic | System.Reflection.TypeAttributes.Class, default, metadata.GetOrAddString("B"), objectType, fields, methods);
+        metadata.AddNestedType(first, second);
+        metadata.AddNestedType(second, first);
+        var image = new BlobBuilder();
+        new System.Reflection.PortableExecutable.ManagedPEBuilder(
+            new System.Reflection.PortableExecutable.PEHeaderBuilder(imageCharacteristics: System.Reflection.PortableExecutable.Characteristics.Dll),
+            new System.Reflection.Metadata.Ecma335.MetadataRootBuilder(metadata),
+            new BlobBuilder()).Serialize(image);
+        File.WriteAllBytes(path, image.ToArray());
+    }
+
     [Theory]
     [InlineData("Components/Pages/Counter.razor", true)]
     [InlineData("Pages/Privacy.cshtml", true)]
@@ -367,7 +563,7 @@ public sealed class Issue98RazorCallSiteTests
     private static string BinDirectory(string root) => Path.Combine(root, "src", "App", "bin", "Debug", "net10.0");
 
     // documentRoot "{root}/" names the PDB's documents by their path in the tree, "/_/" as a deterministic build does.
-    private static TempDir BuildFixture(string documentRoot, string template, bool mapTemplate = true, string? outputUnder = null, DebugInformationFormat pdb = DebugInformationFormat.PortablePdb, bool codeBehind = false)
+    private static TempDir BuildFixture(string documentRoot, string template, bool mapTemplate = true, string? outputUnder = null, DebugInformationFormat pdb = DebugInformationFormat.PortablePdb, bool codeBehind = false, string? generatedSource = null, (string File, string Source)? appSource = null)
     {
         var fixture = new TempDir();
         var project = Path.Combine(fixture.Path, "src", "App");
@@ -380,7 +576,7 @@ public sealed class Issue98RazorCallSiteTests
         File.WriteAllText(templateFile, "<p>@Vendor.Json.Serialize(currentCount)</p>");
 
         var documents = documentRoot.Replace("{root}", fixture.Path.Replace('\\', '/'), StringComparison.Ordinal) + "src/App/";
-        var generated = TemplateGeneratedSource
+        var generated = (generatedSource ?? TemplateGeneratedSource)
             .Replace("{line}", TemplateSerializeLine.ToString(System.Globalization.CultureInfo.InvariantCulture), StringComparison.Ordinal)
             .Replace("{document}", documents + template.Replace('\\', '/'), StringComparison.Ordinal);
         if (!mapTemplate)
@@ -393,6 +589,12 @@ public sealed class Issue98RazorCallSiteTests
             (ProgramSource, documents + "Program.cs"),
             (generated, GeneratedDocument)
         };
+        if (appSource is { } extra)
+        {
+            File.WriteAllText(Path.Combine(project, extra.File), extra.Source);
+            sources.Add((extra.Source, documents + extra.File));
+        }
+
         if (codeBehind)
         {
             // The same call, in the template's code-behind file, which the tree holds as source.
