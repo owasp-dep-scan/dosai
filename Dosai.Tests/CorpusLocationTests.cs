@@ -25,9 +25,22 @@ public class CorpusLocationTests
     [Fact]
     public void Resolve_ExpandsOnlyALeadingTilde()
     {
-        Assert.Equal(Path.Combine(Home, "src", "corpus"), CorpusLocation.Resolve("~/src/corpus", Home));
+        Assert.Equal(Path.Join(Home, "src/corpus"), CorpusLocation.Resolve("~/src/corpus", Home));
         Assert.Equal(Home, CorpusLocation.Resolve("~", Home));
         Assert.Equal("/data/~/corpus", CorpusLocation.Resolve("/data/~/corpus", Home));
-        Assert.Equal("~other/corpus", CorpusLocation.Resolve("~other/corpus", Home));
+        Assert.Throws<InvalidOperationException>(() => CorpusLocation.Resolve("~other/corpus", Home));
+    }
+
+    [Fact]
+    public void Resolve_TrimsTheValueAndDropsSeparatorsAfterTheTilde()
+    {
+        Assert.Equal(Path.Join(Home, "corpus"), CorpusLocation.Resolve("  ~//corpus  ", Home));
+    }
+
+    [Fact]
+    public void Resolve_RejectsARelativeDirectory()
+    {
+        var error = Assert.Throws<InvalidOperationException>(() => CorpusLocation.Resolve("corpus", Home));
+        Assert.Contains(CorpusLocation.EnvironmentVariable, error.Message, StringComparison.Ordinal);
     }
 }

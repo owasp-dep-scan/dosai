@@ -3,12 +3,27 @@
 # Run once before executing CorpusTests; see README.md for what each app covers.
 set -euo pipefail
 
-# DOSAI_CORPUS_DIR picks the corpus directory (a leading ~ is expanded, as CorpusLocation does
-# for the tests); unset or empty means ~/sandbox/dosai-corpus.
-CORPUS_ROOT="${DOSAI_CORPUS_DIR:-${HOME}/sandbox/dosai-corpus}"
+# DOSAI_CORPUS_DIR picks the corpus directory; unset, empty or blank means ~/sandbox/dosai-corpus.
+# Surrounding white space is ignored, a leading ~ is expanded, and the result must be absolute.
+# CorpusLocation applies the same rule for the tests.
+CORPUS_ROOT="${DOSAI_CORPUS_DIR-}"
+CORPUS_ROOT="${CORPUS_ROOT#"${CORPUS_ROOT%%[![:space:]]*}"}"
+CORPUS_ROOT="${CORPUS_ROOT%"${CORPUS_ROOT##*[![:space:]]}"}"
 case "${CORPUS_ROOT}" in
+    "") CORPUS_ROOT="${HOME}/sandbox/dosai-corpus" ;;
     "~") CORPUS_ROOT="${HOME}" ;;
-    "~/"*) CORPUS_ROOT="${HOME}/${CORPUS_ROOT#\~/}" ;;
+    "~/"*)
+        rest="${CORPUS_ROOT#\~/}"
+        while [ "${rest#/}" != "${rest}" ]; do rest="${rest#/}"; done
+        CORPUS_ROOT="${HOME}/${rest}"
+        ;;
+esac
+case "${CORPUS_ROOT}" in
+    /*) ;;
+    *)
+        echo "DOSAI_CORPUS_DIR must be an absolute path, not '${DOSAI_CORPUS_DIR}'." >&2
+        exit 1
+        ;;
 esac
 mkdir -p "${CORPUS_ROOT}"
 
