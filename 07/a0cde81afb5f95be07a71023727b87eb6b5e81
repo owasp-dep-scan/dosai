@@ -1,0 +1,25 @@
+Dosai.Tests/Corpus/README.md
+  s_9814f82717dc15::t_c90b1852a319c1 5-7
+Dosai.Tests/Corpus/setup.sh
+  s_9814f82717dc15::t_cc764d3a837f7f 6-11,13,15-26
+Dosai.Tests/CorpusLocation.cs
+  s_9814f82717dc15::t_38433f12fdd385 5-11,31,33,35,38-40
+Dosai.Tests/CorpusLocationTests.cs
+  s_9814f82717dc15::t_5ecbe7207efaf9 28,31-44
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "07a0cde81afb5f95be07a71023727b87eb6b5e81",
+  "prompts": {},
+  "sessions": {
+    "s_9814f82717dc15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a9077832-8cfa-4f24-bcfd-c2361a4b84db",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
