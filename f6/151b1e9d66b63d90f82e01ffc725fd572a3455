@@ -1,0 +1,47 @@
+docs/compiler-engineering.md
+  s_7e41349f9a9c06::t_7afb5355cde41e 90-102
+AGENTS.md
+  s_7e41349f9a9c06::t_697c3a2ff3b888 352-359
+Dosai/FrameworkReferences.cs
+  s_7e41349f9a9c06::t_a4e7a74e8c3781 52-54
+Dosai/CompilationReferenceSet.cs
+  s_7e41349f9a9c06::t_88ac563ba40999 68-69
+  s_7e41349f9a9c06::t_a028370e9373ff 34-45,50
+  s_7e41349f9a9c06::t_391dbf791c58fa 81,85
+  s_7e41349f9a9c06::t_7cd1dd7d107b98 181-191,224-240
+  s_7e41349f9a9c06::t_97ea5a6705b818 241,294-383
+  s_7e41349f9a9c06::t_9c2377ad5a140d 137-141
+  s_0dbbcb5914c2c5::t_0294bc66dc3470 242
+Dosai.Tests/Issue113RuntimeCorlibTests.cs
+  s_7e41349f9a9c06::t_e70eefb7c21512 243
+  s_7e41349f9a9c06::t_f25fd60e1e6abf 262
+  s_7e41349f9a9c06::t_fe69c69ec39207 270-276
+  s_7e41349f9a9c06::t_5063501b63404e 74-79
+  s_7e41349f9a9c06::t_7bd46268dc4595 46,48
+  s_7e41349f9a9c06::t_6af5b2a7a4df10 81,89-113
+  s_7e41349f9a9c06::t_ed954a5d80f162 1-45,47,49-73,80,82-88,114-242,244-261,263-269,277-397
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f6151b1e9d66b63d90f82e01ffc725fd572a3455",
+  "prompts": {},
+  "sessions": {
+    "s_0dbbcb5914c2c5": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "sess_dd7541fb-2df2-4da7-a16f-14967800872a",
+        "model": "GLM-5.3"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    },
+    "s_7e41349f9a9c06": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "sess_0a4d8063-82eb-43ca-b1c3-b97350c02687",
+        "model": "GLM-5.3-Flash"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
