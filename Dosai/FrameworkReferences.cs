@@ -49,7 +49,9 @@ internal static class FrameworkReferences
     internal const string TreePacksSourcePrefix = "tree-reference-packs";
 
     private const string FrameworkNamesResource = "Dosai.framework-assemblies.txt";
-    private const string RuntimeImplementationPrefix = "System.Private.";
+
+    /// <summary>The runtime's implementation assemblies (<c>System.Private.CoreLib</c> and friends), which the reference packs expose only through facades.</summary>
+    internal const string RuntimeImplementationPrefix = "System.Private.";
 
     private static readonly Lazy<FrameworkReferenceSet> Resolved = new(Resolve, LazyThreadSafetyMode.ExecutionAndPublication);
     private static readonly AsyncLocal<FrameworkReferenceSet?> Override = new();
