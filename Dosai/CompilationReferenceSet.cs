@@ -31,10 +31,19 @@ namespace Depscan;
 ///         becomes a reference. Two build-output files of one version with other content are two
 ///         assemblies, not two copies of one, and that choice is a diagnostic.
 ///     </para>
+///     <para>
+///         The runtime's implementation assemblies in the tree's build or restore output never
+///         become references (issue #113): the SDK compiles against reference packs, so the
+///         corlib always comes from the framework references. A built Blazor WebAssembly client
+///         or a self-contained publish carries <c>System.Private.CoreLib</c>, and beside a base
+///         reference pack (which has none; its <c>System.Runtime</c> declares the primitive
+///         types) that copy made Roslyn report CS0518 for every predefined type.
+///     </para>
 /// </remarks>
 internal sealed class CompilationReferenceSet
 {
     private const int MaxNamesInDiagnostic = 10;
+    private const string CoreLibReferenceName = "System.Private.CoreLib";
 
     /// <summary>Claim rank on equal versions: lower claims first and keeps the name.</summary>
     private enum Origin
@@ -52,6 +61,7 @@ internal sealed class CompilationReferenceSet
 
         public Version? Version { get; set; }
         public bool VersionRead { get; set; }
+        public bool? ReferencesCoreLib { get; set; }
     }
 
     // Every kept reference in claim order: Roslyn enumerates a namespace's members in reference
@@ -63,9 +73,11 @@ internal sealed class CompilationReferenceSet
     private readonly SortedDictionary<string, string> _replacedFramework = new(StringComparer.OrdinalIgnoreCase);
     private readonly SortedDictionary<string, string> _droppedOlder = new(StringComparer.OrdinalIgnoreCase);
     private readonly SortedDictionary<string, string> _equalVersionTies = new(StringComparer.OrdinalIgnoreCase);
+    private readonly SortedDictionary<string, string> _runtimeImplementations = new(StringComparer.OrdinalIgnoreCase);
     private int _droppedOlderCount;
     private int _equalVersionTieCount;
     private int _droppedQuietly;
+    private int _runtimeImplementationCount;
 
     /// <param name="framework">The framework references, in their claim order (<see cref="FrameworkReferences.ForTree" />).</param>
     public CompilationReferenceSet(IEnumerable<(string Key, PortableExecutableReference Reference)> framework)
@@ -117,6 +129,11 @@ internal sealed class CompilationReferenceSet
     public List<string> Diagnostics()
     {
         var diagnostics = new List<string>();
+        if (_runtimeImplementationCount > 0)
+        {
+            diagnostics.Add(string.Create(CultureInfo.InvariantCulture, $"{_runtimeImplementationCount} runtime implementation assembly file(s) from the tree's build or restore output were left out of the source compilation ({Summarize(_runtimeImplementations, _runtimeImplementations.Count)}): the app runs on them but compiles against the reference packs, and the corlib comes from the framework references."));
+        }
+
         if (_replacedFramework.Count > 0)
         {
             diagnostics.Add(string.Create(CultureInfo.InvariantCulture, $"{_replacedFramework.Count} framework reference(s) were replaced by a higher-version copy from the tree's build or restore output ({Summarize(_replacedFramework, _replacedFramework.Count)}): one reference per assembly name, the highest version wins, as the SDK's conflict resolution compiles the project."));
@@ -153,6 +170,14 @@ internal sealed class CompilationReferenceSet
         var name = SimpleName(path);
         if (name.Length == 0)
         {
+            return;
+        }
+
+        // Issue #113: only the framework set may supply the runtime's own System.Private.*
+        // assemblies (a second corlib beside a reference pack breaks every predefined type).
+        if (name.StartsWith(FrameworkReferences.RuntimeImplementationPrefix, StringComparison.Ordinal))
+        {
+            NoteRuntimeImplementation(name, ReadVersion(path));
             return;
         }
 
@@ -193,6 +218,17 @@ internal sealed class CompilationReferenceSet
             return;
         }
 
+        // A runtime implementation file (it names System.Private.CoreLib, where its facades
+        // forward) must not replace a reference that does not: a net10.0 client's System.Runtime
+        // over a 9.0 pack's would move the forwarded types to a corlib the compilation lacks.
+        // Package copies reference System.Runtime and keep replacing (issue #81).
+        var winnerReferencesCoreLib = ReferencesCoreLib(winner);
+        if (winnerReferencesCoreLib && !(existing.ReferencesCoreLib ??= ReferencesCoreLib(existing.Reference)))
+        {
+            NoteRuntimeImplementation(name, candidateVersion);
+            return;
+        }
+
         var tie = NoteEqualVersionTie(name, origin, existing, comparison, kept: path, dropped: existing.Key, candidateVersion);
 
         if (existing.Origin == Origin.Framework && comparison > 0)
@@ -215,6 +251,7 @@ internal sealed class CompilationReferenceSet
         existing.Origin = origin;
         existing.Version = candidateVersion;
         existing.VersionRead = true;
+        existing.ReferencesCoreLib = winnerReferencesCoreLib;
     }
 
     /// <summary>
@@ -237,6 +274,44 @@ internal sealed class CompilationReferenceSet
         _equalVersionTieCount++;
         _equalVersionTies.TryAdd(name, $"{name} {Display(version)}: kept {kept}, left out {dropped}");
         return true;
+    }
+
+    /// <summary>Records a skipped runtime implementation file: the count is per file, the examples per name.</summary>
+    private void NoteRuntimeImplementation(string name, Version? version)
+    {
+        _runtimeImplementationCount++;
+        _runtimeImplementations.TryAdd(name, $"{name} {Display(version)}");
+    }
+
+    /// <summary>
+    ///     Whether the assembly names <c>System.Private.CoreLib</c> among its references, as the
+    ///     runtime's implementation files do and compiled packages and applications do not. An
+    ///     unreadable assembly counts as not naming it, so the version rules decide for it.
+    /// </summary>
+    private static bool ReferencesCoreLib(PortableExecutableReference reference)
+    {
+        try
+        {
+            if (reference.GetMetadata() is not AssemblyMetadata assembly || assembly.GetModules() is not { Length: > 0 } modules)
+            {
+                return false;
+            }
+
+            var reader = modules[0].GetMetadataReader();
+            foreach (var handle in reader.AssemblyReferences)
+            {
+                if (reader.StringComparer.Equals(reader.GetAssemblyReference(handle).Name, CoreLibReferenceName))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or BadImageFormatException or InvalidOperationException or NotSupportedException)
+        {
+            return false;
+        }
     }
 
     /// <summary>Whether the assembly carries <c>ReferenceAssemblyAttribute</c> (metadata only, no implementation); an unreadable file counts as one, so it never adds a note.</summary>

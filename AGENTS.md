@@ -349,7 +349,10 @@ dotnet test ./Dosai.sln
   framework set through `CompilationReferenceSet` (every source compilation does): still one
   reference per simple name, the highest assembly version winning, equal versions keeping the
   earlier claim (framework, build output, restore output, then ordinal path), so a package's
-  newer copy of a framework assembly in `bin/` never sits beside the pack's (issue #81). One set
+  newer copy of a framework assembly in `bin/` never sits beside the pack's (issue #81). The
+  runtime's own files in a Blazor WebAssembly or self-contained output never join (issue #113):
+  a `System.Private.*` name is skipped, and a copy that references `System.Private.CoreLib`
+  never replaces a reference that does not (a second corlib beside a pack is CS0518). One set
   serves the whole tree, so name the projects whose own closure has another version than the
   bound copy (`PackageUrlResolver.UnionBindingDiagnostic` over `TreeBindings`), and report
   equal-version build-output files of other content: both are choices, not copies. Within the

@@ -87,6 +87,16 @@ reference a newer tree copy replaced, and an older build-output copy that was le
 slice diagnostic. The methods, data-flow, crypto and standalone framework compilations all build
 their references this way.
 
+The runtime's own implementation assemblies never reach the compilation from the tree (issue
+#113). A built Blazor WebAssembly client or a self-contained publish carries
+`System.Private.CoreLib` and its facades, and beside a base reference pack, which has no core
+library of its own, that copy made Roslyn report CS0518 for every predefined type. Build and
+restore output named `System.Private.*` is skipped, and a copy whose metadata references
+`System.Private.CoreLib` (the runtime's facades forward there; compiled packages reference
+`System.Runtime`) never replaces a reference that does not. The SDK compiles against reference
+packs, so the corlib always comes from the framework references; the skipped files are counted
+in a slice diagnostic.
+
 `GlobalUsings` resolves the synthetic implicit-usings tree per scan root: the SDK lists verified
 from the SDKs' own .props files (base C#, Web's nine, Worker's four, Windows Forms' two; the
 11 SDKs add `System.Net.Http.Json` for .NET 11+ targets, and .NET Framework targets drop
