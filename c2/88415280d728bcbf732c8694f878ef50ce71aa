@@ -1,0 +1,25 @@
+docs/commands.md
+  s_9814f82717dc15::t_71758f36454444 371,376-377
+docs/migration-5.1.0.md
+  s_9814f82717dc15::t_c30ea7a05619f1 578-579
+Dosai.Tests/Issue106ReportReuseTests.cs
+  s_9814f82717dc15::t_bacb348cc3b1a7 153
+Dosai/ReportReuse.cs
+  s_9814f82717dc15::t_2f7b8f0b97b354 15,179-186
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c288415280d728bcbf732c8694f878ef50ce71aa",
+  "prompts": {},
+  "sessions": {
+    "s_9814f82717dc15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a9077832-8cfa-4f24-bcfd-c2361a4b84db",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}

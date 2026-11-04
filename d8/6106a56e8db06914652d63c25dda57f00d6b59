@@ -1,0 +1,23 @@
+Dosai.Tests/Issue110FileUsingsTests.cs
+  s_9814f82717dc15::t_da7fa3950a13d7 88-107,191-194,197,229,232-237
+Dosai/Dosai.cs
+  s_9814f82717dc15::t_a74e061d663375 2918-2922
+Dosai/GlobalUsings.cs
+  s_9814f82717dc15::t_9cc2e3360a2777 2,4,6-7,106-109,116,127-131,146,152,170,200-202,210,218-222,225-229,231-232,609,626,628-688,691,948-949,952-953,957,959,963
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d86106a56e8db06914652d63c25dda57f00d6b59",
+  "prompts": {},
+  "sessions": {
+    "s_9814f82717dc15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a9077832-8cfa-4f24-bcfd-c2361a4b84db",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}

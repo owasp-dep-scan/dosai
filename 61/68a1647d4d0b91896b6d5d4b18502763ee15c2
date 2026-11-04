@@ -1,0 +1,39 @@
+Dosai.Tests/Issue110FileUsingsTests.cs
+  s_33e216b52f7264::t_aae159fa94ce39 83-84,94,99-100,115,117,127
+  s_33e216b52f7264::t_9fad715cf94917 1-82,85-93,95-98,101-114,116,118-126,128-244
+docs/compiler-engineering.md
+  s_33e216b52f7264::t_6b660714444c29 95-132
+Dosai.Tests/Corpus/README.md
+  s_33e216b52f7264::t_67941b37c2ade4 30,52-53
+Dosai/GlobalUsings.cs
+  s_33e216b52f7264::t_cbd732f3223bde 660
+  s_33e216b52f7264::t_b3cd57b6035719 36-42
+  s_33e216b52f7264::t_466ac39076215b 151-153,171-173,181-183,194-216,247,257-271,417,625-659,661-663,876-967
+Dosai.Tests/CorpusTests.cs
+  s_33e216b52f7264::t_b2fb2fb8dddd98 454
+  s_33e216b52f7264::t_67941b37c2ade4 436-453,455-464
+  s_33e216b52f7264::t_2d84fe984c605a 465
+Dosai/CSharpSourceParser.cs
+  s_33e216b52f7264::t_b3cd57b6035719 534-536
+  s_33e216b52f7264::t_466ac39076215b 422-433
+docs/migration-5.1.0.md
+  s_33e216b52f7264::t_6b660714444c29 550-570
+Dosai.Tests/Corpus/setup.sh
+  s_33e216b52f7264::t_67941b37c2ade4 217-244
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6168a1647d4d0b91896b6d5d4b18502763ee15c2",
+  "prompts": {},
+  "sessions": {
+    "s_33e216b52f7264": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7b5bd5ac-bfb2-42b7-9515-4155ee9ab246",
+        "model": "claude-sonnet-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}

@@ -1,0 +1,59 @@
+docs/commands.md
+  s_33e216b52f7264::t_f02fba500c4a6b 192
+Dosai/DataFlowAssembly.cs
+  s_33e216b52f7264::t_5f13d170518bdb 72,78,81-85,211-218,254,257-266,272,277-391,446,577,579,582,3074
+  s_33e216b52f7264::t_06c75f8022e64e 255-256,267-271
+  s_33e216b52f7264::t_ef6f727b67cee6 273-276
+  s_33e216b52f7264::t_5ca3b3c31239b3 3025
+  s_33e216b52f7264::t_cf174e40724239 3075
+Dosai/CommandLine.cs
+  s_33e216b52f7264::t_ae7f542c1a3f5c 65-70,239,272,386,436,484
+  s_33e216b52f7264::t_06c75f8022e64e 257,644-658
+Dosai.Tests/Corpus/README.md
+  s_33e216b52f7264::t_fd673b19bef785 28-29,46-47
+Dosai/Dosai.cs
+  s_33e216b52f7264::t_5ca3b3c31239b3 1812-1818,1821
+Dosai.Tests/Corpus/setup.sh
+  s_33e216b52f7264::t_fd673b19bef785 121-126,130-146,149-176
+  s_33e216b52f7264::t_408abacc1b12d7 127-129,147-148
+  s_33e216b52f7264::t_2406b18c040cf0 42
+docs/migration-5.1.0.md
+  s_33e216b52f7264::t_f02fba500c4a6b 505-530
+Dosai/AssemblyScope.cs
+  s_33e216b52f7264::t_f88a0e87037938 79-90,98-100,146
+  s_33e216b52f7264::t_5ca3b3c31239b3 10-40,48,51-77,94-97,101-102,141
+  s_33e216b52f7264::t_5c50c27df74035 78
+Dosai.Tests/CorpusTests.cs
+  s_33e216b52f7264::t_fd673b19bef785 335-428
+Dosai.Tests/EmitFixture.cs
+  s_33e216b52f7264::t_9ba33a66ab15b9 1-33
+Dosai/DependencyAssemblies.cs
+  s_33e216b52f7264::t_67ec552e84a437 32-33,37-38,42-47,77,81,83-90,92,95,97,102,108,112,115,132,136,141,144,277-283
+  s_33e216b52f7264::t_b17663e49fb726 284
+docs/ARCHITECTURE.md
+  s_33e216b52f7264::t_fe1d119f634d0e 111
+docs/compiler-engineering.md
+  s_33e216b52f7264::t_fe1d119f634d0e 336
+Dosai.Tests/Issue107AssemblyScopeTests.cs
+  s_33e216b52f7264::t_4e8e94fe2fd843 90,93
+  s_33e216b52f7264::t_9ba33a66ab15b9 1-41,48-89,94-96,123-221
+  s_33e216b52f7264::t_063c874bb814fe 42-47,91-92,97-122
+Dosai/DependencyFlowScope.cs
+  s_33e216b52f7264::t_ae7f542c1a3f5c 1-65
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "10da48b7a83d694b5f1bd59ca1dfa8dc272bd80f",
+  "prompts": {},
+  "sessions": {
+    "s_33e216b52f7264": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7b5bd5ac-bfb2-42b7-9515-4155ee9ab246",
+        "model": "claude-sonnet-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}

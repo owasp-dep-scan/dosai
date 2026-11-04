@@ -1,0 +1,25 @@
+Dosai.Tests/Issue106ReportReuseTests.cs
+  s_9814f82717dc15::t_27e169a573516f 153-158,164-180,202-269
+Dosai/DataFlow.cs
+  s_9814f82717dc15::t_75daa90e4865a3 214-218,701-704,1091-1093,1095-1096,1098,1100,1103-1111,1114-1126,1133,1138-1141,1143-1148
+Dosai/ReportReuse.cs
+  s_9814f82717dc15::t_bbdbeea7e50d26 86-88,90-98,108-115,117-120,123-125,127-128,131,133-135,137-166,170-179,187,235-245,247,250-252,254,257,259
+Dosai/Transparency.cs
+  s_9814f82717dc15::t_db30d18a3612cc 12-28,31-35,232-244
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ee158bccb65822527c57901eeec956af01f15d4a",
+  "prompts": {},
+  "sessions": {
+    "s_9814f82717dc15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a9077832-8cfa-4f24-bcfd-c2361a4b84db",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
