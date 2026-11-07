@@ -49,7 +49,19 @@ dotnet test ./Dosai.sln
   resolves against its nearest project (`.csproj` for C#, `.fsproj` for F#) at or above it
   within the scan root - that project's own target, else the nearest `Directory.Build.props`,
   else `Directory.Build.targets` - and against the scan root's detection when it sits outside
-  every project or its project's target is an MSBuild property reference. Each
+  every project or its project's target is an MSBuild property reference. MSBuild files are
+  read through `MsBuildImports` (issue #117): `<Import Project="...">` is followed wherever a
+  property or item is read, so a `TargetFramework` set only in an imported file is seen.
+  Relative import paths resolve against the importing file's directory (both separators on
+  every OS), the reserved `MSBuildThisFile*`/`MSBuildProjectDirectory` properties and the two
+  directory-chaining property functions (`GetPathOfFileAbove`, `GetDirectoryNameOfFileAbove`)
+  are expanded, and imports are followed only inside the scan root and outside build-output
+  directories - anything else, and any unresolved property or wildcard, is skipped with a
+  diagnostic (SDK, MSBuild-toolset and build-output imports are skipped silently). Import
+  diagnostics come from `MsBuildImports.DiagnosticsFor`, a pass over every project and
+  Directory.Build file of the tree, never from a list the readers fill as they run: readers
+  expand on the worker team, and the report must not depend on which ran first. An `Exists(...)` condition is evaluated; any other condition is followed but
+  marks what it brings as conditioned. Each
   detected TFM contributes what its own build defines (`net8.0` -> `NET`, `NET8_0`, the
   `NET5_0_OR_GREATER` chain, the `NETCOREAPP` family; `netstandard2.0` and `net472` -> their
   families), a multi-target project resolves to one representative target (the most modern it
@@ -377,7 +389,15 @@ dotnet test ./Dosai.sln
   nearest `Directory.Build.props/targets`' `<Using>` items (Include/Remove/Static/Alias;
   unevaluable conditions are applied with a diagnostic), and MSBuild's generated
   `obj/**/<Project>.GlobalUsings.g.cs` when it exists for the resolved target and is no older
-  than the project file. A file-based app (a C# file outside every project's directory that
+  than the project file. Properties and items are read through `MsBuildImports` (issue #117):
+  the nearest Directory.Build file, the project file and everything they `<Import>` are seen in
+  MSBuild evaluation order, and single properties resolve by last definition wins, so a
+  `test/Directory.Build.props` that imports the root one keeps the test project's implicit
+  usings (issue #117's regression). Import paths resolve against the importing file's directory
+  (both separators on every OS), and only inside the scan root; an unresolved path or one
+  outside the tree or in build output is skipped with a diagnostic, and an `Exists(...)`
+  condition is evaluated while any other condition marks what it brings as conditioned. A
+  file-based app (a C# file outside every project's directory that
   opens with `#!` or `#:` directives, or holds top-level statements) contributes the usings of
   the virtual project the SDK generates for it: `ImplicitUsings` enabled, the SDK's own target
   framework, its `#:sdk` and `#:property` values (`FileBasedAppTests`). One compilation means

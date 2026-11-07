@@ -151,7 +151,7 @@ internal static class TargetFrameworkDetection
         }
 
         var projectDirectories = SafeFileRead.EnumerateAllFilesSafe(root, "*" + projectExtension)
-            .Where(file => !IsUnderBuildDirectory(root, file))
+            .Where(file => !MsBuildImports.IsUnderBuildDirectory(root, file))
             .Select(Path.GetDirectoryName)
             .OfType<string>()
             .Distinct(SafeFileRead.PathComparer);
@@ -204,7 +204,7 @@ internal static class TargetFrameworkDetection
         try
         {
             return Directory.EnumerateFiles(directory, "*" + projectExtension, SearchOption.TopDirectoryOnly)
-                .Where(file => !IsUnderBuildDirectory(root, file) && !PathExclusions.IsExcluded(file, isDirectory: false))
+                .Where(file => !MsBuildImports.IsUnderBuildDirectory(root, file) && !PathExclusions.IsExcluded(file, isDirectory: false))
                 .Order(StringComparer.Ordinal)
                 .ToList();
         }
@@ -227,7 +227,7 @@ internal static class TargetFrameworkDetection
             var detected = new List<string>();
             foreach (var projectFile in projectFiles)
             {
-                CollectTargetFrameworks(projectFile, detected);
+                CollectTargetFrameworks(root, Path.GetDirectoryName(projectFile)!, projectFile, detected);
             }
 
             if (detected.Count == 0)
@@ -236,7 +236,7 @@ internal static class TargetFrameworkDetection
                 {
                     if (NearestFileUpwards(projectDirectory, root, buildFile) is { } inherited)
                     {
-                        CollectTargetFrameworks(inherited, detected);
+                        CollectTargetFrameworks(root, projectDirectory, inherited, detected);
                         if (detected.Count > 0)
                         {
                             break;
@@ -279,9 +279,9 @@ internal static class TargetFrameworkDetection
                 .Concat(SafeFileRead.EnumerateAllFilesSafe(root, "*.vbproj"))
                 .Concat(SafeFileRead.EnumerateAllFilesSafe(root, "Directory.Build.props"))
                 .Concat(SafeFileRead.EnumerateAllFilesSafe(root, "Directory.Build.targets"));
-            foreach (var projectFile in projectFiles.Where(file => !IsUnderBuildDirectory(root, file)))
+            foreach (var projectFile in projectFiles.Where(file => !MsBuildImports.IsUnderBuildDirectory(root, file)))
             {
-                CollectTargetFrameworks(projectFile, detected);
+                CollectTargetFrameworks(root, Path.GetDirectoryName(projectFile)!, projectFile, detected);
             }
 
             // Assembly-only trees: a built output directory carries no project file, but a
@@ -320,13 +320,21 @@ internal static class TargetFrameworkDetection
         new(@"<TargetFrameworkVersion\s*>\s*v?([0-9]+(?:\.[0-9]+)*)\s*</TargetFrameworkVersion\s*>",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 
-    private static void CollectTargetFrameworks(string projectFile, List<string> detected)
+    /// <summary>
+    ///     The target frameworks of one file's expansion: the file itself and everything it
+    ///     imports, in evaluation order, each segment scanned for
+    ///     <c>TargetFramework(s)</c>/<c>TargetFrameworkVersion</c>.
+    /// </summary>
+    private static void CollectTargetFrameworks(string root, string projectDirectory, string projectFile, List<string> detected)
     {
-        if (!SafeFileRead.TryReadAllText(projectFile, out var content))
+        foreach (var segment in MsBuildImports.Expand(root, projectDirectory, projectFile))
         {
-            return;
+            CollectTargetFrameworksFromContent(segment.Content, detected);
         }
+    }
 
+    private static void CollectTargetFrameworksFromContent(string content, List<string> detected)
+    {
         foreach (var match in TargetFrameworkRegex.Matches(content).Cast<System.Text.RegularExpressions.Match>())
         {
             foreach (var value in match.Groups[1].Value.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
@@ -347,19 +355,6 @@ internal static class TargetFrameworkDetection
                 detected.Add(moniker);
             }
         }
-    }
-
-    private static bool IsUnderBuildDirectory(string root, string filePath)
-    {
-        foreach (var segment in Path.GetRelativePath(root, filePath).Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
-        {
-            if (segment is "bin" or "obj" or "node_modules" or "artifacts" or "packages")
-            {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     // Accepts `net8.0`, `net8.0-windows`, `net472`, `netstandard2.0`, `netcoreapp3.1`; rejects

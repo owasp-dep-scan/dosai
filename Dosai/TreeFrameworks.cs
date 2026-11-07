@@ -29,7 +29,7 @@ internal static partial class TreeFrameworks
             var projects = SafeFileRead.EnumerateAllFilesSafe(root, "*.csproj")
                 .Concat(SafeFileRead.EnumerateAllFilesSafe(root, "*.fsproj"))
                 .Concat(SafeFileRead.EnumerateAllFilesSafe(root, "*.vbproj"))
-                .Where(file => !IsUnderBuildDirectory(root, file))
+                .Where(file => !MsBuildImports.IsUnderBuildDirectory(root, file))
                 .Order(SafeFileRead.PathComparer)
                 .ToList();
             foreach (var project in projects)
@@ -40,7 +40,7 @@ internal static partial class TreeFrameworks
                 }
 
                 // A commented-out FrameworkReference or Use* property is not part of the build.
-                var content = GlobalUsings.WithoutXmlComments(rawContent);
+                var content = MsBuildImports.WithoutXmlComments(rawContent);
 
                 var projectDirectory = Path.GetDirectoryName(project)!;
                 var reference = Path.GetRelativePath(root, project);
@@ -51,43 +51,40 @@ internal static partial class TreeFrameworks
                     Claim(frameworks, "Microsoft.AspNetCore.App", $"Sdk=Microsoft.NET.Sdk.Web in {reference}");
                 }
 
-                if (sdks.Contains("Microsoft.NET.Sdk.WindowsDesktop") || PropertyIsTrue(root, projectDirectory, content, "UseWindowsForms") || PropertyIsTrue(root, projectDirectory, content, "UseWPF"))
+                if (sdks.Contains("Microsoft.NET.Sdk.WindowsDesktop") || PropertyIsTrue(root, project, projectDirectory, content, "UseWindowsForms") || PropertyIsTrue(root, project, projectDirectory, content, "UseWPF"))
                 {
-                    var useForms = PropertyIsTrue(root, projectDirectory, content, "UseWindowsForms");
-                    var useWpf = PropertyIsTrue(root, projectDirectory, content, "UseWPF");
+                    var useForms = PropertyIsTrue(root, project, projectDirectory, content, "UseWindowsForms");
+                    var useWpf = PropertyIsTrue(root, project, projectDirectory, content, "UseWPF");
                     // Microsoft.NET.Sdk.WindowsDesktop.props: both -> Microsoft.WindowsDesktop.App,
                     // else the one sub-framework that is enabled.
                     var name = useForms && useWpf ? "Microsoft.WindowsDesktop.App" : useForms ? "Microsoft.WindowsDesktop.App.WindowsForms" : "Microsoft.WindowsDesktop.App.WPF";
                     Claim(frameworks, name, $"{(useForms && useWpf ? "UseWindowsForms+UseWPF" : useForms ? "UseWindowsForms" : "UseWPF")} in {reference}");
                 }
 
-                foreach (var match in FrameworkReferenceItemRegex().Matches(content).Cast<Match>())
+                // The project file and everything it imports: a FrameworkReference set in an
+                // imported file is part of the build (issue #116's repro imports one from a
+                // build/ props file).
+                foreach (var (file, match, _) in MsBuildImports.Items(MsBuildImports.Expand(root, project), "FrameworkReference"))
                 {
-                    var include = Attributes(match).GetValueOrDefault("Include");
+                    var include = MsBuildImports.Attributes(match).GetValueOrDefault("Include");
                     if (!string.IsNullOrWhiteSpace(include))
                     {
-                        Claim(frameworks, include, $"FrameworkReference in {reference}");
+                        Claim(frameworks, include, $"FrameworkReference in {Path.GetRelativePath(root, file)}");
                     }
                 }
             }
 
             foreach (var buildFile in SafeFileRead.EnumerateAllFilesSafe(root, "Directory.Build.props")
                          .Concat(SafeFileRead.EnumerateAllFilesSafe(root, "Directory.Build.targets"))
-                         .Where(file => !IsUnderBuildDirectory(root, file)).Order(SafeFileRead.PathComparer))
+                         .Where(file => !MsBuildImports.IsUnderBuildDirectory(root, file)).Order(SafeFileRead.PathComparer))
             {
-                if (!SafeFileRead.TryReadAllText(buildFile, out var rawContent))
+                // Each build file's own expansion: an import inside one brings its items too.
+                foreach (var (file, match, _) in MsBuildImports.Items(MsBuildImports.Expand(root, buildFile), "FrameworkReference"))
                 {
-                    continue;
-                }
-
-                var content = GlobalUsings.WithoutXmlComments(rawContent);
-
-                foreach (var match in FrameworkReferenceItemRegex().Matches(content).Cast<Match>())
-                {
-                    var include = Attributes(match).GetValueOrDefault("Include");
+                    var include = MsBuildImports.Attributes(match).GetValueOrDefault("Include");
                     if (!string.IsNullOrWhiteSpace(include))
                     {
-                        Claim(frameworks, include, $"FrameworkReference in {Path.GetRelativePath(root, buildFile)}");
+                        Claim(frameworks, include, $"FrameworkReference in {Path.GetRelativePath(root, file)}");
                     }
                 }
             }
@@ -173,11 +170,11 @@ internal static partial class TreeFrameworks
             foreach (var project in SafeFileRead.EnumerateAllFilesSafe(root, "*.csproj")
                          .Concat(SafeFileRead.EnumerateAllFilesSafe(root, "*.vbproj"))
                          .Concat(SafeFileRead.EnumerateAllFilesSafe(root, "*.fsproj"))
-                         .Where(file => !IsUnderBuildDirectory(root, file)))
+                         .Where(file => !MsBuildImports.IsUnderBuildDirectory(root, file)))
             {
                 var name = Path.GetFileNameWithoutExtension(project);
                 if (SafeFileRead.TryReadAllText(project, out var content)
-                    && AssemblyNameRegex().Match(GlobalUsings.WithoutXmlComments(content)) is { Success: true } declared
+                    && AssemblyNameRegex().Match(MsBuildImports.WithoutXmlComments(content)) is { Success: true } declared
                     && declared.Groups[1].Value.Trim() is { Length: > 0 } value
                     && !value.Contains("$(", StringComparison.Ordinal))
                 {
@@ -219,12 +216,28 @@ internal static partial class TreeFrameworks
             try
             {
                 using var document = JsonDocument.Parse(content);
-                if (!document.RootElement.TryGetProperty("frameworks", out var frameworkTargets) || frameworkTargets.ValueKind != JsonValueKind.Object)
+                // Restore writes the resolved frameworks under `project`; a root-level
+                // `frameworks` (older or hand-written files) is read as a fallback. Claim is
+                // first-wins and idempotent, so a file carrying both keeps the first answers.
+                JsonElement? frameworkTargets = null;
+                if (document.RootElement.TryGetProperty("project", out var project)
+                    && project.ValueKind == JsonValueKind.Object
+                    && project.TryGetProperty("frameworks", out var projectFrameworks)
+                    && projectFrameworks.ValueKind == JsonValueKind.Object)
+                {
+                    frameworkTargets = projectFrameworks;
+                }
+                else if (document.RootElement.TryGetProperty("frameworks", out var rootFrameworks) && rootFrameworks.ValueKind == JsonValueKind.Object)
+                {
+                    frameworkTargets = rootFrameworks;
+                }
+
+                if (frameworkTargets is null)
                 {
                     continue;
                 }
 
-                foreach (var target in frameworkTargets.EnumerateObject())
+                foreach (var target in frameworkTargets.Value.EnumerateObject())
                 {
                     if (!target.Value.TryGetProperty("frameworkReferences", out var references))
                     {
@@ -326,66 +339,16 @@ internal static partial class TreeFrameworks
         return sdks;
     }
 
-    private static bool PropertyIsTrue(string root, string projectDirectory, string project, string propertyName)
-    {
-        foreach (Match match in Regex.Matches(project, $@"<(?:{propertyName})\s*>([^<]*)</(?:{propertyName})\s*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
-        {
-            return match.Groups[1].Value.Trim().Equals("true", StringComparison.OrdinalIgnoreCase);
-        }
-
-        foreach (var buildFile in new[] { "Directory.Build.props", "Directory.Build.targets" })
-        {
-            for (var directory = projectDirectory; directory is not null; directory = Path.GetDirectoryName(directory))
-            {
-                var candidate = Path.Combine(directory, buildFile);
-                if (File.Exists(candidate) && !IsUnderBuildDirectory(root, candidate))
-                {
-                    return SafeFileRead.TryReadAllText(candidate, out var content)
-                        && Regex.IsMatch(GlobalUsings.WithoutXmlComments(content), $@"<(?:{propertyName})\s*>\s*true\s*</(?:{propertyName})\s*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-                }
-
-                if (string.Equals(directory, root, SafeFileRead.PathComparison))
-                {
-                    break;
-                }
-            }
-        }
-
-        return false;
-    }
-
-    private static Dictionary<string, string> Attributes(Match item)
-    {
-        var attributes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (Match attribute in AttributeRegex().Matches(item.Groups[1].Value))
-        {
-            attributes[attribute.Groups[1].Value] = attribute.Groups[2].Value;
-        }
-
-        return attributes;
-    }
-
-    private static bool IsUnderBuildDirectory(string root, string filePath)
-    {
-        foreach (var segment in Path.GetRelativePath(root, filePath).Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
-        {
-            if (segment is "bin" or "obj" or "node_modules" or "artifacts" or "packages")
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    [GeneratedRegex(@"<FrameworkReference\s+([^>]*?)(?:/>|>.*?</FrameworkReference\s*>)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Singleline)]
-    private static partial Regex FrameworkReferenceItemRegex();
+    /// <summary>
+    ///     Whether the property's effective value is true across the MSBuild evaluation order
+    ///     (the nearest Directory.Build.props, the project file and everything it imports, the
+    ///     nearest Directory.Build.targets), last definition winning.
+    /// </summary>
+    private static bool PropertyIsTrue(string root, string project, string projectDirectory, string content, string propertyName) =>
+        MsBuildImports.PropertyValue(root, projectDirectory, project, content, propertyName)?.Equals("true", StringComparison.OrdinalIgnoreCase) == true;
 
     [GeneratedRegex(@"<Project\b[^>]*?\bSdk\s*=\s*""([^""]+)""", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex ProjectSdkAttributeRegex();
-
-    [GeneratedRegex(@"([\w]+)\s*=\s*""([^""]*)""", RegexOptions.CultureInvariant)]
-    private static partial Regex AttributeRegex();
 
     [GeneratedRegex(@"<AssemblyName\b[^>]*>([^<]*)</AssemblyName\s*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex AssemblyNameRegex();
