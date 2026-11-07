@@ -1,10 +1,8 @@
 name: build and test
 
-# The merge queue is the test gate: each PR's suite runs once, against the main it merges into.
-# On pull_request the test jobs are skipped, and a skipped required check counts as passing, so
-# a PR can enter the queue straight away. main is not tested on push either: the queue
-# fast-forwards it to the commit it just tested. Run the workflow by hand to test a branch
-# before queueing it.
+# The suite runs on every pull request, so a PR shows its results before review, and again in
+# the merge queue, against the main it merges into. main is not tested on push: the queue
+# fast-forwards it to the commit it just tested. Run the workflow by hand to test any branch.
 on:
   push:
     tags:
@@ -30,7 +28,6 @@ env:
 jobs:
   unit-tests:
     runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
     permissions:
       contents: read
       packages: read
@@ -55,7 +52,6 @@ jobs:
 
   smoke-methods:
     runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
     permissions:
       contents: read
       packages: read
@@ -89,7 +85,6 @@ jobs:
 
   smoke-dataflows:
     runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
     permissions:
       contents: read
       packages: read
@@ -197,7 +192,6 @@ jobs:
 
   smoke-crypto:
     runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
     permissions:
       contents: read
       packages: read
@@ -257,7 +251,6 @@ jobs:
 
   smoke-r:
     runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
     permissions:
       contents: read
       packages: read
@@ -306,7 +299,6 @@ jobs:
   # own. This publishes one the way the release job does and runs it with no `dotnet` reachable.
   smoke-self-contained:
     runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
     permissions:
       contents: read
       packages: read

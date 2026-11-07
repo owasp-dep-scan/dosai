@@ -123,6 +123,7 @@ public static class McpServer
         // fresh, exactly as a new CLI process would see it.
         TargetFrameworkDetection.ResetCaches();
         GlobalUsings.ResetCache();
+        MsBuildImports.ResetCache();
         FrameworkReferences.ResetTreeCache();
         TreeFrameworks.ResetCache();
         var arguments = GetProperty(parameters.Value, "arguments") ?? default;

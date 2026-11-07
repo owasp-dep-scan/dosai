@@ -394,7 +394,7 @@ global using global::Microsoft.Extensions.Logging;
 </Project>
 """);
         Write(System.IO.Path.Combine(web, "obj"), "project.assets.json", """
-{"frameworks": {"net8.0": {"frameworkReferences": {"Microsoft.AspNetCore.App": {"type": "platform"}}}}}
+{"version": 3, "targets": {"net8.0": {}}, "libraries": {}, "project": {"version": "1.0.0", "restore": {"projectUniqueName": "web", "projectName": "web", "projectPath": "web.csproj", "frameworks": {"net8.0": {"targetAlias": "net8.0", "projectReferences": {}}}}, "frameworks": {"net8.0": {"targetAlias": "net8.0", "frameworkReferences": {"Microsoft.AspNetCore.App": {"privateAssets": "none"}}}}}}
 """);
         Write(fixture.Path, "app.runtimeconfig.json", """
 {"runtimeOptions": {"frameworks": [{"name": "Microsoft.AspNetCore.App", "version": "8.0.31"}]}}

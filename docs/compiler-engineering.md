@@ -56,8 +56,12 @@ Roslyn operations -> nodes/edges/slices -> transparency facts -> reports/agent c
 
 `FrameworkReferences.ForTree(path)` (used by methods, dataflows and crypto) layers the analyzed
 tree's own reference packs on the process-wide set: `TreeFrameworks.Detect` reads the SDK
-attribute, explicit `<FrameworkReference>` items, `UseWindowsForms`/`UseWPF`,
-project.assets.json's `frameworkReferences` and `*.runtimeconfig.json`, and each named framework
+attribute, explicit `<FrameworkReference>` items (in project files and everything they
+`<Import>`, and in every Directory.Build.props/targets and its imports), `UseWindowsForms`/`UseWPF`
+(resolved across the MSBuild evaluation order, so a value set only in an imported file counts),
+project.assets.json's `frameworkReferences` - which restore writes under `project` (a root-level
+`frameworks` is read as a fallback for older files) - and `*.runtimeconfig.json`, and each named
+framework
 resolves to `packs/<Name>.Ref/<version>/ref/<tfm>` or the NuGet cache copy (gathered together,
 so a target-matched pack that only restore downloaded wins over an installed pack of another
 major), or, when no pack of any major exists, the installed shared framework. The version is the
@@ -100,9 +104,27 @@ in a slice diagnostic.
 `GlobalUsings` resolves the synthetic implicit-usings tree per scan root: the SDK lists verified
 from the SDKs' own .props files (base C#, Web's nine, Worker's four, Windows Forms' two; the
 11 SDKs add `System.Net.Http.Json` for .NET 11+ targets, and .NET Framework targets drop
-`System.Net.Http`), `<Using>` items with `Remove`/`Static`/`Alias` from the project and the
-nearest Directory.Build.props/targets, and MSBuild's generated `GlobalUsings.g.cs` as the
-authoritative set when it matches the resolved target and is no older than the project.
+`System.Net.Http`), `<Using>` items with `Remove`/`Static`/`Alias`, and MSBuild's generated
+`GlobalUsings.g.cs` as the authoritative set when it matches the resolved target and is no older
+than the project. Properties and items are read through `MsBuildImports`: the nearest
+Directory.Build.props, the project file and its `<Import>` targets, and the nearest
+Directory.Build.targets are seen in MSBuild evaluation order, and a single property resolves by
+last definition wins, so a `test/Directory.Build.props` that imports the root one keeps the test
+project's implicit usings (issue #117). Import paths resolve the way MSBuild resolves them:
+relative to the importing file's directory, with both separators on every OS, the reserved
+`MSBuildThisFile*`/`MSBuildProjectDirectory` properties expanded, and the two directory-chaining
+property functions (`GetPathOfFileAbove`, `GetDirectoryNameOfFileAbove`) walking up from the
+given directory. Only files inside the scan root and outside build-output directories are
+followed; an unresolved property, a wildcard, or a path outside the tree is skipped with a
+diagnostic, import cycles and chains deeper than 32 are cut with one, and a missing file is
+silent exactly when the import's own `Exists(...)` condition already decided. An SDK import, an
+import rooted in an MSBuild toolset property (`$(MSBuildToolsPath)`, `$(MSBuildExtensionsPath)`
+and the like) and an import into build output (a `packages.config` package's `build/` targets)
+are skipped silently: none of them is a file of the tree, and every legacy project has them. The
+diagnostics are collected from every project and Directory.Build file of the tree rather than
+from whichever reader ran first, so the list does not depend on read order or worker timing. An `Exists(...)`
+condition is evaluated; any other condition is followed but marks what it brings as conditioned,
+so a property defined only there is unknown and items from there are applied with a note.
 Condition-carrying items are applied unconditionally with a note - a using that resolves nowhere
 errors alone and never blocks other bindings.
 
@@ -190,7 +212,8 @@ Parsing runs on the same dedicated large-stack worker team as the per-file symbo
 downstream phase relies on stays the file order of a sequential parse. Each file's preprocessor
 symbols are those of its **nearest project** at or above it within the scan root
 (`TargetFrameworkDetection.ForFile`): the project's own target framework, else the nearest
-`Directory.Build.props`, else `Directory.Build.targets`, reduced to the most modern target it
+`Directory.Build.props`, else `Directory.Build.targets` (each read with its `<Import>` targets
+through `MsBuildImports`), reduced to the most modern target it
 declares. One compilation holds every file, but parse options are per tree, so a net48 project
 beside a net8.0 one keeps its `#if NETFRAMEWORK` code while the net8.0 project keeps its
 `#if NET8_0` code. The walk is one non-recursive directory listing per directory, memoized, in
