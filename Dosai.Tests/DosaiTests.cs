@@ -1010,7 +1010,12 @@ static class Echo
                 File.WriteAllText(Path.Combine(tempDirectory.Path, name), content);
             }
             var json = DataFlowAnalyzer.GetDataFlows(tempDirectory.Path);
-            return NormalizeGeneratedAt(json).Replace(tempDirectory.Path, "<root>", StringComparison.Ordinal);
+            // The JSON carries the root with its backslashes escaped on Windows, so the escaped
+            // form is replaced as well as the raw one.
+            var escapedRoot = JsonEncodedText.Encode(tempDirectory.Path).ToString();
+            return NormalizeGeneratedAt(json)
+                .Replace(escapedRoot, "<root>", StringComparison.Ordinal)
+                .Replace(tempDirectory.Path, "<root>", StringComparison.Ordinal);
         }
 
         var forward = Report(files);
