@@ -1,0 +1,27 @@
+docs/pattern-packs.md
+  s_ac3e7aa2808f5a::t_945baee6f2c52b 37-39,57-65
+  s_ac3e7aa2808f5a::t_f9af7d939d0d64 66
+docs/frameworks.md
+  s_ac3e7aa2808f5a::t_4051bc7b82bf5a 135-141,145-154
+  s_ac3e7aa2808f5a::t_c9b1ff7a108e12 155
+docs/security-analysis.md
+  s_ac3e7aa2808f5a::t_c65ff07de9c945 164-183
+docs/migration-5.1.0.md
+  s_ac3e7aa2808f5a::t_3c362317bc8efd 675-706
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3ff62acdd4968c306b35520e0ca20e6c8d9c1217",
+  "prompts": {},
+  "sessions": {
+    "s_ac3e7aa2808f5a": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "sess_6a665ba6-7197-4124-a338-1541914b6e6f",
+        "model": "GLM-5.3"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
