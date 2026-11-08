@@ -740,7 +740,8 @@ public static class ConfigSecurityAnalyzer
         Properties =
         {
             ["framework"] = "aspnet",
-            ["headers"] = "x-forwarded-for,x-forwarded-proto",
+            ["headers"] = "x-forwarded",
+            ["forwardedHeaders"] = "x-forwarded-for,x-forwarded-proto",
             ["configFile"] = Path.GetFileName(file),
             ["setting"] = setting
         }
@@ -1192,7 +1193,11 @@ public static class MiddlewareSecurityAnalyzer
         };
         if (headers is { Count: > 0 })
         {
-            finding.Properties["headers"] = string.Join(",", headers);
+            // headers is the family, in the vocabulary chen and the cdxgen plugins share
+            // (ASP.NET Core reads only the X-Forwarded-* family, never RFC 7239 Forwarded);
+            // forwardedHeaders lists the flags the configuration names.
+            finding.Properties["headers"] = "x-forwarded";
+            finding.Properties["forwardedHeaders"] = string.Join(",", headers);
         }
 
         if (configuration is { UnboundedForwardLimit: true })

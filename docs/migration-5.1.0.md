@@ -687,7 +687,7 @@ forwarded headers by literal name, are tracked as data-flow sources of a new cat
 - `Request.Headers["X-Forwarded-For"]`, `Request.Headers.TryGetValue("X-Forwarded-For", ...)`,
   `Request.ServerVariables["HTTP_X_FORWARDED_FOR"]`, legacy `Request.Headers.Get(...)` and
   `[FromHeader(Name = "X-Forwarded-For")]` carry `forwarded-header`, `http`, and record the
-  lower-cased header name in the source node's `Properties.forwardedHeader`.
+  lower-cased header name in the source node's `Properties.header`.
 
 A flow that used to start at one of these members reported source category `http` (the whole
 `HttpContext`/`HttpRequest` pattern); it now reports `proxy-derived` with the specific taint
@@ -700,7 +700,8 @@ A new informational finding records that the middleware is on: `ForwardedHeaders
 `services.Configure<ForwardedHeadersOptions>(...)` that names flags, and in configuration
 (`ForwardedHeaders_Enabled` in an appsettings file, `ASPNETCORE_FORWARDEDHEADERS_ENABLED` in a
 launchSettings.json profile; launchSettings.json is now collected as a configuration file).
-`Properties.framework` is `aspnet`, `Properties.headers` lists the named headers when a literal
-or flags expression names them, and an unbounded `ForwardLimit = null` in the same configuration
+`Properties.framework` is `aspnet`; when a literal or flags expression names the headers,
+`Properties.headers` is the family (`x-forwarded`) and `Properties.forwardedHeaders` lists the
+flags; and an unbounded `ForwardLimit = null` in the same configuration
 is `Properties.forwardLimit` = `unbounded`. `ForwardedHeaders.None` and a `false` setting give
 no finding, and the existing `ForwardedHeadersTrustAll` finding is unchanged.

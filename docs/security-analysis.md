@@ -178,7 +178,7 @@ literal name. Such a value is spoofable only when the application runs behind a 
 that passes the headers through unchanged; with no proxy, or behind one that strips them, the
 value is the socket's own fact. The taint kind says which value it is (`client-ip`, `host`,
 `scheme`, `forwarded-header`), and a literal header read also records the lower-cased header
-name in the source node's `Properties.forwardedHeader`. Nothing here decides whether a
+name in the source node's `Properties.header`. Nothing here decides whether a
 deployment is behind a pass-through proxy; the `ForwardedHeadersEnabled` finding records that
 the middleware is on, and `ForwardedHeadersTrustAll` records that its trust list was cleared.
 

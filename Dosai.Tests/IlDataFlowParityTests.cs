@@ -522,6 +522,15 @@ public static class Flows
     ///     same literal through Response.Headers gives nothing.
     /// </summary>
     private const string ForwardedStubs = """
+namespace Microsoft.AspNetCore.HttpOverrides
+{
+    public static class ForwardedHeadersDefaults
+    {
+        public static string XForwardedForHeaderName { get; } = "X-Forwarded-For";
+        public static string XForwardedHostHeaderName { get; } = "X-Forwarded-Host";
+        public static string XForwardedPrefixHeaderName { get; } = "X-Forwarded-Prefix";
+    }
+}
 
 namespace Microsoft.Extensions.Primitives
 {
@@ -597,6 +606,8 @@ public static class Flows
     public static void HeaderIndexer(HttpContext ctx) => Process.Start("tool", ctx.Request.Headers["X-Forwarded-For"].ToString());
     public static void HeaderTryGetValue(HttpContext ctx) { ctx.Request.Headers.TryGetValue("X-Forwarded-Proto", out var proto); Process.Start("tool", proto.ToString()); }
     public static void ResponseHeader(HttpContext ctx) => Process.Start("tool", ctx.Response.Headers["X-Forwarded-For"].ToString());
+    public static void DefaultsHeaderName(HttpContext ctx) => Process.Start("tool", ctx.Request.Headers[Microsoft.AspNetCore.HttpOverrides.ForwardedHeadersDefaults.XForwardedForHeaderName].ToString());
+    public static void DefaultsPrefixHeaderName(HttpContext ctx) => Process.Start("tool", ctx.Request.Headers[Microsoft.AspNetCore.HttpOverrides.ForwardedHeadersDefaults.XForwardedPrefixHeaderName].ToString());
     public static void HeaderNonLiteral(HttpContext ctx, string name) => Process.Start("tool", ctx.Request.Headers[name].ToString());
     public static void AppClientIp(AppConnection conn) => Process.Start("tool", conn.RemoteIpAddress?.ToString() ?? "");
     public static void FromHeaderForwarded([Microsoft.AspNetCore.Mvc.FromHeader(Name = "X-Forwarded-For")] string ip) => Process.Start("tool", ip);
@@ -607,7 +618,7 @@ public static class Flows
         var categories = result.Nodes
             .Where(node => node.IsSource)
             .GroupBy(node => node.MethodName ?? string.Empty)
-            .ToDictionary(group => group.Key, group => group.Select(node => (node.Category, node.Properties.GetValueOrDefault("forwardedHeader"))).ToList(), StringComparer.Ordinal);
+            .ToDictionary(group => group.Key, group => group.Select(node => (node.Category, node.Properties.GetValueOrDefault("header"))).ToList(), StringComparer.Ordinal);
         bool ProxyDerived(string method) => categories.TryGetValue(method, out var entries) && entries.Any(entry => entry.Category == "proxy-derived");
 
         Assert.True(ProxyDerived("ClientIp"));
@@ -618,8 +629,10 @@ public static class Flows
         Assert.True(ProxyDerived("HeaderIndexer"));
         Assert.True(ProxyDerived("HeaderTryGetValue"));
         Assert.True(ProxyDerived("FromHeaderForwarded"));
-        Assert.Equal("x-forwarded-for", result.Nodes.Single(node => node.IsSource && node.MethodName == "HeaderIndexer" && node.Properties.ContainsKey("forwardedHeader")).Properties.GetValueOrDefault("forwardedHeader"));
-        Assert.Equal("x-forwarded-for", result.Nodes.Single(node => node.IsSource && node.MethodName == "FromHeaderForwarded" && node.Properties.ContainsKey("forwardedHeader")).Properties.GetValueOrDefault("forwardedHeader"));
+        Assert.True(ProxyDerived("DefaultsHeaderName"));
+        Assert.False(ProxyDerived("DefaultsPrefixHeaderName"));
+        Assert.Equal("x-forwarded-for", result.Nodes.Single(node => node.IsSource && node.MethodName == "HeaderIndexer" && node.Properties.ContainsKey("header")).Properties.GetValueOrDefault("header"));
+        Assert.Equal("x-forwarded-for", result.Nodes.Single(node => node.IsSource && node.MethodName == "FromHeaderForwarded" && node.Properties.ContainsKey("header")).Properties.GetValueOrDefault("header"));
 
         // The same members on an application class, the same literal through Response.Headers,
         // and a non-literal header name are not forwarded-header reads.

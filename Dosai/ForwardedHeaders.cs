@@ -22,7 +22,7 @@ internal static class ForwardedHeaders
 {
     internal const string Category = "proxy-derived";
     internal const string TaintKind = "forwarded-header";
-    internal const string HeaderProperty = "forwardedHeader";
+    internal const string HeaderProperty = "header";
 
     /// <summary>
     ///     The header set every analyzer in this vocabulary tags (chen's
@@ -50,6 +50,29 @@ internal static class ForwardedHeaders
         return HeaderNames.Contains(name) ? name : null;
     }
 
+    /// <summary>
+    ///     The header a <c>Microsoft.AspNetCore.HttpOverrides.ForwardedHeadersDefaults</c> name
+    ///     property holds (<c>XForwardedForHeaderName</c> is <c>X-Forwarded-For</c>): the framework's
+    ///     own spelling of the header names, which code passes in place of a literal. Only the
+    ///     properties whose header is in <see cref="HeaderNames" /> map; the prefix and
+    ///     X-Original-* names give null.
+    /// </summary>
+    internal static string? DefaultsHeaderName(string containingType, string propertyName)
+    {
+        if (containingType != "Microsoft.AspNetCore.HttpOverrides.ForwardedHeadersDefaults")
+        {
+            return null;
+        }
+
+        return propertyName switch
+        {
+            "XForwardedForHeaderName" or "get_XForwardedForHeaderName" => "x-forwarded-for",
+            "XForwardedHostHeaderName" or "get_XForwardedHostHeaderName" => "x-forwarded-host",
+            "XForwardedProtoHeaderName" or "get_XForwardedProtoHeaderName" => "x-forwarded-proto",
+            _ => null
+        };
+    }
+
     /// <summary>The direct-read source pattern for one header; the node records the name under <see cref="HeaderProperty" />.</summary>
     internal static DataFlowPattern SourcePattern(string headerName) => new()
     {
@@ -72,8 +95,9 @@ internal static class ForwardedHeaders
     ///     A direct forwarded-header read in source: an indexer or a TryGetValue/Get/GetValues
     ///     call on <c>Request.Headers</c> or <c>Request.ServerVariables</c> (both declared on an
     ///     <c>HttpRequest</c> type; <c>Response.Headers</c> is the same dictionary type and must
-    ///     not match) whose argument is a string literal naming a forwarded header. Matched on
-    ///     the resolved receiver member, never on code text; a non-literal name gives nothing.
+    ///     not match) whose argument is a string literal naming a forwarded header, or a
+    ///     <c>ForwardedHeadersDefaults</c> name property. Matched on the resolved receiver member,
+    ///     never on code text; any other non-literal name gives nothing.
     /// </summary>
     internal static DataFlowPattern? MatchSource(IOperation operation)
     {
@@ -133,6 +157,12 @@ internal static class ForwardedHeaders
             if (candidate.ConstantValue is { HasValue: true, Value: string literal } && HeaderName(literal) is { } name)
             {
                 return name;
+            }
+
+            if (candidate is IPropertyReferenceOperation { Property: var property } &&
+                DefaultsHeaderName(Normalize(property.ContainingType?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)) ?? string.Empty, property.Name) is { } defaultsName)
+            {
+                return defaultsName;
             }
         }
 

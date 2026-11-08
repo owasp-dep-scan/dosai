@@ -135,7 +135,9 @@ types, `ForwardedHeadersTrustAll` (medium, CWE-348: `KnownProxies`/`KnownNetwork
 cleared on `ForwardedHeadersOptions`), `ForwardedHeadersEnabled` (info, CWE-348:
 `app.UseForwardedHeaders(...)` and a `services.Configure<ForwardedHeadersOptions>(...)` that
 names flags, each at its own site, with `Properties.framework` and, when a literal or flags
-expression names them, `Properties.headers` (`x-forwarded-for`, ... or `all`);
+expression names them, `Properties.headers` (`x-forwarded`, the header family in the vocabulary
+chen and the cdxgen plugins share; ASP.NET Core never reads RFC 7239 `Forwarded`) and
+`Properties.forwardedHeaders` (the flags named: `x-forwarded-for`, ... or `all`);
 `ForwardedHeaders.None` gives nothing, and a `ForwardLimit = null` in the same configuration is
 recorded as `Properties.forwardLimit` = `unbounded`) and `RequestSizeLimitDisabled` (medium,
 CWE-770: `MaxRequestBodySize = null`, `[DisableRequestSizeLimit]`, `[RequestSizeLimit(long.MaxValue)]`,

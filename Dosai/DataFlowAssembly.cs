@@ -2144,7 +2144,16 @@ public static partial class DataFlowAnalyzer
 
             if (instruction.OpCode == OpCodes.Call || instruction.OpCode == OpCodes.Callvirt)
             {
-                if (instruction.Operand is int calleeToken && ResolveMember(reader, calleeToken) is { } producer &&
+                var producer = instruction.Operand is int calleeToken ? ResolveMember(reader, calleeToken) : null;
+                // ForwardedHeadersDefaults.XForwardedForHeaderName stands in for the literal: the
+                // getter is a static call in the ldstr's place, so the scan keeps going past it.
+                if (header is null && producer is not null && ForwardedHeaders.DefaultsHeaderName(producer.ContainingType, producer.Name) is { } defaultsName)
+                {
+                    header = defaultsName;
+                    continue;
+                }
+
+                if (producer is not null &&
                     producer.Name is "get_Headers" or "get_ServerVariables" &&
                     producer.ContainingType.EndsWith(".HttpRequest", StringComparison.Ordinal))
                 {

@@ -19,6 +19,16 @@ public class ForwardedHeaderTests
     private const string HttpStubs = """
 using System.Net;
 
+namespace Microsoft.AspNetCore.HttpOverrides
+{
+    public static class ForwardedHeadersDefaults
+    {
+        public static string XForwardedForHeaderName { get; } = "X-Forwarded-For";
+        public static string XForwardedHostHeaderName { get; } = "X-Forwarded-Host";
+        public static string XForwardedPrefixHeaderName { get; } = "X-Forwarded-Prefix";
+    }
+}
+
 namespace Microsoft.Extensions.Primitives
 {
     public struct StringValues { public override string ToString() => string.Empty; }
@@ -125,6 +135,8 @@ public static class Handlers
     public static void HeaderIndexer(HttpContext ctx) => Process.Start("tool", ctx.Request.Headers["X-Forwarded-For"].ToString());
     public static void HeaderIndexerLowercase(HttpContext ctx) => Process.Start("tool", ctx.Request.Headers["x-real-ip"].ToString());
     public static void HeaderTryGetValue(HttpContext ctx) { ctx.Request.Headers.TryGetValue("X-Forwarded-Proto", out var proto); Process.Start("tool", proto.ToString()); }
+    public static void DefaultsHeaderName(HttpContext ctx) => Process.Start("tool", ctx.Request.Headers[Microsoft.AspNetCore.HttpOverrides.ForwardedHeadersDefaults.XForwardedHostHeaderName].ToString());
+    public static void DefaultsPrefixHeaderName(HttpContext ctx) => Process.Start("tool", ctx.Request.Headers[Microsoft.AspNetCore.HttpOverrides.ForwardedHeadersDefaults.XForwardedPrefixHeaderName].ToString());
     public static void HeaderNonLiteral(HttpContext ctx) { var name = Console.ReadLine() ?? ""; Process.Start("tool", ctx.Request.Headers[name].ToString()); }
     public static void ResponseHeader(HttpContext ctx) => Process.Start("tool", ctx.Response.Headers["X-Forwarded-For"].ToString());
     public static void QueryIndexer(HttpContext ctx) => Process.Start("tool", ctx.Request.Query["X-Forwarded-For"].ToString());
@@ -155,7 +167,7 @@ public class AppRequest { public string Host { get; } = string.Empty; }
         result.Nodes
             .Where(node => node.IsSource)
             .GroupBy(node => node.MethodName ?? string.Empty)
-            .ToDictionary(group => group.Key, group => group.Select(node => (node.Category, node.Kind, node.Properties.GetValueOrDefault("forwardedHeader"))).ToList(), StringComparer.Ordinal);
+            .ToDictionary(group => group.Key, group => group.Select(node => (node.Category, node.Kind, node.Properties.GetValueOrDefault("header"))).ToList(), StringComparer.Ordinal);
 
     private static bool IsProxyDerived(Dictionary<string, List<(string? Category, string? Kind, string? Header)>> sources, string method) =>
         sources.TryGetValue(method, out var entries) && entries.Any(entry => entry.Category == "proxy-derived");
@@ -228,6 +240,9 @@ public class AppRequest { public string Host { get; } = string.Empty; }
         Assert.True(IsProxyDerived(sources, "ServerVariablesCgi"));
         Assert.True(IsProxyDerived(sources, "LegacyHeaderGet"));
         Assert.True(IsProxyDerived(sources, "FromHeaderForwarded"));
+        // The framework's own name property stands in for the literal.
+        Assert.True(IsProxyDerived(sources, "DefaultsHeaderName"));
+        Assert.Equal("x-forwarded-host", ForwardedHeaderOf(result, "DefaultsHeaderName"));
 
         var forwardedHeader = ForwardedHeaderOf(result, "HeaderIndexer");
         Assert.Equal("x-forwarded-for", forwardedHeader);
@@ -256,6 +271,8 @@ public class AppRequest { public string Host { get; } = string.Empty; }
         // The query string is not a forwarded header, whatever the literal names.
         Assert.False(IsProxyDerived(sources, "QueryIndexer"));
         Assert.False(IsProxyDerived(sources, "FromHeaderOther"));
+        // X-Forwarded-Prefix is outside the forwarded set the vocabulary tags.
+        Assert.False(IsProxyDerived(sources, "DefaultsPrefixHeaderName"));
 
         // The generic header source still applies to the non-literal and non-forwarded reads.
         Assert.Contains(sources.GetValueOrDefault("HeaderNonLiteral") ?? [], entry => entry.Category == "http");
@@ -263,7 +280,7 @@ public class AppRequest { public string Host { get; } = string.Empty; }
     }
 
     private static string? ForwardedHeaderOf(DataFlowResult result, string method) =>
-        result.Nodes.FirstOrDefault(node => node.IsSource && node.MethodName == method && node.Properties.ContainsKey("forwardedHeader"))?.Properties.GetValueOrDefault("forwardedHeader");
+        result.Nodes.FirstOrDefault(node => node.IsSource && node.MethodName == method && node.Properties.ContainsKey("header"))?.Properties.GetValueOrDefault("header");
 
     private const string FindingStubs = """
 namespace Microsoft.AspNetCore.HttpOverrides
@@ -351,15 +368,18 @@ public class OtherOptions { public int Value { get; set; } }
         Assert.All(enabled, finding => Assert.Equal("aspnet", finding.Properties["framework"]));
 
         var inline = Assert.Single(enabled, finding => finding.FileName == "Program.cs" && finding.LineNumber == 8);
-        Assert.Equal("x-forwarded-for,x-forwarded-proto", inline.Properties.GetValueOrDefault("headers"));
+        Assert.Equal("x-forwarded-for,x-forwarded-proto", inline.Properties.GetValueOrDefault("forwardedHeaders"));
+        Assert.Equal("x-forwarded", inline.Properties.GetValueOrDefault("headers"));
 
         var allFlags = Assert.Single(enabled, finding => finding.LineNumber == 11);
-        Assert.Equal("all", allFlags.Properties.GetValueOrDefault("headers"));
+        Assert.Equal("all", allFlags.Properties.GetValueOrDefault("forwardedHeaders"));
+        Assert.Equal("x-forwarded", allFlags.Properties.GetValueOrDefault("headers"));
 
         Assert.Single(enabled, finding => finding.LineNumber == 9 && !finding.Properties.ContainsKey("headers"));
 
         var unbounded = Assert.Single(enabled, finding => finding.LineNumber == 13);
-        Assert.Equal("x-forwarded-for", unbounded.Properties.GetValueOrDefault("headers"));
+        Assert.Equal("x-forwarded-for", unbounded.Properties.GetValueOrDefault("forwardedHeaders"));
+        Assert.Equal("x-forwarded", unbounded.Properties.GetValueOrDefault("headers"));
         Assert.Equal("unbounded", unbounded.Properties.GetValueOrDefault("forwardLimit"));
 
         // None is off (line 15), Configure<OtherOptions> is not this middleware (line 17), and an
@@ -384,7 +404,8 @@ public class OtherOptions { public int Value { get; set; } }
         var findings = directory.Methods().SecurityFindings!;
         var enabled = Assert.Single(findings, finding => finding.Kind == "ForwardedHeadersEnabled");
         Assert.Equal("aspnet", enabled.Properties["framework"]);
-        Assert.Equal("x-forwarded-for,x-forwarded-proto", enabled.Properties.GetValueOrDefault("headers"));
+        Assert.Equal("x-forwarded-for,x-forwarded-proto", enabled.Properties.GetValueOrDefault("forwardedHeaders"));
+        Assert.Equal("x-forwarded", enabled.Properties.GetValueOrDefault("headers"));
         Assert.Equal("appsettings.json", enabled.Properties.GetValueOrDefault("configFile"));
     }
 
@@ -434,7 +455,8 @@ public class OtherOptions { public int Value { get; set; } }
         var findings = directory.Methods().SecurityFindings!;
         var enabled = Assert.Single(findings, finding => finding.Kind == "ForwardedHeadersEnabled");
         Assert.Equal("aspnet", enabled.Properties["framework"]);
-        Assert.Equal("x-forwarded-for,x-forwarded-proto", enabled.Properties.GetValueOrDefault("headers"));
+        Assert.Equal("x-forwarded-for,x-forwarded-proto", enabled.Properties.GetValueOrDefault("forwardedHeaders"));
+        Assert.Equal("x-forwarded", enabled.Properties.GetValueOrDefault("headers"));
         Assert.Equal("launchSettings.json", enabled.Properties.GetValueOrDefault("configFile"));
     }
 }

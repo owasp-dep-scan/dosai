@@ -60,8 +60,10 @@ Beside these symbol patterns, a direct read of a forwarded header by literal nam
 legacy `Request.Headers.Get("X-Forwarded-Host")` and `[FromHeader(Name = "X-Forwarded-For")]`. The
 matched receiver must be the request's header dictionary (`Response.Headers` gives nothing), the
 name must be a string literal from the set `forwarded`, `x-forwarded-for`, `x-forwarded-host`,
-`x-forwarded-proto`, `x-forwarded-port`, `x-real-ip`, `client-ip`, and the lower-cased header name
-is recorded in the source node's `Properties.forwardedHeader`. These reads are matched on the
+`x-forwarded-proto`, `x-forwarded-port`, `x-real-ip`, `client-ip` (or one of the framework's own
+`ForwardedHeadersDefaults.XForwardedForHeaderName`, `XForwardedHostHeaderName` and
+`XForwardedProtoHeaderName`), and the lower-cased header name
+is recorded in the source node's `Properties.header`. These reads are matched on the
 resolved receiver member, never on code text, and work the same from assembly-only input.
 
 ### Always-on sinks
