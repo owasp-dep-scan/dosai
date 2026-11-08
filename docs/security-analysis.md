@@ -161,15 +161,26 @@ SINK    command Program.cs:6:9     Start           Process.Start(args[0])
 
 ## Built-in source categories
 
-| Category     | Examples                                                                 |
-| ------------ | ------------------------------------------------------------------------ |
-| `cli`        | `Main(string[] args)`, `Console.ReadLine()`                              |
-| `http`       | ASP.NET route/action parameters, request headers/query/form/body/cookies |
-| `webforms`   | `.Text`, `.SelectedItem.Value` controls                                  |
-| `message`    | `request`, `command`, `query` handler parameters                         |
-| `serverless` | Azure Function attributes/triggers                                       |
-| `rpc`        | gRPC server call context                                                 |
-| `input`      | generic `input` parameter                                                |
+| Category       | Examples                                                                                                             |
+| -------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `cli`          | `Main(string[] args)`, `Console.ReadLine()`                                                                          |
+| `http`         | ASP.NET route/action parameters, request headers/query/form/body/cookies                                            |
+| `proxy-derived`| `Connection.RemoteIpAddress`, `Request.Host`, `Request.Scheme`, `Request.Headers["X-Forwarded-For"]`; taint kinds `client-ip`, `host`, `scheme`, `forwarded-header` |
+| `webforms`     | `.Text`, `.SelectedItem.Value` controls                                                                             |
+| `message`      | `request`, `command`, `query` handler parameters                                                                    |
+| `serverless`   | Azure Function attributes/triggers                                                                                  |
+| `rpc`          | gRPC server call context                                                                                            |
+| `input`        | generic `input` parameter                                                                                           |
+
+A `proxy-derived` source is a request value the ASP.NET Core `ForwardedHeaders` middleware
+rewrites from `Forwarded`/`X-Forwarded-*` headers, or a direct read of one of those headers by
+literal name. Such a value is spoofable only when the application runs behind a reverse proxy
+that passes the headers through unchanged; with no proxy, or behind one that strips them, the
+value is the socket's own fact. The taint kind says which value it is (`client-ip`, `host`,
+`scheme`, `forwarded-header`), and a literal header read also records the lower-cased header
+name in the source node's `Properties.forwardedHeader`. Nothing here decides whether a
+deployment is behind a pass-through proxy; the `ForwardedHeadersEnabled` finding records that
+the middleware is on, and `ForwardedHeadersTrustAll` records that its trust list was cleared.
 
 ## Built-in sink categories
 

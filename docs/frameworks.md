@@ -132,10 +132,26 @@ branch), `HttpsRedirectionMissing` and `HstsMissing` (low, CWE-319: a web applic
 `CookieSecurePolicy.None`: medium, CWE-614; `HttpOnly = false` or `HttpOnlyPolicy.None`: medium,
 CWE-1004; `SameSiteMode.None`: low, CWE-1275; `Properties.setting` names the member) on cookie
 types, `ForwardedHeadersTrustAll` (medium, CWE-348: `KnownProxies`/`KnownNetworks`/`KnownIPNetworks`
-cleared on `ForwardedHeadersOptions`), and `RequestSizeLimitDisabled` (medium, CWE-770:
-`MaxRequestBodySize = null`, `[DisableRequestSizeLimit]`, `[RequestSizeLimit(long.MaxValue)]`,
+cleared on `ForwardedHeadersOptions`), `ForwardedHeadersEnabled` (info, CWE-348:
+`app.UseForwardedHeaders(...)` and a `services.Configure<ForwardedHeadersOptions>(...)` that
+names flags, each at its own site, with `Properties.framework` and, when a literal or flags
+expression names them, `Properties.headers` (`x-forwarded-for`, ... or `all`);
+`ForwardedHeaders.None` gives nothing, and a `ForwardLimit = null` in the same configuration is
+recorded as `Properties.forwardLimit` = `unbounded`) and `RequestSizeLimitDisabled` (medium,
+CWE-770: `MaxRequestBodySize = null`, `[DisableRequestSizeLimit]`, `[RequestSizeLimit(long.MaxValue)]`,
 with the endpoint's `Route` when the attribute is on an action). `CorsWildcardWithCredentials`
 judges each `AddPolicy`/`AddDefaultPolicy` on its own builder and names that policy.
+
+`ForwardedHeadersEnabled` is information, not a defect: it says the application consumes
+`Forwarded`/`X-Forwarded-*` header values, which behind a reverse proxy that forwards them
+unchanged lets the client choose the remote IP, host and scheme the application sees. The same
+finding is raised for the configuration switch: `"ForwardedHeaders_Enabled": "true"` in an
+appsettings file and `ASPNETCORE_FORWARDEDHEADERS_ENABLED=true` in a launchSettings.json
+profile (both configure X-Forwarded-For and X-Forwarded-Proto and clear the loopback proxy
+restriction; a `false` value gives nothing). Sites are matched through the semantic model, so an
+application method named `UseForwardedHeaders` or a `Configure` of another options type is not
+reported. The rewritten values themselves are tracked as `proxy-derived` data-flow sources (see
+[security analysis](./security-analysis.md)).
 
 Razor Pages pair each `.cshtml` with its PageModel (`@model`, else the `.cshtml.cs`
 code-behind): `On{Verb}[Handler][Async]` methods are the endpoints, every `@page` directive is a

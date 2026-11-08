@@ -672,3 +672,35 @@ named after the nested type alone (visible in any assembly holding two async met
 name, and in every Razor Pages view, each of which has an `ExecuteAsync`). On the API output of
 modular-monolith-with-ddd that moves the caller of 3,693 of the 14,114 call records and adds
 1,297 edges and 49 nodes, with no edge left without its endpoints.
+
+## Forwarded-header tracking: `proxy-derived` sources and `ForwardedHeadersEnabled` (additive)
+
+Request values the ASP.NET Core `ForwardedHeaders` middleware rewrites, and direct reads of the
+forwarded headers by literal name, are tracked as data-flow sources of a new category
+`proxy-derived` (the same vocabulary as chen and the cdxgen plugins):
+
+- `ConnectionInfo.RemoteIpAddress`/`RemotePort` and `IHttpConnectionFeature.RemoteIpAddress`
+  carry taint kinds `client-ip`, `http`;
+- `HttpRequest.Host`, `UriHelper.GetDisplayUrl()`/`GetEncodedUrl()` and the legacy
+  `System.Web.HttpRequest.Url` carry `host`, `http`;
+- `HttpRequest.Scheme` and `HttpRequest.IsHttps` carry `scheme`, `http`;
+- `Request.Headers["X-Forwarded-For"]`, `Request.Headers.TryGetValue("X-Forwarded-For", ...)`,
+  `Request.ServerVariables["HTTP_X_FORWARDED_FOR"]`, legacy `Request.Headers.Get(...)` and
+  `[FromHeader(Name = "X-Forwarded-For")]` carry `forwarded-header`, `http`, and record the
+  lower-cased header name in the source node's `Properties.forwardedHeader`.
+
+A flow that used to start at one of these members reported source category `http` (the whole
+`HttpContext`/`HttpRequest` pattern); it now reports `proxy-derived` with the specific taint
+kinds, once, not twice. Every other source, sink and graph byte is unchanged, and the same
+sources match from assembly-only input. A `proxy-derived` value is spoofable only behind a
+proxy that passes the headers through unchanged; the analysis cannot see the proxy.
+
+A new informational finding records that the middleware is on: `ForwardedHeadersEnabled`
+(info, CWE-348) at `app.UseForwardedHeaders(...)`, at a
+`services.Configure<ForwardedHeadersOptions>(...)` that names flags, and in configuration
+(`ForwardedHeaders_Enabled` in an appsettings file, `ASPNETCORE_FORWARDEDHEADERS_ENABLED` in a
+launchSettings.json profile; launchSettings.json is now collected as a configuration file).
+`Properties.framework` is `aspnet`, `Properties.headers` lists the named headers when a literal
+or flags expression names them, and an unbounded `ForwardLimit = null` in the same configuration
+is `Properties.forwardLimit` = `unbounded`. `ForwardedHeaders.None` and a `false` setting give
+no finding, and the existing `ForwardedHeadersTrustAll` finding is unchanged.

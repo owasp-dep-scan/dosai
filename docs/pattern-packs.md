@@ -34,6 +34,9 @@ These patterns are always loaded before optional packs.
 
 | Kind        | Match      | Pattern                                                                                    | Category     | Purpose                                     |
 | ----------- | ---------- | ------------------------------------------------------------------------------------------ | ------------ | ------------------------------------------- |
+| `Symbol`    | `Regex`    | `Microsoft.AspNetCore.Http.ConnectionInfo.(get_)?RemoteIpAddress/RemotePort`, `Features.IHttpConnectionFeature.(get_)?RemoteIpAddress` | `proxy-derived` | Client IP and port the ForwardedHeaders middleware rewrites from `X-Forwarded-For`; taint kinds `client-ip`, `http`. |
+| `Symbol`    | `Regex`    | `HttpRequest.(get_)?Host`, `Http.Extensions.UriHelper.GetDisplayUrl/GetEncodedUrl`, `System.Web.HttpRequest.(get_)?Url` | `proxy-derived` | Request host and URLs built from it, rewritten from `X-Forwarded-Host`; taint kinds `host`, `http`. |
+| `Symbol`    | `Regex`    | `HttpRequest.(get_)?(Scheme\|IsHttps)`                                                     | `proxy-derived` | Request scheme, rewritten from `X-Forwarded-Proto`; taint kinds `scheme`, `http`. |
 | `Parameter` | `Exact`    | `Main`                                                                                     | `cli`        | Command-line `Main` arguments.              |
 | `Parameter` | `Exact`    | `request`                                                                                  | `message`    | Request/message handler input.              |
 | `Parameter` | `Exact`    | `command`                                                                                  | `message`    | Command handler input.                      |
@@ -50,6 +53,16 @@ These patterns are always loaded before optional packs.
 | `Code`      | `Contains` | `Request[`, `Request.QueryString`                                                          | `http`       | Legacy ASP.NET request collection fallback. |
 | `Code`      | `Contains` | `.Text`, `.SelectedItem.Value`                                                             | `webforms`   | ASP.NET WebForms input controls.            |
 | `Type`      | `Contains` | `Grpc.Core.ServerCallContext`                                                              | `rpc`        | gRPC server call context.                   |
+
+Beside these symbol patterns, a direct read of a forwarded header by literal name is a
+`proxy-derived` source of taint kind `forwarded-header`: `Request.Headers["X-Forwarded-For"]`,
+`Request.Headers.TryGetValue("X-Forwarded-For", ...)`, `Request.ServerVariables["HTTP_X_FORWARDED_FOR"]`,
+legacy `Request.Headers.Get("X-Forwarded-Host")` and `[FromHeader(Name = "X-Forwarded-For")]`. The
+matched receiver must be the request's header dictionary (`Response.Headers` gives nothing), the
+name must be a string literal from the set `forwarded`, `x-forwarded-for`, `x-forwarded-host`,
+`x-forwarded-proto`, `x-forwarded-port`, `x-real-ip`, `client-ip`, and the lower-cased header name
+is recorded in the source node's `Properties.forwardedHeader`. These reads are matched on the
+resolved receiver member, never on code text, and work the same from assembly-only input.
 
 ### Always-on sinks
 
