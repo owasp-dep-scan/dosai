@@ -517,6 +517,7 @@ public sealed class FrameworkContext
                     name.Equals("local.settings.json", StringComparison.OrdinalIgnoreCase) ||
                     name.Equals("appsettings.json", StringComparison.OrdinalIgnoreCase) ||
                     name.StartsWith("appsettings.", StringComparison.OrdinalIgnoreCase) ||
+                    name.Equals("launchSettings.json", StringComparison.OrdinalIgnoreCase) ||
                     name.Equals("aws-lambda-tools-defaults.json", StringComparison.OrdinalIgnoreCase))
                 {
                     configs.Add(file);

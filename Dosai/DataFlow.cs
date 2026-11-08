@@ -1167,6 +1167,27 @@ public static partial class DataFlowAnalyzer
     {
         Sources =
         [
+            // Forwarded-header tracking, first in the list on purpose: MatchSymbol also matches
+            // Type-kind patterns against a member's containing type, and both passes keep list
+            // order, so the whole-HttpRequest/HttpContext patterns below would otherwise take
+            // these members first and report them as plain http. These are the request values
+            // the ASP.NET Core ForwardedHeaders middleware rewrites (verified against
+            // src/Middleware/HttpOverrides), spoofable only behind a proxy that passes
+            // X-Forwarded-* through. The (get_)? alternation matches the property text the
+            // source walker renders and the get_ accessor symbol the IL pass resolves with one
+            // pattern. System.Web's UserHostAddress/IsSecureConnection are deliberately absent:
+            // IIS/ARR does not rewrite REMOTE_ADDR or the connection's TLS state, so behind a
+            // proxy they hold the proxy's own facts, not client-set values (Url is kept: it is
+            // rebuilt from the client-chosen Host header). No code-text fallback: like the
+            // .Request.Headers collection patterns, these are symbol-resolved only.
+            new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Symbol, Pattern = @"^Microsoft\.AspNetCore\.Http\.ConnectionInfo\.(get_)?RemoteIpAddress\b", Match = DataFlowMatchKind.Regex, Category = ForwardedHeaders.Category, TaintKinds = ["client-ip", "http"], Description = "Client IP the ForwardedHeaders middleware rewrites from X-Forwarded-For" },
+            new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Symbol, Pattern = @"^Microsoft\.AspNetCore\.Http\.ConnectionInfo\.(get_)?RemotePort\b", Match = DataFlowMatchKind.Regex, Category = ForwardedHeaders.Category, TaintKinds = ["client-ip", "http"], Description = "Client port the ForwardedHeaders middleware rewrites from X-Forwarded-For" },
+            new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Symbol, Pattern = @"^Microsoft\.AspNetCore\.Http\.Features\.IHttpConnectionFeature\.(get_)?RemoteIpAddress\b", Match = DataFlowMatchKind.Regex, Category = ForwardedHeaders.Category, TaintKinds = ["client-ip", "http"], Description = "Client IP through the connection feature the ForwardedHeaders middleware rewrites" },
+            new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Symbol, Pattern = @"^Microsoft\.AspNetCore\.Http\.HttpRequest\.(get_)?Host\b", Match = DataFlowMatchKind.Regex, Category = ForwardedHeaders.Category, TaintKinds = ["host", "http"], Description = "Request host the ForwardedHeaders middleware rewrites from X-Forwarded-Host" },
+            new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Symbol, Pattern = @"^Microsoft\.AspNetCore\.Http\.HttpRequest\.(get_)?(Scheme|IsHttps)\b", Match = DataFlowMatchKind.Regex, Category = ForwardedHeaders.Category, TaintKinds = ["scheme", "http"], Description = "Request scheme the ForwardedHeaders middleware rewrites from X-Forwarded-Proto (IsHttps derives from it)" },
+            new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Symbol, Pattern = "Microsoft.AspNetCore.Http.Extensions.UriHelper.GetDisplayUrl", Match = DataFlowMatchKind.Contains, Category = ForwardedHeaders.Category, TaintKinds = ["host", "http"], Description = "Display URL built from the rewritten request scheme and host" },
+            new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Symbol, Pattern = "Microsoft.AspNetCore.Http.Extensions.UriHelper.GetEncodedUrl", Match = DataFlowMatchKind.Contains, Category = ForwardedHeaders.Category, TaintKinds = ["host", "http"], Description = "Encoded URL built from the rewritten request scheme and host" },
+            new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Symbol, Pattern = @"^System\.Web\.HttpRequest\.(get_)?Url\b", Match = DataFlowMatchKind.Regex, Category = ForwardedHeaders.Category, TaintKinds = ["host", "http"], Description = "Legacy System.Web request URL rebuilt from the client-chosen Host header" },
             new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Parameter, Pattern = "Main", Match = DataFlowMatchKind.Exact, Category = "cli", Description = "Command-line Main arguments" },
             new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Parameter, Pattern = "request", Match = DataFlowMatchKind.Exact, Category = "message", Description = "Request/message handler input" },
             new() { Target = DataFlowPatternTarget.Source, Kind = DataFlowPatternKind.Parameter, Pattern = "command", Match = DataFlowMatchKind.Exact, Category = "message", Description = "Command handler input" },
@@ -2151,6 +2172,11 @@ public static partial class DataFlowAnalyzer
 
         private IEnumerable<DataFlowPattern> MatchSourceExpression(IOperation value)
         {
+            if (ForwardedHeaders.MatchSource(value) is { } forwardedHeaderPattern)
+            {
+                yield return forwardedHeaderPattern;
+            }
+
             if (GetReferencedSymbol(value) is { } symbol)
             {
                 foreach (var pattern in MatchSymbol(symbol, value.Syntax, patterns.Sources))
@@ -2890,6 +2916,28 @@ public static partial class DataFlowAnalyzer
                 .Append(GetTaint(operation.Instance)));
             TryGetSummary(operation.TargetMethod, out var summary);
 
+            // A forwarded-header TryGetValue fills its out local with the header value: the
+            // forwarded source is minted on the written symbol, ahead of the receiver's generic
+            // header taint, so the flow reports the header it actually read.
+            if (ForwardedHeaders.MatchSource(operation) is { } forwardedTryGetValue)
+            {
+                foreach (var (argument, symbol) in writeBacks)
+                {
+                    var forwardedNode = graph.AddNode("Source", symbol!.Name, argument, model, basePath, sourceFilePath, _currentMethod,
+                        isSource: true,
+                        isSink: false,
+                        matchedPatterns: [forwardedTryGetValue],
+                        category: ForwardedHeaders.Category,
+                        symbol: symbol.ToDisplayString(),
+                        typeName: GetSymbolType(symbol),
+                        code: SafeSyntaxText.Text(argument.Syntax));
+                    forwardedNode.Properties[ForwardedHeaders.HeaderProperty] = ForwardedHeaders.HeaderOf(forwardedTryGetValue)!;
+                    _taintedSymbols[SymbolKey(symbol)] = new TaintTrace([forwardedNode.Id], forwardedTryGetValue.TaintKinds, []);
+                }
+
+                return;
+            }
+
             // A validator's out value is what it validated into (`int.TryParse(q, out var n)`
             // writes a number): the write-back is clean, and it replaces whatever the slot held.
             var sanitizers = MatchSymbol(operation.TargetMethod, operation.Syntax, _patternIndex.Sanitizers)
@@ -3118,6 +3166,11 @@ public static partial class DataFlowAnalyzer
                         symbol: parameter.ToDisplayString(),
                         typeName: Normalize(parameter.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)),
                         code: parameter.Name);
+                    if (ForwardedHeaders.HeaderOf(matched[0]) is { } parameterForwardedHeader)
+                    {
+                        node.Properties[ForwardedHeaders.HeaderProperty] = parameterForwardedHeader;
+                    }
+
                     _taintedSymbols[SymbolKey(parameter)] = new TaintTrace([node.Id], matched.SelectMany(pattern => pattern.TaintKinds.Count > 0 ? pattern.TaintKinds : [pattern.Category ?? "user-input"]).Distinct(StringComparer.OrdinalIgnoreCase).ToList(), []);
                     continue;
                 }
@@ -3144,6 +3197,13 @@ public static partial class DataFlowAnalyzer
 
         private IEnumerable<DataFlowPattern> MatchParameterSource(IParameterSymbol parameter, IMethodSymbol methodSymbol)
         {
+            // [FromHeader(Name = "X-Forwarded-For")] binds straight from the forwarded header:
+            // the forwarded pattern is yielded first, so the parameter is proxy-derived, not http.
+            if (ForwardedHeaders.FromHeaderParameterSource(parameter) is { } forwardedHeaderParameter)
+            {
+                yield return forwardedHeaderParameter;
+            }
+
             var parameterText = $"{parameter.Name} {Normalize(parameter.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat))}";
             foreach (var pattern in _patternIndex.SourceParameters.Where(p => PatternMatches(parameter.Name, p) || PatternMatches(parameterText, p)))
             {
@@ -4389,6 +4449,11 @@ public static partial class DataFlowAnalyzer
                     symbol: GetOperationSymbol(operation),
                     typeName: Normalize(operation.Type?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty),
                     code: SyntaxText(operation.Syntax));
+                if (ForwardedHeaders.HeaderOf(matchedSourcePatterns[0]) is { } forwardedHeader)
+                {
+                    sourceNode.Properties[ForwardedHeaders.HeaderProperty] = forwardedHeader;
+                }
+
                 return new TaintTrace([sourceNode.Id], matchedSourcePatterns.SelectMany(pattern => pattern.TaintKinds.Count > 0 ? pattern.TaintKinds : [pattern.Category ?? "user-input"]).Distinct(StringComparer.OrdinalIgnoreCase).ToList(), []);
             }
 
@@ -4477,6 +4542,13 @@ public static partial class DataFlowAnalyzer
 
         private IEnumerable<DataFlowPattern> MatchOperationSource(IOperation operation)
         {
+            // A literal forwarded-header read outranks the generic collections: its pattern is
+            // yielded first, so the node's category is proxy-derived, not http.
+            if (ForwardedHeaders.MatchSource(operation) is { } forwardedHeaderPattern)
+            {
+                yield return forwardedHeaderPattern;
+            }
+
             if (_patternIndex.SourceCode.Count > 0)
             {
                 var operationText = SyntaxText(operation.Syntax);

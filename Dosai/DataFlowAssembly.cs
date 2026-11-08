@@ -1249,6 +1249,31 @@ public static partial class DataFlowAnalyzer
         var allTaints = resolvedArguments.Concat([resolvedReceiver]).Where(taint => taint is not null).Cast<AssemblyTaint>().ToList();
         AssemblyTaint? TaintAt(int index) => index == ReceiverIndex ? resolvedReceiver : index >= 0 && index < resolvedArguments.Count ? resolvedArguments[index] : null;
 
+        // A literal forwarded-header read (the dictionary call whose ldstr names the header)
+        // outranks the generic sources: the node is proxy-derived and carries the header name.
+        // TryGetValue also fills its out slot with the header value.
+        if (MatchForwardedHeaderRead(reader, instructions, instructionIndex, member) is { } forwardedPattern)
+        {
+            var forwardedNode = context.AddNode("Source", member.Name, currentMethod, assemblyPath, isSource: true, isSink: false, [forwardedPattern], ForwardedHeaders.Category, member.Symbol, member.ContainingType, member.Symbol, instruction.Offset);
+            forwardedNode.Properties[ForwardedHeaders.HeaderProperty] = ForwardedHeaders.HeaderOf(forwardedPattern)!;
+            var forwardedTaint = new AssemblyTaint([forwardedNode.Id], ToTaintKinds([forwardedPattern]), []);
+            foreach (var argumentTaint in argumentTaints)
+            {
+                if (argumentTaint is not { IsAddress: true } address) continue;
+                if (address.LocalSlot is { } localSlot)
+                {
+                    state.Locals[localSlot] = forwardedTaint;
+                }
+                else if (address.ArgumentSlot is { } argumentSlot)
+                {
+                    state.Arguments[argumentSlot] = forwardedTaint;
+                }
+            }
+
+            state.Push(forwardedTaint);
+            return;
+        }
+
         // Sources: a source API, or the getter of a property bound from the request
         // ([BindProperty], [SupplyParameterFromQuery], ...).
         var sourcePatterns = context.MatchSource(member).Concat(context.MatchPropertySource(reader, token, member)).Distinct().ToList();
@@ -1624,7 +1649,8 @@ public static partial class DataFlowAnalyzer
             var parameterName = reader.GetString(parameter.Name);
             var ilIndex = isStatic ? parameter.SequenceNumber - 1 : parameter.SequenceNumber;
             var parameterAttributes = GetAttributeNames(reader, parameter.GetCustomAttributes()).ToList();
-            var matched = context.MatchParameterSource(parameterName, methodInfo)
+            var matched = ForwardedHeaderParameterSource(reader, parameter)
+                .Concat(context.MatchParameterSource(parameterName, methodInfo))
                 .Concat(context.MatchAttributeSource(GetAttributeNames(reader, method.GetCustomAttributes()).Concat(parameterAttributes)))
                 .DistinctBy(pattern => pattern.Pattern)
                 .ToList();
@@ -1646,6 +1672,11 @@ public static partial class DataFlowAnalyzer
             }
 
             var node = context.AddNode("Source", parameterName, methodInfo, methodInfo.AssemblyPath, isSource: true, isSink: false, matched, matched.FirstOrDefault()?.Category, $"{methodInfo.Symbol}.{parameterName}", null, parameterName, 1);
+            if (matched.FirstOrDefault() is { } firstPattern && ForwardedHeaders.HeaderOf(firstPattern) is { } parameterHeader)
+            {
+                node.Properties[ForwardedHeaders.HeaderProperty] = parameterHeader;
+            }
+
             if (handler is not null)
             {
                 node.Properties["route"] = handler.Route;
@@ -2075,6 +2106,67 @@ public static partial class DataFlowAnalyzer
         }
     }
 
+    /// <summary>
+    ///     A literal forwarded-header read from IL: a header-dictionary call
+    ///     (<c>IHeaderDictionary</c>'s indexer or TryGetValue, <c>NameValueCollection</c>'s
+    ///     Get/GetValues, the ServerVariables indexer) whose argument is an <c>ldstr</c> naming a
+    ///     forwarded header and whose receiver chain comes from the request side
+    ///     (<c>HttpRequest.get_Headers</c>/<c>get_ServerVariables</c>; the response's get_Headers
+    ///     rejects it). The interpreters keep no constant stack, so the literal is found by a
+    ///     bounded backward scan: the shapes the compilers emit put the ldstr within three
+    ///     instructions of the call with only the receiver and out-argument loads between, and a
+    ///     receiver the window cannot trace back to HttpRequest is not a request-side read (the
+    ///     source walker's property-chain gate rejects the same shapes).
+    /// </summary>
+    private static DataFlowPattern? MatchForwardedHeaderRead(MetadataReader reader, IReadOnlyList<AssemblyInstruction> instructions, int callIndex, AssemblyMemberInfo member)
+    {
+        if (member.Name is not ("get_Item" or "TryGetValue" or "Get" or "GetValues") ||
+            member.ContainingType is not ("Microsoft.AspNetCore.Http.IHeaderDictionary" or "Microsoft.AspNetCore.Http.HeaderDictionary" or "System.Collections.Specialized.NameValueCollection"))
+        {
+            return null;
+        }
+
+        string? header = null;
+        var receiverFromRequest = false;
+        for (var index = callIndex - 1; index >= 0 && index >= callIndex - 4; index--)
+        {
+            var instruction = instructions[index];
+            if (instruction.OpCode == OpCodes.Ldstr && instruction.Operand is int userStringToken)
+            {
+                if (header is null && ForwardedHeaders.HeaderName(reader.GetUserString(MetadataTokens.UserStringHandle(userStringToken))) is { } name)
+                {
+                    header = name;
+                    continue;
+                }
+
+                return null;
+            }
+
+            if (instruction.OpCode == OpCodes.Call || instruction.OpCode == OpCodes.Callvirt)
+            {
+                var producer = instruction.Operand is int calleeToken ? ResolveMember(reader, calleeToken) : null;
+                // ForwardedHeadersDefaults.XForwardedForHeaderName stands in for the literal: the
+                // getter is a static call in the ldstr's place, so the scan keeps going past it.
+                if (header is null && producer is not null && ForwardedHeaders.DefaultsHeaderName(producer.ContainingType, producer.Name) is { } defaultsName)
+                {
+                    header = defaultsName;
+                    continue;
+                }
+
+                if (producer is not null &&
+                    producer.Name is "get_Headers" or "get_ServerVariables" &&
+                    producer.ContainingType.EndsWith(".HttpRequest", StringComparison.Ordinal))
+                {
+                    receiverFromRequest = true;
+                }
+
+                break;
+            }
+        }
+
+        return header is not null && receiverFromRequest ? ForwardedHeaders.SourcePattern(header) : null;
+    }
+
     private static AssemblyMemberInfo? ResolveMember(MetadataReader reader, int metadataToken)
     {
         var handle = MetadataTokens.EntityHandle(metadataToken);
@@ -2113,6 +2205,60 @@ public static partial class DataFlowAnalyzer
                 if (!string.IsNullOrWhiteSpace(simpleName)) yield return simpleName;
             }
         }
+    }
+
+    /// <summary>
+    ///     A <c>[FromHeader(Name = "X-Forwarded-For")]</c> parameter from metadata: the attribute
+    ///     value blob is decoded far enough to read the Name argument, and only the framework's
+    ///     own <c>Microsoft.AspNetCore.Mvc.FromHeaderAttribute</c> counts. Yields at most one
+    ///     pattern, ahead of the name/attribute matches, so the parameter is proxy-derived.
+    /// </summary>
+    private static IEnumerable<DataFlowPattern> ForwardedHeaderParameterSource(MetadataReader reader, System.Reflection.Metadata.Parameter parameter)
+    {
+        foreach (var attributeHandle in parameter.GetCustomAttributes())
+        {
+            var attribute = reader.GetCustomAttribute(attributeHandle);
+            if (attribute.Constructor.Kind is not (HandleKind.MemberReference or HandleKind.MethodDefinition))
+            {
+                continue;
+            }
+
+            EntityHandle parent = attribute.Constructor.Kind == HandleKind.MemberReference
+                ? reader.GetMemberReference((MemberReferenceHandle)attribute.Constructor).Parent
+                : reader.GetMethodDefinition((MethodDefinitionHandle)attribute.Constructor).GetDeclaringType();
+            if (ParameterAttributeTypeName(reader, parent) is not "Microsoft.AspNetCore.Mvc.FromHeaderAttribute")
+            {
+                continue;
+            }
+
+            string? literal = null;
+            try
+            {
+                var value = attribute.DecodeValue(AssemblyEndpointAnalyzer.StringTypeProvider.Instance);
+                literal = value.NamedArguments.FirstOrDefault(argument => argument.Name == "Name").Value as string ??
+                          value.FixedArguments.Select(argument => argument.Value).OfType<string>().FirstOrDefault();
+            }
+            catch (Exception ex) when (ex is BadImageFormatException or InvalidOperationException or ArgumentException or NotSupportedException)
+            {
+                // An argument type this decoder cannot see: no header name, no pattern.
+            }
+
+            if (literal is not null && ForwardedHeaders.HeaderName(literal) is { } headerName)
+            {
+                yield return ForwardedHeaders.SourcePattern(headerName);
+            }
+        }
+    }
+
+    private static string? ParameterAttributeTypeName(MetadataReader reader, EntityHandle parent)
+    {
+        var name = parent.Kind switch
+        {
+            HandleKind.TypeReference => GetFullTypeName(reader, reader.GetTypeReference((TypeReferenceHandle)parent)),
+            HandleKind.TypeDefinition => GetFullTypeName(reader, reader.GetTypeDefinition((TypeDefinitionHandle)parent)),
+            _ => null
+        };
+        return name;
     }
 
     private static AssemblyMemberInfo ResolveMemberReference(MetadataReader reader, MemberReferenceHandle handle)

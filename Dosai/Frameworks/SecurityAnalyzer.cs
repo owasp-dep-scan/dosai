@@ -588,6 +588,10 @@ public static class ConfigSecurityAnalyzer
                 {
                     AssessWebConfig(file, File.ReadAllText(file), findings, ids);
                 }
+                else if (fileName.Equals("launchSettings.json", StringComparison.OrdinalIgnoreCase))
+                {
+                    AssessLaunchSettings(file, File.ReadAllText(file), findings, ids);
+                }
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or System.Xml.XmlException)
             {
@@ -688,7 +692,60 @@ public static class ConfigSecurityAnalyzer
                     "Restrict origins to an explicit allowlist; AllowCredentials requires explicit origins per the CORS specification.", text));
             }
         }
+
+        // The ForwardedHeadersOptionsSetup switch (ForwardedHeaders_Enabled; the
+        // ASPNETCORE_FORWARDEDHEADERS_ENABLED environment variable reaches the same key).
+        foreach (var enabled in DescendantProperties(root).Where(property =>
+                     property.Name.Equals("ForwardedHeaders_Enabled", StringComparison.OrdinalIgnoreCase) &&
+                     property.Value.ValueKind == JsonValueKind.String &&
+                     property.Value.GetString()?.Equals("true", StringComparison.OrdinalIgnoreCase) == true))
+        {
+            findings.Add(ForwardedHeadersConfigurationFinding(ids, file, "ForwardedHeaders_Enabled", FindPropertyLine(text, "ForwardedHeaders_Enabled"),
+                $"ForwardedHeaders_Enabled=true in {Path.GetFileName(file)} configures the middleware for X-Forwarded-For and X-Forwarded-Proto and clears the loopback proxy restriction."));
+        }
     }
+
+    /// <summary>
+    ///     launchSettings.json environment variables: <c>ASPNETCORE_FORWARDEDHEADERS_ENABLED=true</c>
+    ///     reaches the framework's <c>ForwardedHeaders_Enabled</c> configuration key and turns the
+    ///     middleware on. Only the development profiles' settings live here, so this is
+    ///     informational.
+    /// </summary>
+    private static void AssessLaunchSettings(string file, string text, List<SecurityFinding> findings, SecurityAnalyzer.FindingIds ids)
+    {
+        using var document = JsonDocument.Parse(text);
+        const string setting = "ASPNETCORE_FORWARDEDHEADERS_ENABLED";
+        foreach (var environment in DescendantProperties(document.RootElement).Where(property =>
+                     property.Name.Equals(setting, StringComparison.OrdinalIgnoreCase) &&
+                     property.Value.ValueKind == JsonValueKind.String &&
+                     property.Value.GetString()?.Equals("true", StringComparison.OrdinalIgnoreCase) == true))
+        {
+            findings.Add(ForwardedHeadersConfigurationFinding(ids, file, setting, FindPropertyLine(text, setting),
+                $"{setting}=true in {Path.GetFileName(file)} configures the middleware for X-Forwarded-For and X-Forwarded-Proto and clears the loopback proxy restriction."));
+        }
+    }
+
+    private static SecurityFinding ForwardedHeadersConfigurationFinding(SecurityAnalyzer.FindingIds ids, string file, string setting, int line, string evidence) => new()
+    {
+        Id = ids.Next("ForwardedHeadersEnabled", Path.GetFileName(file), line),
+        Kind = "ForwardedHeadersEnabled",
+        Title = "Forwarded headers middleware is enabled (x-forwarded-for, x-forwarded-proto)",
+        Severity = "info",
+        Cwe = "CWE-348",
+        FileName = Path.GetFileName(file),
+        LineNumber = line,
+        Evidence = evidence,
+        Remediation = "Informational: behind a reverse proxy that forwards these headers unchanged, the client chooses the remote IP, host and scheme the application sees. Keep KnownProxies/KnownNetworks listing the real proxies; clear them only for a proxy that strips the headers itself.",
+        Confidence = ConfidenceTiers.Syntactic,
+        Properties =
+        {
+            ["framework"] = "aspnet",
+            ["headers"] = "x-forwarded",
+            ["forwardedHeaders"] = "x-forwarded-for,x-forwarded-proto",
+            ["configFile"] = Path.GetFileName(file),
+            ["setting"] = setting
+        }
+    };
 
     private static void AssessWebConfig(string file, string text, List<SecurityFinding> findings, SecurityAnalyzer.FindingIds ids)
     {
@@ -810,7 +867,7 @@ public static class MiddlewareSecurityAnalyzer
         {
             var fileName = Path.GetFileName(tree.FilePath);
             var model = context.CSharp.GetSemanticModel(tree);
-            foreach (var invocation in context.InvocationsNamed(tree, name => name is "UseDeveloperExceptionPage" or "UseHttpsRedirection" or "UseHsts" or "CreateBuilder" or "CreateSlimBuilder" or "CreateEmptyBuilder" or "Clear"))
+            foreach (var invocation in context.InvocationsNamed(tree, name => name is "UseDeveloperExceptionPage" or "UseHttpsRedirection" or "UseHsts" or "CreateBuilder" or "CreateSlimBuilder" or "CreateEmptyBuilder" or "Clear" or "UseForwardedHeaders" or "Configure"))
             {
                 var name = ProviderHelpers.InvocationName(invocation);
                 switch (name)
@@ -835,6 +892,38 @@ public static class MiddlewareSecurityAnalyzer
                             $"{LastName(cleared)}.Clear() removes the loopback default, so X-Forwarded-For/Proto from any client rewrites the remote address and scheme.",
                             "List the real reverse proxies in KnownProxies/KnownNetworks instead of clearing them."));
                         break;
+                    case "UseForwardedHeaders" when IsForwardedHeadersUse(model, invocation):
+                    {
+                        // The inline options initializer names the headers when there is one;
+                        // options from DI (the extension's parameterless form) name none here.
+                        var inlineOptions = invocation.ArgumentList.Arguments
+                            .Select(argument => argument.Expression)
+                            .OfType<ObjectCreationExpressionSyntax>()
+                            .FirstOrDefault();
+                        var useConfiguration = inlineOptions is null ? null : ReadForwardedHeadersConfiguration(inlineOptions);
+                        if (useConfiguration is { Off: true })
+                        {
+                            break;
+                        }
+
+                        findings.Add(ForwardedHeadersEnabledFinding(ids, fileName, Line(invocation), "app.UseForwardedHeaders()", useConfiguration));
+                        break;
+                    }
+
+                    case "Configure" when IsForwardedHeadersConfigure(model, invocation):
+                    {
+                        // The registration turns the middleware on only by naming flags: a
+                        // Configure that only hardens KnownProxies decides nothing about them.
+                        var configureExpression = invocation.ArgumentList.Arguments.Count > 0 ? invocation.ArgumentList.Arguments[^1].Expression : null;
+                        var configureConfiguration = configureExpression is null ? null : ReadForwardedHeadersConfiguration(configureExpression);
+                        if (configureConfiguration is not { Headers: { Count: > 0 } })
+                        {
+                            break;
+                        }
+
+                        findings.Add(ForwardedHeadersEnabledFinding(ids, fileName, Line(invocation), "services.Configure<ForwardedHeadersOptions>(...)", configureConfiguration));
+                        break;
+                    }
                 }
             }
 
@@ -1002,6 +1091,122 @@ public static class MiddlewareSecurityAnalyzer
 
     private static bool IsMemberOf(SemanticModel model, ExpressionSyntax expression, string typeName) =>
         model.GetSymbolInfo(expression).Symbol is { ContainingType: { } type } ? type.Name == typeName : true;
+
+    /// <summary>
+    ///     What an options configuration says about the forwarded headers: the flags it names
+    ///     (null when it names none), whether ForwardedHeaders.None switched them off, and
+    ///     whether ForwardLimit was removed (an unbounded number of proxy hops). Read from the
+    ///     flag NAMES, never the folded constant: the enum's numeric values changed between
+    ///     framework versions, its member names did not.
+    /// </summary>
+    private sealed record ForwardedHeadersConfiguration(List<string>? Headers, bool Off, bool UnboundedForwardLimit);
+
+    private static readonly Dictionary<string, string> ForwardedHeaderFlagNames = new(StringComparer.Ordinal)
+    {
+        ["XForwardedFor"] = "x-forwarded-for",
+        ["XForwardedHost"] = "x-forwarded-host",
+        ["XForwardedProto"] = "x-forwarded-proto",
+        ["XForwardedPrefix"] = "x-forwarded-prefix",
+        ["XForwardedPort"] = "x-forwarded-port"
+    };
+
+    private static ForwardedHeadersConfiguration? ReadForwardedHeadersConfiguration(ExpressionSyntax configuration)
+    {
+        List<string>? headers = null;
+        var off = false;
+        var unbounded = false;
+        foreach (var assignment in configuration.DescendantNodesAndSelf().OfType<AssignmentExpressionSyntax>())
+        {
+            switch (LastName(assignment.Left))
+            {
+                case "ForwardedHeaders":
+                {
+                    var flags = assignment.Right.DescendantNodesAndSelf().OfType<IdentifierNameSyntax>().Select(identifier => identifier.Identifier.Text).ToHashSet(StringComparer.Ordinal);
+                    if (flags.Contains("None"))
+                    {
+                        off = true;
+                    }
+                    else if (flags.Contains("All"))
+                    {
+                        headers = ["all"];
+                    }
+                    else
+                    {
+                        headers = flags.Where(ForwardedHeaderFlagNames.ContainsKey).Select(flag => ForwardedHeaderFlagNames[flag]).Distinct(StringComparer.Ordinal).OrderBy(flag => flag, StringComparer.Ordinal).ToList();
+                    }
+
+                    break;
+                }
+
+                case "ForwardLimit" when assignment.Right.ToString().Replace(" ", string.Empty, StringComparison.Ordinal) == "null":
+                    unbounded = true;
+                    break;
+            }
+        }
+
+        return headers is null && !off && !unbounded ? null : new ForwardedHeadersConfiguration(headers, off, unbounded);
+    }
+
+    /// <summary>The extension call is the framework's own (Microsoft.AspNetCore.Builder.ForwardedHeadersExtensions), not an application method of the same name.</summary>
+    private static bool IsForwardedHeadersUse(SemanticModel model, InvocationExpressionSyntax invocation) =>
+        OperationDepthGuard.GetOperation(model, invocation) is not IInvocationOperation { TargetMethod: { } target } || target.ContainingType.Name == "ForwardedHeadersExtensions";
+
+    /// <summary>A Configure registration whose options type is ForwardedHeadersOptions, by resolved type argument or, unresolved, by the written generic argument.</summary>
+    private static bool IsForwardedHeadersConfigure(SemanticModel model, InvocationExpressionSyntax invocation)
+    {
+        if (OperationDepthGuard.GetOperation(model, invocation) is IInvocationOperation { TargetMethod.TypeArguments: { Length: > 0 } typeArguments })
+        {
+            return typeArguments[0].Name == "ForwardedHeadersOptions";
+        }
+
+        return invocation.Expression is MemberAccessExpressionSyntax { Name: GenericNameSyntax { TypeArgumentList.Arguments.Count: 1 } generic } &&
+               generic.TypeArgumentList.Arguments[0].ToString() == "ForwardedHeadersOptions";
+    }
+
+    /// <summary>
+    ///     Informational record that the forwarded-headers middleware is turned on (CWE-348):
+    ///     behind a proxy that passes the headers through unchanged, the client chooses the
+    ///     remote IP, host and scheme the application then sees. This is information, not a
+    ///     defect; the trust decision is the KnownProxies/KnownNetworks configuration the
+    ///     ForwardedHeadersTrustAll finding judges.
+    /// </summary>
+    private static SecurityFinding ForwardedHeadersEnabledFinding(SecurityAnalyzer.FindingIds ids, string fileName, int line, string site, ForwardedHeadersConfiguration? configuration)
+    {
+        var headers = configuration?.Headers;
+        var finding = new SecurityFinding
+        {
+            Id = ids.Next("ForwardedHeadersEnabled", fileName, line),
+            Kind = "ForwardedHeadersEnabled",
+            Title = headers is null
+                ? "Forwarded headers middleware is enabled"
+                : $"Forwarded headers middleware is enabled ({string.Join(", ", headers)})",
+            Severity = "info",
+            Cwe = "CWE-348",
+            FileName = fileName,
+            LineNumber = line,
+            Evidence = $"{site} in {fileName}:{line} makes the application consume Forwarded/X-Forwarded-* header values" +
+                       (headers is null ? "" : $": {string.Join(", ", headers)}") +
+                       (configuration is { UnboundedForwardLimit: true } ? "; ForwardLimit is null, so every proxy hop in the headers is processed" : "") + ".",
+            Remediation = "Informational: behind a reverse proxy that forwards these headers unchanged, the client chooses the remote IP, host and scheme the application sees. Keep KnownProxies/KnownNetworks listing the real proxies; clear them only for a proxy that strips the headers itself.",
+            Confidence = ConfidenceTiers.Semantic,
+            Properties = { ["framework"] = "aspnet" }
+        };
+        if (headers is { Count: > 0 })
+        {
+            // headers is the family, in the vocabulary chen and the cdxgen plugins share
+            // (ASP.NET Core reads only the X-Forwarded-* family, never RFC 7239 Forwarded);
+            // forwardedHeaders lists the flags the configuration names.
+            finding.Properties["headers"] = "x-forwarded";
+            finding.Properties["forwardedHeaders"] = string.Join(",", headers);
+        }
+
+        if (configuration is { UnboundedForwardLimit: true })
+        {
+            finding.Properties["forwardLimit"] = "unbounded";
+        }
+
+        return finding;
+    }
 
     private static string? LastName(ExpressionSyntax expression) => expression switch
     {

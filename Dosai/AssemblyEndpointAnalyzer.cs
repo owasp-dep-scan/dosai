@@ -905,7 +905,7 @@ internal static class AssemblyEndpointAnalyzer
     };
 
     /// <summary>Decodes attribute arguments far enough to read strings; every other type is opaque.</summary>
-    private sealed class StringTypeProvider : ICustomAttributeTypeProvider<string>
+    internal sealed class StringTypeProvider : ICustomAttributeTypeProvider<string>
     {
         public static readonly StringTypeProvider Instance = new();
         public string GetPrimitiveType(PrimitiveTypeCode typeCode) => typeCode.ToString();
