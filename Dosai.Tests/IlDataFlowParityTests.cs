@@ -127,7 +127,7 @@ namespace Microsoft.AspNetCore.Components
 
 namespace Microsoft.AspNetCore.Mvc
 {
-    [AttributeUsage(AttributeTargets.Parameter | AttributeTargets.Property)] public sealed class FromHeaderAttribute : Attribute { public string? Name { get; set; } }
+    [AttributeUsage(AttributeTargets.Parameter | AttributeTargets.Property)] public sealed class FromHeaderAttribute : Attribute { public FromHeaderAttribute() { } public string? Name { get; set; } }
     [AttributeUsage(AttributeTargets.Property)] public sealed class BindPropertyAttribute : Attribute { }
     public interface IActionResult { }
     public class RedirectResult : IActionResult { public RedirectResult(string url) { } }
@@ -498,8 +498,8 @@ public class Runner
     {
         var total = 0;
         for (var i = 0; i < 10; i++) { total += i * 2; Console.WriteLine(total); Console.WriteLine(i); Console.WriteLine(total - i); }
-        for (var i = 0; i < 10; i++) { total -= i; Console.WriteLine(total); Console.WriteLine(i + 1); Console.WriteLine(total * i); }
-        for (var i = 0; i < 10; i++) { total ^= i; Console.WriteLine(total); Console.WriteLine(i + 2); Console.WriteLine(total + i); }
+        for (var i = 0; i < 10; i++) { total -= i * 2; Console.WriteLine(total); Console.WriteLine(i + 1); Console.WriteLine(total - i * 2); }
+        for (var i = 0; i < 10; i++) { total += i * 2; Console.WriteLine(total); Console.WriteLine(i + 2); Console.WriteLine(total * i); }
         Process.Start(command);
     }
 }
@@ -513,5 +513,122 @@ public static class Flows
 
         Assert.True(Reaches(sinks, "SetterThenLargeGo", "command"));
         Assert.False(sinks.ContainsKey("ReassignedThenLargeGo"));
+    }
+
+    /// <summary>
+    ///     The forwarded-header sources match from IL alone: the rewritten accessors by their
+    ///     declaring types, and a literal-name header read by the ldstr feeding the dictionary
+    ///     call. The receiver must come from the request side (HttpRequest.get_Headers), so the
+    ///     same literal through Response.Headers gives nothing.
+    /// </summary>
+    private const string ForwardedStubs = """
+
+namespace Microsoft.Extensions.Primitives
+{
+    public struct StringValues { public override string ToString() => string.Empty; }
+}
+namespace Microsoft.AspNetCore.Http
+{
+    public struct HostString { public override string ToString() => string.Empty; }
+    public abstract class ConnectionInfo
+    {
+        public abstract System.Net.IPAddress? RemoteIpAddress { get; }
+        public abstract int RemotePort { get; }
+    }
+    public class DefaultConnectionInfo : ConnectionInfo
+    {
+        public override System.Net.IPAddress? RemoteIpAddress => null;
+        public override int RemotePort => 0;
+    }
+    public interface IHeaderDictionary
+    {
+        Microsoft.Extensions.Primitives.StringValues this[string key] { get; }
+        bool TryGetValue(string key, out Microsoft.Extensions.Primitives.StringValues value);
+    }
+    public class HeaderDictionary : IHeaderDictionary
+    {
+        public Microsoft.Extensions.Primitives.StringValues this[string key] => default;
+        public bool TryGetValue(string key, out Microsoft.Extensions.Primitives.StringValues value) { value = default; return false; }
+    }
+    public class HttpContext
+    {
+        public ConnectionInfo Connection { get; } = new DefaultConnectionInfo();
+        public HttpRequest Request { get; } = new();
+        public HttpResponse Response { get; } = new();
+    }
+    public class HttpRequest
+    {
+        public HostString Host { get; } = default;
+        public string Scheme { get; } = string.Empty;
+        public bool IsHttps { get; }
+        public IHeaderDictionary Headers { get; } = new HeaderDictionary();
+    }
+    public class HttpResponse { public IHeaderDictionary Headers { get; } = new HeaderDictionary(); }
+}
+namespace Microsoft.AspNetCore.Http.Extensions
+{
+    public static class UriHelper
+    {
+        public static string GetDisplayUrl(Microsoft.AspNetCore.Http.HttpRequest request) => string.Empty;
+    }
+}
+""" + Stubs;
+
+    [Fact]
+    public void ForwardedHeaderSources_WorkFromAssemblyIl()
+    {
+        using var fixture = new TempDir();
+        EmitAssembly(fixture.Path, """
+using System;
+using System.Diagnostics;
+using System.Net;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Extensions;
+
+public class AppConnection { public IPAddress? RemoteIpAddress { get; } }
+
+public static class Flows
+{
+    public static void ClientIp(HttpContext ctx) => Process.Start("tool", ctx.Connection.RemoteIpAddress?.ToString() ?? "");
+    public static void ClientPort(HttpContext ctx) => Process.Start("tool", ctx.Connection.RemotePort.ToString());
+    public static void Host(HttpContext ctx) => Process.Start("tool", ctx.Request.Host.ToString());
+    public static void Scheme(HttpContext ctx) => Process.Start("tool", ctx.Request.Scheme);
+    public static void DisplayUrl(HttpContext ctx) => Process.Start("tool", UriHelper.GetDisplayUrl(ctx.Request));
+    public static void HeaderIndexer(HttpContext ctx) => Process.Start("tool", ctx.Request.Headers["X-Forwarded-For"].ToString());
+    public static void HeaderTryGetValue(HttpContext ctx) { ctx.Request.Headers.TryGetValue("X-Forwarded-Proto", out var proto); Process.Start("tool", proto.ToString()); }
+    public static void ResponseHeader(HttpContext ctx) => Process.Start("tool", ctx.Response.Headers["X-Forwarded-For"].ToString());
+    public static void HeaderNonLiteral(HttpContext ctx, string name) => Process.Start("tool", ctx.Request.Headers[name].ToString());
+    public static void AppClientIp(AppConnection conn) => Process.Start("tool", conn.RemoteIpAddress?.ToString() ?? "");
+    public static void FromHeaderForwarded([Microsoft.AspNetCore.Mvc.FromHeader(Name = "X-Forwarded-For")] string ip) => Process.Start("tool", ip);
+}
+""" + ForwardedStubs);
+
+        var result = DataFlowAnalyzer.Analyze(fixture.Path);
+        var categories = result.Nodes
+            .Where(node => node.IsSource)
+            .GroupBy(node => node.MethodName ?? string.Empty)
+            .ToDictionary(group => group.Key, group => group.Select(node => (node.Category, node.Properties.GetValueOrDefault("forwardedHeader"))).ToList(), StringComparer.Ordinal);
+        bool ProxyDerived(string method) => categories.TryGetValue(method, out var entries) && entries.Any(entry => entry.Category == "proxy-derived");
+
+        Assert.True(ProxyDerived("ClientIp"));
+        Assert.True(ProxyDerived("ClientPort"));
+        Assert.True(ProxyDerived("Host"));
+        Assert.True(ProxyDerived("Scheme"));
+        Assert.True(ProxyDerived("DisplayUrl"));
+        Assert.True(ProxyDerived("HeaderIndexer"));
+        Assert.True(ProxyDerived("HeaderTryGetValue"));
+        Assert.True(ProxyDerived("FromHeaderForwarded"));
+        Assert.Equal("x-forwarded-for", result.Nodes.Single(node => node.IsSource && node.MethodName == "HeaderIndexer" && node.Properties.ContainsKey("forwardedHeader")).Properties.GetValueOrDefault("forwardedHeader"));
+        Assert.Equal("x-forwarded-for", result.Nodes.Single(node => node.IsSource && node.MethodName == "FromHeaderForwarded" && node.Properties.ContainsKey("forwardedHeader")).Properties.GetValueOrDefault("forwardedHeader"));
+
+        // The same members on an application class, the same literal through Response.Headers,
+        // and a non-literal header name are not forwarded-header reads.
+        Assert.False(ProxyDerived("AppClientIp"));
+        Assert.False(ProxyDerived("ResponseHeader"));
+        Assert.False(ProxyDerived("HeaderNonLiteral"));
+
+        var nodesById = result.Nodes.ToDictionary(node => node.Id);
+        Assert.Contains(result.Slices, slice => slice is { SourceCategory: "proxy-derived", SinkCategory: "command" } &&
+                                                nodesById.TryGetValue(slice.SourceId, out var source) && source.MethodName == "ClientIp");
     }
 }
