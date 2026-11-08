@@ -1,0 +1,31 @@
+Dosai/Frameworks/FrameworkContext.cs
+  s_ac3e7aa2808f5a::t_085c893c90e5f4 520
+Dosai.Tests/ForwardedHeaderTests.cs
+  s_ac3e7aa2808f5a::t_d620a48f57b513 331,334,353,356,359,365-367,371,378,395,421
+  s_ac3e7aa2808f5a::t_08fed9b7454a9b 345-348
+  s_ac3e7aa2808f5a::t_20b106a29e8048 267-330,332-333,335-344,349-352,354-355,357-358,360-364,368-370,372-377,379-394,396-420,422-439
+Dosai/Frameworks/SecurityAnalyzer.cs
+  s_ac3e7aa2808f5a::t_9e552f21592b97 1094-1133,1135-1204
+  s_ac3e7aa2808f5a::t_76e98543abafdc 591-594
+  s_ac3e7aa2808f5a::t_99a052b1676710 869
+  s_ac3e7aa2808f5a::t_d341aa6a7d2ced 894-925
+  s_ac3e7aa2808f5a::t_1c7adbf8ec6bdb 1134
+  s_ac3e7aa2808f5a::t_f3aa93b7e21c66 695-725,728-747
+  s_ac3e7aa2808f5a::t_9af93c27a934c6 748,1205
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5553ef85e87f4b13e7c9a9bd0978883a59c5743d",
+  "prompts": {},
+  "sessions": {
+    "s_ac3e7aa2808f5a": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "sess_6a665ba6-7197-4124-a338-1541914b6e6f",
+        "model": "GLM-5.3"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
