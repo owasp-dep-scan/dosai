@@ -264,4 +264,177 @@ public class AppRequest { public string Host { get; } = string.Empty; }
 
     private static string? ForwardedHeaderOf(DataFlowResult result, string method) =>
         result.Nodes.FirstOrDefault(node => node.IsSource && node.MethodName == method && node.Properties.ContainsKey("forwardedHeader"))?.Properties.GetValueOrDefault("forwardedHeader");
+
+    private const string FindingStubs = """
+namespace Microsoft.AspNetCore.HttpOverrides
+{
+    [System.Flags]
+    public enum ForwardedHeaders { None = 0, XForwardedFor = 1, XForwardedHost = 2, XForwardedProto = 4, XForwardedPrefix = 8, All = 15 }
+}
+namespace Microsoft.AspNetCore.Builder
+{
+    public interface IApplicationBuilder { }
+    public class ForwardedHeadersOptions
+    {
+        public Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders ForwardedHeaders { get; set; }
+        public int? ForwardLimit { get; set; }
+        public System.Collections.Generic.IList<object> KnownProxies { get; } = new System.Collections.Generic.List<object>();
+        public System.Collections.Generic.IList<object> KnownNetworks { get; } = new System.Collections.Generic.List<object>();
+    }
+    public static class ForwardedHeadersExtensions
+    {
+        public static IApplicationBuilder UseForwardedHeaders(this IApplicationBuilder app) => app;
+        public static IApplicationBuilder UseForwardedHeaders(this IApplicationBuilder app, ForwardedHeadersOptions options) => app;
+    }
+}
+namespace Microsoft.Extensions.DependencyInjection
+{
+    public interface IServiceCollection { }
+    public static class OptionsServiceCollectionExtensions
+    {
+        public static IServiceCollection Configure<TOptions>(this IServiceCollection services, System.Action<TOptions> configure) where TOptions : class => services;
+    }
+}
+""";
+
+    private const string FindingFixture = """
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.Extensions.DependencyInjection;
+
+public static class Setup
+{
+    public static void Inline(IApplicationBuilder app) =>
+        app.UseForwardedHeaders(new ForwardedHeadersOptions { ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto });
+    public static void NoHeaders(IApplicationBuilder app) => app.UseForwardedHeaders();
+    public static void AllFlags(IServiceCollection services) =>
+        services.Configure<ForwardedHeadersOptions>(options => options.ForwardedHeaders = ForwardedHeaders.All);
+    public static void UnboundedHops(IServiceCollection services) =>
+        services.Configure<ForwardedHeadersOptions>(options => { options.ForwardedHeaders = ForwardedHeaders.XForwardedFor; options.ForwardLimit = null; });
+    public static void Off(IApplicationBuilder app) =>
+        app.UseForwardedHeaders(new ForwardedHeadersOptions { ForwardedHeaders = ForwardedHeaders.None });
+    public static void OtherOptions(IServiceCollection services) =>
+        services.Configure<OtherOptions>(options => options.Value = 1);
+    public static void AppNamed(IApplicationBuilder app) => AppPipeline.UseForwardedHeaders(app);
+    public static void TrustAll(IApplicationBuilder app)
+    {
+        var forwarded = new ForwardedHeadersOptions();
+        forwarded.KnownProxies.Clear();
+        app.UseForwardedHeaders(forwarded);
+    }
+}
+
+public static class AppPipeline { public static IApplicationBuilder UseForwardedHeaders(IApplicationBuilder app) => app; }
+public class OtherOptions { public int Value { get; set; } }
+""";
+
+    private static List<Depscan.Frameworks.SecurityFinding> AnalyzeFindings(string source)
+    {
+        using var directory = new RoadmapTemporaryDirectory();
+        directory.WriteSource("Program.cs", source + FindingStubs);
+        return directory.Methods().SecurityFindings!;
+    }
+
+    [Fact]
+    public void ForwardedHeadersEnabled_IsReportedWhereTheMiddlewareIsTurnedOn()
+    {
+        var findings = AnalyzeFindings(FindingFixture);
+        List<Depscan.Frameworks.SecurityFinding> Of(string kind) => findings.Where(finding => finding.Kind == kind).ToList();
+
+        var enabled = Of("ForwardedHeadersEnabled");
+        // Inline options, the DI registration with flags, the flagless call, the unbounded
+        // registration and the trust-all site's own call are each their own site; None, other
+        // options and an application method of the same name give nothing.
+        Assert.Equal(5, enabled.Count);
+        Assert.All(enabled, finding => Assert.Equal("info", finding.Severity));
+        Assert.All(enabled, finding => Assert.Equal("CWE-348", finding.Cwe));
+        Assert.All(enabled, finding => Assert.Equal("aspnet", finding.Properties["framework"]));
+
+        var inline = Assert.Single(enabled, finding => finding.FileName == "Program.cs" && finding.LineNumber == 8);
+        Assert.Equal("x-forwarded-for,x-forwarded-proto", inline.Properties.GetValueOrDefault("headers"));
+
+        var allFlags = Assert.Single(enabled, finding => finding.LineNumber == 11);
+        Assert.Equal("all", allFlags.Properties.GetValueOrDefault("headers"));
+
+        Assert.Single(enabled, finding => finding.LineNumber == 9 && !finding.Properties.ContainsKey("headers"));
+
+        var unbounded = Assert.Single(enabled, finding => finding.LineNumber == 13);
+        Assert.Equal("x-forwarded-for", unbounded.Properties.GetValueOrDefault("headers"));
+        Assert.Equal("unbounded", unbounded.Properties.GetValueOrDefault("forwardLimit"));
+
+        // None is off (line 15), Configure<OtherOptions> is not this middleware (line 17), and an
+        // application UseForwardedHeaders is not the framework's (line 18).
+        Assert.DoesNotContain(enabled, finding => finding.LineNumber is 15 or 17 or 18);
+
+        // The trust-all rule keeps firing beside the new informational finding.
+        var trustAll = Assert.Single(Of("ForwardedHeadersTrustAll"));
+        Assert.Equal(22, trustAll.LineNumber);
+    }
+
+    [Fact]
+    public void ForwardedHeadersEnabled_FromConfiguration()
+    {
+        using var directory = new RoadmapTemporaryDirectory();
+        directory.WriteSource("App.cs", "public class App { }\n");
+        directory.WriteSource("appsettings.json", """
+{
+  "ForwardedHeaders_Enabled": "true"
+}
+""");
+        var findings = directory.Methods().SecurityFindings!;
+        var enabled = Assert.Single(findings, finding => finding.Kind == "ForwardedHeadersEnabled");
+        Assert.Equal("aspnet", enabled.Properties["framework"]);
+        Assert.Equal("x-forwarded-for,x-forwarded-proto", enabled.Properties.GetValueOrDefault("headers"));
+        Assert.Equal("appsettings.json", enabled.Properties.GetValueOrDefault("configFile"));
+    }
+
+    [Fact]
+    public void ForwardedHeadersEnabled_ConfigurationTwins_StayQuiet()
+    {
+        using var directory = new RoadmapTemporaryDirectory();
+        directory.WriteSource("App.cs", "public class App { }\n");
+        directory.WriteSource("appsettings.json", """
+{
+  "ForwardedHeaders_Enabled": "false"
+}
+""");
+        directory.WriteSource("launchSettings.json", """
+{
+  "profiles": {
+    "Dev": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "ASPNETCORE_FORWARDEDHEADERS_ENABLED": "false"
+      }
+    }
+  }
+}
+""");
+        var findings = directory.Methods().SecurityFindings!;
+        Assert.DoesNotContain(findings, finding => finding.Kind == "ForwardedHeadersEnabled");
+    }
+
+    [Fact]
+    public void ForwardedHeadersEnabled_FromLaunchSettingsEnvironment()
+    {
+        using var directory = new RoadmapTemporaryDirectory();
+        directory.WriteSource("App.cs", "public class App { }\n");
+        directory.WriteSource("launchSettings.json", """
+{
+  "profiles": {
+    "Dev": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "ASPNETCORE_FORWARDEDHEADERS_ENABLED": "true"
+      }
+    }
+  }
+}
+""");
+        var findings = directory.Methods().SecurityFindings!;
+        var enabled = Assert.Single(findings, finding => finding.Kind == "ForwardedHeadersEnabled");
+        Assert.Equal("aspnet", enabled.Properties["framework"]);
+        Assert.Equal("x-forwarded-for,x-forwarded-proto", enabled.Properties.GetValueOrDefault("headers"));
+        Assert.Equal("launchSettings.json", enabled.Properties.GetValueOrDefault("configFile"));
+    }
 }
