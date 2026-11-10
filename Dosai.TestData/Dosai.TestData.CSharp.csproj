@@ -10,6 +10,7 @@
   <ItemGroup>
     <Compile Remove="UnionTypes.cs" />
     <Compile Remove="UnionAccess.cs" />
+    <Compile Remove="UnionSwitchShapes.cs" />
     <Compile Remove="CSharp15Features.cs" />
     <Compile Remove="ExtensionMembers.cs" />
     <Compile Remove="FileBasedApp.cs" />

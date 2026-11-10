@@ -763,6 +763,7 @@ public class CommandLine
         if (result.Slices.Count == 0)
         {
             writer.WriteLine("No data-flow slices found.");
+            WriteStandaloneWeaknesses(writer, result);
             return;
         }
 
@@ -791,6 +792,36 @@ public class CommandLine
                 writer.WriteLine($"{childPrefix}PURLs: {string.Join(", ", slice.Purls)}");
             }
             WriteDataPathLines(writer, childPrefix, slice, nodesById, edgesById);
+        }
+
+        WriteStandaloneWeaknesses(writer, result);
+    }
+
+    /// <summary>
+    ///     Weakness candidates that belong to no slice (static ReDoS literals, union switch
+    ///     shapes): the summary line counts them, so they are listed too, in result order.
+    /// </summary>
+    private static void WriteStandaloneWeaknesses(TextWriter writer, DataFlowResult result)
+    {
+        var standalone = result.WeaknessCandidates.Where(weakness => string.IsNullOrWhiteSpace(weakness.SliceId)).ToList();
+        if (standalone.Count == 0)
+        {
+            return;
+        }
+
+        writer.WriteLine("Other weakness candidates:");
+        for (var index = 0; index < standalone.Count; index++)
+        {
+            var weakness = standalone[index];
+            var isLast = index == standalone.Count - 1;
+            var connector = isLast ? "└─" : "├─";
+            var childPrefix = isLast ? "   " : "│  ";
+            var cwe = string.IsNullOrWhiteSpace(weakness.Cwe) ? string.Empty : $", {weakness.Cwe}";
+            writer.WriteLine($"{connector} {weakness.Kind} {weakness.Id}: {weakness.Severity}{cwe} at {weakness.SourceLocation ?? weakness.SinkLocation ?? "unknown location"} ({weakness.Confidence})");
+            if (!string.IsNullOrWhiteSpace(weakness.Summary))
+            {
+                writer.WriteLine($"{childPrefix}Summary: {TrimConsoleText(weakness.Summary, 400)}");
+            }
         }
     }
 

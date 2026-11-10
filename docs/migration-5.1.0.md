@@ -711,16 +711,23 @@ no finding, and the existing `ForwardedHeadersTrustAll` finding is unchanged.
 Two new weakness candidate kinds report switches over C# 15 unions that compile cleanly but can
 misbehave at run time, both in category `union-switch` with severity `low`:
 
-- `UnionSwitchWithoutNullArm` (CWE-248): a switch expression over a union with no arm that
-  matches the empty union. `default`, an uninitialized field, or a deserialized empty value has a
-  null `Value`, matches none of the case arms, and throws `SwitchExpressionException`.
+- `UnionSwitchWithoutNullArm` (CWE-248): a switch expression with a union position, the switched
+  value itself or a union inside a tuple element or property, where no arm matches an empty
+  union. `default`, an uninitialized field, or a deserialized empty value has a null `Value`,
+  matches none of the case arms, and throws `SwitchExpressionException`. `Evidence` names the
+  positions (`value`, `#0`, `Owner.Pet`).
 - `UnionSwitchMissingCase` (CWE-478): a switch statement over a union that leaves a case type
-  without an unguarded clause and has no `default`. The compiler does not check switch
-  statements, so those values are skipped silently. `Evidence` names the unhandled case types.
+  not fully handled and has no `default`. The compiler does not check switch statements, so
+  those values are skipped silently. `Evidence` names the unhandled case types.
 
 Confidence is `Medium`, with the source category in `SourceCategory`, when the switched value
-carries data from a source, and `Low` otherwise. Ids are `wcu1`, `wcu2`, ... in path and line
-order, and the usual suppression matchers (`category: union-switch`, file and line) apply. Only
+carries data from a source, and `Low` otherwise. `SourceLocation` and `SinkLocation` carry the
+scan-relative path with forward slashes (`src/Program.cs:12:9`; the file name when the scan root
+is the file), and ids are content-derived (`union-switch-<kind>-<path>-<line>`). A suppression
+`file` now also matches a location by its bare file name after the last `/`, so existing
+file-name suppressions keep working for locations that carry a directory. The `dataflows` text
+report lists weakness candidates that belong to no slice (these findings and ReDoS candidates)
+under "Other weakness candidates"; before, they were only counted in the summary line. Only
 source is checked.
 
 The data classifier now reads the case types of a hand-written `[Union]` type as the compiler

@@ -4977,8 +4977,7 @@ public static partial class DataFlowAnalyzer
         public void RecordUnionSwitch(UnionSwitchFinding finding, string sourceFilePath, TaintTrace? operandTaint)
         {
             var lineSpan = finding.Syntax.GetLocation().GetLineSpan().StartLinePosition;
-            var fileName = Path.GetFileName(sourceFilePath);
-            var path = Path.GetRelativePath(basePath, sourceFilePath);
+            var path = UnionSwitchPath(sourceFilePath);
             var key = (finding.Kind, path, lineSpan.Line, lineSpan.Character);
             var sourceCategories = operandTaint is null
                 ? []
@@ -4993,16 +4992,36 @@ public static partial class DataFlowAnalyzer
                 // A second walk of the same switch may see taint the first did not.
                 if (sourceCategories.Count > 0 && existing.SourceCategory is null)
                 {
-                    _unionSwitchFindings[key] = BuildUnionSwitchWeakness(finding, fileName, lineSpan, sourceCategories);
+                    _unionSwitchFindings[key] = BuildUnionSwitchWeakness(finding, path, lineSpan, sourceCategories);
                 }
 
                 return;
             }
 
-            _unionSwitchFindings[key] = BuildUnionSwitchWeakness(finding, fileName, lineSpan, sourceCategories);
+            _unionSwitchFindings[key] = BuildUnionSwitchWeakness(finding, path, lineSpan, sourceCategories);
         }
 
-        /// <summary>Union switch findings ordered by path, line, column and kind, numbered <c>wcu1</c>, <c>wcu2</c>, ...</summary>
+        /// <summary>
+        ///     The scan-relative path of a source file with forward slashes, or its file name when
+        ///     the scan root is that file. Two files of one name in different directories keep
+        ///     apart in ids, locations and diff keys.
+        /// </summary>
+        private string UnionSwitchPath(string sourceFilePath)
+        {
+            if (!Directory.Exists(basePath))
+            {
+                return Path.GetFileName(sourceFilePath);
+            }
+
+            return Path.GetRelativePath(basePath, sourceFilePath).Replace('\\', '/');
+        }
+
+        /// <summary>
+        ///     Union switch findings ordered by path, line, column and kind. Ids are
+        ///     content-derived (<c>union-switch-&lt;kind&gt;-&lt;path&gt;-&lt;line&gt;</c>, with
+        ///     a counter only for a second switch of one kind on one line), so adding a switch
+        ///     elsewhere leaves every other id, and any suppression naming it, unchanged.
+        /// </summary>
         public List<WeaknessCandidate> UnionSwitchWeaknesses()
         {
             var ordered = _unionSwitchFindings
@@ -5010,19 +5029,22 @@ public static partial class DataFlowAnalyzer
                 .ThenBy(entry => entry.Key.Line)
                 .ThenBy(entry => entry.Key.Character)
                 .ThenBy(entry => entry.Key.Kind, StringComparer.Ordinal)
-                .Select(entry => entry.Value)
                 .ToList();
-            for (var index = 0; index < ordered.Count; index++)
+            var issued = new Dictionary<string, int>(StringComparer.Ordinal);
+            foreach (var ((kind, path, line, _), weakness) in ordered)
             {
-                ordered[index].Id = string.Create(CultureInfo.InvariantCulture, $"wcu{index + 1}");
+                var slug = string.Create(CultureInfo.InvariantCulture, $"{UnionSwitchAnalysis.Category}-{kind}-{path.Replace('/', '-').Replace(' ', '-')}-{line + 1}");
+                var occurrence = issued.TryGetValue(slug, out var count) ? count + 1 : 1;
+                issued[slug] = occurrence;
+                weakness.Id = occurrence == 1 ? slug : string.Create(CultureInfo.InvariantCulture, $"{slug}-{occurrence}");
             }
 
-            return ordered;
+            return ordered.Select(entry => entry.Value).ToList();
         }
 
-        private static WeaknessCandidate BuildUnionSwitchWeakness(UnionSwitchFinding finding, string fileName, Microsoft.CodeAnalysis.Text.LinePosition position, List<string> sourceCategories)
+        private static WeaknessCandidate BuildUnionSwitchWeakness(UnionSwitchFinding finding, string path, Microsoft.CodeAnalysis.Text.LinePosition position, List<string> sourceCategories)
         {
-            var location = string.Create(CultureInfo.InvariantCulture, $"{fileName}:{position.Line + 1}:{position.Character + 1}");
+            var location = string.Create(CultureInfo.InvariantCulture, $"{path}:{position.Line + 1}:{position.Character + 1}");
             var unionName = finding.Union.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat);
             var missing = string.Join(", ", finding.MissingCases.Select(caseType => caseType.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat)));
             var reasons = new List<string> { "Static check of the switch shape; whether an empty union reaches it is not proven." };
@@ -5031,9 +5053,26 @@ public static partial class DataFlowAnalyzer
                 reasons.Add($"The switched value carries data from a {string.Join("/", sourceCategories)} source.");
             }
 
-            var summary = finding.Kind == UnionSwitchAnalysis.MissingNullArmKind
-                ? $"Switch expression over union {unionName} has no null arm: a default or empty {unionName} matches no arm and throws SwitchExpressionException. Add a `null` arm rather than a discard, so the compiler still reports a case added later."
-                : $"Switch statement over union {unionName} handles no {missing} and has no default clause: the compiler does not check switch statements, so those values are skipped silently.";
+            var nested = finding.EmptySlots.Any(slot => slot != UnionSwitchAnalysis.RootSlot);
+            var summary = finding.Kind switch
+            {
+                UnionSwitchAnalysis.MissingNullArmKind when !nested =>
+                    $"Switch expression over union {unionName} has no null arm: a default or empty {unionName} matches no arm and throws SwitchExpressionException. Add a `null` arm rather than a discard, so the compiler still reports a case added later.",
+                UnionSwitchAnalysis.MissingNullArmKind =>
+                    $"Switch expression has no arm for an empty union at {string.Join(", ", finding.EmptySlots)}: a value holding a default or empty union there matches no arm and throws SwitchExpressionException. Add an arm with `null` at that position.",
+                _ => $"Switch statement over union {unionName} handles no {missing} and has no default clause: the compiler does not check switch statements, so those values are skipped silently."
+            };
+            var evidence = new List<string> { TrimCode(SafeSyntaxText.Text(finding.Syntax)) };
+            if (finding.MissingCases.Count > 0)
+            {
+                evidence.Add($"Unhandled case types: {missing}");
+            }
+
+            if (finding.EmptySlots.Count > 0)
+            {
+                evidence.Add($"Empty union unmatched at: {string.Join(", ", finding.EmptySlots)}");
+            }
+
             return new WeaknessCandidate
             {
                 Id = string.Empty,
@@ -5046,9 +5085,7 @@ public static partial class DataFlowAnalyzer
                 SourceLocation = location,
                 SinkLocation = location,
                 SinkCategory = UnionSwitchAnalysis.Category,
-                Evidence = finding.MissingCases.Count > 0
-                    ? [TrimCode(SafeSyntaxText.Text(finding.Syntax)), $"Unhandled case types: {missing}"]
-                    : [TrimCode(SafeSyntaxText.Text(finding.Syntax))],
+                Evidence = evidence,
                 Summary = summary
             };
         }

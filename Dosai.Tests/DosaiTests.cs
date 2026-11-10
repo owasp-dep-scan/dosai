@@ -1345,7 +1345,13 @@ class CryptoIvNoise
         // Discard, `or null`, a default clause, full coverage, a null arm, and a non-union
         // switch give nothing; UnionTypes.cs is a separate file and not part of this scan.
         Assert.Equal(3, findings.Count);
-        Assert.Equal(["wcu1", "wcu2", "wcu3"], findings.Select(weakness => weakness.Id));
+        Assert.Equal(
+            [
+                $"union-switch-UnionSwitchWithoutNullArm-UnionAccess.cs-{LineOf("public static string WithoutNullArm") + 3}",
+                $"union-switch-UnionSwitchWithoutNullArm-UnionAccess.cs-{LineOf("public static string DefaultUnion") + 3}",
+                $"union-switch-UnionSwitchMissingCase-UnionAccess.cs-{LineOf("public static void StatementMissingCase") + 2}"
+            ],
+            findings.Select(weakness => weakness.Id));
     }
 
     // The `is` pattern is the third matching form and the most common one outside a switch;
