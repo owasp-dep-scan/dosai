@@ -106,10 +106,22 @@ names the member that triggered it in `Description`. Disable with `--no-classify
 
 C# union declarations (C# 15, .NET 11) classify through their case records: the classifier
 expands a union into the payload records the compiler lowers per case, so a `credential` or
-`pii` member on one case surfaces even though the union declares no members of its own. Types
-marked for JSON closed-type polymorphism or union serialization (`JsonPolymorphicAttribute`,
-`JsonUnionAttribute`) are treated as (de)serialization boundaries and their interface-typed
-members are followed.
+`pii` member on one case surfaces even though the union declares no members of its own. A
+hand-written `[Union]` type expands the same way, with its cases read the way the compiler reads
+them: the parameter types of its public single-parameter constructors, and the single-parameter
+static `Create` methods of a nested `IUnionMembers` interface it implements (a union whose cases
+are named only there has no case constructor at all). Types marked for JSON closed-type
+polymorphism or union serialization (`JsonPolymorphicAttribute`, `JsonUnionAttribute`) are
+treated as (de)serialization boundaries and their interface-typed members are followed.
+
+System.Text.Json writes a union as its case value alone, with no tag naming the case. Reading
+one back works only while each case has its own JSON shape: when two cases serialize alike (two
+records that are both JSON objects), deserialization throws `JsonException` and asks for a type
+classifier. Review the classifier such a type is given: it decides which case, and so which
+members, untrusted JSON binds into, and one that guesses from loosely checked properties can
+bind a request into a case the client was not meant to reach. A request body of a union type is
+also a place where a default, empty union can enter (see the union switch findings in
+[compiler engineering](compiler-engineering.md#weakness-candidate-model)).
 
 Authorization metadata follows ASP.NET Core's rules. `[AllowAnonymous]` anywhere (method, class,
 base class, group, handler) makes an endpoint anonymous, whatever roles or policies it also

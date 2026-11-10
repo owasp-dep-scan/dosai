@@ -32,6 +32,7 @@ dotnet test ./Dosai.sln
 | `Dosai/CommandLine.cs`               | CLI commands and options                                         |
 | `Dosai.Tests/DosaiTests.cs`          | Unit/integration tests                                           |
 | `Dosai/CSharpSourceParser.cs`        | Single C# parse entry point and language-version policy          |
+| `Dosai/UnionShapes.cs`               | C# 15 union case types and union switch review checks           |
 
 ## Coding expectations
 

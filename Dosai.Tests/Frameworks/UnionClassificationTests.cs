@@ -38,6 +38,37 @@ public interface IReceipt
 {
     ICard Card { get; }
 }
+
+public sealed record Signup(string Email, string ApiKey);
+public sealed record Guest(string Nickname);
+
+// A hand-written union whose cases are named only by its member-provider interface: it has no
+// public single-parameter constructor, so the cases come from IUnionMembers.Create.
+[System.Runtime.CompilerServices.Union]
+public struct Registration : Registration.IUnionMembers
+{
+    private readonly object? _value;
+    private Registration(object? value, bool _) { _value = value; }
+    public interface IUnionMembers
+    {
+        static abstract Registration Create(Signup signup);
+        static abstract Registration Create(Guest guest);
+        object? Value { get; }
+    }
+    public static Registration Create(Signup signup) => new(signup, true);
+    public static Registration Create(Guest guest) => new(guest, true);
+    public object? Value => _value;
+}
+
+// A hand-written union with public case constructors; the private one is not a creation member.
+[System.Runtime.CompilerServices.Union]
+public struct Login : System.Runtime.CompilerServices.IUnion
+{
+    private readonly object? _value;
+    public Login(Signup signup) { _value = signup; }
+    private Login(Success success) { _value = success; }
+    public object? Value => _value;
+}
 """;
 
     [Fact]
@@ -51,6 +82,35 @@ public interface IReceipt
         // case record that inbound JSON can bind into.
         Assert.Contains(("credential", (string?)"Password"), classifications);
         Assert.Contains(("pii", (string?)"Email"), classifications);
+    }
+
+    [Fact]
+    public void ClassifyAll_MemberProviderUnion_SurfacesCaseMembersFromCreateMethods()
+    {
+        var classifications = DataClassifier.ClassifyAll(ResolveSymbol<INamedTypeSymbol>("Registration"));
+
+        Assert.Contains(("credential", (string?)"ApiKey"), classifications);
+        Assert.Contains(("pii", (string?)"Email"), classifications);
+    }
+
+    [Fact]
+    public void ClassifyAll_HandWrittenUnion_ReadsOnlyPublicCaseConstructors()
+    {
+        var classifications = DataClassifier.ClassifyAll(ResolveSymbol<INamedTypeSymbol>("Login"));
+
+        Assert.Contains(("credential", (string?)"ApiKey"), classifications);
+        // Success reaches Login only through a private constructor, which is not a case.
+        Assert.DoesNotContain(("credential", (string?)"Password"), classifications);
+    }
+
+    [Fact]
+    public void CaseTypes_FollowTheCompilersCreationMembers()
+    {
+        static string[] Names(string type) => UnionShapes.CaseTypes((INamedTypeSymbol)ResolveSymbol<INamedTypeSymbol>(type)).Select(caseType => caseType.Name).ToArray();
+
+        Assert.Equal(["Success", "Failure"], Names("Result"));
+        Assert.Equal(["Signup", "Guest"], Names("Registration"));
+        Assert.Equal(["Signup"], Names("Login"));
     }
 
     [Fact]

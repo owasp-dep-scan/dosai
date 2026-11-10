@@ -705,3 +705,33 @@ launchSettings.json profile; launchSettings.json is now collected as a configura
 flags; and an unbounded `ForwardLimit = null` in the same configuration
 is `Properties.forwardLimit` = `unbounded`. `ForwardedHeaders.None` and a `false` setting give
 no finding, and the existing `ForwardedHeadersTrustAll` finding is unchanged.
+
+## Union switch findings and hand-written union cases (additive)
+
+Two new weakness candidate kinds report switches over C# 15 unions that compile cleanly but can
+misbehave at run time, both in category `union-switch` with severity `low`:
+
+- `UnionSwitchWithoutNullArm` (CWE-248): a switch expression with a union position, the switched
+  value itself or a union inside a tuple element or property, where no arm matches an empty
+  union. `default`, an uninitialized field, or a deserialized empty value has a null `Value`,
+  matches none of the case arms, and throws `SwitchExpressionException`. `Evidence` names the
+  positions (`value`, `#0`, `Owner.Pet`).
+- `UnionSwitchMissingCase` (CWE-478): a switch statement over a union that leaves a case type
+  not fully handled and has no `default`. The compiler does not check switch statements, so
+  those values are skipped silently. `Evidence` names the unhandled case types.
+
+Confidence is `Medium`, with the source category in `SourceCategory`, when the switched value
+carries data from a source, and `Low` otherwise. `SourceLocation` and `SinkLocation` carry the
+scan-relative path with forward slashes (`src/Program.cs:12:9`; the file name when the scan root
+is the file), and ids are content-derived (`union-switch-<kind>-<path>-<line>`). A suppression
+`file` now also matches a location by its bare file name after the last `/`, so existing
+file-name suppressions keep working for locations that carry a directory. The `dataflows` text
+report lists weakness candidates that belong to no slice (these findings and ReDoS candidates)
+under "Other weakness candidates"; before, they were only counted in the summary line. Only
+source is checked.
+
+The data classifier now reads the case types of a hand-written `[Union]` type as the compiler
+does: public single-parameter constructors and the static `Create` methods of an implemented
+`IUnionMembers` interface. A union whose cases are named only by that interface used to
+classify as if it had no cases, and a private single-parameter constructor used to count as a
+case; both now follow the compiler. Union declarations classify as before.

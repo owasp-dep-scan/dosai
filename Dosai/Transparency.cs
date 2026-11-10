@@ -1270,7 +1270,7 @@ public static class TransparencyBuilder
     {
         "command" or "sql" or "deserialization" or "file" or "xss" or "xxe" or "ldap" or "xpath" or "nosql" or "template" or "crypto" or "jwt" or "certificate" or "tls" or "reflection" or "network" or "auth" => "high",
         "redirect" or "header" or "prompt" or "mcp" or "mcp-egress" or "rpc" or "eval" or "memory" => "medium",
-        "log" or "redos" or "string" or "cli" => "low",
+        "log" or "redos" or "string" or "cli" or "union-switch" => "low",
         _ => "medium"
     };
 

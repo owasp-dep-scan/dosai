@@ -152,12 +152,23 @@ public sealed class SuppressionSet
                 return false;
             }
 
-            if (File is not null && !location.StartsWith(File, StringComparison.OrdinalIgnoreCase))
+            if (File is not null && !location.StartsWith(File, StringComparison.OrdinalIgnoreCase) && !NamesFileOf(location, File))
             {
                 return false;
             }
 
             return Line is null || (TryLine(location, out var line) && line == Line);
+        }
+
+        /// <summary>
+        ///     Whether a location that carries a scan-relative path (<c>src/Program.cs:12:5</c>)
+        ///     names <paramref name="file" /> as its file: <c>{"file":"Program.cs"}</c> keeps
+        ///     matching a file-name location after it gains its directory.
+        /// </summary>
+        private static bool NamesFileOf(string location, string file)
+        {
+            var separator = location.LastIndexOf('/');
+            return separator >= 0 && location.AsSpan(separator + 1).StartsWith(file, StringComparison.OrdinalIgnoreCase);
         }
 
         private static bool TryLine(string? location, out int line)
