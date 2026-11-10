@@ -1,0 +1,29 @@
+README.md
+  s_645a15cd2c69e5::t_e0dae25bc24db3 19,66,162
+Dosai/Dosai.csproj
+  s_645a15cd2c69e5::t_e0dae25bc24db3 18,45,48,50
+.github/workflows/vulnerable-repo-smoke.yml
+  s_645a15cd2c69e5::t_e0dae25bc24db3 32
+docs/migration-5.0.md
+  s_645a15cd2c69e5::t_e0dae25bc24db3 21-24,26
+.github/workflows/test.yml
+  s_645a15cd2c69e5::t_e0dae25bc24db3 22,24
+Dosai.Tests/Corpus/README.md
+  s_645a15cd2c69e5::t_0b80f6990242af 39
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "96e61e0afaca149b30144a959ed461382f97867d",
+  "prompts": {},
+  "sessions": {
+    "s_645a15cd2c69e5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "52ce9d01-0964-4274-bf5e-3572dafef246",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
