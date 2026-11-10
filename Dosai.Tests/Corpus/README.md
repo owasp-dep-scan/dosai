@@ -36,7 +36,7 @@ you do):
 
 The `issue98` apps are built by the SDK the script runs under: the Razor compiler's line mapping
 differs between SDKs (dotnet/razor#11432, #13056), and the pinned lines in `CorpusTests.cs` were
-taken from builds by .NET SDK `11.0.100-rc.2.26504.105`. Rebuild them (delete the app's `bin/` and
+taken from builds by .NET SDK `11.0.100`. Rebuild them (delete the app's `bin/` and
 `obj/`) under another SDK and the template rows can move to earlier lines.
 
 **Always build the sample apps before running the corpus tests** - several assertions rely on

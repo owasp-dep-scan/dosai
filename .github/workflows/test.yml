@@ -19,11 +19,9 @@ concurrency:
 
 env:
   # The .NET 11 SDK is required to build Dosai itself and to compile the C# 15
-  # (union declaration) fixtures used by the unit tests. While 11.0 is still prerelease,
-  # DOTNET_QUALITY must stay 'preview' or setup-dotnet resolves no matching SDK; set it back
-  # to 'ga' once 11.0 ships.
+  # (union declaration) fixtures used by the unit tests.
   DOTNET_VERSION: '11.0.x'
-  DOTNET_QUALITY: 'preview'
+  DOTNET_QUALITY: 'ga'
 
 jobs:
   unit-tests:

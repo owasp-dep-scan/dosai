@@ -16,7 +16,7 @@ The [command reference](./docs/commands.md) documents every command with inputs,
 
 ## Installation
 
-With the .NET 11 SDK, install Dosai as a .NET tool from NuGet. The tool runs on the SDK's .NET 11 runtime; add `--prerelease` to the install for a release candidate:
+With the .NET 11 SDK, install Dosai as a .NET tool from NuGet. The tool runs on the SDK's .NET 11 runtime; add `--prerelease` to the install to get a release candidate of Dosai:
 
 ```bash
 dotnet tool install -g Dosai       # then run `dosai`
@@ -63,7 +63,7 @@ dotnet run --project ./Dosai/Dosai.csproj -- methods \
 Example output, abridged from one real `methods --path ./Dosai --debug` run:
 
 ```
-[dosai +0.002s] dosai 5.0.0.0, .NET 11.0.0-rc.3.26522.148, macOS 26.6.2 Arm64, 14 processor(s)
+[dosai +0.002s] dosai 5.0.0.0, .NET 11.0.0, macOS 26.6.2 Arm64, 14 processor(s)
 [dosai +0.006s] input path: /Users/you/dosai/Dosai
 [dosai +0.006s] --exclude: <none>
 [dosai +0.006s] start methods
@@ -159,7 +159,7 @@ Dosai targets .NET 11 and analyzes C# 15 source, the default language version fo
 
 .NET 11 library additions are recognized where they matter to analysis: the `Aes` key-wrap methods (RFC 3394) and the post-quantum algorithms (`MLKem`/FIPS 203, `MLDsa`/FIPS 204, `SlhDsa`/FIPS 205, and the composite `CompositeMLKem` and `CompositeMLDsa`), HPKE (RFC 9180), ChaCha20-Poly1305 and `EnvelopedCms` ML-KEM recipients classify as crypto operations in the CBOM, and the experimental caller-driven TLS session types in `System.Net.Security` classify as TLS protocol assets. APIs still marked experimental raise a low-severity finding per diagnostic: `DOSAI-CRYPTO-EXPERIMENTAL-TLS-API` (`SYSLIB5007`), `DOSAI-CRYPTO-EXPERIMENTAL-HPKE` (`SYSLIB5009`) and `DOSAI-CRYPTO-EXPERIMENTAL-PQC-API` (`SYSLIB5006`). Assembly-only inputs built for .NET 11 extract fully, including C# 15 union and positional-pattern lowering: type tests, downcasts, `Deconstruct` out-parameters, and arithmetic keep taint in compiled code. F# 11 source parses with the current language constructs, including record spreads and record constructors.
 
-Building Dosai requires the .NET 11 SDK (11.0.x); a .NET 10 SDK cannot build the current target frameworks. While .NET 11 is prerelease, the `FSharp.Compiler.Service`, `FSharp.Core`, and `System.Reflection.MetadataLoadContext` references are RC builds and are pinned to the RC SDK's versions; they move to the stable releases when .NET 11 reaches GA. The published binaries are self-contained, so analyzing .NET 11 code does not require a .NET 11 runtime on the machine running Dosai.
+Building Dosai requires the .NET 11 SDK (11.0.x); a .NET 10 SDK cannot build the current target frameworks. The `FSharp.Compiler.Service`, `FSharp.Core`, `System.CommandLine` and `System.Reflection.MetadataLoadContext` references are the stable releases that ship with the .NET 11.0.100 SDK. The published binaries are self-contained, so analyzing .NET 11 code does not require a .NET 11 runtime on the machine running Dosai.
 
 ### .NET version support (target-framework aware analysis)
 
