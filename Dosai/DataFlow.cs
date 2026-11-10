@@ -555,6 +555,8 @@ public static partial class DataFlowAnalyzer
         // Statically-detected catastrophic regex literals join the weakness queue as
         // CWE-1333 candidates so suppressions, diff, and downstream consumers see them.
         result.WeaknessCandidates.AddRange(ReDoSAnalyzer.Detect(csharpCompilation, result.Diagnostics));
+        // Union switches that compile cleanly but throw on an empty union or skip a case.
+        result.WeaknessCandidates.AddRange(graph.UnionSwitchWeaknesses());
         TransparencyBuilder.ApplySeverity(result);
         TransparencyBuilder.AttachExploitChains(result, graph.MethodEdges, graph.MethodIdsByFileMethod);
         TransparencyBuilder.ApplySuppressions(result, suppressionsPath);
@@ -3806,12 +3808,22 @@ public static partial class DataFlowAnalyzer
         /// </summary>
         public override void VisitSwitch(ISwitchOperation operation)
         {
+            if (UnionSwitchAnalysis.Inspect(operation) is { } unionFinding)
+            {
+                graph.RecordUnionSwitch(unionFinding, sourceFilePath, GetTaint(operation.Value));
+            }
+
             PropagateOperandTaintToPatternVariables(operation.Value, operation.Cases.SelectMany(@case => @case.Clauses.OfType<IPatternCaseClauseOperation>()).Select(clause => clause.Pattern));
             base.VisitSwitch(operation);
         }
 
         public override void VisitSwitchExpression(ISwitchExpressionOperation operation)
         {
+            if (UnionSwitchAnalysis.Inspect(operation) is { } unionFinding)
+            {
+                graph.RecordUnionSwitch(unionFinding, sourceFilePath, GetTaint(operation.Value));
+            }
+
             PropagateOperandTaintToPatternVariables(operation.Value, operation.Arms.Select(arm => arm.Pattern));
             base.VisitSwitchExpression(operation);
         }
@@ -4940,6 +4952,7 @@ public static partial class DataFlowAnalyzer
         private readonly Dictionary<string, List<DataFlowEdge>> _outgoingEdgesBySource = new(StringComparer.Ordinal);
         private readonly Dictionary<string, HashSet<string>> _methodEdges = new(StringComparer.Ordinal);
         private readonly Dictionary<string, string> _methodIdsByFileMethod = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<(string Kind, string Path, int Line, int Character), WeaknessCandidate> _unionSwitchFindings = new();
 
         /// <summary>Caller method id → callee method ids, recorded during the operation walk.</summary>
         public IReadOnlyDictionary<string, HashSet<string>> MethodEdges => _methodEdges;
@@ -4953,6 +4966,91 @@ public static partial class DataFlowAnalyzer
             {
                 result.Diagnostics.Add(message);
             }
+        }
+
+        /// <summary>
+        ///     Records a union switch review finding once per kind and location (a local
+        ///     function is walked both inside its declaring method and on its own). A switched
+        ///     value that carries source data raises the finding's confidence: that value can be
+        ///     the empty union a request or file produced.
+        /// </summary>
+        public void RecordUnionSwitch(UnionSwitchFinding finding, string sourceFilePath, TaintTrace? operandTaint)
+        {
+            var lineSpan = finding.Syntax.GetLocation().GetLineSpan().StartLinePosition;
+            var fileName = Path.GetFileName(sourceFilePath);
+            var path = Path.GetRelativePath(basePath, sourceFilePath);
+            var key = (finding.Kind, path, lineSpan.Line, lineSpan.Character);
+            var sourceCategories = operandTaint is null
+                ? []
+                : operandTaint.NodeIds
+                    .Select(nodeId => _nodesById.TryGetValue(nodeId, out var node) && node.IsSource ? node.Category : null)
+                    .OfType<string>()
+                    .Distinct(StringComparer.Ordinal)
+                    .Order(StringComparer.Ordinal)
+                    .ToList();
+            if (_unionSwitchFindings.TryGetValue(key, out var existing))
+            {
+                // A second walk of the same switch may see taint the first did not.
+                if (sourceCategories.Count > 0 && existing.SourceCategory is null)
+                {
+                    _unionSwitchFindings[key] = BuildUnionSwitchWeakness(finding, fileName, lineSpan, sourceCategories);
+                }
+
+                return;
+            }
+
+            _unionSwitchFindings[key] = BuildUnionSwitchWeakness(finding, fileName, lineSpan, sourceCategories);
+        }
+
+        /// <summary>Union switch findings ordered by path, line, column and kind, numbered <c>wcu1</c>, <c>wcu2</c>, ...</summary>
+        public List<WeaknessCandidate> UnionSwitchWeaknesses()
+        {
+            var ordered = _unionSwitchFindings
+                .OrderBy(entry => entry.Key.Path, StringComparer.Ordinal)
+                .ThenBy(entry => entry.Key.Line)
+                .ThenBy(entry => entry.Key.Character)
+                .ThenBy(entry => entry.Key.Kind, StringComparer.Ordinal)
+                .Select(entry => entry.Value)
+                .ToList();
+            for (var index = 0; index < ordered.Count; index++)
+            {
+                ordered[index].Id = string.Create(CultureInfo.InvariantCulture, $"wcu{index + 1}");
+            }
+
+            return ordered;
+        }
+
+        private static WeaknessCandidate BuildUnionSwitchWeakness(UnionSwitchFinding finding, string fileName, Microsoft.CodeAnalysis.Text.LinePosition position, List<string> sourceCategories)
+        {
+            var location = string.Create(CultureInfo.InvariantCulture, $"{fileName}:{position.Line + 1}:{position.Character + 1}");
+            var unionName = finding.Union.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat);
+            var missing = string.Join(", ", finding.MissingCases.Select(caseType => caseType.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat)));
+            var reasons = new List<string> { "Static check of the switch shape; whether an empty union reaches it is not proven." };
+            if (sourceCategories.Count > 0)
+            {
+                reasons.Add($"The switched value carries data from a {string.Join("/", sourceCategories)} source.");
+            }
+
+            var summary = finding.Kind == UnionSwitchAnalysis.MissingNullArmKind
+                ? $"Switch expression over union {unionName} has no null arm: a default or empty {unionName} matches no arm and throws SwitchExpressionException. Add a `null` arm rather than a discard, so the compiler still reports a case added later."
+                : $"Switch statement over union {unionName} handles no {missing} and has no default clause: the compiler does not check switch statements, so those values are skipped silently.";
+            return new WeaknessCandidate
+            {
+                Id = string.Empty,
+                Kind = finding.Kind,
+                Cwe = finding.Cwe,
+                Confidence = sourceCategories.Count > 0 ? "Medium" : "Low",
+                Severity = TransparencyBuilder.SeverityForCategory(UnionSwitchAnalysis.Category),
+                ConfidenceReasons = reasons,
+                SourceCategory = sourceCategories.Count > 0 ? sourceCategories[0] : null,
+                SourceLocation = location,
+                SinkLocation = location,
+                SinkCategory = UnionSwitchAnalysis.Category,
+                Evidence = finding.MissingCases.Count > 0
+                    ? [TrimCode(SafeSyntaxText.Text(finding.Syntax)), $"Unhandled case types: {missing}"]
+                    : [TrimCode(SafeSyntaxText.Text(finding.Syntax))],
+                Summary = summary
+            };
         }
 
         public void AddMethodEdge(string caller, string callee)

@@ -242,32 +242,16 @@ public static class DataClassifier
     }
 
     /// <summary>
-    ///     The case payload types of a C# union declaration. The compiler lowers one
-    ///     single-parameter constructor per case, and that parameter's type is the case payload,
-    ///     so the cases are read back off the constructors. The union's own copy constructor is
-    ///     excluded; recursion is guarded by the caller's visited set either way.
+    ///     The case payload types of a C# union that can carry members: a union declaration's
+    ///     cases and a hand-written <c>[Union]</c> type's cases, including those named only by
+    ///     the <c>Create</c> methods of its <c>IUnionMembers</c> interface (see
+    ///     <see cref="UnionShapes.CaseTypes" />). Primitive cases carry no members and are left
+    ///     out; recursion is guarded by the caller's visited set.
     /// </summary>
-    /// <remarks>
-    ///     <c>ITypeSymbol.IsUnion</c> is marked experimental (RSEXPERIMENTAL006) on the
-    ///     referenced compiler and is the only union marker its public API surfaces. Replace this
-    ///     with <c>UnionCaseTypes</c> once a compiler package exposing it is published, which
-    ///     removes the constructor-shape assumption.
-    /// </remarks>
-    private static IEnumerable<INamedTypeSymbol> UnionCaseTypes(INamedTypeSymbol type)
-    {
-#pragma warning disable RSEXPERIMENTAL006
-        if (!type.IsUnion)
-#pragma warning restore RSEXPERIMENTAL006
-        {
-            return [];
-        }
-
-        return type.InstanceConstructors
-            .Where(constructor => constructor.Parameters.Length == 1)
-            .Select(constructor => constructor.Parameters[0].Type)
-            .OfType<INamedTypeSymbol>()
-            .Where(caseType => caseType.SpecialType == SpecialType.None && !SymbolEqualityComparer.Default.Equals(caseType, type));
-    }
+    private static IEnumerable<INamedTypeSymbol> UnionCaseTypes(INamedTypeSymbol type) =>
+        UnionShapes.AsUnion(type) is { } union
+            ? UnionShapes.CaseTypes(union).OfType<INamedTypeSymbol>().Where(caseType => caseType.SpecialType == SpecialType.None)
+            : [];
 
     /// <summary>System.Text.Json closed-type polymorphism and union serialization markers, matched by name so analyzing older targets stays safe.</summary>
     private static bool HasJsonSerializationAttribute(INamedTypeSymbol type) =>

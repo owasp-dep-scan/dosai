@@ -1300,6 +1300,54 @@ class CryptoIvNoise
         Assert.Contains(result.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" } && slice.SinkArgument?.Contains("command", StringComparison.Ordinal) == true);
     }
 
+    // Union payloads are also read through the `Value` property, plain type patterns, nested
+    // property patterns and, on a hand-written [Union] type, `TryGetValue`. Each must carry the
+    // console input to the sink.
+    [Theory]
+    [InlineData("viaValue.Command")]
+    [InlineData("viaTypePattern.Reason")]
+    [InlineData("viaPropertyPattern")]
+    [InlineData("viaTryGetValue!.Command")]
+    public void GetDataFlows_CSharp15UnionAccessShapes_PropagateTaintToTheSink(string sinkArgument)
+    {
+        var result = ReadDataFlows(GetFilePath("UnionAccess.cs"));
+
+        Assert.Contains(result.Slices, slice => slice is { SourceCategory: "cli", SinkCategory: "command" } && slice.SinkArgument == sinkArgument);
+    }
+
+    // A default union holds a null Value. A switch expression that names every case compiles
+    // without warning yet throws on it, and a switch statement is not checked at all.
+    [Fact]
+    public void GetDataFlows_CSharp15UnionSwitches_ReportEmptyUnionAndMissingCaseShapes()
+    {
+        var result = ReadDataFlows(GetFilePath("UnionAccess.cs"));
+        var findings = result.WeaknessCandidates.Where(weakness => weakness.SinkCategory == "union-switch").ToList();
+        var lines = File.ReadAllLines(GetFilePath("UnionAccess.cs"));
+        int LineOf(string marker) => Array.FindIndex(lines, line => line.Contains(marker, StringComparison.Ordinal)) + 1;
+
+        var withoutNullArm = Assert.Single(findings, weakness => weakness.SourceLocation!.StartsWith($"UnionAccess.cs:{LineOf("public static string WithoutNullArm") + 3}:", StringComparison.Ordinal));
+        Assert.Equal("UnionSwitchWithoutNullArm", withoutNullArm.Kind);
+        Assert.Equal("CWE-248", withoutNullArm.Cwe);
+        Assert.Equal("low", withoutNullArm.Severity);
+        Assert.Equal("Medium", withoutNullArm.Confidence);
+        Assert.Equal("cli", withoutNullArm.SourceCategory);
+
+        var defaultUnion = Assert.Single(findings, weakness => weakness.SourceLocation!.StartsWith($"UnionAccess.cs:{LineOf("public static string DefaultUnion") + 3}:", StringComparison.Ordinal));
+        Assert.Equal("UnionSwitchWithoutNullArm", defaultUnion.Kind);
+        Assert.Equal("Low", defaultUnion.Confidence);
+        Assert.Null(defaultUnion.SourceCategory);
+
+        var missingCase = Assert.Single(findings, weakness => weakness.Kind == "UnionSwitchMissingCase");
+        Assert.Equal("CWE-478", missingCase.Cwe);
+        Assert.StartsWith($"UnionAccess.cs:{LineOf("public static void StatementMissingCase") + 2}:", missingCase.SourceLocation, StringComparison.Ordinal);
+        Assert.Contains("Unhandled case types: Rejected", missingCase.Evidence);
+
+        // Discard, `or null`, a default clause, full coverage, a null arm, and a non-union
+        // switch give nothing; UnionTypes.cs is a separate file and not part of this scan.
+        Assert.Equal(3, findings.Count);
+        Assert.Equal(["wcu1", "wcu2", "wcu3"], findings.Select(weakness => weakness.Id));
+    }
+
     // The `is` pattern is the third matching form and the most common one outside a switch;
     // its declared locals need the same operand-to-pattern propagation.
     [Fact]

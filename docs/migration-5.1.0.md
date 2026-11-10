@@ -705,3 +705,26 @@ launchSettings.json profile; launchSettings.json is now collected as a configura
 flags; and an unbounded `ForwardLimit = null` in the same configuration
 is `Properties.forwardLimit` = `unbounded`. `ForwardedHeaders.None` and a `false` setting give
 no finding, and the existing `ForwardedHeadersTrustAll` finding is unchanged.
+
+## Union switch findings and hand-written union cases (additive)
+
+Two new weakness candidate kinds report switches over C# 15 unions that compile cleanly but can
+misbehave at run time, both in category `union-switch` with severity `low`:
+
+- `UnionSwitchWithoutNullArm` (CWE-248): a switch expression over a union with no arm that
+  matches the empty union. `default`, an uninitialized field, or a deserialized empty value has a
+  null `Value`, matches none of the case arms, and throws `SwitchExpressionException`.
+- `UnionSwitchMissingCase` (CWE-478): a switch statement over a union that leaves a case type
+  without an unguarded clause and has no `default`. The compiler does not check switch
+  statements, so those values are skipped silently. `Evidence` names the unhandled case types.
+
+Confidence is `Medium`, with the source category in `SourceCategory`, when the switched value
+carries data from a source, and `Low` otherwise. Ids are `wcu1`, `wcu2`, ... in path and line
+order, and the usual suppression matchers (`category: union-switch`, file and line) apply. Only
+source is checked.
+
+The data classifier now reads the case types of a hand-written `[Union]` type as the compiler
+does: public single-parameter constructors and the static `Create` methods of an implemented
+`IUnionMembers` interface. A union whose cases are named only by that interface used to
+classify as if it had no cases, and a private single-parameter constructor used to count as a
+case; both now follow the compiler. Union declarations classify as before.
