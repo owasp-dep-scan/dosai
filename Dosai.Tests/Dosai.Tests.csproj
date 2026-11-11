@@ -34,6 +34,16 @@
   </ItemGroup>
 
   <ItemGroup>
+  <!-- The binding cases are analysis inputs: their sources must stay out of the compilation, and
+       their project files must reach the output directory, since each case's target framework is
+       read from its csproj. -->
+  <Compile Remove="BindingCases/**/*.cs" />
+  <None Include="BindingCases/**/*.cs" CopyToOutputDirectory="PreserveNewest" />
+  <None Include="BindingCases/**/*.csproj" CopyToOutputDirectory="PreserveNewest" />
+  <None Update="BindingCases/**/expected.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
   <None Include="./../Dosai.TestData/FooBar.cs" CopyToOutputDirectory="PreserveNewest" />
   <None Include="./../Dosai.TestData/HelloWorld.cs" CopyToOutputDirectory="PreserveNewest" />
   <None Include="./../Dosai.TestData/FooBar.vb" CopyToOutputDirectory="PreserveNewest" />

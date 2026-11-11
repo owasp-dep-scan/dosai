@@ -1,0 +1,59 @@
+{
+  "targetFramework": "net11.0",
+  "calls": [
+    {
+      "line": 10,
+      "caller": "Run",
+      "namespace": "System.Text",
+      "className": "StringBuilder",
+      "calledMethod": "StringBuilder",
+      "evidenceKind": "SourceRoslynDirect",
+      "purl": "pkg:nuget/System.Runtime"
+    },
+    {
+      "line": 11,
+      "caller": "Run",
+      "namespace": "System.Text",
+      "className": "StringBuilder",
+      "calledMethod": "System.Text.StringBuilder.Append(string?)",
+      "evidenceKind": "SourceRoslynDirect",
+      "purl": "pkg:nuget/System.Runtime"
+    },
+    {
+      "line": 12,
+      "caller": "Run",
+      "namespace": "System",
+      "className": "Console",
+      "calledMethod": "System.Console.WriteLine(string?)",
+      "evidenceKind": "SourceRoslynDirect",
+      "purl": "pkg:nuget/System.Console"
+    },
+    {
+      "line": 12,
+      "caller": "Run",
+      "namespace": "System.Text",
+      "className": "StringBuilder",
+      "calledMethod": "System.Text.StringBuilder.ToString()",
+      "evidenceKind": "SourceRoslynDirect",
+      "purl": "pkg:nuget/System.Runtime"
+    },
+    {
+      "line": 13,
+      "caller": "Run",
+      "namespace": "BindingProbe",
+      "className": "Probe",
+      "calledMethod": "BindingProbe.Probe.Describe(System.Text.StringBuilder)",
+      "evidenceKind": "SourceRoslynDirect",
+      "purl": null
+    },
+    {
+      "line": 18,
+      "caller": "Describe",
+      "namespace": "System.Text",
+      "className": "StringBuilder",
+      "calledMethod": "System.Text.StringBuilder.ToString()",
+      "evidenceKind": "SourceRoslynDirect",
+      "purl": "pkg:nuget/System.Runtime"
+    }
+  ]
+}
