@@ -1,0 +1,23 @@
+README.md
+  s_fbf294528fc626::t_6f6b69726e67d2 162
+docs/migration-5.0.md
+  s_fbf294528fc626::t_6f6b69726e67d2 23
+docs/QUICKSTART.md
+  s_fbf294528fc626::t_6f6b69726e67d2 11
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5ef45df32b35b46dcd87214d39069704ab15507b",
+  "prompts": {},
+  "sessions": {
+    "s_fbf294528fc626": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "898da1c7-6c18-4985-b8b1-cf21b057aab2",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
