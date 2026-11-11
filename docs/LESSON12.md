@@ -26,8 +26,8 @@ dotnet run --project ./Dosai/Dosai.csproj -- methods \
 The log that matters looks like this, trimmed to the interesting lines:
 
 ```text
-[dosai +0.005s] dosai 5.0.0.0, .NET 11.0.0-rc.3..., macOS 15.8.1 Arm64, 14 processor(s)
-[dosai +0.111s] discovered under '.../Dosai': 81 .cs; 6 skipped in obj/bin or generated
+[dosai +0.005s] dosai 5.0.0.0, .NET 11.0.0, macOS 15.8.1 Arm64, 14 processor(s)
+[dosai +0.111s] discovered under '.../Dosai': 81 .cs; 6 skipped in obj/bin or generated; --exclude pruned 0 director(ies) and skipped 0 file(s)
 [dosai +0.125s] framework metadata references (trusted-platform-assemblies): 181
 [dosai +0.194s] start methods.parse-csharp
 [dosai +0.286s] end methods.parse-csharp in 0.092s, managed heap 43 MB, working set 510 MB
@@ -43,7 +43,7 @@ The log that matters looks like this, trimmed to the interesting lines:
 [dosai +1.912s] start methods.assembly-call-graph
 ```
 
-Each line answers a question you will eventually ask. The startup line records the runtime and processor count, which is what the worker count derives from. Discovery counts come from the analyzers' own walk, so `81 .cs` is what the compilation actually saw, and `6 skipped in obj/bin or generated` reminds you build output never pollutes a source scan. The framework-reference line names the source Dosai bound against, one of `trusted-platform-assemblies`, `bundled-runtime`, or `installed-shared-framework`. Phase lines carry elapsed time plus managed heap and working set, so a leak or a spike is visible as it happens rather than at the end. `call sites with a failed dispatch resolution` is the count of virtual calls whose candidate resolution threw inside Roslyn and was abandoned; a large number means the graph's inferred edges deserve extra skepticism. And `released source compilations after framework analysis` marks the moment the syntax trees become garbage, which is the line to look for when memory is the problem.
+Each line answers a question you will eventually ask. The startup line records the runtime and processor count, which is what the worker count derives from. Discovery counts come from the analyzers' own walk, so `81 .cs` is what the compilation actually saw, and `6 skipped in obj/bin or generated` reminds you build output never pollutes a source scan. The framework-reference line names the source Dosai bound against, one of `trusted-platform-assemblies`, `bundled-runtime`, or `installed-shared-framework`, prefixed with `tree-reference-packs[...]+` when the tree's own framework reference packs were resolved. Phase lines carry elapsed time plus managed heap and working set, so a leak or a spike is visible as it happens rather than at the end. `call sites with a failed dispatch resolution` is the count of virtual calls whose candidate resolution threw inside Roslyn and was abandoned; a large number means the graph's inferred edges deserve extra skepticism. And `released source compilations after framework analysis` marks the moment the syntax trees become garbage, which is the line to look for when memory is the problem.
 
 Two more behaviors make long runs legible. While any phase runs longer than thirty seconds, a heartbeat names the innermost running phase with heap and working-set size, so a two-hour scan says where it is instead of appearing hung. And the log is designed to be pasted into an issue: paths, counts, phase names, and timings only, never file contents, source text, or secret values, and everything goes to stderr so the JSON artifacts and the MCP stream on stdout are unaffected.
 

@@ -5,9 +5,14 @@ Schema 5.0.0 is the .NET 11 / C# 15 release. The output changes are **additive o
 marks the platform move - Dosai now targets `net11.0` and requires the .NET 11 SDK to build -
 rather than a break in the JSON contract.
 
-The one field every consumer sees change value is `Metadata.SchemaVersion`, which now reads
-`5.0.0`. Consumers that pin an exact schema version must accept `5.0.0`; consumers that compare
-`>= 4.1.0` need no change.
+Dosai 5.0.0, the first stable release on .NET 11, writes `Metadata.SchemaVersion` `5.1.0`, as
+did every 5.0.0 release candidate: no release wrote `5.0.0`. Schema 5.1.0 builds on the changes
+in this guide and adds the target-framework-aware analysis, which restructures
+`CustomAttributes[].ConstructorArguments` and renames lambda and local-function call-graph ids;
+[migration-5.1.0.md](migration-5.1.0.md) covers those. A consumer moving from 4.1.0 to Dosai
+5.0.0 reads both guides. Consumers that pin an exact schema version must accept `5.1.0`;
+consumers that compare `>= 4.1.0` need no change for the fields described here. Section headings
+such as "(5.0.0-rc.2)" record the release candidate that introduced a change.
 
 ## Platform requirements
 
@@ -89,6 +94,8 @@ latest .NET target. `#if NET8_0_OR_GREATER` guards are near-universal in real li
 parsing with an empty define set turned their bodies into disabled text invisible to
 `Methods[]`, `MethodCalls[]`, and the data-flow walker. A missed sink in a guarded branch is
 worse for a scanner than a declaration the analyzed project's own target would not compile.
+Schema 5.1.0 resolves guards against each file's own project target instead and keeps this set
+as the fallback when no target is detected; see [migration-5.1.0.md](migration-5.1.0.md).
 
 ### File-based apps (`dotnet run app.cs`)
 
@@ -502,7 +509,8 @@ Assembly-only inputs now report the flows source mode reports, where IL can expr
 
 Field names, identifier formats (`Metadata`, `SourceSignature`, method ids), severity and
 confidence vocabularies, graph export attributes, the query language, and the CycloneDX property
-names are unchanged from 4.1.0.
+names are unchanged from 4.1.0 by the changes in this guide. Schema 5.1.0, which Dosai 5.0.0
+writes, renames lambda and local-function call-graph ids; see [migration-5.1.0.md](migration-5.1.0.md).
 
 One corrective exception: `crypto --format cyclonedx` now emits schema-valid CycloneDX 1.6.
 The previously invalid `bomRef` key became `bom-ref`, the document declares `$schema`, and

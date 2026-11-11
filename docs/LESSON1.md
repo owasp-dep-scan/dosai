@@ -46,16 +46,17 @@ Data-flow stack traces:
    Argument[0]: command
    PURLs: pkg:nuget/System.Diagnostics.Process
    Stack (3 frames, 3 transitions):
-     at Source/cli args [dfn1] in Program.cs:4:5
+     at Source/cli args [dfn1] in Program.cs:3:1
         code: args
         symbol: string[] args
-     via VariableAssignment [dfe1] from dfn1 to dfn2 in Program.cs:5:13 label=command
-     at Assignment command [dfn2] in Program.cs:5:13
+     via VariableAssignment [dfe1] from dfn1 to dfn2 in Program.cs:3:8 label=command
+     at Assignment command [dfn2] in Program.cs:3:8
         code: command = args[0]
-     via SinkArgument [dfe3] from dfn2 to dfn3 in Program.cs:6:9 label=fileName
-     at Sink/command Start [dfn3] in Program.cs:6:9
+     via SinkArgument [dfe3] from dfn2 to dfn3 in Program.cs:4:15 label=fileName targetPurl=pkg:nuget/System.Diagnostics.Process
+     at Sink/command Start [dfn3] in Program.cs:4:1 [pkg:nuget/System.Diagnostics.Process]
         code: Process.Start(command)
         symbol: System.Diagnostics.Process.Start(string)
+     via SinkArgument [dfe2] from dfn1 to dfn3 in Program.cs:4:15 label=fileName targetPurl=pkg:nuget/System.Diagnostics.Process
 ```
 
 Read it from the top. The `at` frames are places where the tainted value lives, and the `via` lines are the transitions between them. The confidence in parentheses is `Medium` here. Confidence and severity answer different questions: confidence tracks how well the flow is tied to an entry point, while severity (`info`, `low`, `medium`, `high`, defaulted by sink category) says how much risk the sink class carries, and both live on the slice and weakness records in the JSON and the report. Because the synthesized `<Main>$` entry point matches the call graph node, this program also gets an exploit chain linking the CLI entry point to the sink, with exposure `cli`.
@@ -70,16 +71,15 @@ The printed trace is a presentation. The JSON is the record, and the slice insid
   "SourceId": "dfn1",
   "SinkId": "dfn3",
   "NodeIds": ["dfn1", "dfn2", "dfn3"],
-  "EdgeIds": ["dfe1", "dfe3"],
+  "EdgeIds": ["dfe1", "dfe2", "dfe3"],
   "SourceCategory": "cli",
   "SinkCategory": "command",
-  "SourcePurl": null,
   "SinkPurl": "pkg:nuget/System.Diagnostics.Process",
   "Purls": ["pkg:nuget/System.Diagnostics.Process"],
   "SinkArgument": "command",
   "SinkArgumentIndex": 0,
   "Severity": "high",
-  "Summary": "cli data reaches command sink Start."
+  "Summary": "Data flows from dfn1 to Start argument 0."
 }
 ```
 

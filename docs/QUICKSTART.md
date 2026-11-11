@@ -8,7 +8,7 @@ This page takes you from an empty shell to your first reviewed data-flow slice i
 .NET SDK 11.0 or newer
 ```
 
-That is all. Dosai runs from source with `dotnet run`, and Roslyn ships with the SDK. Optional extras widen coverage later: the `Rscript` binary improves R analysis, and `FSharp.Compiler.Service` improves F# analysis, but neither is required.
+That is all. Dosai runs from source with `dotnet run`, and Roslyn and the F# compiler service come with it as package references. The `Rscript` binary is an optional extra that improves R analysis. To use Dosai without building it, install the .NET tool (`dotnet tool install -g Dosai`, which runs on the .NET 11 runtime) or download a self-contained binary from the GitHub release.
 
 ## Build and smoke test
 

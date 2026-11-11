@@ -17,16 +17,30 @@ The Dosai repository cloned locally
 dotnet new webapi -o /tmp/surface
 cat > /tmp/surface/Program.cs << 'EOF'
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
 
 var builder = WebApplication.CreateBuilder(args);
+builder.Services.AddControllers();
 var app = builder.Build();
-
-app.MapGet("/health", () => "ok");
-
-app.MapPost("/api/payments",
-    [Authorize] (PaymentRequest request) => Results.Accepted());
-
+app.MapControllers();
 app.Run();
+
+[ApiController]
+[Route("health")]
+public class HealthController : ControllerBase
+{
+    [HttpGet]
+    public string Get() => "ok";
+}
+
+[ApiController]
+[Authorize]
+[Route("api/payments")]
+public class PaymentsController : ControllerBase
+{
+    [HttpPost]
+    public IActionResult Pay(PaymentRequest request) => Accepted();
+}
 
 public record PaymentRequest(string CardNumber, string CardHolder, decimal Amount);
 EOF
@@ -51,22 +65,26 @@ dotnet run --project ./Dosai/Dosai.csproj -- query \
   --o /tmp/services.json
 ```
 
-The two services come back with stable bom-refs, kinds, and trust zones. The health endpoint lands in the `public` zone, the payments endpoint in `authenticated`. The payment service also carries a data classification, because `CardNumber` and `CardHolder` are member names the classifier recognizes as `pii`:
+The two services come back with stable ids, kinds, and trust zones. The health controller lands in the `public` zone, the payments controller in `authenticated`. The payment service also carries a data classification, because `CardNumber` is a member name the classifier recognizes as `financial` (trimmed to the relevant fields):
 
 ```json
 {
-  "BomRef": "svc:minimal-api:Program/PaymentRequest",
-  "Name": "PaymentRequest",
-  "Kind": "http",
+  "Id": "svc:aspnetcore-mvc:_/Payments",
+  "Name": "Payments",
+  "ServiceKind": "http",
   "TrustZone": "authenticated",
   "Data": [
     {
-      "Classification": "pii",
-      "Description": "CardNumber"
+      "Flow": "inbound",
+      "Classification": "financial",
+      "Name": "PaymentRequest",
+      "Description": "member 'CardNumber' matched financial keywords"
     }
   ]
 }
 ```
+
+Minimal APIs are inventoried too, but as one service per file with one operation per route, so a file that mixes an anonymous and a protected route reports the protected one through the operation's `Authenticated` flag rather than a separate zone.
 
 Every non-unknown classification names the member that triggered it, so the label is auditable back to code. Disable the whole feature with `--no-classify-data` if an engagement does not want it.
 

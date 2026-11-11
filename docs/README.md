@@ -60,6 +60,6 @@ The `--print` flag renders each slice as a stack-trace-style path, which is the 
 
 ## Where to go next
 
-If you review code, the [security analyst guide](security-analysis.md) is the main walkthrough, and the [lessons](LESSON1.md) take you from a first slice to automation. If your work is audit or compliance, read the [compliance guide](compliance.md) for the evidence model and its limits. If you build tools on top of the JSON, the [command reference](commands.md) and the [schema migration guides](migration-4.1.0.md) describe the contracts. If you want to know how the analyzer works inside, start at the [architecture overview](ARCHITECTURE.md).
+If you review code, the [security analyst guide](security-analysis.md) is the main walkthrough, and the [lessons](LESSON1.md) take you from a first slice to automation. If your work is audit or compliance, read the [compliance guide](compliance.md) for the evidence model and its limits. If you build tools on top of the JSON, the [command reference](commands.md) and the schema migration guides ([4.0.0](migration-4.0.md), [4.1.0](migration-4.1.0.md), [5.0.0](migration-5.0.md), [5.1.0](migration-5.1.0.md)) describe the contracts. If you want to know how the analyzer works inside, start at the [architecture overview](ARCHITECTURE.md).
 
 Dosai is part of the OWASP dep-scan family. It pairs well with [blint](BLINT-INTEGRATION.md) for binary-level checks and [YARA](YARA-USAGE.md) for rule-based scanning, and its service inventory maps into [cdxgen](https://github.com/cdxgen/cdxgen) CycloneDX BOMs.
