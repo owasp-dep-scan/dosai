@@ -1,8 +1,11 @@
 # Migration to schema 5.1.0
 
-Schema 5.1.0 ships with the target-framework-aware analysis (issue #56 follow-up). The changes
-are additive except for one restructured property; v5 is a new major, so the restructure was made
-under the breaking-changes-allowed policy instead of keeping a lossy encoding.
+Schema 5.1.0 ships with the target-framework-aware analysis (issue #56 follow-up). It is the
+schema that Dosai 5.0.0 writes, and it builds on the .NET 11 / C# 15 changes described in
+[migration-5.0.md](migration-5.0.md); a consumer moving from 4.1.0 reads both guides. The changes
+are additive except for one restructured property and the call-graph ids of lambdas and local
+functions; v5 is a new major, so these were made under the breaking-changes-allowed policy
+instead of keeping a lossy encoding.
 
 ## `CustomAttributes[].ConstructorArguments` is restructured (breaking)
 
@@ -604,7 +607,7 @@ trees that `methods` and `dataflows` had just analysed (cdxgen's research profil
   tree itself. Reports written before this release carry neither field and are always refused.
   Without the options nothing changes.
 - Additive metadata fields in every report: `AnalyzerBuild` (the informational version, such as
-  `5.0.0-rc.4+abc1234`; `AnalyzerVersion` stays the assembly version) and `InputFullPath`
+  `5.0.0+abc1234`; `AnalyzerVersion` stays the assembly version) and `InputFullPath`
   (`InputPath` resolved to a full path when the report was written).
 - Each report line added to `Diagnostics` starts `The methods slice was taken from the report`,
   `The crypto data flows were taken from the data-flow report`, or contains `was not reused`.
