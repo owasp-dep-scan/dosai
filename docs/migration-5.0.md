@@ -20,7 +20,7 @@ such as "(5.0.0-rc.2)" record the release candidate that introduced a change.
 | -------------------- | --------- | ------------------------------------------------------------- |
 | Target framework     | `net10.0` | `net11.0`                                                     |
 | SDK to build         | 10.0.x    | 11.0.x (a 10.0.x SDK cannot build this target)                |
-| Runtime to run       | 10.0.x    | Bundled - published binaries are self-contained               |
+| Runtime to run       | 10.0.x    | 11.0.x, or none with the self-contained `-full` binaries      |
 | Analyzable languages | C# 14     | C# 15 (including union declarations), F# 11, VB.NET, R, C/C++ |
 
 The `FSharp.Compiler.Service` (`43.13.101`), `FSharp.Core` (`11.0.101`), `System.CommandLine`
