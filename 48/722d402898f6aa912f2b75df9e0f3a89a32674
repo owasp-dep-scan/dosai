@@ -1,0 +1,49 @@
+.github/workflows/test.yml
+  s_fbf294528fc626::t_1372fec684fbee 37,61,94,201,260,308,377,449
+docs/migration-5.0.md
+  s_fbf294528fc626::t_50e9f9ed0d8413 8-15,97-98
+  s_fbf294528fc626::t_ccee5e185117f6 512-513
+docs/QUICKSTART.md
+  s_fbf294528fc626::t_474386010d2dbd 11
+Dosai/Dosai.csproj
+  s_fbf294528fc626::t_689312313a931a 18
+docs/LESSON12.md
+  s_fbf294528fc626::t_ea5620fd190b71 46
+  s_fbf294528fc626::t_f1a75cd5b9f519 29-30
+docs/LESSON7.md
+  s_fbf294528fc626::t_f1a75cd5b9f519 98
+.github/workflows/vulnerable-repo-smoke.yml
+  s_fbf294528fc626::t_1372fec684fbee 29
+docs/compiler-engineering.md
+  s_fbf294528fc626::t_a9cc8ab939e24d 189
+  s_fbf294528fc626::t_abb455b6eceba9 190-194
+docs/LESSON1.md
+  s_fbf294528fc626::t_a15b1ca75d44df 49,52-53,55-56,59,74,82
+README.md
+  s_fbf294528fc626::t_2ba59b6f799c14 11,19,305
+docs/migration-5.1.0.md
+  s_fbf294528fc626::t_50e9f9ed0d8413 3-8,610
+docs/README.md
+  s_fbf294528fc626::t_2ba59b6f799c14 63
+docs/LESSON5.md
+  s_fbf294528fc626::t_f282b66236f41e 20,23,25-26,28-34,36-43,68,72-74,78-81,87
+  s_fbf294528fc626::t_f3f729e7be9bbb 88
+.github/workflows/docs-pages.yml
+  s_fbf294528fc626::t_53e4ef54ab6538 33
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "48722d402898f6aa912f2b75df9e0f3a89a32674",
+  "prompts": {},
+  "sessions": {
+    "s_fbf294528fc626": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "898da1c7-6c18-4985-b8b1-cf21b057aab2",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
