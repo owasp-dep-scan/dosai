@@ -123,7 +123,7 @@ These calls preserve taint through common string transformations:
 | `Name`   | `Exact`    | `IsMatch`                                                               | `validation`      | Validator method by simple name.                                                                                    |
 | `Name`   | `Exact`    | `TryParse`                                                              | `validation`      | Parse validator.                                                                                                    |
 
-Validator/sanitizer matches can stop taint for the matched expression. An encoder neutralizes only the sink categories listed (`sanitizesCategories`): an HTML-encoded value still reaches a command or file sink. A validator's `out` value (`int.TryParse(q, out var n)`) is clean, and an early exit (`if (!IsMatch(q)) return;`) validates `q` for the rest of its block. Validator guards can suppress taint on validated branches and keep taint on unvalidated branches for common positive, negated, `&&`, and `||` conditions.
+Validator/sanitizer matches can stop taint for the matched expression. An encoder neutralizes only the sink categories listed (`sanitizesCategories`): an HTML-encoded value still reaches a command or file sink. A validator's `out` value (`int.TryParse(q, out var n)`) is clean, and an early exit (`if (!IsMatch(q)) return;`) validates `q` for the rest of its block. Validator guards can suppress taint on validated branches and keep taint on unvalidated branches for positive and negated conditions, comparisons with `true` or `false`, `&&` and `||`.
 
 ## Optional packs
 
