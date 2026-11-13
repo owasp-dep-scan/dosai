@@ -4250,10 +4250,31 @@ public static partial class DataFlowAnalyzer
                         condition = conditionalAccess.WhenNotNull;
                         break;
                     default:
-                        return condition;
+                        if (ReceiverOfAResultRead(condition) is not { } receiver)
+                        {
+                            return condition;
+                        }
+
+                        condition = receiver;
+                        break;
                 }
             }
         }
+
+        private static IOperation? ReceiverOfAResultRead(IOperation operation) => operation switch
+        {
+            IInvocationOperation { Instance: { } task, TargetMethod: { Name: "ConfigureAwait" or "GetAwaiter" or "GetResult" } method } when IsTaskMember(method) => task,
+            IPropertyReferenceOperation { Instance: { } task, Property: { Name: "Result" } property } when IsTaskMember(property) => task,
+            IInvocationOperation { Instance: { } nullable, Arguments.Length: 0, TargetMethod: { Name: "GetValueOrDefault" } method } when IsNullableMember(method) => nullable,
+            IPropertyReferenceOperation { Instance: { } nullable, Property: { Name: "Value" } property } when IsNullableMember(property) => nullable,
+            _ => null
+        };
+
+        private static bool IsTaskMember(ISymbol member) =>
+            member.ContainingNamespace?.ToDisplayString() is "System.Threading.Tasks" or "System.Runtime.CompilerServices";
+
+        private static bool IsNullableMember(ISymbol member) =>
+            member.ContainingType?.OriginalDefinition.SpecialType == SpecialType.System_Nullable_T;
 
         private static (IOperation Operand, bool? Value)? ImpliedBooleanOperand(IOperation condition, bool whenConditionIsTrue)
         {

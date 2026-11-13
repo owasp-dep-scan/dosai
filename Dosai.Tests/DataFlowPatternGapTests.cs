@@ -492,4 +492,61 @@ End Module
         Assert.False(sinks.ContainsKey("Parenthesized"));
         Assert.True(sanitized.GetValueOrDefault("Parenthesized") > 0);
     }
+
+    [Fact]
+    public void ValidatorResultsReadThroughATaskOrANullable_DecideTheFlowLikeTheCall()
+    {
+        var (sinks, sanitized) = Analyze("""
+public static class AsyncValidator
+{
+    public static System.Threading.Tasks.Task<bool> IsMatch(string value) => System.Threading.Tasks.Task.FromResult(value.Length < 8);
+}
+
+public sealed class Verdict
+{
+    public bool Result => false;
+    public bool Value => false;
+}
+
+public static class VerdictValidator
+{
+    public static Verdict IsMatch(string value) => new Verdict();
+}
+
+public static class Flows
+{
+    public static async System.Threading.Tasks.Task ConfiguredAwait() { var q = Console.ReadLine()!; if (await AsyncValidator.IsMatch(q).ConfigureAwait(false)) { Process.Start(q); } }
+    public static void TaskResult() { var q = Console.ReadLine()!; if (AsyncValidator.IsMatch(q).Result) { Process.Start(q); } }
+    public static void AwaiterResult() { var q = Console.ReadLine()!; if (AsyncValidator.IsMatch(q).GetAwaiter().GetResult()) { Process.Start(q); } }
+    public static void ConfiguredAwaiterResult() { var q = Console.ReadLine()!; if (AsyncValidator.IsMatch(q).ConfigureAwait(false).GetAwaiter().GetResult()) { Process.Start(q); } }
+    public static void NullableValue(Regex? regex) { var q = Console.ReadLine()!; if ((regex?.IsMatch(q)).Value) { Process.Start(q); } }
+    public static void NullableValueOrDefault(Regex? regex) { var q = Console.ReadLine()!; if ((regex?.IsMatch(q)).GetValueOrDefault()) { Process.Start(q); } }
+    public static async System.Threading.Tasks.Task ConfiguredAwaitEqualsFalse() { var q = Console.ReadLine()!; if (await AsyncValidator.IsMatch(q).ConfigureAwait(false) == false) { Process.Start(q); } }
+    public static void NullableValueOrTrue(Regex? regex) { var q = Console.ReadLine()!; if ((regex?.IsMatch(q)).GetValueOrDefault(true)) { Process.Start(q); } }
+    public static void OwnResultProperty() { var q = Console.ReadLine()!; if (VerdictValidator.IsMatch(q).Result) { Process.Start(q); } }
+    public static void OwnValueProperty() { var q = Console.ReadLine()!; if (VerdictValidator.IsMatch(q).Value) { Process.Start(q); } }
+}
+""");
+
+        Assert.All(
+            new[]
+            {
+                "ConfiguredAwait",
+                "TaskResult",
+                "AwaiterResult",
+                "ConfiguredAwaiterResult",
+                "NullableValue",
+                "NullableValueOrDefault",
+            },
+            method =>
+            {
+                Assert.False(sinks.ContainsKey(method));
+                Assert.True(sanitized.GetValueOrDefault(method) > 0);
+            }
+        );
+        Assert.True(Reaches(sinks, "ConfiguredAwaitEqualsFalse", "command"));
+        Assert.True(Reaches(sinks, "NullableValueOrTrue", "command"));
+        Assert.True(Reaches(sinks, "OwnResultProperty", "command"));
+        Assert.True(Reaches(sinks, "OwnValueProperty", "command"));
+    }
 }
