@@ -51,6 +51,13 @@ public class CryptoGapTests
         return index + 1;
     }
 
+    private static void AssertOneFindingPerMarker(CryptoAnalysisResult result, string rule, string source, params string[] markers)
+    {
+        var expected = markers.Select(marker => LineOf(source, marker)).Order().ToList();
+        Assert.Equal(expected, Lines(result, rule).Order());
+        Assert.Equal(expected.Count, result.Findings.Count(finding => finding.RuleId == rule));
+    }
+
     private const string Usings = """
 using System;
 using System.Linq;
@@ -339,5 +346,77 @@ public static class Primitives
         Assert.Equal("block-cipher", primitives["AES"]);
         Assert.Equal("drbg", primitives["CSPRNG"]);
         Assert.Equal("key-agree", primitives["ECDH"]);
+    }
+
+    [Fact]
+    public void WeakKeySizes_AreFoundInCSharpInitializersAndExpressionBodies()
+    {
+        var source = Usings + """
+public class Keys
+{
+    private static readonly RSA FieldKey = RSA.Create(1024); // m:field
+    public event EventHandler Changed = delegate { RSA.Create(1024).Dispose(); }; // m:event
+    public RSA PropertyKey { get; } = RSA.Create(1024); // m:property
+    public RSA ArrowKey => RSA.Create(1024); // m:arrow
+    public RSA this[int bits] => RSA.Create(1024); // m:indexer
+    public static RSA MethodKey() { return RSA.Create(1024); } // m:method
+}
+
+public abstract class Base(RSA key)
+{
+    public RSA Key => key;
+}
+
+public class Derived() : Base(RSA.Create(1024)); // m:base
+""";
+        var result = Analyze(source);
+
+        AssertOneFindingPerMarker(result, "DOSAI-CRYPTO-WEAK-KEY-SIZE", source, "m:field", "m:event", "m:property", "m:arrow", "m:indexer", "m:method", "m:base");
+    }
+
+    [Fact]
+    public void WeakKeySizes_AreFoundInTopLevelStatements()
+    {
+        var source = Usings + """
+using var key = RSA.Create(1024); // m:top
+Console.WriteLine(Make().KeySize);
+
+static RSA Make() => RSA.Create(1024); // m:local
+""";
+        var result = Analyze(source, "Program.cs");
+
+        AssertOneFindingPerMarker(result, "DOSAI-CRYPTO-WEAK-KEY-SIZE", source, "m:top", "m:local");
+    }
+
+    [Fact]
+    public void WeakKeySizes_AreFoundInVisualBasicConstructorsOperatorsAndInitializers()
+    {
+        var source = """
+Imports System.Security.Cryptography
+
+Public Class VbKeys
+    Private ReadOnly FieldKeySize As Integer = RSA.Create(1024).KeySize ' m:field
+    Private ReadOnly NewField As New RSACryptoServiceProvider(1024) ' m:newfield
+    Public Property PropertyKeySize As Integer = RSA.Create(1024).KeySize ' m:property
+    Public Property NewProperty As New RSACryptoServiceProvider(1024) ' m:newproperty
+    Private ReadOnly key As RSA
+
+    Public Sub New()
+        key = RSA.Create(1024) ' m:constructor
+    End Sub
+
+    Public Shared Operator +(left As VbKeys, right As VbKeys) As VbKeys
+        Dim size = RSA.Create(1024).KeySize ' m:operator
+        Return left
+    End Operator
+
+    Public Function MethodKey() As RSA
+        Return RSA.Create(1024) ' m:method
+    End Function
+End Class
+""";
+        var result = Analyze(source, "VbKeys.vb");
+
+        AssertOneFindingPerMarker(result, "DOSAI-CRYPTO-WEAK-KEY-SIZE", source, "m:field", "m:newfield", "m:property", "m:newproperty", "m:constructor", "m:operator", "m:method");
     }
 }

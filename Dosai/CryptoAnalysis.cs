@@ -601,6 +601,35 @@ public static class CryptoAnalyzer
             if (localFunction.Body is not null) yield return localFunction.Body;
             if (localFunction.ExpressionBody is not null) yield return localFunction.ExpressionBody;
         }
+
+        foreach (var field in root.DescendantNodes().OfType<CSharpSyntax.BaseFieldDeclarationSyntax>())
+        {
+            foreach (var variable in field.Declaration.Variables)
+            {
+                if (variable.Initializer is not null) yield return variable.Initializer;
+            }
+        }
+
+        foreach (var property in root.DescendantNodes().OfType<CSharpSyntax.PropertyDeclarationSyntax>())
+        {
+            if (property.Initializer is not null) yield return property.Initializer;
+            if (property.ExpressionBody is not null) yield return property.ExpressionBody;
+        }
+
+        foreach (var indexer in root.DescendantNodes().OfType<CSharpSyntax.IndexerDeclarationSyntax>())
+        {
+            if (indexer.ExpressionBody is not null) yield return indexer.ExpressionBody;
+        }
+
+        foreach (var baseType in root.DescendantNodes().OfType<CSharpSyntax.PrimaryConstructorBaseTypeSyntax>())
+        {
+            yield return baseType;
+        }
+
+        foreach (var global in root.DescendantNodes().OfType<CSharpSyntax.GlobalStatementSyntax>())
+        {
+            yield return global.Statement;
+        }
     }
 
     private static IEnumerable<SyntaxNode> GetVisualBasicOperationRoots(SyntaxNode root)
@@ -619,6 +648,29 @@ public static class CryptoAnalyzer
             {
                 yield return statement;
             }
+        }
+
+        foreach (var block in root.DescendantNodes().OfType<VisualBasicSyntax.MethodBlockBaseSyntax>().Where(block => block is VisualBasicSyntax.ConstructorBlockSyntax or VisualBasicSyntax.OperatorBlockSyntax))
+        {
+            foreach (var statement in block.Statements)
+            {
+                yield return statement;
+            }
+        }
+
+        foreach (var field in root.DescendantNodes().OfType<VisualBasicSyntax.FieldDeclarationSyntax>())
+        {
+            foreach (var declarator in field.Declarators)
+            {
+                if (declarator.Initializer is not null) yield return declarator.Initializer;
+                if (declarator.AsClause is VisualBasicSyntax.AsNewClauseSyntax asNew) yield return asNew;
+            }
+        }
+
+        foreach (var property in root.DescendantNodes().OfType<VisualBasicSyntax.PropertyStatementSyntax>())
+        {
+            if (property.Initializer is not null) yield return property.Initializer;
+            if (property.AsClause is VisualBasicSyntax.AsNewClauseSyntax asNew) yield return asNew;
         }
     }
 
