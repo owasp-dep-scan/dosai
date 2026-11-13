@@ -32,12 +32,15 @@ public class DataFlowPatternGapTests
     }
 
     /// <summary>The sink categories of each method's slices, plus the method's sanitized-flow count.</summary>
-    private static (Dictionary<string, HashSet<string>> Sinks, Dictionary<string, int> Sanitized) Analyze(string source)
-    {
-        using var fixture = new TempDir();
+    private static (Dictionary<string, HashSet<string>> Sinks, Dictionary<string, int> Sanitized) Analyze(string source) =>
         // The fixture's own types live in the global namespace: the stubs need block namespaces,
         // which a file-scoped namespace would forbid.
-        File.WriteAllText(System.IO.Path.Combine(fixture.Path, "Fixture.cs"), Header + source + Stubs);
+        AnalyzeFile("Fixture.cs", Header + source + Stubs);
+
+    private static (Dictionary<string, HashSet<string>> Sinks, Dictionary<string, int> Sanitized) AnalyzeFile(string fileName, string text)
+    {
+        using var fixture = new TempDir();
+        File.WriteAllText(System.IO.Path.Combine(fixture.Path, fileName), text);
         var result = DataFlowAnalyzer.Analyze(fixture.Path);
         var nodes = result.Nodes.ToDictionary(node => node.Id);
         var sinks = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
@@ -350,5 +353,200 @@ public static class Flows
 """);
 
         Assert.True(Reaches(sinks, "ThroughHelper", "sql"));
+    }
+
+    [Fact]
+    public void ComparisonsSayingTheValidatorReturnedFalse_KeepTheFlow()
+    {
+        var (sinks, _) = Analyze("""
+public static class AsyncValidator
+{
+    public static System.Threading.Tasks.Task<bool> IsMatch(string value) => System.Threading.Tasks.Task.FromResult(value.Length < 8);
+}
+
+public static class Flows
+{
+    public static void EqualsFalse() { var q = Console.ReadLine()!; if (Regex.IsMatch(q, "^[a-z]+$") == false) { Process.Start(q); } }
+    public static void FalseEquals() { var q = Console.ReadLine()!; if (false == Regex.IsMatch(q, "^[a-z]+$")) { Process.Start(q); } }
+    public static void NotEqualsTrue() { var q = Console.ReadLine()!; if (Regex.IsMatch(q, "^[a-z]+$") != true) { Process.Start(q); } }
+    public static void IsFalse() { var q = Console.ReadLine()!; if (Regex.IsMatch(q, "^[a-z]+$") is false) { Process.Start(q); } }
+    public static void IsNotTrue() { var q = Console.ReadLine()!; if (Regex.IsMatch(q, "^[a-z]+$") is not true) { Process.Start(q); } }
+    public static void NullableEqualsFalse(Regex? regex) { var q = Console.ReadLine()!; if (regex?.IsMatch(q) == false) { Process.Start(q); } }
+    public static void NullableNotEqualsTrue(Regex? regex) { var q = Console.ReadLine()!; if (regex?.IsMatch(q) != true) { Process.Start(q); } }
+    public static void NullableNotEqualsFalse(Regex? regex) { var q = Console.ReadLine()!; if (regex?.IsMatch(q) != false) { Process.Start(q); } }
+    public static void NullableOrTrue(Regex? regex) { var q = Console.ReadLine()!; if (regex?.IsMatch(q) ?? true) { Process.Start(q); } }
+    public static async System.Threading.Tasks.Task AwaitedEqualsFalse() { var q = Console.ReadLine()!; if (await AsyncValidator.IsMatch(q) == false) { Process.Start(q); } }
+}
+""");
+
+        Assert.True(Reaches(sinks, "EqualsFalse", "command"));
+        Assert.True(Reaches(sinks, "FalseEquals", "command"));
+        Assert.True(Reaches(sinks, "NotEqualsTrue", "command"));
+        Assert.True(Reaches(sinks, "IsFalse", "command"));
+        Assert.True(Reaches(sinks, "IsNotTrue", "command"));
+        Assert.True(Reaches(sinks, "NullableEqualsFalse", "command"));
+        Assert.True(Reaches(sinks, "NullableNotEqualsTrue", "command"));
+        Assert.True(Reaches(sinks, "NullableNotEqualsFalse", "command"));
+        Assert.True(Reaches(sinks, "NullableOrTrue", "command"));
+        Assert.True(Reaches(sinks, "AwaitedEqualsFalse", "command"));
+    }
+
+    [Fact]
+    public void ComparisonsSayingTheValidatorReturnedTrue_StopTheFlow()
+    {
+        var (sinks, sanitized) = Analyze("""
+public static class AsyncValidator
+{
+    public static System.Threading.Tasks.Task<bool> IsMatch(string value) => System.Threading.Tasks.Task.FromResult(value.Length < 8);
+}
+
+public static class Flows
+{
+    public static void EqualsTrue() { var q = Console.ReadLine()!; if (Regex.IsMatch(q, "^[a-z]+$") == true) { Process.Start(q); } }
+    public static void TrueEquals() { var q = Console.ReadLine()!; if (true == Regex.IsMatch(q, "^[a-z]+$")) { Process.Start(q); } }
+    public static void NotEqualsFalse() { var q = Console.ReadLine()!; if (Regex.IsMatch(q, "^[a-z]+$") != false) { Process.Start(q); } }
+    public static void IsTrue() { var q = Console.ReadLine()!; if (Regex.IsMatch(q, "^[a-z]+$") is true) { Process.Start(q); } }
+    public static void NullableEqualsTrue(Regex? regex) { var q = Console.ReadLine()!; if (regex?.IsMatch(q) == true) { Process.Start(q); } }
+    public static void NullableOrFalse(Regex? regex) { var q = Console.ReadLine()!; if (regex?.IsMatch(q) ?? false) { Process.Start(q); } }
+    public static void NullableOrFalseReturn(Regex? regex) { var q = Console.ReadLine()!; if (!(regex?.IsMatch(q) ?? false)) return; Process.Start(q); }
+    public static void BothChecked(bool flag) { var q = Console.ReadLine()!; if (Regex.IsMatch(q, "^[a-z]+$") & flag) { Process.Start(q); } }
+    public static async System.Threading.Tasks.Task Awaited() { var q = Console.ReadLine()!; if (await AsyncValidator.IsMatch(q)) { Process.Start(q); } }
+    public static void EqualsFalseReturn() { var q = Console.ReadLine()!; if (Regex.IsMatch(q, "^[a-z]+$") == false) return; Process.Start(q); }
+    public static void IsFalseThrow() { var q = Console.ReadLine()!; if (Regex.IsMatch(q, "^[a-z]+$") is false) { throw new ArgumentException("bad"); } Process.Start(q); }
+    public static void EqualsFalseElse() { var q = Console.ReadLine()!; if (Regex.IsMatch(q, "^[a-z]+$") == false) { Debug.WriteLine("odd"); } else { Process.Start(q); } }
+    public static void EitherFailedReturn() { var q = Console.ReadLine()!; if (!Regex.IsMatch(q, "^[a-z]+$") | string.IsNullOrEmpty(q)) return; Process.Start(q); }
+}
+""");
+
+        Assert.All(
+            new[]
+            {
+                "EqualsTrue",
+                "TrueEquals",
+                "NotEqualsFalse",
+                "IsTrue",
+                "NullableEqualsTrue",
+                "NullableOrFalse",
+                "NullableOrFalseReturn",
+                "BothChecked",
+                "Awaited",
+                "EqualsFalseReturn",
+                "IsFalseThrow",
+                "EqualsFalseElse",
+                "EitherFailedReturn",
+            },
+            method =>
+            {
+                Assert.False(sinks.ContainsKey(method));
+                Assert.True(sanitized.GetValueOrDefault(method) > 0);
+            }
+        );
+    }
+
+    [Fact]
+    public void ConditionsThatDoNotSayWhatTheValidatorReturned_KeepTheFlow()
+    {
+        var (sinks, _) = Analyze("""
+public static class Flows
+{
+    private static bool Invert(bool value) => !value;
+    public static void PassedToAnotherMethod() { var q = Console.ReadLine()!; if (Invert(Regex.IsMatch(q, "^[a-z]+$"))) { Process.Start(q); } }
+    public static void ExclusiveOr(bool flag) { var q = Console.ReadLine()!; if (Regex.IsMatch(q, "^[a-z]+$") ^ flag) { Process.Start(q); } }
+    public static void EitherChecked(bool flag) { var q = Console.ReadLine()!; if (Regex.IsMatch(q, "^[a-z]+$") | flag) { Process.Start(q); } }
+    public static void ComparedWithAnotherCheck(string other) { var q = Console.ReadLine()!; if (Regex.IsMatch(q, "^[a-z]+$") == Regex.IsMatch(other, "^[a-z]+$")) { Process.Start(q); } }
+}
+""");
+
+        Assert.True(Reaches(sinks, "PassedToAnotherMethod", "command"));
+        Assert.True(Reaches(sinks, "ExclusiveOr", "command"));
+        Assert.True(Reaches(sinks, "EitherChecked", "command"));
+        Assert.True(Reaches(sinks, "ComparedWithAnotherCheck", "command"));
+    }
+
+    [Fact]
+    public void VisualBasicComparisonsWithTheValidator_DecideTheFlowByWhatItReturned()
+    {
+        var (sinks, sanitized) = AnalyzeFile("Fixture.vb", """
+Imports System
+Imports System.Diagnostics
+Imports System.Text.RegularExpressions
+
+Public Module Flows
+    Public Sub EqualsFalse()
+        Dim q = Console.ReadLine()
+        If Regex.IsMatch(q, "^[a-z]+$") = False Then
+            Process.Start(q)
+        End If
+    End Sub
+
+    Public Sub Parenthesized()
+        Dim q = Console.ReadLine()
+        If (Regex.IsMatch(q, "^[a-z]+$")) Then
+            Process.Start(q)
+        End If
+    End Sub
+End Module
+""");
+
+        Assert.True(Reaches(sinks, "EqualsFalse", "command"));
+        Assert.False(sinks.ContainsKey("Parenthesized"));
+        Assert.True(sanitized.GetValueOrDefault("Parenthesized") > 0);
+    }
+
+    [Fact]
+    public void ValidatorResultsReadThroughATaskOrANullable_DecideTheFlowLikeTheCall()
+    {
+        var (sinks, sanitized) = Analyze("""
+public static class AsyncValidator
+{
+    public static System.Threading.Tasks.Task<bool> IsMatch(string value) => System.Threading.Tasks.Task.FromResult(value.Length < 8);
+}
+
+public sealed class Verdict
+{
+    public bool Result => false;
+    public bool Value => false;
+}
+
+public static class VerdictValidator
+{
+    public static Verdict IsMatch(string value) => new Verdict();
+}
+
+public static class Flows
+{
+    public static async System.Threading.Tasks.Task ConfiguredAwait() { var q = Console.ReadLine()!; if (await AsyncValidator.IsMatch(q).ConfigureAwait(false)) { Process.Start(q); } }
+    public static void TaskResult() { var q = Console.ReadLine()!; if (AsyncValidator.IsMatch(q).Result) { Process.Start(q); } }
+    public static void AwaiterResult() { var q = Console.ReadLine()!; if (AsyncValidator.IsMatch(q).GetAwaiter().GetResult()) { Process.Start(q); } }
+    public static void ConfiguredAwaiterResult() { var q = Console.ReadLine()!; if (AsyncValidator.IsMatch(q).ConfigureAwait(false).GetAwaiter().GetResult()) { Process.Start(q); } }
+    public static void NullableValue(Regex? regex) { var q = Console.ReadLine()!; if ((regex?.IsMatch(q)).Value) { Process.Start(q); } }
+    public static void NullableValueOrDefault(Regex? regex) { var q = Console.ReadLine()!; if ((regex?.IsMatch(q)).GetValueOrDefault()) { Process.Start(q); } }
+    public static async System.Threading.Tasks.Task ConfiguredAwaitEqualsFalse() { var q = Console.ReadLine()!; if (await AsyncValidator.IsMatch(q).ConfigureAwait(false) == false) { Process.Start(q); } }
+    public static void NullableValueOrTrue(Regex? regex) { var q = Console.ReadLine()!; if ((regex?.IsMatch(q)).GetValueOrDefault(true)) { Process.Start(q); } }
+    public static void OwnResultProperty() { var q = Console.ReadLine()!; if (VerdictValidator.IsMatch(q).Result) { Process.Start(q); } }
+    public static void OwnValueProperty() { var q = Console.ReadLine()!; if (VerdictValidator.IsMatch(q).Value) { Process.Start(q); } }
+}
+""");
+
+        Assert.All(
+            new[]
+            {
+                "ConfiguredAwait",
+                "TaskResult",
+                "AwaiterResult",
+                "ConfiguredAwaiterResult",
+                "NullableValue",
+                "NullableValueOrDefault",
+            },
+            method =>
+            {
+                Assert.False(sinks.ContainsKey(method));
+                Assert.True(sanitized.GetValueOrDefault(method) > 0);
+            }
+        );
+        Assert.True(Reaches(sinks, "ConfiguredAwaitEqualsFalse", "command"));
+        Assert.True(Reaches(sinks, "NullableValueOrTrue", "command"));
+        Assert.True(Reaches(sinks, "OwnResultProperty", "command"));
+        Assert.True(Reaches(sinks, "OwnValueProperty", "command"));
     }
 }

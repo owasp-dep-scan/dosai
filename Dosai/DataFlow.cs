@@ -4172,7 +4172,19 @@ public static partial class DataFlowAnalyzer
 
         private IEnumerable<string> GetSanitizedGuardKeys(IOperation condition, bool whenConditionIsTrue)
         {
-            condition = Strip(condition);
+            condition = StripGuardWrappers(condition);
+            if (ImpliedBooleanOperand(condition, whenConditionIsTrue) is { } comparison)
+            {
+                if (comparison.Value is { } impliedValue)
+                {
+                    foreach (var key in GetSanitizedGuardKeys(comparison.Operand, impliedValue))
+                    {
+                        yield return key;
+                    }
+                }
+                yield break;
+            }
+
             if (condition is IUnaryOperation { OperatorKind: UnaryOperatorKind.Not } negated)
             {
                 foreach (var key in GetSanitizedGuardKeys(negated.Operand, !whenConditionIsTrue))
@@ -4182,7 +4194,7 @@ public static partial class DataFlowAnalyzer
                 yield break;
             }
 
-            if (condition is IBinaryOperation { OperatorKind: BinaryOperatorKind.ConditionalAnd } andOperation)
+            if (condition is IBinaryOperation { OperatorKind: BinaryOperatorKind.ConditionalAnd or BinaryOperatorKind.And } andOperation)
             {
                 if (whenConditionIsTrue)
                 {
@@ -4191,7 +4203,7 @@ public static partial class DataFlowAnalyzer
                 yield break;
             }
 
-            if (condition is IBinaryOperation { OperatorKind: BinaryOperatorKind.ConditionalOr } orOperation)
+            if (condition is IBinaryOperation { OperatorKind: BinaryOperatorKind.ConditionalOr or BinaryOperatorKind.Or } orOperation)
             {
                 if (!whenConditionIsTrue)
                 {
@@ -4219,15 +4231,88 @@ public static partial class DataFlowAnalyzer
                     }
                 }
             }
+        }
 
-            foreach (var child in condition.ChildOperations)
+        private static IOperation StripGuardWrappers(IOperation condition)
+        {
+            while (true)
             {
-                foreach (var key in GetSanitizedGuardKeys(child, whenConditionIsTrue))
+                condition = Strip(condition);
+                switch (condition)
                 {
-                    yield return key;
+                    case IParenthesizedOperation parenthesized:
+                        condition = parenthesized.Operand;
+                        break;
+                    case IAwaitOperation awaited:
+                        condition = awaited.Operation;
+                        break;
+                    case IConditionalAccessOperation conditionalAccess:
+                        condition = conditionalAccess.WhenNotNull;
+                        break;
+                    default:
+                        if (ReceiverOfAResultRead(condition) is not { } receiver)
+                        {
+                            return condition;
+                        }
+
+                        condition = receiver;
+                        break;
                 }
             }
         }
+
+        private static IOperation? ReceiverOfAResultRead(IOperation operation) => operation switch
+        {
+            IInvocationOperation { Instance: { } task, TargetMethod: { Name: "ConfigureAwait" or "GetAwaiter" or "GetResult" } method } when IsTaskMember(method) => task,
+            IPropertyReferenceOperation { Instance: { } task, Property: { Name: "Result" } property } when IsTaskMember(property) => task,
+            IInvocationOperation { Instance: { } nullable, Arguments.Length: 0, TargetMethod: { Name: "GetValueOrDefault" } method } when IsNullableMember(method) => nullable,
+            IPropertyReferenceOperation { Instance: { } nullable, Property: { Name: "Value" } property } when IsNullableMember(property) => nullable,
+            _ => null
+        };
+
+        private static bool IsTaskMember(ISymbol member) =>
+            member.ContainingNamespace?.ToDisplayString() is "System.Threading.Tasks" or "System.Runtime.CompilerServices";
+
+        private static bool IsNullableMember(ISymbol member) =>
+            member.ContainingType?.OriginalDefinition.SpecialType == SpecialType.System_Nullable_T;
+
+        private static (IOperation Operand, bool? Value)? ImpliedBooleanOperand(IOperation condition, bool whenConditionIsTrue)
+        {
+            if (condition is ICoalesceOperation coalesce && BooleanConstant(coalesce.WhenNull) is { } whenNull)
+            {
+                return (coalesce.Value, whenNull == whenConditionIsTrue ? null : whenConditionIsTrue);
+            }
+
+            (IOperation Operand, bool Constant, bool IsEquality)? comparison = condition switch
+            {
+                IBinaryOperation { OperatorKind: BinaryOperatorKind.Equals or BinaryOperatorKind.NotEquals } binary when BooleanConstant(binary.RightOperand) is { } right =>
+                    (binary.LeftOperand, right, binary.OperatorKind == BinaryOperatorKind.Equals),
+                IBinaryOperation { OperatorKind: BinaryOperatorKind.Equals or BinaryOperatorKind.NotEquals } binary when BooleanConstant(binary.LeftOperand) is { } left =>
+                    (binary.RightOperand, left, binary.OperatorKind == BinaryOperatorKind.Equals),
+                IIsPatternOperation { Pattern: IConstantPatternOperation constant } isPattern when BooleanConstant(constant.Value) is { } value =>
+                    (isPattern.Value, value, true),
+                IIsPatternOperation { Pattern: INegatedPatternOperation { Pattern: IConstantPatternOperation constant } } isPattern when BooleanConstant(constant.Value) is { } value =>
+                    (isPattern.Value, value, false),
+                _ => null
+            };
+            if (comparison is not { } known)
+            {
+                return null;
+            }
+
+            if (known.IsEquality == whenConditionIsTrue)
+            {
+                return (known.Operand, known.Constant);
+            }
+
+            return (known.Operand, IsNullableBoolean(known.Operand) ? null : !known.Constant);
+        }
+
+        private static bool? BooleanConstant(IOperation operation) =>
+            Strip(operation).ConstantValue is { HasValue: true, Value: bool value } ? value : null;
+
+        private static bool IsNullableBoolean(IOperation operation) =>
+            operation.Type is INamedTypeSymbol { OriginalDefinition.SpecialType: SpecialType.System_Nullable_T };
 
         /// <summary>
         ///     Paired hardening: a sink invocation is suppressed when its text matches a
