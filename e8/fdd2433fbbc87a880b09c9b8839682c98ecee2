@@ -1,0 +1,46 @@
+Dosai.Tests/Frameworks/UnionClassificationTests.cs
+  s_5cd029f45a1e60::t_003508f45b2352 41-71,87-114
+  s_5cd029f45a1e60::t_f18fd15ecb9e62 115
+Dosai/Frameworks/DataClassifier.cs
+  s_5cd029f45a1e60::t_36ae6eb866b33e 245-249,251-254
+Dosai.TestData/Dosai.TestData.CSharp.csproj
+  s_5cd029f45a1e60::t_9f839c398b5a68 12
+docs/migration-5.1.0.md
+  s_5cd029f45a1e60::t_ea9dd6eef18228 708-730
+Dosai.Tests/Dosai.Tests.csproj
+  s_5cd029f45a1e60::t_9f839c398b5a68 43
+Dosai.TestData/UnionAccess.cs
+  s_5cd029f45a1e60::t_c60caec7a01102 1-159
+Dosai.Tests/DosaiTests.cs
+  s_5cd029f45a1e60::t_9f839c398b5a68 1303-1350
+docs/frameworks.md
+  s_5cd029f45a1e60::t_33e80154e91f91 124
+  s_5cd029f45a1e60::t_ea9dd6eef18228 109-123
+docs/compiler-engineering.md
+  s_5cd029f45a1e60::t_ea9dd6eef18228 497-499
+Dosai/DataFlow.cs
+  s_5cd029f45a1e60::t_922454f6c6da12 558-559,3811-3815,3822-3826,4955,4971-5054
+  s_5cd029f45a1e60::t_f831eaa9d39c26 5055
+Dosai/UnionShapes.cs
+  s_5cd029f45a1e60::t_2b89113ef59a60 1-227
+Dosai/Transparency.cs
+  s_5cd029f45a1e60::t_922454f6c6da12 1273
+AGENTS.md
+  s_5cd029f45a1e60::t_0738752b611c69 35
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e8fdd2433fbbc87a880b09c9b8839682c98ecee2",
+  "prompts": {},
+  "sessions": {
+    "s_5cd029f45a1e60": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e079e2e8-a788-4e76-b1b7-d7aa050730b0",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
