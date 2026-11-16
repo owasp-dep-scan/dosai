@@ -1,0 +1,28 @@
+docs/agent-workflows.md
+  s_c6c2eef264b80a::t_7a4159472e2dba 99
+SECURITY.md
+  s_c6c2eef264b80a::t_4dbee0b20e5d72 5,7,9
+docs/LESSON10.md
+  s_c6c2eef264b80a::t_00077472a31585 76
+docs/THREAT_MODEL.md
+  s_c6c2eef264b80a::t_12a6cee50ff20a 56
+  s_c6c2eef264b80a::t_6260fb2821f0e4 162-165
+  s_c6c2eef264b80a::t_d2fef5b3e99b99 138
+  s_c6c2eef264b80a::t_37f2e5974cc3f8 34
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6df1b765cab0e6d75f3c74a53008266c976d92e8",
+  "prompts": {},
+  "sessions": {
+    "s_c6c2eef264b80a": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "sess_ca5a02be-9bad-4280-9f9f-602d6836ad7c",
+        "model": "GLM-5.3"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
