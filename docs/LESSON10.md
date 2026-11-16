@@ -73,7 +73,7 @@ dotnet run --project ./Dosai/Dosai.csproj -- mcp \
   --path /workspace/app
 ```
 
-With `--mcp-root` set, every `path` argument and the `input` file of `dosai.query` must resolve under that directory, or the tool call fails. A second flag bounds what the transport-integrity analysis treats as approved: `--mcp-allowlist FILE` lists the stdio transport commands (one per line) your policy allows, and MCP transport findings mark anything outside it. Two defaults stay locked regardless of flags: prompt text is never exposed through MCP, and the server is designed for local stdio use, not as an authenticated network service.
+With `--mcp-root` set, every `path` argument and the `input` file of `dosai.query` must resolve under that directory, or the tool call fails. What the transport-integrity analysis treats as approved is bounded by an allowlist passed to the `methods` command, not to `mcp`: `methods --mcp-allowlist FILE` lists the stdio transport commands (one per line) your policy allows, and MCP transport findings mark anything outside it. Two defaults stay locked regardless of flags: prompt text is never exposed through MCP, and the server is designed for local stdio use, not as an authenticated network service.
 
 ```text
    Agent (trusted client)

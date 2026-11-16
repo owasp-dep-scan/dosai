@@ -96,7 +96,7 @@ dotnet run --project ./Dosai/Dosai.csproj -- diff \
 
 ## MCP server
 
-The `mcp` command runs a local line-delimited JSON-RPC server over stdin/stdout. It is intended for local agent integrations, not as an authenticated network service. Two flags bound what it can do: `--mcp-root DIR` confines every tool call (and the `input` file of `dosai.query`) to paths under `DIR`, and `--mcp-allowlist FILE` names the stdio transport commands that count as policy-approved for MCP transport integrity findings.
+The `mcp` command runs a local line-delimited JSON-RPC server over stdin/stdout. It is intended for local agent integrations, not as an authenticated network service. Its one bounding flag is `--mcp-root DIR`, which confines every tool call (and the `input` file of `dosai.query`) to paths under `DIR`. The stdio transport commands that count as policy-approved for MCP transport integrity findings come from an allowlist file passed to the `methods` command (`methods --mcp-allowlist FILE`); the `mcp` command itself takes no allowlist.
 
 Start by listing tools:
 

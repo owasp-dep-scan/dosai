@@ -31,7 +31,7 @@ flowchart LR
 - `methods --path <file|directory|nupkg>`
 - `dataflows --path <file|directory>`
 - `--patterns <json>` and `--suppress <json>` (repo-supplied files parsed by the tool)
-- `--mcp-allowlist <file>` (policy file read by the MCP server)
+- `--mcp-allowlist <file>` on `methods` (policy file read by the methods analysis when MCP transport integrity findings are computed)
 - `--o`, `--callgraph-out`, `--graph-out`
 - assembly loading/reflection for managed assemblies
 - source parsing via Roslyn
@@ -53,7 +53,7 @@ flowchart LR
 
 ## Data-flow specific risks
 
-Dosai data-flow slices are triage artifacts, not proof of exploitability. Exploit chains (schema 4.1.0) connect entry points to sinks through the reconstructed call graph and label the exposure, but they remain static evidence derived from the same graph, not a demonstration that an exploit works.
+Dosai data-flow slices are triage artifacts, not proof of exploitability. Exploit chains (introduced in schema 4.1.0; the current schema is 5.1.0) connect entry points to sinks through the reconstructed call graph and label the exposure, but they remain static evidence derived from the same graph, not a demonstration that an exploit works.
 
 False positives can occur when:
 
@@ -135,7 +135,7 @@ CI runs dosai on PR/source
 
 Dosai should fail closed where feasible: preserve host safety, emit diagnostics, and avoid producing malformed output.
 
-## Prompt and AI inventory handling (schema 4.0.0)
+## Prompt and AI inventory handling (since schema 4.0.0)
 
 Dosai's AI inventory (`AiComponents[]`) records system prompts found in source. Prompts can
 contain secrets and proprietary IP, so the default output is redacted: a SHA-256 prefix and the
@@ -159,9 +159,10 @@ channel into every directory the process can access:
 - Use `mcp --mcp-root DIR` to confine every tool call (and the `input` file of `dosai.query`)
   to paths under `DIR`. With confinement enabled, out-of-root paths fail the call instead of
   being analyzed.
-- Use `mcp --mcp-allowlist FILE` to restrict which stdio transport commands are treated as
-  policy-approved when MCP transport integrity findings are computed; a missing file disables
-  the allowlist (nothing is policy-approved).
+- The allowlist that decides which stdio transport commands are treated as policy-approved
+  when MCP transport integrity findings are computed belongs to the `methods` command
+  (`methods --mcp-allowlist FILE`); the `mcp` command has no allowlist option. A missing file
+  disables the allowlist (nothing is policy-approved).
 - The tool surface is read-oriented (`dosai.methods`, `dosai.dataflows`, `dosai.crypto`,
   `dosai.agent_context`, `dosai.services`, `dosai.ai_components`, `dosai.query`,
   `dosai.exploit_chains`, `dosai.attack_surface`, `dosai.reachability`), and every tool is a
