@@ -430,6 +430,15 @@ internal static partial class MsBuildImports
 
         value = ExpandReservedProperties(value, importingFile, importingDirectory, projectDirectory);
         value = EvaluateDirectoryFunctions(value, importingDirectory);
+        if (IsUncShaped(value))
+        {
+            // A UNC network location named by the tree, refused before any existence probe so
+            // the share is never touched to be skipped (the same rule as packageFolders).
+            diagnostics?.Add($"<Import Project=\"{expression}\"> in '{Relative(root, importingFile)}' was skipped: the path names a UNC network location, which Dosai does not read.");
+
+            return false;
+        }
+
         if (UnresolvedReferenceRegex().IsMatch(value) || value.Contains('*', StringComparison.Ordinal) || value.Contains('?', StringComparison.Ordinal))
         {
             diagnostics?.Add($"<Import Project=\"{expression}\"> in '{Relative(root, importingFile)}' was skipped: the path holds a property, item or wildcard Dosai cannot expand.");
@@ -551,7 +560,10 @@ internal static partial class MsBuildImports
             fileName = args.Count > 1 ? Unquote(args[1]) : string.Empty;
         }
 
-        if (fileName.Length == 0 || startDirectory.Length == 0)
+        // A UNC network location named by the tree, refused before the upward walk probes it:
+        // on Windows Path.Combine keeps a rooted second argument as-is, so either argument
+        // could otherwise put a share path under File.Exists.
+        if (fileName.Length == 0 || startDirectory.Length == 0 || IsUncShaped(startDirectory) || IsUncShaped(fileName))
         {
             return string.Empty;
         }
@@ -632,6 +644,15 @@ internal static partial class MsBuildImports
 
     /// <summary>A path relative to the scan root with forward slashes, so a diagnostic reads the same on every OS.</summary>
     private static string Relative(string root, string path) => Path.GetRelativePath(root, path).Replace('\\', '/');
+
+    /// <summary>
+    ///     A UNC path shape (<c>\\server\share</c> or <c>//server/share</c>, the
+    ///     <c>\\?\UNC\</c> device form included): not a local path. A string test on purpose,
+    ///     run before any existence probe on a path read from tree content, so refusing a
+    ///     network location never touches it.
+    /// </summary>
+    private static bool IsUncShaped(string path) =>
+        path.StartsWith(@"\\", StringComparison.Ordinal) || path.StartsWith("//", StringComparison.Ordinal);
 
     private static bool BalancedParentheses(string value, int open, out int close)
     {

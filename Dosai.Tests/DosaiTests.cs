@@ -5854,6 +5854,9 @@ class SqlFlow
     {
         using var tempDirectory = new TemporaryDirectory();
         var packageCacheRoot = Path.Combine(tempDirectory.Path, "package-cache");
+        // The cache sits outside the analyzed path, like the real global packages folder, so
+        // the restore reader accepts it as a configured packages folder.
+        using var trustedPackageFolders = NuGetRestoreCache.OverrideTrustedPackageFoldersForTesting(packageCacheRoot);
         var packageLibDirectory = Path.Combine(packageCacheRoot, "restore-sample-lib", "1.0.0", "lib", "net10.0");
         Directory.CreateDirectory(packageLibDirectory);
         File.WriteAllBytes(Path.Combine(packageLibDirectory, "RestoreSampleLib.dll"), []);
@@ -5920,6 +5923,9 @@ namespace RestoreSampleLib
 }
 """, outputType: "Library");
         var packageCacheRoot = Path.Combine(tempDirectory.Path, "package-cache");
+        // The cache is outside the analyzed path on purpose (the comment above), so the
+        // restore reader accepts it as a configured packages folder.
+        using var trustedPackageFolders = NuGetRestoreCache.OverrideTrustedPackageFoldersForTesting(packageCacheRoot);
         var packageLibDirectory = Path.Combine(packageCacheRoot, "restore-sample-lib", "1.0.0", "lib", "net10.0");
         Directory.CreateDirectory(packageLibDirectory);
         File.Copy(Path.Combine(libraryOutput, "RestoreSampleLib.dll"), Path.Combine(packageLibDirectory, "RestoreSampleLib.dll"));
