@@ -1,0 +1,37 @@
+Dosai/LanguageFrontendAnalyzer.cs
+  h_0926447d100ad2 692-694,710-715,720-721,942-944,946
+Dosai.Tests/DosaiTests.cs
+  s_280fc80ae6d6e4::t_fd6f84cf02b3fc 4026-4030
+Dosai/SafeProcess.cs
+  h_0926447d100ad2 1-200
+docs/THREAT_MODEL.md
+  h_0926447d100ad2 53
+Dosai.Tests/SafeProcessTests.cs
+  s_280fc80ae6d6e4::t_b01d9516bc0ea2 10-14
+  h_0926447d100ad2 1-9,15-349
+Dosai/BuildPreparation.cs
+  h_0926447d100ad2 133-142,147
+Dosai/Dosai.cs
+  h_0926447d100ad2 1770-1775,1783-1788,1792,1797-1799
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4b9b346547175df6560829089efdbb465c16d013",
+  "prompts": {},
+  "humans": {
+    "h_0926447d100ad2": {
+      "author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  },
+  "sessions": {
+    "s_280fc80ae6d6e4": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "sess_64a430d5-0129-419d-b7e2-f8354680c70e",
+        "model": "GLM-5.3"
+      },
+      "human_author": null
+    }
+  }
+}
