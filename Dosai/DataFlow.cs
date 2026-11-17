@@ -699,7 +699,19 @@ public static partial class DataFlowAnalyzer
         }
 
         var json = File.ReadAllText(patternsPath);
-        var userPatterns = JsonSerializer.Deserialize<DataFlowPatternSet>(json, JsonOptions) ?? new DataFlowPatternSet();
+        DataFlowPatternSet userPatterns;
+        try
+        {
+            userPatterns = JsonSerializer.Deserialize<DataFlowPatternSet>(json, JsonOptions) ?? new DataFlowPatternSet();
+        }
+        catch (JsonException ex)
+        {
+            // The serializer's message quotes the offending text. The MCP server returns error
+            // messages to its client, and a pattern path can name any readable file, so the
+            // rethrown message gives the position only and no inner exception.
+            throw new JsonException(string.Create(CultureInfo.InvariantCulture,
+                $"Pattern file is not valid JSON (line {(ex.LineNumber ?? 0) + 1}, byte {(ex.BytePositionInLine ?? 0) + 1})."));
+        }
         defaults.Sources.AddRange(NormalizeTargets(userPatterns.Sources, DataFlowPatternTarget.Source, CustomPack));
         defaults.Sinks.AddRange(NormalizeTargets(userPatterns.Sinks, DataFlowPatternTarget.Sink, CustomPack));
         defaults.Passthroughs.AddRange(NormalizeTargets(userPatterns.Passthroughs, DataFlowPatternTarget.Passthrough, CustomPack));
