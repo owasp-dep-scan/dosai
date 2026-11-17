@@ -1,0 +1,34 @@
+docs/THREAT_MODEL.md
+  h_0926447d100ad2 46
+Dosai/MsBuildImports.cs
+  h_0926447d100ad2 433-441,563-566,648-656
+Dosai.Tests/DosaiTests.cs
+  h_0926447d100ad2 5853-5855,5922-5924
+Dosai.Tests/PackageFoldersTrustTests.cs
+  h_0926447d100ad2 1-10,12-103,105-126,151-337
+  s_4934ed444cde27::t_0b1154e78f25e1 11,104,127-150
+Dosai/NuGetRestoreCache.cs
+  h_0926447d100ad2 3,23-25,27-28,41-60,147-151,161,184,198,273,292-418,420-422,426-442,446-448,452,455-457,464-478,482,485-492,495-496,503-508,510-526,528-535
+  s_4934ed444cde27::t_f96dedc888f39e 26,419,423-425,443-445,449-451,453-454,458-463,479-481,483-484,493-494,497-502,509,527
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2d87db03c3ebf2163e793efdd1ca2d922f7080f0",
+  "prompts": {},
+  "humans": {
+    "h_0926447d100ad2": {
+      "author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  },
+  "sessions": {
+    "s_4934ed444cde27": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bb33f44c-7f08-4ca1-b501-a8d60716aa4f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
