@@ -1,0 +1,14 @@
+Dosai/MsBuildImports.cs
+  h_0926447d100ad2 155-161,163-168,170,226-262,343-355,744-747,760-895
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1d830925fd0921cfbc5a7adb962ee99332e4de1c",
+  "prompts": {},
+  "humans": {
+    "h_0926447d100ad2": {
+      "author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
