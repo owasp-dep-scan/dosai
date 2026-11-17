@@ -1,0 +1,31 @@
+docs/THREAT_MODEL.md
+  h_0926447d100ad2 47
+Dosai/SafeZipExtraction.cs
+  h_0926447d100ad2 1-119
+Dosai.Tests/NupkgExtractionTests.cs
+  h_0926447d100ad2 1-105,122-186
+  s_4934ed444cde27::t_1edc6338b8f74a 106-121
+Dosai/Dosai.cs
+  h_0926447d100ad2 954-957,970-971,973,976-978
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0ea672b8f07cd455ede2cd8fc132e6fda45cba4d",
+  "prompts": {},
+  "humans": {
+    "h_0926447d100ad2": {
+      "author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  },
+  "sessions": {
+    "s_4934ed444cde27": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bb33f44c-7f08-4ca1-b501-a8d60716aa4f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
