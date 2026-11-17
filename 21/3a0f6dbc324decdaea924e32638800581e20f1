@@ -1,0 +1,22 @@
+Dosai.Tests/DosaiTests.cs
+  h_0926447d100ad2 5853-5855,5922-5924
+Dosai.Tests/PackageFoldersTrustTests.cs
+  h_0926447d100ad2 1-313
+Dosai/MsBuildImports.cs
+  h_0926447d100ad2 433-441,563-566,648-656
+Dosai/NuGetRestoreCache.cs
+  h_0926447d100ad2 3,23-28,41-60,147-151,161,184,198,273,292-515
+docs/THREAT_MODEL.md
+  h_0926447d100ad2 46
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "213a0f6dbc324decdaea924e32638800581e20f1",
+  "prompts": {},
+  "humans": {
+    "h_0926447d100ad2": {
+      "author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
