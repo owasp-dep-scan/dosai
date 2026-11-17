@@ -951,6 +951,10 @@ public static class Dosai
             Console.WriteLine($"Extracting NuGet package: {nupkgPath} to {tempExtractionDir}");
             using var extractionPhase = DebugLog.Phase("methods.nupkg-extraction");
             using var archive = ZipFile.OpenRead(nupkgPath);
+            // Entry names come from an untrusted archive: SafeZipExtraction refuses any name
+            // whose resolved destination would leave the extraction root, and each refused
+            // entry is reported once in the slice diagnostics instead of aborting the analysis.
+            var skippedEntries = new List<string>();
             foreach (var entry in archive.Entries)
             {
                 if (entry.FullName.EndsWith("/", StringComparison.OrdinalIgnoreCase) ||
@@ -963,15 +967,15 @@ public static class Dosai
                 }
                 var entryExtension = Path.GetExtension(entry.FullName).ToLowerInvariant();
                 if (!IsDotNetExtension(entryExtension)) continue;
-                var destinationPath = Path.Combine(tempExtractionDir, entry.FullName);
-                var destinationDir = Path.GetDirectoryName(destinationPath);
-                if (!Directory.Exists(destinationDir))
+                var outcome = SafeZipExtraction.ExtractEntry(entry, tempExtractionDir);
+                if (outcome.WasSkipped)
                 {
-                    if (destinationDir is not null) Directory.CreateDirectory(destinationDir);
+                    skippedEntries.Add(string.Create(CultureInfo.InvariantCulture, $"NuGet package entry '{entry.FullName}' was not extracted: {outcome.SkipReason}."));
                 }
-                entry.ExtractToFile(destinationPath, overwrite: true);
             }
-            return GetMethodsSlice(tempExtractionDir);
+            var slice = GetMethodsSlice(tempExtractionDir);
+            slice.Diagnostics?.AddRange(skippedEntries);
+            return slice;
 
         }
         catch (Exception ex)
