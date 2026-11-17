@@ -4023,7 +4023,11 @@ Console.WriteLine("hello");
         }
 
         using var tempDirectory = new TemporaryDirectory();
-        var toolDirectory = Path.Combine(tempDirectory.Path, "tools");
+        // The slow fake parser sits in its own temporary directory outside the scanned tree:
+        // an executable resolved from inside the tree is refused by design, so the timeout
+        // this test pins is reached through a PATH entry an operator could configure.
+        using var toolDirectoryContainer = new TemporaryDirectory();
+        var toolDirectory = Path.Combine(toolDirectoryContainer.Path, "tools");
         Directory.CreateDirectory(toolDirectory);
         var fakeRscript = Path.Combine(toolDirectory, "Rscript");
         File.WriteAllText(fakeRscript, "#!/bin/sh\nsleep 5\n");

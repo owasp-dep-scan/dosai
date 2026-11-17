@@ -1767,7 +1767,12 @@ public static class Dosai
 
     /// <summary>
     /// Discovers the paths of all installed .NET shared runtimes (like Microsoft.NETCore.App
-    /// and Microsoft.AspNetCore.App) by executing 'dotnet --list-runtimes'.
+    /// and Microsoft.AspNetCore.App) by executing 'dotnet --list-runtimes'. The executable is
+    /// resolved to an absolute path first (SafeProcess.ResolveDotnet): a bare "dotnet" would
+    /// let the scanned tree supply one through a PATH entry. The probe runs once per process
+    /// across every tree, so no single scan root applies; relative PATH entries are still
+    /// rejected, and the child runs from a neutral directory, so no working-directory lookup
+    /// can resolve into a tree being scanned either.
     /// </summary>
     /// <returns>A HashSet of directory paths containing the shared runtime assemblies.</returns>
     private static HashSet<string> ListDotnetSharedRuntimeRoots()
@@ -1775,14 +1780,23 @@ public static class Dosai
         var runtimePaths = new HashSet<string>();
         try
         {
+            var dotnet = SafeProcess.ResolveDotnet(scanRoot: null);
+            if (dotnet is null)
+            {
+                DebugLog.Log("'dotnet --list-runtimes' unavailable: no absolute dotnet executable resolved from DOTNET_HOST_PATH, DOTNET_ROOT or PATH; installed shared frameworks are not probed.");
+                return runtimePaths;
+            }
             using var process = new Process();
             process.StartInfo = new ProcessStartInfo
             {
-                FileName = "dotnet",
+                FileName = dotnet,
                 Arguments = "--list-runtimes",
                 RedirectStandardOutput = true,
                 UseShellExecute = false,
                 CreateNoWindow = true,
+                // The temp directory keeps any working-directory lookup away from a scanned
+                // tree; an unwritable temp falls back to the current directory as before.
+                WorkingDirectory = SafeProcess.NeutralWorkingDirectory() ?? string.Empty,
             };
 
             process.Start();

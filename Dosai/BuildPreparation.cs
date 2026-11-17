@@ -130,11 +130,21 @@ public static class BuildPreparation
         {
             DebugLog.Log($"dotnet {verb} starting on '{Path.GetFileName(target)}'");
         }
+        // The executable is resolved to an absolute path outside the scanned tree; a bare
+        // name could let the tree supply dotnet through a PATH entry while the child runs
+        // with the tree as its working directory. The tree stays the working directory so
+        // restore and build keep seeing the repository they are run against.
+        var dotnet = SafeProcess.ResolveDotnet(root);
+        if (dotnet is null)
+        {
+            Console.Error.WriteLine($"dosai: no absolute dotnet executable found for {verb}; analyzing the tree as-is.");
+            return;
+        }
         try
         {
             using var process = Process.Start(new ProcessStartInfo
             {
-                FileName = "dotnet",
+                FileName = dotnet,
                 Arguments = arguments,
                 WorkingDirectory = root,
                 RedirectStandardOutput = true,
