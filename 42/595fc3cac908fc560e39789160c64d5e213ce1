@@ -1,0 +1,20 @@
+Dosai.Tests/NupkgExtractionTests.cs
+  h_0926447d100ad2 1-170
+Dosai/Dosai.cs
+  h_0926447d100ad2 954-957,970-971,973,976-978
+Dosai/SafeZipExtraction.cs
+  h_0926447d100ad2 1-119
+docs/THREAT_MODEL.md
+  h_0926447d100ad2 47
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "42595fc3cac908fc560e39789160c64d5e213ce1",
+  "prompts": {},
+  "humans": {
+    "h_0926447d100ad2": {
+      "author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
