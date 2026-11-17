@@ -1,0 +1,24 @@
+Dosai/DataFlowExporter.cs
+  h_0926447d100ad2 281
+docs/graph-formats.md
+  h_0926447d100ad2 97-102
+Dosai/XmlText.cs
+  h_0926447d100ad2 1-101
+Dosai.Tests/XmlExportTests.cs
+  h_0926447d100ad2 1-200
+docs/THREAT_MODEL.md
+  h_0926447d100ad2 49
+Dosai/CallGraphExporter.cs
+  h_0926447d100ad2 302
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "34f8b220b242704cc33a7d40a17fc169ee047b68",
+  "prompts": {},
+  "humans": {
+    "h_0926447d100ad2": {
+      "author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
