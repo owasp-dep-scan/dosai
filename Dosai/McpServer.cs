@@ -17,10 +17,11 @@ public static class McpServer
         input ??= Console.In;
         output ??= Console.Out;
 
-        // Optional confinement: when set, every path the server touches (tool arguments and the
-        // configured default path) must resolve under this directory. Analysis output carries
-        // source-derived text, so an unrestricted server lets any connected client read any
-        // directory on the host through tool results.
+        // Optional confinement: when set, every path the server touches (each path-valued tool
+        // argument of PathArgumentNames, and the configured default path and patterns file)
+        // must resolve under this directory, with symbolic links resolved on every existing
+        // component. Analysis output carries source-derived text, so an unrestricted server
+        // lets any connected client read any directory on the host through tool results.
         string? confinedRoot = null;
         if (!string.IsNullOrWhiteSpace(rootPath))
         {
@@ -36,7 +37,17 @@ public static class McpServer
                 WriteError(output, null, -32001, $"--path must fall under --mcp-root when confinement is enabled.");
                 return 2;
             }
+
+            if (!string.IsNullOrWhiteSpace(patternsPath) && !IsUnderRoot(patternsPath, confinedRoot))
+            {
+                WriteError(output, null, -32001, $"--patterns must fall under --mcp-root when confinement is enabled.");
+                return 2;
+            }
         }
+
+        // Enumeration follows the same root as the argument checks: while this scope is active,
+        // the shared tree walk does not follow a link out of the root.
+        using var enumerationConfinement = confinedRoot is null ? null : SafeFileRead.ConfineTo(confinedRoot);
 
         string? line;
         while ((line = input.ReadLine()) is not null)
@@ -71,12 +82,24 @@ public static class McpServer
         return 0;
     }
 
-    /// <summary>True when <paramref name="candidate" /> resolves inside <paramref name="root" /> (symlink-stripped, case-insensitive on macOS/Windows).</summary>
+    /// <summary>
+    ///     True when <paramref name="candidate" /> resolves inside <paramref name="root" />:
+    ///     every existing component of both paths is resolved to its final link target
+    ///     (<see cref="SafeFileRead.TryResolvePhysicalPath" />), so a link placed under the root
+    ///     cannot point the comparison at a directory outside it, and components past the first
+    ///     missing one are compared as written. A path whose links cannot be resolved (a cycle, a
+    ///     permission error) counts as outside the root. Comparison ignores case on macOS and
+    ///     Windows, as the file system does.
+    /// </summary>
     internal static bool IsUnderRoot(string candidate, string root)
     {
-        var full = Path.GetFullPath(candidate);
-        var comparison = OperatingSystem.IsLinux() ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
-        return full.Equals(root, comparison) || full.StartsWith(root + Path.DirectorySeparatorChar, comparison);
+        var resolvedRoot = SafeFileRead.TryResolvePhysicalPath(root);
+        if (resolvedRoot is null)
+        {
+            return false;
+        }
+        var resolvedCandidate = SafeFileRead.TryResolvePhysicalPath(candidate);
+        return resolvedCandidate is not null && SafeFileRead.IsWithinRoot(resolvedCandidate, resolvedRoot);
     }
 
     private static object Handle(JsonRpcRequest request, string? defaultPath, string? patternsPath, string? patternPacks, string? confinedRoot = null)
@@ -130,18 +153,19 @@ public static class McpServer
         var path = GetString(arguments, "path") ?? defaultPath;
         var localPatterns = GetString(arguments, "patterns") ?? patternsPath;
         var localPatternPacks = GetString(arguments, "patternPacks") ?? patternPacks;
-        var inputFile = GetString(arguments, "input");
 
+        // One list of every path-valued argument (PathArgumentNames), checked with links
+        // resolved, so a future path argument joins the list instead of an if-chain that can
+        // miss it. The server-level defaults were already checked at startup.
         if (confinedRoot is not null)
         {
-            if (path is not null && !IsUnderRoot(path, confinedRoot))
+            foreach (var argumentName in PathArgumentNames)
             {
-                throw new ArgumentException($"Path is outside the --mcp-root confinement: {path}");
-            }
-
-            if (inputFile is not null && !IsUnderRoot(inputFile, confinedRoot))
-            {
-                throw new ArgumentException($"Input file is outside the --mcp-root confinement: {inputFile}");
+                var value = GetString(arguments, argumentName);
+                if (value is not null && !IsUnderRoot(value, confinedRoot))
+                {
+                    throw new ArgumentException($"{PathArgumentLabel(argumentName)} is outside the --mcp-root confinement: {value}");
+                }
             }
         }
 
@@ -214,6 +238,22 @@ public static class McpServer
 
     private static string RequirePath(string? path) => string.IsNullOrWhiteSpace(path) ? throw new ArgumentException("A path is required.") : path;
 
+    /// <summary>
+    ///     Every tool argument that names a file or directory the server reads, in tool-schema
+    ///     spelling. Confinement checks each against --mcp-root before dispatch. The list is
+    ///     pinned against the schema declared in <see cref="Tool" /> by a test, so a new
+    ///     path-valued argument fails the suite until it joins this list.
+    /// </summary>
+    internal static readonly string[] PathArgumentNames = ["path", "patterns", "input"];
+
+    private static string PathArgumentLabel(string argumentName) => argumentName switch
+    {
+        "path" => "Path",
+        "patterns" => "Patterns file",
+        "input" => "Input file",
+        _ => argumentName
+    };
+
     private static object Tool(string name, string description) => new
     {
         name,
@@ -221,6 +261,8 @@ public static class McpServer
         inputSchema = new
         {
             type = "object",
+            // A property added here that names a file or directory must also join
+            // PathArgumentNames, or confinement will not check it.
             properties = new Dictionary<string, object>
             {
                 ["path"] = new { type = "string", description = "File or directory to inspect." },

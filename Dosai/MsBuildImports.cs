@@ -152,9 +152,22 @@ internal static partial class MsBuildImports
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Singleline));
         foreach (var segment in segments)
         {
-            foreach (Match match in regex.Matches(segment.Content))
+            // The regex runs only at starts the scanner has verified, where its lazy quantifiers
+            // walk no further than the match itself; the free-position Matches it used to run is
+            // quadratic on text that never closes the element.
+            var position = 0;
+            var memo = new ElementScanMemo();
+            int start;
+            while ((start = NextElementStart(segment.Content, position, itemName, ref memo)) >= 0)
             {
+                var match = regex.Match(segment.Content, start);
+                if (!match.Success || match.Index != start)
+                {
+                    break;
+                }
+
                 yield return new MsBuildItem(segment.File, match, segment.Conditioned);
+                position = match.Index + match.Length;
             }
         }
     }
@@ -210,7 +223,43 @@ internal static partial class MsBuildImports
     }
 
     /// <summary>A project file's text with its XML comments blanked: a commented-out import, property or item is not part of the build.</summary>
-    internal static string WithoutXmlComments(string content) => XmlCommentRegex().Replace(content, string.Empty);
+    /// <remarks>
+    ///     A linear scan, not a lazy regular expression: a file of unclosed comment openers made
+    ///     every opener walk the remaining text looking for its closer. A comment whose closer
+    ///     never comes runs to the end of the text.
+    /// </remarks>
+    internal static string WithoutXmlComments(string content)
+    {
+        var open = content.IndexOf("<!--", StringComparison.Ordinal);
+        if (open < 0)
+        {
+            return content;
+        }
+
+        var stripped = new StringBuilder(content.Length);
+        stripped.Append(content, 0, open);
+        while (open >= 0)
+        {
+            var close = content.IndexOf("-->", open + 4, StringComparison.Ordinal);
+            if (close < 0)
+            {
+                // An unclosed comment runs to the end of the text.
+                return stripped.ToString();
+            }
+
+            var next = content.IndexOf("<!--", close + 3, StringComparison.Ordinal);
+            if (next < 0)
+            {
+                stripped.Append(content, close + 3, content.Length - close - 3);
+                return stripped.ToString();
+            }
+
+            stripped.Append(content, close + 3, next - close - 3);
+            open = next;
+        }
+
+        return stripped.ToString();
+    }
 
     /// <summary>
     ///     The import-resolution diagnostics of a scan root: those of every project file and
@@ -291,8 +340,19 @@ internal static partial class MsBuildImports
         var segments = new List<MsBuildFileSegment>();
         var diagnostics = new List<string>();
         var position = 0;
-        foreach (var import in ImportRegex().Matches(content).Cast<Match>())
+        var memo = new ElementScanMemo();
+        int start;
+        while ((start = NextElementStart(content, position, "Import", ref memo)) >= 0)
         {
+            // The regex runs only at a start the scanner has verified, where its lazy
+            // quantifiers walk no further than the match itself; the free-position Matches it
+            // used to run is quadratic on a file of unclosed import tags.
+            var import = ImportRegex().Match(content, start);
+            if (!import.Success || import.Index != start)
+            {
+                break;
+            }
+
             AddOwnSegment(segments, file, content[position..import.Index]);
             position = import.Index + import.Length;
             FollowImport(root, projectDirectory, file, import, context, segments, diagnostics);
@@ -430,6 +490,15 @@ internal static partial class MsBuildImports
 
         value = ExpandReservedProperties(value, importingFile, importingDirectory, projectDirectory);
         value = EvaluateDirectoryFunctions(value, importingDirectory);
+        if (IsUncShaped(value))
+        {
+            // A UNC network location named by the tree, refused before any existence probe so
+            // the share is never touched to be skipped (the same rule as packageFolders).
+            diagnostics?.Add($"<Import Project=\"{expression}\"> in '{Relative(root, importingFile)}' was skipped: the path names a UNC network location, which Dosai does not read.");
+
+            return false;
+        }
+
         if (UnresolvedReferenceRegex().IsMatch(value) || value.Contains('*', StringComparison.Ordinal) || value.Contains('?', StringComparison.Ordinal))
         {
             diagnostics?.Add($"<Import Project=\"{expression}\"> in '{Relative(root, importingFile)}' was skipped: the path holds a property, item or wildcard Dosai cannot expand.");
@@ -551,7 +620,10 @@ internal static partial class MsBuildImports
             fileName = args.Count > 1 ? Unquote(args[1]) : string.Empty;
         }
 
-        if (fileName.Length == 0 || startDirectory.Length == 0)
+        // A UNC network location named by the tree, refused before the upward walk probes it:
+        // on Windows Path.Combine keeps a rooted second argument as-is, so either argument
+        // could otherwise put a share path under File.Exists.
+        if (fileName.Length == 0 || startDirectory.Length == 0 || IsUncShaped(startDirectory) || IsUncShaped(fileName))
         {
             return string.Empty;
         }
@@ -633,6 +705,15 @@ internal static partial class MsBuildImports
     /// <summary>A path relative to the scan root with forward slashes, so a diagnostic reads the same on every OS.</summary>
     private static string Relative(string root, string path) => Path.GetRelativePath(root, path).Replace('\\', '/');
 
+    /// <summary>
+    ///     A UNC path shape (<c>\\server\share</c> or <c>//server/share</c>, the
+    ///     <c>\\?\UNC\</c> device form included): not a local path. A string test on purpose,
+    ///     run before any existence probe on a path read from tree content, so refusing a
+    ///     network location never touches it.
+    /// </summary>
+    private static bool IsUncShaped(string path) =>
+        path.StartsWith(@"\\", StringComparison.Ordinal) || path.StartsWith("//", StringComparison.Ordinal);
+
     private static bool BalancedParentheses(string value, int open, out int close)
     {
         var depth = 0;
@@ -681,6 +762,10 @@ internal static partial class MsBuildImports
         public bool DoNotMemoize { get; set; }
     }
 
+    // Matched only at a start NextElementStart has verified for the same content (ExpandFile):
+    // at a known start the lazy quantifiers walk no further than the match itself. A
+    // free-position Matches over text that never closes the element is quadratic; keep the
+    // scan in the scanner.
     [GeneratedRegex(@"<Import\s+([^>]*?)(?:/>|>.*?</Import\s*>)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Singleline)]
     private static partial Regex ImportRegex();
 
@@ -693,8 +778,142 @@ internal static partial class MsBuildImports
     [GeneratedRegex(@"\$\(\s*(?:MSBuildToolsPath|MSBuildToolsRoot|MSBuildBinPath|MSBuildExtensionsPath(?:32|64)?|MSBuildSDKsPath|MSBuildFrameworkToolsPath\w*|VSToolsPath|VCTargetsPath|NuGetPackageRoot)\s*\)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex ToolsetPropertyRegex();
 
-    [GeneratedRegex(@"<!--.*?-->", RegexOptions.CultureInvariant | RegexOptions.Singleline)]
-    private static partial Regex XmlCommentRegex();
+    /// <summary>
+    ///     The next position at or after <paramref name="from" /> where the element pattern of
+    ///     <paramref name="tag" /> (<c>&lt;tag\s+([^&gt;]*?)(?:/&gt;|&gt;.*?&lt;/tag\s*&gt;)</c>,
+    ///     case-insensitive) starts a match, or -1 when none remains. This decides exactly what
+    ///     that pattern's free-position scan decides: after the tag name and at least one
+    ///     whitespace character the attribute run reaches to the next <c>&gt;</c> (never past
+    ///     it), the run ending in <c>/</c> before a <c>&gt;</c> is the self-closing form, and
+    ///     any other <c>&gt;</c> opens the element, which needs a <c>&lt;/tag&gt;</c> after it.
+    ///     A candidate that fails costs the run to the next <c>&gt;</c> and the search for a
+    ///     closing tag, both memoized across the candidates of one scan, so text that never
+    ///     closes is walked once, not once per opener.
+    /// </summary>
+    private static int NextElementStart(string content, int from, string tag, ref ElementScanMemo memo)
+    {
+        for (var open = content.IndexOf('<', from); open >= 0; open = content.IndexOf('<', open + 1))
+        {
+            var nameEnd = open + 1 + tag.Length;
+            if (nameEnd > content.Length || !EqualsIgnoreCase(content, open + 1, tag))
+            {
+                continue;
+            }
+
+            if (nameEnd >= content.Length || !char.IsWhiteSpace(content[nameEnd]))
+            {
+                continue;
+            }
+
+            var attributes = nameEnd;
+            while (attributes < content.Length && char.IsWhiteSpace(content[attributes]))
+            {
+                attributes++;
+            }
+
+            var greater = FirstCharAtOrAfter(content, attributes, '>', ref memo.GreaterFrom, ref memo.GreaterAt);
+            if (greater < 0)
+            {
+                continue;
+            }
+
+            if (greater > attributes && content[greater - 1] == '/')
+            {
+                return open;
+            }
+
+            if (FirstElementClose(content, greater + 1, tag, ref memo.CloserFrom, ref memo.CloserAt) >= 0)
+            {
+                return open;
+            }
+        }
+
+        return -1;
+    }
+
+    /// <summary>Case-insensitive equality of <paramref name="tag" /> with the text at <paramref name="start" />; the caller checks the bounds.</summary>
+    private static bool EqualsIgnoreCase(string content, int start, string tag)
+    {
+        for (var i = 0; i < tag.Length; i++)
+        {
+            if (char.ToLowerInvariant(content[start + i]) != char.ToLowerInvariant(tag[i]))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    ///     The first index at or after <paramref name="from" /> holding <paramref name="character" />, or -1 when none
+    ///     remains, memoized across the candidates of one scan (their queries only move
+    ///     forward, so a miss answers every later candidate).
+    /// </summary>
+    private static int FirstCharAtOrAfter(string content, int from, char character, ref int memoFrom, ref int memoAt)
+    {
+        if (memoFrom <= from && (memoAt == -1 || memoAt >= from))
+        {
+            return memoAt;
+        }
+
+        memoFrom = from;
+        return memoAt = content.IndexOf(character, from);
+    }
+
+    /// <summary>
+    ///     The first <c>&lt;/tag&gt;</c> (whitespace tolerated before the closing bracket) at or after
+    ///     <paramref name="from" />, or -1 when none remains, memoized like
+    ///     <see cref="FirstCharAtOrAfter" />.
+    /// </summary>
+    private static int FirstElementClose(string content, int from, string tag, ref int memoFrom, ref int memoAt)
+    {
+        if (memoFrom <= from && (memoAt == -1 || memoAt >= from))
+        {
+            return memoAt;
+        }
+
+        var found = -1;
+        var nameEnd = 2 + tag.Length;
+        for (var close = content.IndexOf('<', from); close >= 0; close = content.IndexOf('<', close + 1))
+        {
+            if (close + nameEnd < content.Length && content[close + 1] == '/' && EqualsIgnoreCase(content, close + 2, tag))
+            {
+                var end = close + nameEnd;
+                while (end < content.Length && char.IsWhiteSpace(content[end]))
+                {
+                    end++;
+                }
+
+                if (end < content.Length && content[end] == '>')
+                {
+                    found = close;
+                    break;
+                }
+            }
+        }
+
+        memoFrom = from;
+        memoAt = found;
+        return found;
+    }
+
+    /// <summary>The two lookups of one element scan, remembered so the candidates that fail never walk the same text twice.</summary>
+    private struct ElementScanMemo
+    {
+        public int GreaterFrom;
+        public int GreaterAt;
+        public int CloserFrom;
+        public int CloserAt;
+
+        public ElementScanMemo()
+        {
+            GreaterFrom = 0;
+            GreaterAt = -2;
+            CloserFrom = 0;
+            CloserAt = -2;
+        }
+    }
 
     // Exists('...') or Exists("..."), whitespace tolerated around the name, quotes and argument.
     [GeneratedRegex(@"^Exists\s*\(\s*(?:""([^""]*)""|'([^']*)')\s*\)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]

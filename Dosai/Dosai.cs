@@ -951,6 +951,10 @@ public static class Dosai
             Console.WriteLine($"Extracting NuGet package: {nupkgPath} to {tempExtractionDir}");
             using var extractionPhase = DebugLog.Phase("methods.nupkg-extraction");
             using var archive = ZipFile.OpenRead(nupkgPath);
+            // Entry names come from an untrusted archive: SafeZipExtraction refuses any name
+            // whose resolved destination would leave the extraction root, and each refused
+            // entry is reported once in the slice diagnostics instead of aborting the analysis.
+            var skippedEntries = new List<string>();
             foreach (var entry in archive.Entries)
             {
                 if (entry.FullName.EndsWith("/", StringComparison.OrdinalIgnoreCase) ||
@@ -963,15 +967,15 @@ public static class Dosai
                 }
                 var entryExtension = Path.GetExtension(entry.FullName).ToLowerInvariant();
                 if (!IsDotNetExtension(entryExtension)) continue;
-                var destinationPath = Path.Combine(tempExtractionDir, entry.FullName);
-                var destinationDir = Path.GetDirectoryName(destinationPath);
-                if (!Directory.Exists(destinationDir))
+                var outcome = SafeZipExtraction.ExtractEntry(entry, tempExtractionDir);
+                if (outcome.WasSkipped)
                 {
-                    if (destinationDir is not null) Directory.CreateDirectory(destinationDir);
+                    skippedEntries.Add(string.Create(CultureInfo.InvariantCulture, $"NuGet package entry '{entry.FullName}' was not extracted: {outcome.SkipReason}."));
                 }
-                entry.ExtractToFile(destinationPath, overwrite: true);
             }
-            return GetMethodsSlice(tempExtractionDir);
+            var slice = GetMethodsSlice(tempExtractionDir);
+            slice.Diagnostics?.AddRange(skippedEntries);
+            return slice;
 
         }
         catch (Exception ex)
@@ -1767,7 +1771,12 @@ public static class Dosai
 
     /// <summary>
     /// Discovers the paths of all installed .NET shared runtimes (like Microsoft.NETCore.App
-    /// and Microsoft.AspNetCore.App) by executing 'dotnet --list-runtimes'.
+    /// and Microsoft.AspNetCore.App) by executing 'dotnet --list-runtimes'. The executable is
+    /// resolved to an absolute path first (SafeProcess.ResolveDotnet): a bare "dotnet" would
+    /// let the scanned tree supply one through a PATH entry. The probe runs once per process
+    /// across every tree, so no single scan root applies; relative PATH entries are still
+    /// rejected, and the child runs from a neutral directory, so no working-directory lookup
+    /// can resolve into a tree being scanned either.
     /// </summary>
     /// <returns>A HashSet of directory paths containing the shared runtime assemblies.</returns>
     private static HashSet<string> ListDotnetSharedRuntimeRoots()
@@ -1775,14 +1784,23 @@ public static class Dosai
         var runtimePaths = new HashSet<string>();
         try
         {
+            var dotnet = SafeProcess.ResolveDotnet(scanRoot: null);
+            if (dotnet is null)
+            {
+                DebugLog.Log("'dotnet --list-runtimes' unavailable: no absolute dotnet executable resolved from DOTNET_HOST_PATH, DOTNET_ROOT or PATH; installed shared frameworks are not probed.");
+                return runtimePaths;
+            }
             using var process = new Process();
             process.StartInfo = new ProcessStartInfo
             {
-                FileName = "dotnet",
+                FileName = dotnet,
                 Arguments = "--list-runtimes",
                 RedirectStandardOutput = true,
                 UseShellExecute = false,
                 CreateNoWindow = true,
+                // The temp directory keeps any working-directory lookup away from a scanned
+                // tree; an unwritable temp falls back to the current directory as before.
+                WorkingDirectory = SafeProcess.NeutralWorkingDirectory() ?? string.Empty,
             };
 
             process.Start();

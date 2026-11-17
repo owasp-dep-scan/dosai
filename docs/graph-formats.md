@@ -94,6 +94,12 @@ flowchart LR
     assign --> sink[["Process.Start"]]
 ```
 
+## Text escaping
+
+Node ids, labels, and attribute values in the GraphML and GEXF exports are escaped by one shared escaper (`Dosai/XmlText.cs`). The five markup characters `<`, `>`, `&`, `'`, and `"` become the entity references `&lt;`, `&gt;`, `&amp;`, `&apos;`, and `&quot;`. Every character the XML 1.0 `Char` production rejects, that is control characters below U+0020 other than tab, newline, and carriage return, plus U+FFFE and U+FFFF, and every lone surrogate (a high or low surrogate without its partner), is replaced with U+FFFD (the Unicode replacement character). Identifiers, file names, and code text read from an analyzed tree can carry all of these; without the replacement the exported document would not parse with any conforming XML parser.
+
+U+FFFD was chosen over a visible `\uXXXX` form because GraphML and GEXF define no such escape syntax, and replacement keeps downstream XML tooling working instead of presenting it with text it may or may not unescape. A complete surrogate pair (for example an emoji) is one supplementary character and is kept as-is. Text whose characters are all legal is escaped exactly as before, so exports of trees whose identifiers contain only legal characters are byte-identical to earlier releases. Mermaid labels use the separate, unchanged Mermaid escaper.
+
 ## Graph validation
 
 The CI workflow validates that:

@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Security;
 using System.Text;
 
 namespace Depscan;
@@ -300,5 +299,5 @@ public static class CallGraphExporter
         .Replace("\r", " ", StringComparison.Ordinal)
         .Replace("\n", " ", StringComparison.Ordinal);
 
-    private static string Xml(string value) => SecurityElement.Escape(value ?? string.Empty) ?? string.Empty;
+    private static string Xml(string value) => XmlText.Escape(value);
 }

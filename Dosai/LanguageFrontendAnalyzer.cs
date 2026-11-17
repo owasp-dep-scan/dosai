@@ -689,7 +689,9 @@ public static partial class LanguageFrontendAnalyzer
 
     private static bool TryAnalyzeRWithNativeParser(string basePath, string file, List<Method> methods, List<Dependency> dependencies, List<MethodCalls> calls)
     {
-        var rscript = ResolveExecutable("Rscript");
+        // Resolved through SafeProcess: only absolute PATH entries outside the scanned tree
+        // are searched, so a tree-supplied Rscript cannot run.
+        var rscript = SafeProcess.ResolveFromPath(["Rscript", "rscript"], basePath);
         if (rscript is null)
         {
             return false;
@@ -705,12 +707,18 @@ if (is.null(pd)) quit(status = 0)
 pd <- pd[, c("line1", "col1", "token", "text", "parent", "id")]
 write.table(pd, file = "", sep = "\t", row.names = FALSE, col.names = TRUE, quote = FALSE, na = "")
 """);
-            var start = new ProcessStartInfo(rscript, $"{Quote(scriptPath)} {Quote(file)}")
+            // --vanilla (--no-save --no-restore --no-site-file --no-init-file --no-environ)
+            // keeps the scanned tree from contributing R startup files, and the neutral
+            // working directory keeps anything R resolves relative to its own location out of
+            // the tree. The parse script takes the file to parse as an absolute argument and
+            // writes its table to stdout, so it does not depend on the working directory.
+            var start = new ProcessStartInfo(rscript, $"--vanilla {Quote(scriptPath)} {Quote(Path.GetFullPath(file))}")
             {
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
-                CreateNoWindow = true
+                CreateNoWindow = true,
+                WorkingDirectory = SafeProcess.NeutralWorkingDirectory() ?? string.Empty
             };
             using var process = Process.Start(start);
             if (process is null) return false;
@@ -931,17 +939,11 @@ write.table(pd, file = "", sep = "\t", row.names = FALSE, col.names = TRUE, quot
 
     private static string? ResolveExecutable(string name)
     {
+        // The historical candidates ("Rscript" then "rscript") are kept; resolution itself goes
+        // through SafeProcess, which searches only absolute PATH entries outside the scan root
+        // (no root is known for the availability probe).
         var candidates = name.Equals("Rscript", StringComparison.OrdinalIgnoreCase) ? new[] { name, "Rscript", "rscript" } : [name];
-        var path = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
-        foreach (var directory in path.Split(Path.PathSeparator).Where(Directory.Exists))
-        {
-            foreach (var executable in candidates.Distinct(StringComparer.Ordinal))
-            {
-                var candidate = Path.Combine(directory, executable);
-                if (File.Exists(candidate)) return candidate;
-            }
-        }
-        return null;
+        return SafeProcess.ResolveFromPath(candidates.Distinct(StringComparer.Ordinal).ToArray(), scanRoot: null);
     }
 
     private static string Quote(string value) => "\"" + value.Replace("\"", "\\\"", StringComparison.Ordinal) + "\"";

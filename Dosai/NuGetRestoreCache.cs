@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using System.Text.Json;
+using System.Xml.Linq;
 using Microsoft.CodeAnalysis;
 using System.Globalization;
 
@@ -19,6 +20,12 @@ public sealed record NuGetRestoreSummary(int AssetsFiles, int ResolvedReferences
 ///     package. A restored tree therefore yields full-fidelity Roslyn binding even when no
 ///     <c>bin/</c> output exists, which is what keeps package reachability above the
 ///     dependency-only fallback for unbuilt checkouts.
+///     The assets file is tree content, so a <c>packageFolders</c> entry is only followed when
+///     it is an absolute, non-UNC local path under the scan root, or equals a packages folder
+///     the analyst's machine configures (<c>NUGET_PACKAGES</c>, <c>NUGET_FALLBACK_PACKAGES</c>,
+///     the default global folder, the user-level NuGet.Config); every other entry is skipped with a diagnostic
+///     naming it, and the UNC refusal is a string-shape test that runs before any file system
+///     probe.
 ///     Resolution is best-effort and never throws; per-root results are cached because the
 ///     four metadata-reference builders in one process scan the same tree.
 /// </summary>
@@ -30,6 +37,26 @@ public static class NuGetRestoreCache
 
     private static readonly Dictionary<string, RootResult> ResultsByRoot = new(StringComparer.OrdinalIgnoreCase);
     private static readonly object ResultsLock = new();
+
+    /// <summary>Additional trusted package folder roots for the current execution context (a test hook).</summary>
+    private static readonly AsyncLocal<string[]?> TrustedPackageFoldersOverride = new();
+
+    /// <summary>
+    ///     Test hook: package folders the caller configures for the current execution context
+    ///     and the threads it starts, the way an operator's environment configures
+    ///     NUGET_PACKAGES. Restores the previous roots on dispose.
+    /// </summary>
+    internal static IDisposable OverrideTrustedPackageFoldersForTesting(params string[] folders)
+    {
+        var previous = TrustedPackageFoldersOverride.Value;
+        TrustedPackageFoldersOverride.Value = folders;
+        return new RestorePrevious(() => TrustedPackageFoldersOverride.Value = previous);
+    }
+
+    private sealed class RestorePrevious(Action restore) : IDisposable
+    {
+        public void Dispose() => restore();
+    }
 
     /// <summary>
     ///     Package assembly paths resolved from <c>project.assets.json</c> files under
@@ -117,6 +144,11 @@ public static class NuGetRestoreCache
         var referenceFileNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var assetsFiles = 0;
         var declaredPackages = 0;
+        var diagnostics = new List<string>();
+        // Refusals are reported once per distinct entry per root: every project's assets file
+        // of one machine names the same package folders.
+        var reportedRefusals = new HashSet<string>(StringComparer.Ordinal);
+        var trust = new PackageFolderTrust();
         try
         {
             foreach (var assetsFile in SafeFileRead.EnumerateAllFilesSafe(root, "project.assets.json"))
@@ -126,7 +158,7 @@ public static class NuGetRestoreCache
                     break;
                 }
                 assetsFiles++;
-                declaredPackages += ReadAssetsFile(assetsFile, referencePaths, referenceFileNames);
+                declaredPackages += ReadAssetsFile(assetsFile, root, trust, reportedRefusals, diagnostics, referencePaths, referenceFileNames);
             }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
@@ -134,7 +166,6 @@ public static class NuGetRestoreCache
             // Discovery is best-effort; whatever was resolved before the failure still counts.
         }
 
-        var diagnostics = new List<string>();
         if (assetsFiles > 0 && referencePaths.Count > 0)
         {
             diagnostics.Add($"Resolved {referencePaths.Count} package assemblies from NuGet restore output ({assetsFiles} project.assets.json).");
@@ -150,7 +181,7 @@ public static class NuGetRestoreCache
     }
 
     /// <summary>Resolves one assets file's package assemblies; returns how many package libraries it declares.</summary>
-    private static int ReadAssetsFile(string assetsFile, List<string> referencePaths, HashSet<string> referenceFileNames)
+    private static int ReadAssetsFile(string assetsFile, string scanRoot, PackageFolderTrust trust, HashSet<string> reportedRefusals, List<string> diagnostics, List<string> referencePaths, HashSet<string> referenceFileNames)
     {
         JsonDocument document;
         try
@@ -164,7 +195,7 @@ public static class NuGetRestoreCache
         using (document)
         {
             var libraryPaths = ReadLibraryPaths(document.RootElement);
-            var packageFolders = ReadPackageFolders(document.RootElement);
+            var packageFolders = ReadTrustedPackageFolders(document.RootElement, scanRoot, trust, reportedRefusals, diagnostics);
             if (packageFolders.Count == 0 || libraryPaths.Count == 0 || !document.RootElement.TryGetProperty("targets", out var targets) || targets.ValueKind != JsonValueKind.Object)
             {
                 return libraryPaths.Count;
@@ -239,7 +270,7 @@ public static class NuGetRestoreCache
     private static readonly System.Text.RegularExpressions.Regex TargetFrameworkRegex =
         new(@"^net(\d+)\.", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 
-    private static List<string> ReadPackageFolders(JsonElement root)
+    private static List<string> ReadPackageFolderEntries(JsonElement root)
     {
         var folders = new List<string>();
         if (root.TryGetProperty("packageFolders", out var packageFolders))
@@ -256,6 +287,250 @@ public static class NuGetRestoreCache
             }
         }
         return folders;
+    }
+
+    /// <summary>Why a packageFolders entry may not be read; <see cref="None" /> means it may.</summary>
+    internal enum PackageFolderRefusal
+    {
+        None,
+        UncPath,
+        NotAbsolute,
+        UnresolvablePath,
+        OutsideTrustedRoots,
+    }
+
+    /// <summary>
+    ///     Decides whether one non-empty <c>packageFolders</c> entry from project.assets.json
+    ///     may be read. The entry names a folder on the analyst's machine, but the file it
+    ///     sits in is tree content, so only locations the operator's environment, the scanned
+    ///     tree, or its own NuGet.config configure are accepted. The UNC check is a
+    ///     string-shape test that runs first, so refusing a network location never touches
+    ///     it. Internal for tests.
+    /// </summary>
+    internal static PackageFolderRefusal ClassifyPackageFolder(string entry, string scanRoot, IReadOnlyList<string>? configuredRoots = null)
+    {
+        if (IsUncShaped(entry))
+        {
+            return PackageFolderRefusal.UncPath;
+        }
+
+        if (!Path.IsPathRooted(entry))
+        {
+            return PackageFolderRefusal.NotAbsolute;
+        }
+
+        if (NormalizeFolder(entry) is not { } full)
+        {
+            return PackageFolderRefusal.UnresolvablePath;
+        }
+
+        if (IsUnderRoot(scanRoot, full))
+        {
+            return PackageFolderRefusal.None;
+        }
+
+        configuredRoots ??= ConfiguredPackageFolderRoots();
+        foreach (var configured in configuredRoots)
+        {
+            if (string.Equals(full, configured, SafeFileRead.PathComparison))
+            {
+                return PackageFolderRefusal.None;
+            }
+        }
+
+        return PackageFolderRefusal.OutsideTrustedRoots;
+    }
+
+    /// <summary>
+    ///     The package folder entries an assets file declares, filtered to the trusted ones.
+    ///     Each refused entry is skipped with a diagnostic naming it, once per distinct entry
+    ///     per root, and resolution proceeds with what is left.
+    /// </summary>
+    private static List<string> ReadTrustedPackageFolders(JsonElement root, string scanRoot, PackageFolderTrust trust, HashSet<string> reportedRefusals, List<string> diagnostics)
+    {
+        var trusted = new List<string>();
+        foreach (var entry in ReadPackageFolderEntries(root))
+        {
+            var refusal = ClassifyPackageFolder(entry, scanRoot, trust.ConfiguredRoots);
+            if (refusal == PackageFolderRefusal.None)
+            {
+                trusted.Add(entry);
+            }
+            else if (reportedRefusals.Add(entry))
+            {
+                diagnostics.Add(RefusalDiagnostic(entry, refusal));
+            }
+        }
+
+        return trusted;
+    }
+
+    private static string RefusalDiagnostic(string entry, PackageFolderRefusal refusal) => refusal switch
+    {
+        PackageFolderRefusal.UncPath => $"packageFolders entry '{entry}' in project.assets.json was skipped: UNC network paths are not accepted as package folders.",
+        PackageFolderRefusal.NotAbsolute => $"packageFolders entry '{entry}' in project.assets.json was skipped: the path is not absolute.",
+        PackageFolderRefusal.UnresolvablePath => $"packageFolders entry '{entry}' in project.assets.json was skipped: the path could not be resolved.",
+        _ => $"packageFolders entry '{entry}' in project.assets.json was skipped: the folder is outside the scanned tree and is not a packages folder this machine configures (NUGET_PACKAGES, NUGET_FALLBACK_PACKAGES, the default global packages folder, or the user-level NuGet.Config).",
+    };
+
+    /// <summary>
+    ///     A UNC path shape (<c>\\server\share</c> or <c>//server/share</c>, the
+    ///     <c>\\?\UNC\</c> device form included): not a local path. A string test on purpose,
+    ///     run before any file system probe, so refusing a network location never touches it.
+    /// </summary>
+    private static bool IsUncShaped(string path) =>
+        path.StartsWith(@"\\", StringComparison.Ordinal) || path.StartsWith("//", StringComparison.Ordinal);
+
+    /// <summary>An absolute folder path with trailing separators removed, or null when it cannot be resolved.</summary>
+    private static string? NormalizeFolder(string path)
+    {
+        try
+        {
+            var trimmed = path.TrimEnd('\\', '/');
+            return Path.GetFullPath(trimmed.Length == 0 ? path : trimmed);
+        }
+        catch (Exception ex) when (ex is ArgumentException or IOException or NotSupportedException)
+        {
+            return null;
+        }
+    }
+
+    private static bool IsUnderRoot(string root, string fullFolder)
+    {
+        try
+        {
+            var relative = Path.GetRelativePath(root, fullFolder);
+            return relative.Length == 0
+                || relative == "."
+                || (!relative.StartsWith("../", StringComparison.Ordinal)
+                    && !relative.StartsWith(@"..\", StringComparison.Ordinal)
+                    && relative != ".."
+                    && !Path.IsPathRooted(relative));
+        }
+        catch (ArgumentException)
+        {
+            // Another root (a different drive on Windows): not under the scan root.
+            return false;
+        }
+    }
+
+    /// <summary>
+    ///     The package folder roots the analyst's own machine configures: <c>NUGET_PACKAGES</c>,
+    ///     the folders of <c>NUGET_FALLBACK_PACKAGES</c>, NuGet's default global packages
+    ///     folder, the <c>globalPackagesFolder</c> and <c>fallbackPackageFolders</c> of the
+    ///     user-level NuGet.Config, the Visual Studio shared offline folder on Windows, and the
+    ///     test override. Nothing here is read from the scanned tree: a NuGet.config inside it
+    ///     is tree content and could name any folder, so a tree's own fallback folders count
+    ///     only when they sit under the scan root, which the caller already accepts.
+    ///     Comparison-ready absolute paths; entries that cannot be resolved are dropped.
+    /// </summary>
+    private static IReadOnlyList<string> ConfiguredPackageFolderRoots()
+    {
+        var candidates = new List<string>();
+        if (Environment.GetEnvironmentVariable("NUGET_PACKAGES") is { Length: > 0 } environmentRoot)
+        {
+            candidates.Add(environmentRoot);
+        }
+
+        if (Environment.GetEnvironmentVariable("NUGET_FALLBACK_PACKAGES") is { Length: > 0 } fallbackList)
+        {
+            candidates.AddRange(fallbackList.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+        }
+
+        var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (userProfile.Length > 0)
+        {
+            candidates.Add(Path.Combine(userProfile, ".nuget", "packages"));
+        }
+
+        if (UserNuGetConfigPath(userProfile) is { } userConfig)
+        {
+            candidates.AddRange(ReadUserConfigPackageFolders(userConfig));
+        }
+
+        if (OperatingSystem.IsWindows()
+            && Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86) is { Length: > 0 } programFilesX86)
+        {
+            candidates.Add(Path.Combine(programFilesX86, "Microsoft Visual Studio", "Shared", "NuGetPackages"));
+        }
+
+        if (TrustedPackageFoldersOverride.Value is { Length: > 0 } overridden)
+        {
+            candidates.AddRange(overridden);
+        }
+
+        var roots = new List<string>();
+        foreach (var candidate in candidates)
+        {
+            if (!IsUncShaped(candidate) && NormalizeFolder(candidate) is { } normalized)
+            {
+                roots.Add(normalized);
+            }
+        }
+
+        return roots;
+    }
+
+    /// <summary>The user-level NuGet.Config NuGet itself reads, or null when there is none.</summary>
+    private static string? UserNuGetConfigPath(string userProfile)
+    {
+        var directory = OperatingSystem.IsWindows()
+            ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "NuGet")
+            : userProfile.Length > 0 ? Path.Combine(userProfile, ".nuget", "NuGet") : null;
+        if (directory is null)
+        {
+            return null;
+        }
+
+        foreach (var fileName in new[] { "NuGet.Config", "NuGet.config", "nuget.config" })
+        {
+            var candidate = Path.Combine(directory, fileName);
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    ///     The <c>config/globalPackagesFolder</c> value and every <c>fallbackPackageFolders</c>
+    ///     entry of one user-level NuGet.Config. A relative value resolves against the config
+    ///     file's directory, the way NuGet reads it. Internal for tests.
+    /// </summary>
+    internal static List<string> ReadUserConfigPackageFolders(string configFile)
+    {
+        try
+        {
+            var document = XDocument.Load(configFile);
+            var directory = Path.GetDirectoryName(configFile);
+            var globalFolders = document.Descendants("config")
+                .Elements("add")
+                .Where(add => string.Equals(add.Attribute("key")?.Value, "globalPackagesFolder", StringComparison.OrdinalIgnoreCase));
+            var fallbackFolders = document.Descendants("fallbackPackageFolders").Elements("add");
+            return globalFolders.Concat(fallbackFolders)
+                .Select(add => add.Attribute("value")?.Value)
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Select(value => Path.IsPathRooted(value!) || directory is null ? value! : Path.Combine(directory, value!))
+                .ToList();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Xml.XmlException)
+        {
+            // Best effort: an unreadable or malformed config contributes no folders.
+            return [];
+        }
+    }
+
+    /// <summary>
+    ///     The machine's configured package folder roots, read once per resolution and only on
+    ///     first use: trees without package folders never read the user-level NuGet.Config.
+    /// </summary>
+    private sealed class PackageFolderTrust
+    {
+        private IReadOnlyList<string>? configuredRoots;
+
+        public IReadOnlyList<string> ConfiguredRoots => configuredRoots ??= ConfiguredPackageFolderRoots();
     }
 
     private static Dictionary<string, string> ReadLibraryPaths(JsonElement root)
