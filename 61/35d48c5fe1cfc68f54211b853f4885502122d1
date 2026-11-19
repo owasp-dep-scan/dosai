@@ -1,0 +1,47 @@
+Dosai.Tests/Corpus/README.md
+  s_c7ab1e6d0f0c48::t_67bada89f8b525 37,75
+Dosai.Tests/Issue134WeakHashTests.cs
+  s_c7ab1e6d0f0c48::t_822ee8012de5e9 167,248,268
+  s_c7ab1e6d0f0c48::t_2a20264548de99 69
+  s_c7ab1e6d0f0c48::t_5ad212d41e0398 49-53,109,116,293
+  s_c7ab1e6d0f0c48::t_e38caaa8306756 99-106,111
+  s_c7ab1e6d0f0c48::t_d900c4aa9f64fd 1-48,54-68,70-98,107-108,110,112-115,117-123,125-146,148-166,168-169,171-186,188-191,193-213,215-235,237-240,242-247,249-267,269-285,287-292,294-297,299,301,313-320,322-326
+  s_c7ab1e6d0f0c48::t_d13e2cb24ac73c 298,300,302-312
+  s_c7ab1e6d0f0c48::t_5a687e8895888b 170,214
+  s_c7ab1e6d0f0c48::t_5ff7bc65b1ac9d 124,286,321
+  s_c7ab1e6d0f0c48::t_67887525ada831 147,187,192,236,241
+Dosai/CryptoAnalysis.cs
+  s_c7ab1e6d0f0c48::t_6f68803c917b93 1748
+  s_c7ab1e6d0f0c48::t_2cfb6cdcbb4407 1666-1673,1678-1698,1701-1720,1722-1746
+  s_c7ab1e6d0f0c48::t_f49d0bfc4e7cb2 924,926-928
+  s_c7ab1e6d0f0c48::t_519a1924f6f6af 1441-1463,1747
+  s_c7ab1e6d0f0c48::t_9b12c36338a2ac 1721
+  s_c7ab1e6d0f0c48::t_50224453e2d566 1699-1700
+Dosai.Tests/CorpusTests.cs
+  s_c7ab1e6d0f0c48::t_822ee8012de5e9 487
+  s_c7ab1e6d0f0c48::t_6aaaf01584193e 459-486,488-511
+docs/migration-5.1.0.md
+  s_c7ab1e6d0f0c48::t_b6a3aa9d1ca340 763-777
+Dosai.Tests/Corpus/setup.sh
+  s_c7ab1e6d0f0c48::t_3028b989605ccc 611-613,620,624-625
+  s_c7ab1e6d0f0c48::t_7286af6aca5e58 630-642,644-645
+  s_c7ab1e6d0f0c48::t_db46c71ef5a427 626-629
+docs/crypto-cbom.md
+  s_c7ab1e6d0f0c48::t_36dc058e2c2d98 78
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6135d48c5fe1cfc68f54211b853f4885502122d1",
+  "prompts": {},
+  "sessions": {
+    "s_c7ab1e6d0f0c48": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "sess_ffe8eabc-0c06-4d2b-9b0a-1af2dae85431",
+        "model": "GLM-5.3"
+      },
+      "human_author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}
