@@ -8,10 +8,11 @@ namespace Depscan;
 ///         <see cref="All" /> (the default for a built source tree, the policy of issue #78)
 ///         analyzes every method of every dependency assembly, so flows that stay inside package code are in the graph, scoped
 ///         <c>dependency</c> and capped at low severity. <see cref="Reachable" /> analyzes a
-///         dependency method only when application code reaches it by a chain of calls, so the
-///         flows from the application into a package, and through it, are kept (the application
-///         slices are identical in both modes) while flows nothing in the application can start
-///         are left out. It is the default for an assembly-only input (see <see cref="For" />).
+///         dependency method only when application code reaches it by a chain of calls,
+///         following interface and virtual dispatch to the types reached code instantiates, so
+///         the flows through the package code a run can execute are kept while flows that only
+///         analyzing every package body finds (dead formatters, unused caches) are left out. It
+///         is the default for an assembly-only input (see <see cref="For" />).
 ///     </para>
 ///     Applied per command with <see cref="Apply" />, like <see cref="PathExclusions" />, or
 ///     process-wide by <c>DOSAI_DEPENDENCY_FLOWS</c>.

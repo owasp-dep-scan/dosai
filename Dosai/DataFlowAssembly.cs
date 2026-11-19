@@ -262,17 +262,26 @@ public static partial class DataFlowAnalyzer
     ///         The walk starts at every method of the application's own assemblies and
     ///         over-approximates what a run can execute, so that every method whose summary or
     ///         stored field taint an analyzed body uses is analyzed too. A call, <c>newobj</c> or
-    ///         <c>ldftn</c> reaches each definition of the same member, matched by declaring type
-    ///         and name with generic arguments and arity removed and by parameter count, so a call
-    ///         to <c>M&lt;int&gt;</c> or through a constructed type reaches the open definition.
-    ///         Reaching a type's member reaches its static constructor, and reading a field reaches
-    ///         every method that stores it. Overrides and interface implementations are not
-    ///         followed: the interpreter takes a call's summary from the member the call names,
-    ///         never from the method dispatch would pick, so no analyzed body uses them, and
-    ///         following every same-named virtual method kept three quarters of MailKit's bodies.
-    ///         Flows that only start inside such an override are package-internal and left out.
-    ///         Reachability is a property of the metadata alone, so it does not depend on the
-    ///         order of the files.
+    ///         <c>ldftn</c> reaches each definition of the same member, matched by declaring
+    ///         type's full nesting chain (issue #128) and by name with generic arguments and
+    ///         arity removed and by parameter count, so a call to <c>M&lt;int&gt;</c> or
+    ///         through a constructed type reaches the open definition. Reaching a type's member
+    ///         reaches its static constructor, and reading a field reaches every method that
+    ///         stores it. <c>callvirt</c> and <c>ldvirtftn</c> additionally reach the
+    ///         implementations held by types reached code instantiates (issue #120): a rapid
+    ///         type analysis whose evidence is <c>newobj</c>, <c>box</c>, <c>ldtoken</c> and
+    ///         the generic arguments and signature types of called members, counted in
+    ///         reached bodies only, fired in both directions against a memoized inheritance
+    ///         table built from every analyzed assembly (bodyless interfaces included), and
+    ///         matching explicit interface implementations by their dotted metadata name.
+    ///         There is no class-hierarchy fallback: it kept three quarters of MailKit's
+    ///         bodies and admitted implementations nothing constructs, exactly the dead
+    ///         formatters the original report was about. The interpreter still takes a call's
+    ///         summary from the member the call names, so dispatch following decides which
+    ///         bodies are interpreted, not which summary a call site uses; a flow needing
+    ///         value propagation through an interface call's return can therefore still
+    ///         differ from <see cref="DependencyFlowMode.All" />. Reachability is a property
+    ///         of the metadata alone, so it does not depend on the order of the files.
     ///     </para>
     /// </summary>
     private static void PruneUnreachableDependencyMethods(List<AnalyzedAssembly> assemblies, AssemblyDataFlowContext context, DataFlowResult result, DependencyFlowMode mode)
@@ -299,6 +308,13 @@ public static partial class DataFlowAnalyzer
             {
                 total += reach.AddDefinitions(index, assemblies[index].Reader, assemblies[index].PeReader);
             }
+        }
+
+        // The inheritance table covers every analyzed assembly (application types and bodyless
+        // interfaces included: the table names what other types implement, issue #120).
+        for (var index = 0; index < assemblies.Count; index++)
+        {
+            reach.AddTypeHierarchy(index, assemblies[index].Reader, isDependency[index]);
         }
 
         // The secondary legacy index is decided over the complete definition set: which legacy
@@ -351,23 +367,54 @@ public static partial class DataFlowAnalyzer
             {
                 foreach (var instruction in DecodeInstructions(assembly.PeReader.GetMethodBody(method.RelativeVirtualAddress).GetILReader()))
                 {
-                    if (instruction.Operand is not int token || DependencyReachIndex.KindOf(instruction.OpCode) is not { } kind)
+                    if (instruction.Operand is not int token)
                     {
                         continue;
                     }
 
-                    if (!targets.TryGetValue((assemblyIndex, token), out var member))
+                    var kind = DependencyReachIndex.KindOf(instruction.OpCode);
+                    AssemblyMemberInfo? member = null;
+                    string? qualifiedType = null;
+                    if (kind is not null)
                     {
-                        member = ResolveReachTarget(assembly.Reader, token);
-                        targets[(assemblyIndex, token)] = member;
-                        // Memoized beside the member: the qualified chain is walked once per
-                        // referenced token, not once per call site (issue #128).
-                        qualifiedTypes[(assemblyIndex, token)] = member is null ? null : DependencyReachIndex.QualifiedContainingType(assembly.Reader, token);
+                        if (!targets.TryGetValue((assemblyIndex, token), out member))
+                        {
+                            member = ResolveReachTarget(assembly.Reader, token);
+                            targets[(assemblyIndex, token)] = member;
+                            // Memoized beside the member: the qualified chain is walked once per
+                            // referenced token, not once per call site (issue #128).
+                            qualifiedTypes[(assemblyIndex, token)] = member is null ? null : DependencyReachIndex.QualifiedContainingType(assembly.Reader, token);
+                        }
+
+                        qualifiedType = qualifiedTypes[(assemblyIndex, token)];
                     }
 
-                    if (member is not null)
+                    if (member is not null && kind is { } reachKind)
                     {
-                        Reach(reach.Targets(member, kind, qualifiedTypes[(assemblyIndex, token)]));
+                        Reach(reach.Targets(member, reachKind, qualifiedType));
+                        if (reachKind == DependencyReachIndex.ReachKind.Call)
+                        {
+                            // The signature types of a called member are instantiation evidence
+                            // too: a call through a parameter of the interface's type reaches
+                            // what implements it, when reached code instantiates that (issue #120).
+                            foreach (var parameterType in member.RenderedParameterTypes)
+                            {
+                                Reach(reach.Admit(DependencyReachIndex.OpenTypeName(parameterType)));
+                            }
+                        }
+
+                        if (instruction.OpCode == OpCodes.Callvirt || instruction.OpCode == OpCodes.Ldvirtftn)
+                        {
+                            Reach(reach.RecordDispatchKey(DependencyReachIndex.OpenTypeName(qualifiedType ?? member.ContainingType), member.Name, member.ParameterCount));
+                        }
+                    }
+
+                    if (instruction.OpCode == OpCodes.Newobj || instruction.OpCode == OpCodes.Box || instruction.OpCode == OpCodes.Ldtoken)
+                    {
+                        foreach (var typeName in reach.InstantiatedTypeNames(assembly.Reader, token))
+                        {
+                            Reach(reach.Admit(typeName));
+                        }
                     }
                 }
             }
@@ -389,7 +436,7 @@ public static partial class DataFlowAnalyzer
 
         if (kept < total)
         {
-            result.Diagnostics.Add(string.Create(CultureInfo.InvariantCulture, $"{total - kept} of {total} method bodies in dependency assemblies were not analyzed because no application code reaches them ({(DependencyFlowScope.Requested is null ? "the default for an assembly-only input; --dependency-flows all analyzes them" : "--dependency-flows reachable")}); flows that start inside them are not reported."));
+            result.Diagnostics.Add(string.Create(CultureInfo.InvariantCulture, $"{total - kept} of {total} method bodies in dependency assemblies were not analyzed because no application code reaches them ({(DependencyFlowScope.Requested is null ? "the default for an assembly-only input; --dependency-flows all analyzes them" : "--dependency-flows reachable")}); flows that start or pass inside them are not reported."));
         }
     }
 
@@ -443,6 +490,20 @@ public static partial class DataFlowAnalyzer
         private readonly Dictionary<(int, int), TypeDefinitionHandle> _declaringType = [];
         private readonly Dictionary<string, int> _methodLegacyKeyCounts = new(StringComparer.Ordinal);
         private readonly Dictionary<string, int> _fieldLegacyKeyCounts = new(StringComparer.Ordinal);
+
+        // Rapid type analysis (issue #120): instantiation evidence, dispatch keys and the
+        // inheritance table. Every set only grows and every fire is checked against both, so
+        // the closure is unique and the result does not depend on dequeue order.
+        private readonly HashSet<string> _knownTypes = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, TypeInfo> _typesByName = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, string[]?> _closureByType = new(StringComparer.Ordinal);
+        private readonly HashSet<string> _instantiated = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, HashSet<(string Member, int Parameters)>> _dispatchKeysByDeclaring = new(StringComparer.Ordinal);
+
+        private sealed record TypeInfo(bool Sealed, bool Abstract, bool Interface, string? BaseType, List<string> Interfaces);
+
+        /// <summary>A type or member name without generic arguments or arity, as the walk's sets hold them.</summary>
+        internal static string OpenTypeName(string name) => OpenName(name);
 
         public static ReachKind? KindOf(OpCode opCode)
         {
@@ -506,6 +567,331 @@ public static partial class DataFlowAnalyzer
             // legacy key unique over the whole definition set is still unambiguous, so the
             // lookup degrades to today's reach, never below it.
             return legacyIndex.TryGetValue(legacy, out var legacyMembers) ? legacyMembers : [];
+        }
+
+        /// <summary>
+        ///     Collects one assembly's types into the inheritance table: every analyzed
+        ///     assembly contributes, application assemblies and bodyless interfaces included
+        ///     (an interface no method has a body for still names what other types implement).
+        ///     Dependency assemblies' types also become names instantiation evidence can admit.
+        /// </summary>
+        public void AddTypeHierarchy(int index, MetadataReader reader, bool isDependency)
+        {
+            foreach (var handle in reader.TypeDefinitions)
+            {
+                var type = reader.GetTypeDefinition(handle);
+                var name = OpenName(QualifiedDefinitionTypeName(reader, handle));
+                if (name.Length == 0)
+                {
+                    continue;
+                }
+
+                if (isDependency)
+                {
+                    _knownTypes.Add(name);
+                }
+
+                string? baseType = null;
+                var interfaces = new List<string>();
+                try
+                {
+                    var baseHandle = type.BaseType;
+                    if (baseHandle.Kind is HandleKind.TypeReference or HandleKind.TypeDefinition)
+                    {
+                        baseType = OpenName(QualifiedContainingTypeOfParent(reader, baseHandle) ?? string.Empty);
+                        if (baseType.Length == 0) baseType = null;
+                    }
+
+                    foreach (var implementation in type.GetInterfaceImplementations())
+                    {
+                        var implemented = reader.GetInterfaceImplementation(implementation).Interface;
+                        if (implemented.Kind is HandleKind.TypeReference or HandleKind.TypeDefinition)
+                        {
+                            var interfaceName = OpenName(QualifiedContainingTypeOfParent(reader, implemented) ?? string.Empty);
+                            if (interfaceName.Length > 0)
+                            {
+                                interfaces.Add(interfaceName);
+                            }
+                        }
+                    }
+                }
+                catch (BadImageFormatException)
+                {
+                    // Untrusted metadata: the type keeps what was read.
+                }
+
+                var attributes = type.Attributes;
+                _typesByName.TryAdd(name, new TypeInfo(
+                    (attributes & TypeAttributes.Sealed) != 0,
+                    (attributes & TypeAttributes.Abstract) != 0,
+                    (attributes & TypeAttributes.Interface) != 0,
+                    baseType,
+                    interfaces));
+            }
+        }
+
+        /// <summary>
+        ///     The names instantiation evidence can carry from one operand: a <c>newobj</c>'s
+        ///     constructed type (the parent of the constructor member, generic arguments
+        ///     included), or the <c>box</c>/<c>ldtoken</c> type token itself.
+        /// </summary>
+        public IEnumerable<string> InstantiatedTypeNames(MetadataReader reader, int token)
+        {
+            var handle = System.Reflection.Metadata.Ecma335.MetadataTokens.EntityHandle(token);
+            var parent = handle.Kind switch
+            {
+                HandleKind.MethodDefinition => reader.GetMethodDefinition((MethodDefinitionHandle)handle).GetDeclaringType(),
+                HandleKind.MemberReference => reader.GetMemberReference((MemberReferenceHandle)handle).Parent,
+                HandleKind.FieldDefinition => reader.GetFieldDefinition((FieldDefinitionHandle)handle).GetDeclaringType(),
+                _ => handle.Kind is HandleKind.TypeDefinition or HandleKind.TypeReference or HandleKind.TypeSpecification ? handle : default
+            };
+
+            var names = new List<string>();
+            CollectTypeNames(reader, parent, names, 0);
+            return names;
+        }
+
+        private void CollectTypeNames(MetadataReader reader, EntityHandle handle, List<string> names, int depth)
+        {
+            if (depth >= MaxNestingDepth)
+            {
+                return;
+            }
+
+            switch (handle.Kind)
+            {
+                case HandleKind.TypeDefinition:
+                    AddName(names, QualifiedDefinitionTypeName(reader, (TypeDefinitionHandle)handle));
+                    break;
+                case HandleKind.TypeReference:
+                    if (QualifiedReferenceTypeName(reader, (TypeReferenceHandle)handle) is { } reference)
+                    {
+                        AddName(names, reference);
+                    }
+
+                    break;
+                case HandleKind.TypeSpecification:
+                    // A generic instance: the head and every generic argument (a newobj on
+                    // Cache<Gadget> admits both).
+                    try
+                    {
+                        var blob = reader.GetBlobReader(reader.GetTypeSpecification((TypeSpecificationHandle)handle).Signature);
+                        CollectSignatureTypeNames(ref blob, names, reader, depth);
+                    }
+                    catch (BadImageFormatException)
+                    {
+                        // Untrusted metadata names nothing.
+                    }
+
+                    break;
+            }
+
+            static void AddName(List<string> names, string qualified)
+            {
+                var open = OpenName(qualified);
+                if (open.Length > 0)
+                {
+                    names.Add(open);
+                }
+            }
+        }
+
+        private void CollectSignatureTypeNames(ref BlobReader blob, List<string> names, MetadataReader reader, int depth)
+        {
+            if (depth >= MaxNestingDepth || blob.RemainingBytes <= 0)
+            {
+                return;
+            }
+
+            // The raw signature protocol the signature reader itself decodes: 0x15 GENERICINST
+            // (kind, head, argument count, arguments), 0x11/0x12 VALUETYPE/CLASS with a
+            // TypeDefOrRef coded index, 0x1d SZARRAY with the element type.
+            switch (blob.ReadByte())
+            {
+                case 0x15:
+                    if (blob.RemainingBytes <= 0)
+                    {
+                        return;
+                    }
+
+                    _ = blob.ReadByte();
+                    CollectSignatureTypeNames(ref blob, names, reader, depth + 1);
+                    var arguments = blob.RemainingBytes > 0 ? blob.ReadCompressedInteger() : 0;
+                    for (var i = 0; i < arguments && blob.RemainingBytes > 0; i++)
+                    {
+                        CollectSignatureTypeNames(ref blob, names, reader, depth + 1);
+                    }
+
+                    break;
+                case 0x11 or 0x12:
+                    if (blob.RemainingBytes > 0)
+                    {
+                        CollectCodedType(reader, blob.ReadCompressedInteger(), names);
+                    }
+
+                    break;
+                case 0x1d:
+                    CollectSignatureTypeNames(ref blob, names, reader, depth + 1);
+                    break;
+                // Anything else (primitive, by-ref, pointer, generic parameter, arrays with
+                // bounds) stops this operand's decode: admission is evidence, and a desynced
+                // blob would misread whatever follows.
+            }
+        }
+
+        private void CollectCodedType(MetadataReader reader, int codedIndex, List<string> names)
+        {
+            var tag = codedIndex & 0x3;
+            var row = codedIndex >> 2;
+            if (tag == 0 && row > 0)
+            {
+                CollectTypeNames(reader, MetadataTokens.TypeDefinitionHandle(row), names, MaxNestingDepth - 1);
+            }
+            else if (tag == 1 && row > 0)
+            {
+                CollectTypeNames(reader, MetadataTokens.TypeReferenceHandle(row), names, MaxNestingDepth - 1);
+            }
+        }
+
+        /// <summary>
+        ///     Admits a type reached code instantiates and fires every recorded dispatch key
+        ///     whose declaring type is in its closure. Returns the methods the firing reached.
+        /// </summary>
+        public IEnumerable<(int, MethodDefinitionHandle)> Admit(string openTypeName)
+        {
+            if (openTypeName.Length == 0 || !_knownTypes.Contains(openTypeName) || !_instantiated.Add(openTypeName))
+            {
+                return [];
+            }
+
+            var fired = new List<(int, MethodDefinitionHandle)>();
+            foreach (var ancestor in ClosureOf(openTypeName))
+            {
+                if (_dispatchKeysByDeclaring.TryGetValue(ancestor, out var keys))
+                {
+                    foreach (var (member, parameters) in keys)
+                    {
+                        fired.AddRange(MatchAlongBaseChain(openTypeName, ancestor, member, parameters));
+                    }
+                }
+            }
+
+            return fired;
+        }
+
+        /// <summary>
+        ///     Records a virtual dispatch site (callvirt or ldvirtftn) and fires it against
+        ///     every type admitted so far whose closure contains its declaring type. The key
+        ///     is skipped when the declaring type is a sealed concrete type: the call runs
+        ///     exactly the bound method, which the plain call reach already indexed.
+        /// </summary>
+        public IEnumerable<(int, MethodDefinitionHandle)> RecordDispatchKey(string declaringType, string member, int parameters)
+        {
+            if (declaringType.Length == 0)
+            {
+                return [];
+            }
+
+            if (_typesByName.TryGetValue(declaringType, out var info) && info.Sealed && !info.Abstract && !info.Interface)
+            {
+                return [];
+            }
+
+            if (!_dispatchKeysByDeclaring.TryGetValue(declaringType, out var keys))
+            {
+                _dispatchKeysByDeclaring[declaringType] = keys = new HashSet<(string, int)>();
+            }
+
+            if (!keys.Add((member, parameters)))
+            {
+                return [];
+            }
+
+            var fired = new List<(int, MethodDefinitionHandle)>();
+            foreach (var instantiatedType in _instantiated)
+            {
+                if (ClosureOf(instantiatedType).Contains(declaringType))
+                {
+                    fired.AddRange(MatchAlongBaseChain(instantiatedType, declaringType, member, parameters));
+                }
+            }
+
+            return fired;
+        }
+
+        /// <summary>
+        ///     The methods a fired key reaches: walking the instantiated type's base chain, the
+        ///     first declaration matching the member name and parameter count, plus explicit
+        ///     interface implementations anywhere on the chain, whose metadata name is the
+        ///     dotted form of the interface member (<c>OpenName(D).M</c>).
+        /// </summary>
+        private IEnumerable<(int, MethodDefinitionHandle)> MatchAlongBaseChain(string instantiatedType, string declaringType, string member, int parameters)
+        {
+            var dotted = $"{OpenName(declaringType)}.{member}";
+            for (var current = instantiatedType; current is not null && current.Length > 0;)
+            {
+                var hit = false;
+                if (_methods.TryGetValue(MethodKeyText(current, member, parameters), out var methods))
+                {
+                    hit = true;
+                    foreach (var method in methods)
+                    {
+                        yield return method;
+                    }
+                }
+
+                if (_methods.TryGetValue(MethodKeyText(current, dotted, parameters), out var explicitMethods))
+                {
+                    hit = true;
+                    foreach (var method in explicitMethods)
+                    {
+                        yield return method;
+                    }
+                }
+
+                // The first declaration matching the key wins, as method resolution would.
+                if (hit)
+                {
+                    yield break;
+                }
+
+                current = _typesByName.TryGetValue(current, out var info) ? info.BaseType : null;
+            }
+        }
+
+        private static string MethodKeyText(string containingType, string member, int parameters) =>
+            string.Create(CultureInfo.InvariantCulture, $"{containingType}\u001f{OpenName(member)}\u001f{parameters}");
+
+        /// <summary>The type and every base and interface the table holds, transitively; memoized and bounded.</summary>
+        private string[] ClosureOf(string type)
+        {
+            if (_closureByType.TryGetValue(type, out var cached))
+            {
+                return cached ?? [];
+            }
+
+            // Mark in progress to break cycles in untrusted metadata.
+            _closureByType[type] = null;
+            var closure = new List<string> { type };
+            if (_typesByName.TryGetValue(type, out var info))
+            {
+                if (info.BaseType is { } baseType && !closure.Contains(baseType))
+                {
+                    closure.AddRange(ClosureOf(baseType).Where(name => !closure.Contains(name)));
+                }
+
+                foreach (var implemented in info.Interfaces)
+                {
+                    if (!closure.Contains(implemented))
+                    {
+                        closure.AddRange(ClosureOf(implemented).Where(name => !closure.Contains(name)));
+                    }
+                }
+            }
+
+            var distinct = closure.ToArray();
+            _closureByType[type] = distinct;
+            return distinct;
         }
 
         /// <summary>
@@ -608,6 +994,12 @@ public static partial class DataFlowAnalyzer
                 _ => default
             };
 
+            return QualifiedContainingTypeOfParent(reader, parent);
+        }
+
+        /// <summary>The qualified chain of a member parent handle: a definition, a reference, or a TypeSpecification whose generic head decodes.</summary>
+        private static string? QualifiedContainingTypeOfParent(MetadataReader reader, EntityHandle parent)
+        {
             for (var depth = 0; depth < MaxNestingDepth; depth++)
             {
                 switch (parent.Kind)
@@ -2435,7 +2827,7 @@ public static partial class DataFlowAnalyzer
         var containingType = ResolveMemberParent(reader, member.Parent);
         var signature = ReadSignatureInfo(reader, member.Signature, null);
         var symbol = BuildAssemblyMethodSymbol(containingType, name, signature.ParameterTypes, signature.ReturnsVoid, signature.ReturnType, name);
-        return new AssemblyMemberInfo(symbol, name, containingType, signature.ParameterCount, signature.HasThis, signature.ReturnsVoid, signature.ReturnType);
+        return new AssemblyMemberInfo(symbol, name, containingType, signature.ParameterCount, signature.HasThis, signature.ReturnsVoid, signature.ReturnType, signature.ParameterTypes);
     }
 
     /// <summary>
@@ -4234,7 +4626,11 @@ public static partial class DataFlowAnalyzer
     private sealed record AssemblyInstruction(int Offset, int NextOffset, OpCode OpCode, object? Operand);
     private sealed record AssemblySuccessor(int Index, bool IsExceptionHandler, ExceptionRegionKind RegionKind);
     private sealed record AssemblySignatureInfo(int ParameterCount, bool HasThis, bool ReturnsVoid, string ReturnType, IReadOnlyList<string> ParameterTypes);
-    internal sealed record AssemblyMemberInfo(string Symbol, string Name, string ContainingType, int ParameterCount, bool HasThis, bool ReturnsVoid, string ReturnType);
+    internal sealed record AssemblyMemberInfo(string Symbol, string Name, string ContainingType, int ParameterCount, bool HasThis, bool ReturnsVoid, string ReturnType, IReadOnlyList<string>? ParameterTypes = null)
+    {
+        /// <summary>The rendered parameter types when known (member references render them): instantiation evidence for the reachable walk's type analysis (issue #120).</summary>
+        public IReadOnlyList<string> RenderedParameterTypes => ParameterTypes ?? [];
+    }
     private sealed record AssemblyMethodSymbolParts(string Namespace, string ClassName, string MethodName);
     private sealed record AssemblySourceLocation(string FilePath, int LineNumber, int ColumnNumber);
     private sealed record AssemblySequencePoint(int Offset, string FilePath, int LineNumber, int ColumnNumber);

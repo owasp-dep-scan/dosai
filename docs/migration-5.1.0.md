@@ -533,11 +533,21 @@ as application code until someone copied a `*.deps.json` into the root.
   from the member the call names. The walk's member and field keys carry the declaring type's full
   nesting chain (issue #128), so a nested type of one assembly - a compiler-generated `<>c` or
   a user-written `Cache` - never joins another assembly's, and a key that cannot be qualified
-  falls back to a legacy key unique over the whole set. The application's slices are the same
-  as with `all`, node for
-  node (a corpus test compares them on a MailKit app), flows that only start inside package code
-  are not reported, and a diagnostic counts the method bodies left out. On that MailKit app it
-  took `dataflows` from 70 s and 127 MB to 3.5 s and 0.3 MB.
+  falls back to a legacy key unique over the whole set. `callvirt` and `ldvirtftn` reach the
+  implementations held by types reached code instantiates (issue #120): instantiation evidence
+  is `newobj`, `box`, `ldtoken` and the generic arguments and signature types of called
+  members, counted in reached bodies only, with no class-hierarchy fallback, fired against a
+  memoized inheritance table built from every analyzed assembly and matching explicit
+  interface implementations by their dotted metadata name. The flows through the package code
+  a run can execute are kept while flows that only analyzing every package body finds are
+  left out: on the Serilog fixture of issue #120 the dead formatters stay out
+  (`MessageTemplateTextFormatter`, `JsonFormatter`, `LogEvent.Copy`) while the console sink's
+  `OutputTemplateRenderer` and `ExceptionTokenRenderer` bodies come back with
+  `Serilog.Sinks.Console`'s package reachability, and the interpreter still takes a call's
+  summary from the member the call names, so a flow needing value propagation through an
+  interface call's return can differ from `all`. A diagnostic counts the method bodies left
+  out; on that MailKit app `reachable` took `dataflows` from 70 s and 127 MB to 3.5 s and
+  0.3 MB.
 - **Default by input.** Without the option or the variable, a built source tree uses `all`, as
   before, and an assembly-only input (a publish directory, a container file system, a `bin/`
   folder scanned on its own) uses `reachable`. Such an input used to be scoped to the project

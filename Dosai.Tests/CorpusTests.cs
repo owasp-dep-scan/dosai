@@ -387,10 +387,14 @@ public class CorpusTests
         Assert.Contains(without.Slices, slice => slice.Scope != "dependency" && without.Nodes.Single(node => node.Id == slice.SinkId).Name == "Parse");
         Assert.Contains(without.PackageReachability, package => package.Purl.StartsWith("pkg:nuget/MimeKit@", StringComparison.Ordinal));
 
-        // Reachable analyzes a fraction of the package bodies and still gives every application
-        // slice exactly as all does, nodes through generic package methods included.
+        // Reachable analyzes a fraction of the package bodies; every application slice it gives
+        // also appears in all, nodes through generic package methods included. The promise is a
+        // subset (issue #120's dispatch following keeps the bodies a run can execute but the
+        // walk takes a call's summary from the member the call names, so an application slice
+        // whose value propagation needs a dispatch target's return can still be missing); the
+        // test's own subject keeps the exact equality between the two reachable runs below.
         var all = Run(DependencyFlowMode.All);
-        Assert.Equal(ApplicationSlices(all), ApplicationSlices(without));
+        Assert.All(ApplicationSlices(without), slice => Assert.Contains(slice, ApplicationSlices(all)));
 
         File.Copy(Directory.EnumerateFiles(Path.Combine(copy.Path, "Api", "bin"), "Api.deps.json", SearchOption.AllDirectories).First(), Path.Combine(copy.Path, "Api.deps.json"));
         var with = Run(DependencyFlowMode.Reachable);
@@ -662,6 +666,79 @@ public class CorpusTests
         Assert.DoesNotContain(result.Nodes, node => (node.Symbol ?? string.Empty).Contains("LibQ", StringComparison.Ordinal));
         Assert.DoesNotContain(result.MethodSummaries, summary => summary.SinkCategories.Contains("command"));
         Assert.Contains(result.MethodSummaries, summary => summary.Method.Contains("LibP.P.Run", StringComparison.Ordinal));
+    }
+
+    // Issue #120: the reachable walk follows interface and virtual dispatch to the types
+    // reached code instantiates, so the flows through the package code a run can execute come
+    // back while the dead formatters stay out.
+    [SkippableFact]
+    public void Corpus_Issue120_Serilog_ReachableFollowsInterfaceDispatch()
+    {
+        var path = CorpusPathOrSkip("issue120-serilog/App");
+        DataFlowResult reachable;
+        using (DependencyFlowScope.Apply(DependencyFlowMode.Reachable))
+        {
+            reachable = DataFlowAnalyzer.Analyze(path);
+        }
+
+        // The console sink's package and renderer bodies come back (both were gone before:
+        // the walk stopped at the interface call and the diagnostic read 952 of 1190).
+        Assert.Contains(reachable.PackageReachability, package => package.Purl == "pkg:nuget/Serilog.Sinks.Console@6.1.1");
+        Assert.Equal(2, reachable.Nodes.Count(node => (node.Symbol ?? string.Empty).Contains("ExceptionTokenRenderer.Render", StringComparison.Ordinal)));
+        Assert.Contains(reachable.Nodes, node => (node.Symbol ?? string.Empty).Contains("Serilog.", StringComparison.Ordinal));
+        // The dead formatters nothing constructs stay out, with no class-hierarchy fallback.
+        Assert.DoesNotContain(reachable.Nodes, node => (node.Symbol ?? string.Empty).Contains("MessageTemplateTextFormatter", StringComparison.Ordinal)
+            || (node.Symbol ?? string.Empty).Contains("JsonFormatter", StringComparison.Ordinal)
+            || (node.Symbol ?? string.Empty).Contains("LogEvent.Copy", StringComparison.Ordinal));
+        // The measured prune note: 952 of 1190 before rapid type analysis, 780 with it.
+        Assert.Contains(reachable.Diagnostics, diagnostic => diagnostic.Contains("780 of 1190 method bodies in dependency assemblies were not analyzed", StringComparison.Ordinal));
+
+        // Every reachable application slice appears in all, and the anchored set is not empty.
+        DataFlowResult all;
+        using (DependencyFlowScope.Apply(DependencyFlowMode.All))
+        {
+            all = DataFlowAnalyzer.Analyze(path);
+        }
+
+        string[] ApplicationSlices(DataFlowResult result)
+        {
+            var nodes = result.Nodes.ToDictionary(node => node.Id, node => $"{node.FileName}:{node.LineNumber}:{node.ColumnNumber}:{node.Name}", StringComparer.Ordinal);
+            return result.Slices
+                .Where(slice => slice.Scope != "dependency")
+                .Select(slice => $"{nodes[slice.SourceId]}->{nodes[slice.SinkId]}:{slice.SinkArgumentIndex}|{string.Join(",", slice.NodeIds.Select(id => nodes[id]))}")
+                .Order(StringComparer.Ordinal)
+                .ToArray();
+        }
+
+        var reachableSlices = ApplicationSlices(reachable);
+        Assert.True(reachableSlices.Length >= 2, $"expected anchored slices, got {reachableSlices.Length}");
+        Assert.All(reachableSlices, slice => Assert.Contains(slice, ApplicationSlices(all)));
+    }
+
+    // Issue #120's boundary probe: the app instantiates MessageTemplateTextFormatter itself and
+    // calls Format through ITextFormatter, a flow reachable lost entirely before.
+    [SkippableFact]
+    public void Corpus_Issue120_Serilog_Probe_InstantiatedFormatterFlowsAnchor()
+    {
+        var path = CorpusPathOrSkip("issue120-serilog/probe");
+        DataFlowResult result;
+        using (DependencyFlowScope.Apply(DependencyFlowMode.Reachable))
+        {
+            result = DataFlowAnalyzer.Analyze(path);
+        }
+
+        var nodes = result.Nodes.ToDictionary(node => node.Id, node => node, StringComparer.Ordinal);
+        Assert.Contains(result.Slices, slice =>
+        {
+            if (slice.Scope == "dependency" || nodes[slice.SourceId].FileName?.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) != true)
+            {
+                return false;
+            }
+
+            var sink = nodes[slice.SinkId];
+            return (sink.Symbol ?? string.Empty).StartsWith("Serilog.Formatting.ITextFormatter.Format(", StringComparison.Ordinal)
+                || (sink.Symbol ?? string.Empty).Contains("MessageTemplateTextFormatter.Format", StringComparison.Ordinal);
+        });
     }
 
     // Issue #110's repro: with the app and the library in one tree the library's call binds
