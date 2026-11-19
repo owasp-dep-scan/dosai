@@ -35,6 +35,14 @@ docs/ARCHITECTURE.md
   "base_commit_sha": "ec5c32cf3e508478712ba9341e84c4f997752555",
   "prompts": {},
   "sessions": {
+    "s_5bad3094f7bc65": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c8058ad5-2c38-4556-995e-6d27935e4326",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    },
     "s_c7ab1e6d0f0c48": {
       "agent_id": {
         "tool": "opencode",
