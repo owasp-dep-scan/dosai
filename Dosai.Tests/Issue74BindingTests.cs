@@ -616,9 +616,17 @@ global using global::System.Threading.Tasks;
     [Fact]
     public void FrameworkReferences_TreeWithoutExtraFrameworks_KeepsTheProcessWideSet()
     {
+        // net11.0 is same-major on every machine (Dosai's runtime is .NET 11), so the tree keeps
+        // the process-wide references everywhere; a net8.0 fixture would bind a real 8.x base
+        // pack wherever the CI runners preinstall one, and neither equality would hold there.
         using var fixture = new TempDir();
-        Write(fixture.Path, "app.csproj", string.Format(Net8Csproj, "Microsoft.NET.Sdk"));
-        Assert.Equal(FrameworkReferences.Current, FrameworkReferences.ForTree(fixture.Path));
+        Write(fixture.Path, "app.csproj", string.Format(Net8Csproj, "Microsoft.NET.Sdk").Replace("net8.0", "net11.0", StringComparison.Ordinal));
+        var tree = FrameworkReferences.ForTree(fixture.Path);
+        Assert.Equal(FrameworkReferences.Current.References, tree.References);
+        Assert.Equal(FrameworkReferences.Current.Source, tree.Source);
+        // The one note the tree adds names the base (issue #127); the set itself is untouched.
+        Assert.NotNull(tree.Diagnostic);
+        Assert.DoesNotContain("No reference pack", tree.Diagnostic, StringComparison.Ordinal);
     }
 
     /// <summary>

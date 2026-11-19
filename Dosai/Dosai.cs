@@ -644,12 +644,7 @@ public static class Dosai
         var unresolvedCallCount = methodCalls.Count(call => call.EvidenceKind == AnalysisEvidenceKind.SourceUnresolved);
         if (unresolvedCallCount > 0)
         {
-            var treeReferences = FrameworkReferences.ForTree(path);
-            sliceDiagnostics.Add(FrameworkReferences.Current.References.Count == 0
-                ? string.Create(CultureInfo.InvariantCulture, $"Semantic binding failed for {unresolvedCallCount} call sites: Dosai resolved no framework metadata references (see the framework-reference diagnostic), so every framework call is unresolved regardless of the tree's restore state.")
-                : treeReferences.Diagnostic is { } treeNote && treeNote.Contains("No reference pack", StringComparison.Ordinal)
-                    ? string.Create(CultureInfo.InvariantCulture, $"Semantic binding failed for {unresolvedCallCount} call sites: reference assemblies are missing (see the framework-reference diagnostics naming the packs); installing the SDK or runtime that ships them fixes it, restoring or building the tree does not.")
-                    : string.Create(CultureInfo.InvariantCulture, $"Semantic binding failed for {unresolvedCallCount} call sites: target assemblies were missing or conflicted with other references. Restoring or building the tree (--restore/--build) helps when packages are involved; framework references come from installed packs, not from the tree."));
+            sliceDiagnostics.Add(UnresolvedCallDiagnostic(unresolvedCallCount, FrameworkReferences.ForTree(path)));
         }
 
         // Conditional-compilation guards were evaluated against the detected target frameworks;
@@ -767,6 +762,22 @@ public static class Dosai
     ///     sorted by project path: the per-project decisions the parser made
     ///     (<see cref="TargetFrameworkDetection.ForFile" />).
     /// </summary>
+    /// <summary>
+    ///     The diagnostic for unresolved source call sites, choosing the advice that matches why
+    ///     binding failed: no framework references at all, missing installed packs, a net4x tree
+    ///     whose reference-assemblies package the NuGet cache lacks (the one case a restore
+    ///     fixes, because restore auto-fetches that package), else the generic
+    ///     missing-or-conflicting message.
+    /// </summary>
+    internal static string UnresolvedCallDiagnostic(int unresolvedCallCount, FrameworkReferenceSet treeReferences)
+        => FrameworkReferences.Current.References.Count == 0
+            ? string.Create(CultureInfo.InvariantCulture, $"Semantic binding failed for {unresolvedCallCount} call sites: Dosai resolved no framework metadata references (see the framework-reference diagnostic), so every framework call is unresolved regardless of the tree's restore state.")
+            : treeReferences.Diagnostic is { } treeNote && treeNote.Contains("No reference pack", StringComparison.Ordinal)
+                ? string.Create(CultureInfo.InvariantCulture, $"Semantic binding failed for {unresolvedCallCount} call sites: reference assemblies are missing (see the framework-reference diagnostics naming the packs); installing the SDK or runtime that ships them fixes it, restoring or building the tree does not.")
+                : treeReferences.Diagnostic is { } netFrameworkNote && netFrameworkNote.Contains(FrameworkReferences.NetFrameworkPackAbsentMarker, StringComparison.Ordinal)
+                    ? string.Create(CultureInfo.InvariantCulture, $"Semantic binding failed for {unresolvedCallCount} call sites: the .NET Framework reference assemblies are missing from the NuGet cache (see the framework-reference diagnostic); restoring the tree fetches them.")
+                    : string.Create(CultureInfo.InvariantCulture, $"Semantic binding failed for {unresolvedCallCount} call sites: target assemblies were missing or conflicted with other references. Restoring or building the tree (--restore/--build) helps when packages are involved; framework references come from installed packs, not from the tree.");
+
     private static List<ProjectGuardTarget> ProjectGuardTargets(string path)
     {
         var guards = new List<ProjectGuardTarget>();

@@ -738,3 +738,25 @@ does: public single-parameter constructors and the static `Create` methods of an
 `IUnionMembers` interface. A union whose cases are named only by that interface used to
 classify as if it had no cases, and a private single-parameter constructor used to count as a
 case; both now follow the compiler. Union declarations classify as before.
+
+## Framework-reference diagnostics and target-following binding (issue #127, behavioral)
+
+Every command's `Diagnostics` gain one base-naming line naming where the base framework
+references came from, in five shapes: an exact-major pack ("Base framework references for target
+'net10.0' come from the Microsoft.NETCore.App 10.0.15 reference pack (exact major)"), Dosai's own
+runtime on a same-major target, the .NET Framework reference assemblies of a net4x tree, a
+net4x tree whose reference-assemblies package the NuGet cache lacks (the one framework
+diagnostic whose fix is a restore, because restore auto-fetches the package), and the
+netstandard/netcoreapp/undetectable shapes that keep the process-wide set. A tree holding a
+net4x project beside a root-wide modern target gets one extra line naming those projects and
+pointing at `Metadata.ProjectGuardTargetFrameworks`.
+
+The binding itself changes where it was silently wrong: a tree whose target is a modern .NET
+major below Dosai's own runtime now binds through the matching reference pack (or the nearest
+major, with a note) whether or not it declares a second shared framework, and a net4x tree binds
+the .NET Framework reference assemblies from the NuGet cache when restore fetched them. Assembly
+strings a consumer may have pinned change accordingly: `System.Private.CoreLib, Version=11.0.0.0`
+for a net10.0 tree becomes `System.Runtime, Version=10.0.0.0`, and a net48 tree binds
+`mscorlib, Version=4.0.0.0` (the pack's facades forward there and Roslyn reports the defining
+assembly). The unresolved-call diagnostic selects a restore-advice branch for the missing net4x
+package; every other branch keeps its wording.

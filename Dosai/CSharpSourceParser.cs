@@ -284,7 +284,9 @@ internal static class FrameworkPreprocessorDefines
 
     private static string Symbol(string prefix, FrameworkVersion version) => $"{prefix}{version.Major}_{version.Minor}";
 
-    private static bool TryParseVersion(string text, out FrameworkVersion version)
+    // Internal so FrameworkReferences shares the one parse the preprocessor-define sets depend
+    // on: net48 is 4.8, not major 48 (issue #127).
+    internal static bool TryParseVersion(string text, out FrameworkVersion version)
     {
         var trimmed = text.Trim();
         if (trimmed.Length == 0)
@@ -369,7 +371,7 @@ internal static class FrameworkPreprocessorDefines
         new(4, 8, 1)
     ];
 
-    private readonly record struct FrameworkVersion(int Major, int Minor, int Patch) : IComparable<FrameworkVersion>
+    internal readonly record struct FrameworkVersion(int Major, int Minor, int Patch) : IComparable<FrameworkVersion>
     {
         public int CompareTo(FrameworkVersion other)
         {

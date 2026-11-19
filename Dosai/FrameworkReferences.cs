@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Reflection;
 using Microsoft.CodeAnalysis;
+using FrameworkVersion = Depscan.FrameworkPreprocessorDefines.FrameworkVersion;
 
 namespace Depscan;
 
@@ -47,6 +48,13 @@ internal static class FrameworkReferences
     internal const string InstalledFrameworkSource = "installed-shared-framework";
     internal const string NoneSource = "none";
     internal const string TreePacksSourcePrefix = "tree-reference-packs";
+
+    /// <summary>
+    ///     Marks the diagnostic of a net4x target whose reference-assemblies package is missing
+    ///     from the NuGet cache: only there does the unresolved-call message advise a restore,
+    ///     because a package restore auto-fetches (an installed pack does not).
+    /// </summary>
+    internal const string NetFrameworkPackAbsentMarker = "reference assemblies (package Microsoft.NETFramework.ReferenceAssemblies.";
 
     private const string FrameworkNamesResource = "Dosai.framework-assemblies.txt";
 
@@ -142,88 +150,65 @@ internal static class FrameworkReferences
     {
         var current = Current;
         var notes = new List<string>();
+
+        var detected = TreeFrameworks.Detect(root);
+        var moniker = FrameworkPreprocessorDefines.TrySelectRepresentative(TargetFrameworkDetection.Detect(root), out var representative)
+            ? representative
+            : null;
+        // The base follows the family of the tree's representative target (issue #127), whether
+        // or not the tree declares a second shared framework: modern .NET resolves a
+        // Microsoft.NETCore.App pack, net4x the .NET Framework reference assemblies, and
+        // netstandard, netcoreapp and undetectable targets have no reference pack.
+        var family = ClassifyTargetForReferencePacks(moniker, out var version);
+        if (family == ReferencePackTargetFamily.NetFramework)
+        {
+            return ResolveForNetFrameworkTree(root, moniker!, version, detected, current);
+        }
+
         if (current.Diagnostic is { } currentDiagnostic)
         {
             notes.Add(currentDiagnostic);
         }
 
-        var detected = TreeFrameworks.Detect(root);
-        if (detected.Count == 0)
+        if (family == ReferencePackTargetFamily.None)
         {
-            return current;
-        }
+            if (detected.Count > 0)
+            {
+                notes.Add(string.Create(CultureInfo.InvariantCulture,
+                    $"Framework references {string.Join(", ", detected.Select(framework => framework.Name))} were detected, but the tree's representative target '{moniker ?? "<none>"}' has no reference pack; the base framework references come from Dosai's own runtime ({current.Source}, .NET {Environment.Version.Major})."));
+            }
+            else
+            {
+                notes.Add(moniker is null
+                    ? string.Create(CultureInfo.InvariantCulture,
+                        $"No TargetFramework detected under the tree; the base framework references come from Dosai's own runtime ({current.Source}, .NET {Environment.Version.Major}).")
+                    : string.Create(CultureInfo.InvariantCulture,
+                        $"The tree's representative target '{moniker}' has no reference pack; the base framework references come from Dosai's own runtime ({current.Source}, .NET {Environment.Version.Major})."));
+            }
 
-        var moniker = FrameworkPreprocessorDefines.TrySelectRepresentative(TargetFrameworkDetection.Detect(root), out var representative)
-            ? representative
-            : null;
-        // Reference packs exist for modern .NETCore targets only; anything else (net472,
-        // netstandard) keeps the process-wide set.
-        var major = moniker is not null && TryParseTargetMajor(moniker, out var parsed) && parsed >= 5 ? parsed : (int?)null;
-        if (major is null)
-        {
-            notes.Add($"Framework references {string.Join(", ", detected.Select(framework => framework.Name))} were detected, but the tree's representative target '{moniker ?? "<none>"}' has no reference pack; keeping the process-wide framework references.");
+            AddNetFrameworkProjectNote(notes, root, moniker);
             return new FrameworkReferenceSet(current.References, current.Source, JoinNotes(notes), current.Warnings);
         }
 
+        var collector = new TreePackCollector(notes, TreeFrameworks.SourceAssemblyNames(root));
         var monikerName = MonikerOf(moniker!);
-        var references = new List<(string Key, PortableExecutableReference Reference)>();
-        var originByName = new Dictionary<string, (string Key, string Origin)>(StringComparer.OrdinalIgnoreCase);
-        var packOrigins = new List<string>();
         var corePackOwnsCorlib = false;
 
-        var sourceAssemblyNames = TreeFrameworks.SourceAssemblyNames(root);
-        var builtFromSource = new List<string>();
-
-        void AddDirectory(string directory, string origin, bool isBasePack = false)
-        {
-            var added = 0;
-            var dropped = 0;
-            foreach (var assemblyPath in Directory.EnumerateFiles(directory, "*" + Constants.AssemblyExtension).Order(StringComparer.Ordinal))
-            {
-                var name = Path.GetFileNameWithoutExtension(assemblyPath);
-                // The tree compiles this assembly from source: a pack copy would duplicate its
-                // types in metadata. The base pack is exempt, because the process-wide set fills
-                // the same names anyway and has always stood beside source copies of them.
-                if (!isBasePack && sourceAssemblyNames.Contains(name))
-                {
-                    dropped++;
-                    builtFromSource.Add(name);
-                    continue;
-                }
-
-                if (originByName.TryGetValue(name, out var existing))
-                {
-                    dropped++;
-                    notes.Add($"framework assembly '{name}' of '{origin}' skipped: already provided by {existing.Origin} (one reference per assembly name; the pack matching the analyzed target wins).");
-                    continue;
-                }
-
-                if (TryCreateFromFile(assemblyPath, notes) is { } reference)
-                {
-                    references.Add((assemblyPath, reference));
-                    originByName.Add(name, (assemblyPath, origin));
-                    added++;
-                }
-            }
-
-            if (added > 0)
-            {
-                packOrigins.Add(origin);
-                DebugLog.Log($"tree framework reference pack: {origin} -> {added} reference(s), {dropped} dropped as duplicate(s)");
-            }
-        }
-
-        // 1. A target-matched base-framework pack when Dosai's own runtime is of a different
-        //    major: same-major trees already run on matching references.
-        if (major == Environment.Version.Major)
+        // 1. A target-matched base-framework pack, resolved for every modern target (issue
+        //    #127): a plain net10.0 tree used to bind Dosai's own runtime silently.
+        if (version.Major == Environment.Version.Major)
         {
             // Same major as Dosai's own runtime: the process-wide set already matches the
             // target, and re-deriving it from a pack would only churn the reference list.
+            notes.Add(string.Create(CultureInfo.InvariantCulture,
+                $"Base framework references for target '{moniker}' come from Dosai's own runtime ({current.Source}, .NET {Environment.Version.Major}), which matches the target's major."));
         }
-        else if (ResolvePackDirectory("Microsoft.NETCore.App", monikerName, major.Value, notes) is { } corePack
+        else if (ResolvePackDirectory("Microsoft.NETCore.App", monikerName, version.Major, notes) is { } corePack
                  && ParseVersion(corePack.Version).Version.Major != Environment.Version.Major)
         {
-            AddDirectory(corePack.Directory, $"base framework Microsoft.NETCore.App {corePack.Version} for {moniker} ({(corePack.ExactMajor ? "exact major" : "nearest installed major")})");
+            notes.Add(string.Create(CultureInfo.InvariantCulture,
+                $"Base framework references for target '{moniker}' come from the Microsoft.NETCore.App {corePack.Version} reference pack ({(corePack.ExactMajor ? "exact major" : "nearest installed major")})."));
+            collector.AddDirectory(corePack.Directory, $"base framework Microsoft.NETCore.App {corePack.Version} for {moniker} ({(corePack.ExactMajor ? "exact major" : "nearest installed major")})", isBasePack: true);
             // A base reference pack owns the corlib: its System.Runtime declares the primitive
             // types, and Dosai's own System.Private.CoreLib (a different major) beside it makes
             // Roslyn report CS0518 for every predefined type - two competing corlibs. The
@@ -235,15 +220,16 @@ internal static class FrameworkReferences
         {
             // No base framework nearer to the target than Dosai's own runtime: say which base
             // references a foreign-major tree got (the tree's packs are layered on it below).
-            notes.Add($"No {major}.x Microsoft.NETCore.App reference pack is installed for target '{moniker}'; the base framework references come from Dosai's own runtime ({current.Source}, .NET {Environment.Version.Major}), so APIs that differ between .NET {major} and .NET {Environment.Version.Major} bind through a different base than the tree targets.");
+            notes.Add(string.Create(CultureInfo.InvariantCulture,
+                $"No {version.Major}.x Microsoft.NETCore.App reference pack is installed for target '{moniker}'; the base framework references come from Dosai's own runtime ({current.Source}, .NET {Environment.Version.Major}), so APIs that differ between .NET {version.Major} and .NET {Environment.Version.Major} bind through a different base than the tree targets."));
         }
 
         // 2. The tree's other frameworks, sorted by name so several packs are deterministic.
         foreach (var framework in detected.Where(framework => framework.Name != "Microsoft.NETCore.App").OrderBy(framework => framework.Name, StringComparer.Ordinal))
         {
-            if (ResolvePackDirectory(framework.Name, monikerName, major.Value, notes) is { } pack)
+            if (ResolvePackDirectory(framework.Name, monikerName, version.Major, notes) is { } pack)
             {
-                AddDirectory(pack.Directory, $"{framework.Name} {pack.Version} via {framework.Evidence} for {moniker} ({(pack.ExactMajor ? "exact major" : $"no {major}.x pack installed")})");
+                collector.AddDirectory(pack.Directory, $"{framework.Name} {pack.Version} via {framework.Evidence} for {moniker} ({(pack.ExactMajor ? "exact major" : $"no {version.Major}.x pack installed")})");
             }
             else
             {
@@ -251,11 +237,7 @@ internal static class FrameworkReferences
             }
         }
 
-        if (builtFromSource.Count > 0)
-        {
-            var distinct = builtFromSource.Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.Ordinal).ToList();
-            notes.Add($"{distinct.Count} framework pack assembl{(distinct.Count == 1 ? "y was" : "ies were")} left out because the tree builds {(distinct.Count == 1 ? "it" : "them")} from source ({string.Join(", ", distinct.Take(10))}{(distinct.Count > 10 ? ", ..." : string.Empty)}): a metadata copy beside the source makes their extension methods ambiguous.");
-        }
+        AddBuiltFromSourceNote(notes, collector.BuiltFromSource);
 
         // 3. The process-wide set fills every name the packs did not supply; its dropped
         //    copies are summarized, because filling never changes what the packs claimed.
@@ -263,7 +245,7 @@ internal static class FrameworkReferences
         foreach (var (key, reference) in current.References)
         {
             var name = Path.GetFileNameWithoutExtension(key);
-            if (originByName.ContainsKey(name))
+            if (collector.OriginByName.ContainsKey(name))
             {
                 continue;
             }
@@ -273,23 +255,117 @@ internal static class FrameworkReferences
                 continue;
             }
 
-            references.Add((key, reference));
-            originByName.Add(name, (key, $"fallback ({current.Source})"));
+            collector.References.Add((key, reference));
+            collector.OriginByName.Add(name, (key, $"fallback ({current.Source})"));
             filled++;
         }
 
-        if (references.Count == 0 || packOrigins.Count == 0)
+        AddNetFrameworkProjectNote(notes, root, moniker);
+
+        if (collector.References.Count == 0 || collector.PackOrigins.Count == 0)
         {
             // Nothing came from a pack: the set is the process-wide one, under its own source
             // name (the self-contained smoke test greps for it), with the notes saying why.
             return new FrameworkReferenceSet(current.References, current.Source, JoinNotes(notes), current.Warnings);
         }
 
-        var source = $"{TreePacksSourcePrefix}[{string.Join(",", packOrigins)}]+{current.Source}";
-        DebugLog.Count($"tree framework reference packs ({root})", packOrigins.Count);
-        DebugLog.Count("tree framework references from packs", references.Count - filled);
+        var source = $"{TreePacksSourcePrefix}[{string.Join(",", collector.PackOrigins)}]+{current.Source}";
+        DebugLog.Count($"tree framework reference packs ({root})", collector.PackOrigins.Count);
+        DebugLog.Count("tree framework references from packs", collector.References.Count - filled);
         DebugLog.Count("tree framework references from the process-wide fallback", filled);
-        return new FrameworkReferenceSet(references, source, JoinNotes(notes), current.Warnings);
+        return new FrameworkReferenceSet(collector.References, source, JoinNotes(notes), current.Warnings);
+    }
+
+    /// <summary>
+    ///     A net4x tree binds the .NET Framework reference assemblies from the NuGet cache
+    ///     (issue #127): restore auto-fetches the package the SDK compiles net4x against, so
+    ///     net48 source binds mscorlib 4.0.0.0 instead of .NET 11 metadata a net48 build would
+    ///     reject. The pack owns the whole set - mscorlib is the corlib, and Dosai's own runtime
+    ///     assemblies beside it redeclare types into a corlib the compilation does not have - so
+    ///     the process-wide set fills nothing and is not layered. Modern shared frameworks the
+    ///     tree declares (WindowsDesktop via UseWindowsForms) are not layered either: the net4x
+    ///     pack already carries their types. Without the package the tree degrades to the
+    ///     process-wide set under a diagnostic naming what is missing, never a failure.
+    /// </summary>
+    private static FrameworkReferenceSet ResolveForNetFrameworkTree(string root, string moniker, FrameworkVersion version, List<(string Name, string Evidence)> detected, FrameworkReferenceSet current)
+    {
+        var notes = new List<string>();
+        var tfm = MonikerOf(moniker);
+        var packageId = $"microsoft.netframework.referenceassemblies.{tfm}";
+        var canonicalPackageId = $"Microsoft.NETFramework.ReferenceAssemblies.{tfm}";
+        var versionText = VersionText(version);
+        var pack = ResolveNetFrameworkReferenceAssemblies(packageId, version, NuGetPackageRoots());
+        if (pack is null)
+        {
+            notes.Add(string.Create(CultureInfo.InvariantCulture,
+                $"No .NET Framework {versionText} reference assemblies (package {canonicalPackageId}) were found in the NuGet cache; the base framework references come from Dosai's own runtime ({current.Source}, .NET {Environment.Version.Major}), so APIs that differ between .NET Framework {versionText} and .NET {Environment.Version.Major} bind through a different base than the tree targets. Restoring the tree fetches the package."));
+            return new FrameworkReferenceSet(current.References, current.Source, JoinNotes(notes), current.Warnings);
+        }
+
+        var collector = new TreePackCollector(notes, TreeFrameworks.SourceAssemblyNames(root));
+        collector.AddDirectory(pack.Value.Directory, $"base framework .NET Framework {versionText} reference assemblies ({canonicalPackageId} {pack.Value.Version}, NuGet cache)", facadesDirectory: Path.Combine(pack.Value.Directory, "Facades"));
+        notes.Add(string.Create(CultureInfo.InvariantCulture,
+            $"Base framework references for target '{moniker}' come from the .NET Framework {versionText} reference assemblies ({canonicalPackageId} {pack.Value.Version}, NuGet cache); the process-wide runtime set fills nothing beside them."));
+        foreach (var framework in detected.Where(framework => !string.Equals(framework.Name, "Microsoft.NETCore.App", StringComparison.OrdinalIgnoreCase)).OrderBy(framework => framework.Name, StringComparer.Ordinal))
+        {
+            notes.Add($"{framework.Name} via {framework.Evidence} was not layered over the .NET Framework reference assemblies; the net4x reference assemblies already contain its types.");
+        }
+
+        AddBuiltFromSourceNote(notes, collector.BuiltFromSource);
+
+        if (collector.References.Count == 0 || collector.PackOrigins.Count == 0)
+        {
+            // The package directory exists but holds no readable assembly: the set stays the
+            // process-wide one under its own source name, with the notes saying why.
+            return new FrameworkReferenceSet(current.References, current.Source, JoinNotes(notes), current.Warnings);
+        }
+
+        // The net4x pack owns the whole set: no process-wide fill, and the source names the
+        // pack alone (the pack-used shape carries no current.Diagnostic either).
+        var source = $"{TreePacksSourcePrefix}[{string.Join(",", collector.PackOrigins)}]";
+        DebugLog.Count($"tree framework reference packs ({root})", collector.PackOrigins.Count);
+        DebugLog.Count("tree framework references from packs", collector.References.Count);
+        return new FrameworkReferenceSet(collector.References, source, JoinNotes(notes), current.Warnings);
+    }
+
+    private static void AddBuiltFromSourceNote(List<string> notes, List<string> builtFromSource)
+    {
+        if (builtFromSource.Count == 0)
+        {
+            return;
+        }
+
+        var distinct = builtFromSource.Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.Ordinal).ToList();
+        notes.Add($"{distinct.Count} framework pack assembl{(distinct.Count == 1 ? "y was" : "ies were")} left out because the tree builds {(distinct.Count == 1 ? "it" : "them")} from source ({string.Join(", ", distinct.Take(10))}{(distinct.Count > 10 ? ", ..." : string.Empty)}): a metadata copy beside the source makes their extension methods ambiguous.");
+    }
+
+    /// <summary>
+    ///     The mixed-tree note (issue #127): a net4x project inside a tree whose root-wide base is
+    ///     something else binds against that base, and the reader should see it. Scoped to net4x
+    ///     projects on purpose: netstandard and netcoreapp targets sit below modern targets in the
+    ///     representative ranking by design, so a family comparison would fire for every ordinary
+    ///     solution holding a netstandard2.0 library beside a modern app.
+    /// </summary>
+    private static void AddNetFrameworkProjectNote(List<string> notes, string root, string? moniker)
+    {
+        var netFrameworkTargets = new List<string>();
+        foreach (var project in TargetFrameworkDetection.ProjectsUnder(root, ".csproj").Concat(TargetFrameworkDetection.ProjectsUnder(root, ".fsproj")))
+        {
+            if (FrameworkPreprocessorDefines.TrySelectRepresentative(project.TargetFrameworks, out var projectRepresentative)
+                && ClassifyTargetForReferencePacks(projectRepresentative, out _) == ReferencePackTargetFamily.NetFramework)
+            {
+                netFrameworkTargets.Add(projectRepresentative);
+            }
+        }
+
+        if (netFrameworkTargets.Count == 0)
+        {
+            return;
+        }
+
+        var distinct = netFrameworkTargets.Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.Ordinal).ToList();
+        notes.Add(string.Create(CultureInfo.InvariantCulture,
+            $"Base framework references follow the root's representative target '{moniker ?? "<none>"}'; {netFrameworkTargets.Count} net4x project{(netFrameworkTargets.Count == 1 ? "" : "s")} targeting {string.Join(", ", distinct.Take(5))}{(distinct.Count > 5 ? ", ..." : string.Empty)} bind{(netFrameworkTargets.Count == 1 ? "s" : "")} against that base too (Metadata.ProjectGuardTargetFrameworks lists every project's target)."));
     }
 
     private static string? JoinNotes(List<string> notes) => notes.Count == 0 ? null : string.Join(" | ", notes);
@@ -302,23 +378,148 @@ internal static class FrameworkReferences
         return separator >= 0 ? normalized[..separator] : normalized;
     }
 
-    private static bool TryParseTargetMajor(string targetFramework, out int major)
+    /// <summary>A .NET Framework version rendered as the pack layouts name it (`4.8`, `4.7.2`).</summary>
+    private static string VersionText(FrameworkVersion version) => version.Patch == 0
+        ? string.Create(CultureInfo.InvariantCulture, $"{version.Major}.{version.Minor}")
+        : string.Create(CultureInfo.InvariantCulture, $"{version.Major}.{version.Minor}.{version.Patch}");
+
+    /// <summary>
+    ///     Which reference-pack family a target moniker belongs to. netstandard and netcoreapp
+    ///     targets, and monikers that parse as no known family, have no reference pack: the
+    ///     process-wide set stays. The shared parse is the preprocessor-define one, so `net48` is
+    ///     4.8 and never major 48.
+    /// </summary>
+    internal static ReferencePackTargetFamily ClassifyTargetForReferencePacks(string? moniker, out FrameworkVersion version)
     {
-        major = 0;
-        var span = targetFramework.AsSpan();
-        if (!span.StartsWith("net", StringComparison.OrdinalIgnoreCase))
+        version = default;
+        if (moniker is null)
         {
-            return false;
+            return ReferencePackTargetFamily.None;
         }
 
-        span = span[3..];
-        var digits = 0;
-        while (digits < span.Length && char.IsAsciiDigit(span[digits]))
+        var normalized = MonikerOf(moniker);
+        if (normalized.StartsWith("netstandard", StringComparison.Ordinal) || normalized.StartsWith("netcoreapp", StringComparison.Ordinal) || !normalized.StartsWith("net", StringComparison.Ordinal))
         {
-            digits++;
+            return ReferencePackTargetFamily.None;
         }
 
-        return digits > 0 && int.TryParse(span[..digits], NumberStyles.Integer, CultureInfo.InvariantCulture, out major);
+        return FrameworkPreprocessorDefines.TryParseVersion(normalized["net".Length..], out version)
+            ? version.Major >= 5 ? ReferencePackTargetFamily.ModernNet : ReferencePackTargetFamily.NetFramework
+            : ReferencePackTargetFamily.None;
+    }
+
+    /// <summary>Reference-pack families a tree's representative target can resolve to.</summary>
+    internal enum ReferencePackTargetFamily
+    {
+        /// <summary>netstandard, netcoreapp or nothing parseable: no reference pack, the process-wide set stays.</summary>
+        None,
+
+        /// <summary>Modern .NET (net5.0 and later): Microsoft.NETCore.App reference packs.</summary>
+        ModernNet,
+
+        /// <summary>.NET Framework (net4x and earlier): the reference-assemblies NuGet package.</summary>
+        NetFramework,
+    }
+
+    /// <summary>
+    ///     The .NET Framework reference assemblies of one net4x target: the exact package
+    ///     (<c>microsoft.netframework.referenceassemblies.&lt;tfm&gt;</c>, the moniker without
+    ///     separators) under the NuGet cache, highest version, layout
+    ///     <c>build/.NETFramework/v&lt;Major.Minor[.Patch]&gt;/</c>. No cross-TFM substitution.
+    /// </summary>
+    private static (string Directory, string Version)? ResolveNetFrameworkReferenceAssemblies(string packageId, FrameworkVersion version)
+        => ResolveNetFrameworkReferenceAssemblies(packageId, version, NuGetPackageRoots());
+
+    /// <summary>Testable core: the package roots are supplied by the caller.</summary>
+    internal static (string Directory, string Version)? ResolveNetFrameworkReferenceAssemblies(string packageId, FrameworkVersion version, IEnumerable<string> nugetPackageRoots)
+    {
+        (string Directory, Version Version, bool IsRelease)? best = null;
+        foreach (var root in nugetPackageRoots)
+        {
+            var packageRoot = Path.Combine(root, packageId);
+            if (!Directory.Exists(packageRoot))
+            {
+                continue;
+            }
+
+            foreach (var directory in Directory.EnumerateDirectories(packageRoot).Order(StringComparer.Ordinal))
+            {
+                var label = Path.GetFileName(directory);
+                var (parsed, isRelease) = ParseVersion(label);
+                if (parsed <= new Version(0, 0))
+                {
+                    continue;
+                }
+
+                if (best is null || parsed > best.Value.Version || (parsed == best.Value.Version && isRelease && !best.Value.IsRelease))
+                {
+                    best = (directory, parsed, isRelease);
+                }
+            }
+        }
+
+        if (best is not { } found)
+        {
+            return null;
+        }
+
+        var referenceDirectory = Path.Combine(found.Directory, "build", ".NETFramework", $"v{VersionText(version)}");
+        return Directory.Exists(referenceDirectory) ? (referenceDirectory, Path.GetFileName(found.Directory)) : null;
+    }
+
+    /// <summary>
+    ///     Collects one tree's pack references: exactly one reference per assembly simple name
+    ///     claimed in pack order, the built-from-source drop, and one origin record per pack (a
+    ///     pack that brings a main directory and a facades directory is recorded once).
+    /// </summary>
+    private sealed class TreePackCollector(List<string> notes, IReadOnlySet<string> sourceAssemblyNames)
+    {
+        internal readonly List<(string Key, PortableExecutableReference Reference)> References = [];
+        internal readonly Dictionary<string, (string Key, string Origin)> OriginByName = new(StringComparer.OrdinalIgnoreCase);
+        internal readonly List<string> PackOrigins = [];
+        internal readonly List<string> BuiltFromSource = [];
+
+        internal void AddDirectory(string directory, string origin, bool isBasePack = false, string? facadesDirectory = null)
+        {
+            var added = 0;
+            var dropped = 0;
+            foreach (var assemblyPath in EnumerateAssemblies(directory).Concat(facadesDirectory is null ? [] : EnumerateAssemblies(facadesDirectory)))
+            {
+                var name = Path.GetFileNameWithoutExtension(assemblyPath);
+                // The tree compiles this assembly from source: a pack copy would duplicate its
+                // types in metadata. The base pack is exempt, because the process-wide set fills
+                // the same names anyway and has always stood beside source copies of them.
+                if (!isBasePack && sourceAssemblyNames.Contains(name))
+                {
+                    dropped++;
+                    BuiltFromSource.Add(name);
+                    continue;
+                }
+
+                if (OriginByName.TryGetValue(name, out var existing))
+                {
+                    dropped++;
+                    notes.Add($"framework assembly '{name}' of '{origin}' skipped: already provided by {existing.Origin} (one reference per assembly name; the pack matching the analyzed target wins).");
+                    continue;
+                }
+
+                if (TryCreateFromFile(assemblyPath, notes) is { } reference)
+                {
+                    References.Add((assemblyPath, reference));
+                    OriginByName.Add(name, (assemblyPath, origin));
+                    added++;
+                }
+            }
+
+            if (added > 0)
+            {
+                PackOrigins.Add(origin);
+                DebugLog.Log($"tree framework reference pack: {origin} -> {added} reference(s), {dropped} dropped as duplicate(s)");
+            }
+        }
+
+        private static IEnumerable<string> EnumerateAssemblies(string directory) =>
+            Directory.Exists(directory) ? Directory.EnumerateFiles(directory, "*" + Constants.AssemblyExtension).Order(StringComparer.Ordinal) : [];
     }
 
     /// <summary>
