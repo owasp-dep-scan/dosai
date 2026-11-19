@@ -456,6 +456,59 @@ public class CorpusTests
         Assert.Contains(slice.Diagnostics!, line => line.StartsWith("Global usings differ between projects", StringComparison.Ordinal));
     }
 
+    // Issue #134's whole-directory matrix: the algorithm argument of the one-shot hash APIs is
+    // read in every body shape, a decoded MAC argument names the MAC in place of the generic
+    // HMAC asset, and the signature probe and the local-algorithm call stay silent.
+    [SkippableFact]
+    public void Corpus_Issue134WeakHash_TheArgumentIsReadInEveryBodyShape()
+    {
+        var path = CorpusPathOrSkip("issue134-weakhash");
+        var result = CryptoAnalyzer.Analyze(path);
+
+        // (path, line, column, name, family, strength, source) of every asset, and every
+        // weak-hash finding line, exactly as measured after the fix.
+        (string Path, int Line, int Column, string Name, string Family, string Strength, string Source)[] expectedAssets =
+        [
+            ("Hashing.cs", 5, 81, "MD5", "hash", "weak", "roslyn"),
+            ("Hashing.cs", 9, 49, "MD5", "hash", "weak", "roslyn"),
+            ("vb/Hashing.vb", 6, 53, "MD5", "hash", "weak", "roslyn"),
+            ("lambda/ParenLambda.cs", 6, 104, "MD5", "hash", "weak", "roslyn"),
+            ("hasprobe/HasProbe.cs", 9, 49, "MD5", "hash", "weak", "roslyn"),
+            ("boundary/Boundary.cs", 5, 119, "MD5", "hash", "weak", "roslyn"),
+            ("boundary/Boundary.cs", 9, 72, "MD5", "hash", "weak", "csharp"),
+            ("hmac/Hmac.cs", 6, 105, "HMAC-MD5", "mac", "weak", "roslyn"),
+            ("hmac/Hmac.cs", 10, 49, "HMAC-MD5", "mac", "weak", "roslyn"),
+            ("hmac/Hmac.cs", 10, 67, "MD5", "hash", "weak", "csharp"),
+            ("hmac/Hmac.cs", 13, 98, "HMAC", "mac", "strong", "roslyn"),
+        ];
+        var actualAssets = result.Assets.Select(asset => (
+            asset.Location.Path!, asset.Location.LineNumber, asset.Location.ColumnNumber,
+            asset.Name, asset.Family!, asset.Strength!, asset.Properties.TryGetValue("source", out var source) ? source : null)).ToList();
+        Assert.Equal(expectedAssets.OrderBy(row => row.Item1, StringComparer.Ordinal).ThenBy(row => row.Item2).ThenBy(row => row.Item3), actualAssets.OrderBy(row => row.Item1, StringComparer.Ordinal).ThenBy(row => row.Item2).ThenBy(row => row.Item3));
+
+        var weakHashLines = result.Findings.Where(finding => finding.RuleId is "DOSAI-CRYPTO-WEAK-HASH-MD5" or "DOSAI-CRYPTO-WEAK-HASH-SHA1")
+            .Select(finding => (finding.Location.Path, finding.Location.LineNumber, finding.RuleId)).OrderBy(row => row.Path).ThenBy(row => row.LineNumber).ToList();
+        Assert.Equal(
+            [("boundary/Boundary.cs", 5, "DOSAI-CRYPTO-WEAK-HASH-MD5"), ("boundary/Boundary.cs", 9, "DOSAI-CRYPTO-WEAK-HASH-MD5"),
+             ("Hashing.cs", 5, "DOSAI-CRYPTO-WEAK-HASH-MD5"), ("Hashing.cs", 9, "DOSAI-CRYPTO-WEAK-HASH-MD5"),
+             ("hasprobe/HasProbe.cs", 9, "DOSAI-CRYPTO-WEAK-HASH-MD5"),
+             ("hmac/Hmac.cs", 10, "DOSAI-CRYPTO-WEAK-HASH-MD5"),
+             ("lambda/ParenLambda.cs", 6, "DOSAI-CRYPTO-WEAK-HASH-MD5"),
+             ("vb/Hashing.vb", 6, "DOSAI-CRYPTO-WEAK-HASH-MD5")],
+            weakHashLines);
+
+        // The negative pins: the signature probe reports nothing, the local-algorithm call
+        // reports at its declaration line only, and no generic HMAC sits beside a decoded MAC.
+        Assert.DoesNotContain(result.Assets, asset => asset.Location.Path == "hasprobe/HasProbe.cs" && asset.Location.LineNumber == 5);
+        Assert.DoesNotContain(result.Findings, finding => finding.Location.Path == "hasprobe/HasProbe.cs" && finding.Location.LineNumber == 5);
+        Assert.DoesNotContain(result.Assets, asset => asset.Location.Path == "boundary/Boundary.cs" && asset.Location.LineNumber == 10);
+        Assert.DoesNotContain(result.Assets, asset => asset.Location.Path == "hmac/Hmac.cs" && asset.Name == "HMAC" && asset.Location.LineNumber is 6 or 10);
+
+        // Not an empty list (issue #127 adds a base-naming note even to project-less trees);
+        // nothing originates from the crypto pass itself.
+        Assert.DoesNotContain(result.Diagnostics, line => line.Contains("Crypto reachability fallback", StringComparison.Ordinal) || line.Contains("Crypto data-flow fallback", StringComparison.Ordinal));
+    }
+
     // Issue #110's repro: with the app and the library in one tree the library's call binds
     // as it does when the library is scanned alone.
     [SkippableFact]

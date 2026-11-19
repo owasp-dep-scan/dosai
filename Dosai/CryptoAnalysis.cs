@@ -921,9 +921,11 @@ public static class CryptoAnalyzer
         return false;
     }
 
-    private static void RecordCryptoUse(string symbol, string code, string basePath, string file, int line, int column, string? namespaceName, string? className, string? methodName, CryptoReachability reachability, CryptoAnalysisResult result, string source)
+    private static void RecordCryptoUse(string symbol, string code, string basePath, string file, int line, int column, string? namespaceName, string? className, string? methodName, CryptoReachability reachability, CryptoAnalysisResult result, string source, CryptoClassification? classification = null)
     {
-        var classification = ClassifyCryptoSymbol(symbol, code, source);
+        // A caller that classified from an argument (the one-shot hash APIs' HashAlgorithmName)
+        // passes its classification in and still names the API called as the symbol evidence.
+        classification ??= ClassifyCryptoSymbol(symbol, code, source);
         if (classification is null)
         {
             return;
@@ -1436,6 +1438,29 @@ public static class CryptoAnalyzer
 
     private static bool ContainsAny(string value, params string[] candidates) => candidates.Any(candidate => value.Contains(candidate, StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>
+    ///     The algorithm a <c>HashAlgorithmName</c> value names, when it is a compile-time
+    ///     constant: a static property (<c>HashAlgorithmName.MD5</c>, also through
+    ///     <c>using static</c>) or a <c>new HashAlgorithmName("MD5")</c> with a constant string.
+    ///     Null when the value is computed at run time (a local, <c>Parse</c>, a parameter).
+    ///     Read by the PBKDF2 PRF check and by the one-shot hash APIs' argument rule (issue
+    ///     #134).
+    /// </summary>
+    internal static string? HashAlgorithmNameOf(IOperation value)
+    {
+        while (value is IConversionOperation conversion)
+        {
+            value = conversion.Operand;
+        }
+
+        return value switch
+        {
+            IPropertyReferenceOperation { Property.ContainingType.Name: "HashAlgorithmName" } property => property.Property.Name,
+            IObjectCreationOperation { Arguments: [{ Value.ConstantValue: { HasValue: true, Value: string name } }] } => name,
+            _ => null
+        };
+    }
+
     private static bool HasCryptoToken(string symbol, params string[] candidates)
     {
         var frameworkQualified = symbol.Contains("System.Security.Cryptography", StringComparison.OrdinalIgnoreCase) ||
@@ -1638,9 +1663,87 @@ public static class CryptoAnalyzer
     {
         public override void VisitInvocation(IInvocationOperation operation)
         {
-            Record(operation, operation.TargetMethod, SafeSyntaxText.Text(operation.Syntax));
+            // The argument is read before the symbol: a decoded one-shot hash or MAC call
+            // records its algorithm asset in place of the record the method name would give
+            // (a generic strong HMAC beside a weak HMAC-MD5 would disagree about strength).
+            if (!RecordHashAlgorithmArgument(operation))
+            {
+                Record(operation, operation.TargetMethod, SafeSyntaxText.Text(operation.Syntax));
+            }
+
             DetectSemanticMisuse(operation, operation.TargetMethod, operation.Arguments);
             base.VisitInvocation(operation);
+        }
+
+        /// <summary>
+        ///     Records the one-shot hash APIs' algorithm from their <c>HashAlgorithmName</c>
+        ///     argument (issue #134). The walker reaches every body shape (expression bodies,
+        ///     field-initializer lambdas, VB statements), where the line fallback is silent, and
+        ///     the decoded argument classifies through the same rules as the named algorithm
+        ///     types: MD5 keeps its weak-hash finding, and a MAC argument names the MAC
+        ///     (<c>HmacData(HashAlgorithmName.MD5, ...)</c> records HMAC-MD5). The record is
+        ///     anchored at the argument, the evidence being the algorithm choice. Returns
+        ///     whether it recorded; a decode that failed (a runtime-chosen algorithm) or spelled
+        ///     a candidate the classifier never defined leaves the caller on today's symbol
+        ///     record, which never silences a call.
+        /// </summary>
+        private bool RecordHashAlgorithmArgument(IInvocationOperation operation)
+        {
+            var type = operation.TargetMethod.ContainingType;
+            if (type is null || type.Name != "CryptographicOperations"
+                || !(type.ContainingNamespace?.ToDisplayString() ?? string.Empty).StartsWith(CryptographyNamespace, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            var isMac = operation.TargetMethod.Name is "HmacData" or "HmacDataAsync" or "TryHmacData";
+            if (!isMac && operation.TargetMethod.Name is not ("HashData" or "HashDataAsync" or "TryHashData"))
+            {
+                return false;
+            }
+
+            foreach (var argument in operation.Arguments)
+            {
+                if (argument.Parameter?.Type.Name != "HashAlgorithmName")
+                {
+                    continue;
+                }
+
+                var algorithm = HashAlgorithmNameOf(argument.Value);
+                if (algorithm is null)
+                {
+                    return false;
+                }
+
+                // No hyphen or underscore normalization: the weak rules' targets decode in
+                // every form because their canonical strings equal their token spellings, and
+                // inventing spellings the classifier never defined is how token rules drift.
+                var classification = ClassifyCryptoSymbol(isMac ? "HMAC" + algorithm : algorithm, SafeSyntaxText.Text(operation.Syntax), "roslyn");
+                if (classification is null)
+                {
+                    return false;
+                }
+
+                var method = model.GetEnclosingSymbol(operation.Syntax.SpanStart) as IMethodSymbol;
+                var position = argument.Syntax.GetLocation().GetLineSpan().StartLinePosition;
+                RecordCryptoUse(
+                    DescribeSymbol(operation.TargetMethod),
+                    SafeSyntaxText.Text(operation.Syntax),
+                    basePath,
+                    sourceFilePath,
+                    position.Line + 1,
+                    position.Character + 1,
+                    method?.ContainingNamespace?.ToDisplayString(),
+                    method?.ContainingType?.Name,
+                    method?.Name,
+                    reachability,
+                    result,
+                    "roslyn",
+                    classification);
+                return true;
+            }
+
+            return false;
         }
 
         public override void VisitObjectCreation(IObjectCreationOperation operation)
@@ -1791,13 +1894,6 @@ public static class CryptoAnalyzer
 
             return false;
         }
-
-        private static string? HashAlgorithmNameOf(IOperation value) => Strip(value) switch
-        {
-            IPropertyReferenceOperation { Property.ContainingType.Name: "HashAlgorithmName" } property => property.Property.Name,
-            IObjectCreationOperation { Arguments: [{ Value.ConstantValue: { HasValue: true, Value: string name } }] } => name,
-            _ => null
-        };
 
         /// <summary>
         ///     "zero" for a freshly allocated array (`new byte[16]`), "constant" for one built only

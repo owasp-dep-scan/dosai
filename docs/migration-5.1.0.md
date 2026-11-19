@@ -760,3 +760,18 @@ for a net10.0 tree becomes `System.Runtime, Version=10.0.0.0`, and a net48 tree 
 `mscorlib, Version=4.0.0.0` (the pack's facades forward there and Roslyn reports the defining
 assembly). The unresolved-call diagnostic selects a restore-advice branch for the missing net4x
 package; every other branch keeps its wording.
+
+## The weak-hash rules read the algorithm argument of the one-shot hash APIs (issue #134, behavioral)
+
+`CryptographicOperations.HashData`/`HashDataAsync`/`TryHashData` (and their `Hmac*` twins) now
+have their `HashAlgorithmName` argument read by the semantic walker, so an MD5 or SHA-1 choice
+reports in the body shapes the line pass skips: expression bodies, field-initializer lambdas
+and VB `Dim` statements. Both constant forms decode, the static property (also through
+`using static`) and `new HashAlgorithmName("MD5")`. The evidence contract moves on lines that
+already reported: a block-body MD5 asset and finding anchor at the argument instead of the
+token (column 67 becomes 49 on the fixture's line), and the operation names the called API with
+`source: roslyn`. On the MAC half, a decoded argument names the MAC (`HmacData` with MD5 becomes
+a weak HMAC-MD5 asset) and replaces the generic strong `HMAC` asset the method name used to
+give; a runtime-chosen algorithm keeps the generic record. A block-body MAC line keeps the line
+pass's MD5 token beside the walker's MAC asset (two assets, one finding), and hyphenated
+constant spellings (`"SHA-256"`) record nothing.

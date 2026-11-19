@@ -608,20 +608,41 @@ public static class HasProbe
 PROGRAM
 
 echo "==> issue134-weakhash/boundary (extra probe: using-static MD5, and MD5 through a string literal)"
+# The using-static arm names the call fully qualified and drops the namespace import: beside
+# `using System.Security.Cryptography` the bare MD5 is CS0229-ambiguous between the type and
+# the HashAlgorithmName.MD5 property, and a file that does not compile probes nothing.
 mkdir -p "${ISSUE134}/boundary"
 cat > "${ISSUE134}/boundary/Boundary.cs" <<'PROGRAM'
-using System.Security.Cryptography;
 using static System.Security.Cryptography.HashAlgorithmName;
 
 public static class Boundary
 {
-    public static byte[] ViaUsingStatic(byte[] data) => CryptographicOperations.HashData(MD5, data);
+    public static byte[] ViaUsingStatic(byte[] data) => System.Security.Cryptography.CryptographicOperations.HashData(MD5, data);
 
     public static byte[] ViaString(byte[] data)
     {
-        var algo = new HashAlgorithmName("MD5");
-        return CryptographicOperations.HashData(algo, data);
+        var algo = new System.Security.Cryptography.HashAlgorithmName("MD5");
+        return System.Security.Cryptography.CryptographicOperations.HashData(algo, data);
     }
+}
+PROGRAM
+
+echo "==> issue134-weakhash/hmac (the MAC half of the family: argument-named MAC beside a runtime algorithm)"
+mkdir -p "${ISSUE134}/hmac"
+cat > "${ISSUE134}/hmac/Hmac.cs" <<'PROGRAM'
+using System;
+using System.Security.Cryptography;
+
+public static class Hmac
+{
+    public static byte[] Arrow(ReadOnlySpan<byte> key, byte[] data) => CryptographicOperations.HmacData(HashAlgorithmName.MD5, key, data);
+
+    public static byte[] Block(ReadOnlySpan<byte> key, byte[] data)
+    {
+        return CryptographicOperations.HmacData(HashAlgorithmName.MD5, key, data);
+    }
+
+    public static byte[] Runtime(HashAlgorithmName name, ReadOnlySpan<byte> key, byte[] data) => CryptographicOperations.HmacData(name, key, data);
 }
 PROGRAM
 
