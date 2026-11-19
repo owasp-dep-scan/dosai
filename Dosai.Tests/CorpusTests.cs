@@ -559,7 +559,8 @@ public class CorpusTests
         Assert.Equal([(3, "ToString", "BuildRenderTree"), (8, "SerializeObject", "Describe")], Rows("Widgets/Badge.razor"));
 
         // One node for each method a template declares, whichever copy of the library was read.
-        Assert.Single(slice.CallGraph!.Nodes, node => node.Id == "Host.Components.Pages.Behind.Label():string");
+        // Label lives only in the template, so its node keeps the IL rendering of the signature.
+        Assert.Single(slice.CallGraph!.Nodes, node => node.Id == "Host.Components.Pages.Behind.Label():System.String");
         Assert.Single(slice.CallGraph.Nodes, node => node.Id.StartsWith("Widgets.Badge.Describe()", StringComparison.Ordinal));
         AssertEveryEdgeEndpointExists(slice);
     }

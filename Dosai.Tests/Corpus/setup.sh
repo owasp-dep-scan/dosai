@@ -439,6 +439,11 @@ RAZOR
 
 <Badge Count="@total" />
 <p>@JsonConvert.ToString(total)</p>
+
+@code {
+    public string Label()
+        => JsonConvert.SerializeObject(new { total });
+}
 RAZOR
         cat > Host/Components/Pages/Behind.razor.cs <<'PROGRAM'
 using Newtonsoft.Json;
