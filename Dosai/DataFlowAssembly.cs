@@ -297,9 +297,13 @@ public static partial class DataFlowAnalyzer
         {
             if (isDependency[index])
             {
-                total += reach.AddDefinitions(index, assemblies[index]);
+                total += reach.AddDefinitions(index, assemblies[index].Reader, assemblies[index].PeReader);
             }
         }
+
+        // The secondary legacy index is decided over the complete definition set: which legacy
+        // keys are unique is a property of the metadata alone (issue #128).
+        reach.FinalizeLegacyKeys();
 
         var reachable = new HashSet<int>[assemblies.Count];
         var queue = new Queue<(int Assembly, MethodDefinitionHandle Method)>();
@@ -332,6 +336,7 @@ public static partial class DataFlowAnalyzer
 
         var scanned = new HashSet<(int, int)>();
         var targets = new Dictionary<(int Assembly, int Token), AssemblyMemberInfo?>();
+        var qualifiedTypes = new Dictionary<(int Assembly, int Token), string?>();
         while (queue.Count > 0)
         {
             var (assemblyIndex, handle) = queue.Dequeue();
@@ -355,11 +360,14 @@ public static partial class DataFlowAnalyzer
                     {
                         member = ResolveReachTarget(assembly.Reader, token);
                         targets[(assemblyIndex, token)] = member;
+                        // Memoized beside the member: the qualified chain is walked once per
+                        // referenced token, not once per call site (issue #128).
+                        qualifiedTypes[(assemblyIndex, token)] = member is null ? null : DependencyReachIndex.QualifiedContainingType(assembly.Reader, token);
                     }
 
                     if (member is not null)
                     {
-                        Reach(reach.Targets(member, kind));
+                        Reach(reach.Targets(member, kind, qualifiedTypes[(assemblyIndex, token)]));
                     }
                 }
             }
@@ -401,10 +409,18 @@ public static partial class DataFlowAnalyzer
     /// <summary>
     ///     The dependency members the reach walk can name, keyed without generic arguments or
     ///     arity so that a call through a constructed type or a method instantiation meets its
-    ///     open definition. Keys over-approximate (overloads with the same parameter count
-    ///     share one), which can only keep more methods in.
+    ///     open definition. The key's type part is the declaring type's full nesting chain under
+    ///     the outermost type's namespace (issue #128): a namespace-less nested type name such
+    ///     as <c>&lt;&gt;c</c> or a user-written <c>Cache</c> is one string across all
+    ///     assemblies, so the unqualified key joined same-named members of packages nothing
+    ///     calls. Every definition also sits in a secondary index under its legacy unqualified
+    ///     key; <see cref="FinalizeLegacyKeys" /> keeps that entry only where the whole
+    ///     definition set holds exactly one member of that key, so a lookup that could not
+    ///     build a qualified chain degrades to today's reach instead of pruning silently. Keys
+    ///     over-approximate (overloads with the same parameter count share one), which can only
+    ///     keep more methods in.
     /// </summary>
-    private sealed class DependencyReachIndex
+    internal sealed class DependencyReachIndex
     {
         internal enum ReachKind
         {
@@ -412,10 +428,21 @@ public static partial class DataFlowAnalyzer
             FieldRead
         }
 
+        /// <summary>Nesting levels the chain walks follow, matching the call graph's bound: inspected metadata is untrusted and a cycle must not loop the walk.</summary>
+        internal const int MaxNestingDepth = 64;
+
         private readonly Dictionary<string, List<(int, MethodDefinitionHandle)>> _methods = new(StringComparer.Ordinal);
         private readonly Dictionary<string, List<(int, MethodDefinitionHandle)>> _storesByField = new(StringComparer.Ordinal);
+        // The legacy secondary index lives beside the qualified one, never inside it: a
+        // top-level type's qualified and legacy keys are the same string, and overloads share
+        // a key by design, so pruning a collided legacy key out of the main index would prune
+        // the method itself.
+        private readonly Dictionary<string, List<(int, MethodDefinitionHandle)>> _methodsByLegacyKey = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, List<(int, MethodDefinitionHandle)>> _storesByLegacyFieldKey = new(StringComparer.Ordinal);
         private readonly Dictionary<(int, TypeDefinitionHandle), List<(int, MethodDefinitionHandle)>> _staticConstructors = [];
         private readonly Dictionary<(int, int), TypeDefinitionHandle> _declaringType = [];
+        private readonly Dictionary<string, int> _methodLegacyKeyCounts = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, int> _fieldLegacyKeyCounts = new(StringComparer.Ordinal);
 
         public static ReachKind? KindOf(OpCode opCode)
         {
@@ -428,9 +455,8 @@ public static partial class DataFlowAnalyzer
         }
 
         /// <summary>Indexes one dependency assembly's methods; returns how many have a body.</summary>
-        public int AddDefinitions(int index, AnalyzedAssembly assembly)
+        public int AddDefinitions(int index, MetadataReader reader, PEReader peReader)
         {
-            var reader = assembly.Reader;
             var bodies = 0;
             foreach (var handle in reader.MethodDefinitions)
             {
@@ -448,7 +474,7 @@ public static partial class DataFlowAnalyzer
                     continue;
                 }
 
-                Add(_methods, MethodKey(member), (index, handle));
+                AddBoth(_methods, _methodsByLegacyKey, _methodLegacyKeyCounts, MethodKeys(member, QualifiedContainingType(reader, MetadataTokens.GetToken(handle))), (index, handle));
 
                 if (member.Name == ".cctor")
                 {
@@ -460,20 +486,51 @@ public static partial class DataFlowAnalyzer
                     constructors.Add((index, handle));
                 }
 
-                IndexFieldStores(index, assembly, handle, definition);
+                IndexFieldStores(index, reader, peReader, handle, definition);
             }
 
             return bodies;
         }
 
-        public IEnumerable<(int, MethodDefinitionHandle)> Targets(AssemblyMemberInfo member, ReachKind kind)
+        public IEnumerable<(int, MethodDefinitionHandle)> Targets(AssemblyMemberInfo member, ReachKind kind, string? qualifiedContainingType)
         {
-            if (kind == ReachKind.FieldRead)
+            var (index, legacyIndex) = kind == ReachKind.FieldRead ? (_storesByField, _storesByLegacyFieldKey) : (_methods, _methodsByLegacyKey);
+            var (qualified, legacy) = kind == ReachKind.FieldRead ? FieldKeys(member, qualifiedContainingType) : MethodKeys(member, qualifiedContainingType);
+            if (index.TryGetValue(qualified, out var members))
             {
-                return _storesByField.TryGetValue(FieldKey(member), out var stores) ? stores : [];
+                return members;
             }
 
-            return _methods.TryGetValue(MethodKey(member), out var methods) ? methods : [];
+            // The qualified chain missed or could not be built (a TypeSpecification whose head
+            // does not decode, a reference whose scope chain stops at depth or at a cycle): a
+            // legacy key unique over the whole definition set is still unambiguous, so the
+            // lookup degrades to today's reach, never below it.
+            return legacyIndex.TryGetValue(legacy, out var legacyMembers) ? legacyMembers : [];
+        }
+
+        /// <summary>
+        ///     Keeps a legacy-key entry only where the complete definition set holds exactly one
+        ///     member of that key: LibP's and LibQ's <c>Cache.Local</c> share one, so neither
+        ///     keeps a secondary entry and the collision this issue fixes cannot return through
+        ///     the back door. Call once, after every dependency assembly is indexed.
+        /// </summary>
+        internal void FinalizeLegacyKeys()
+        {
+            PruneNonUnique(_methodsByLegacyKey, _methodLegacyKeyCounts);
+            PruneNonUnique(_storesByLegacyFieldKey, _fieldLegacyKeyCounts);
+            _methodLegacyKeyCounts.Clear();
+            _fieldLegacyKeyCounts.Clear();
+
+            static void PruneNonUnique(Dictionary<string, List<(int, MethodDefinitionHandle)>> index, Dictionary<string, int> counts)
+            {
+                foreach (var (key, count) in counts)
+                {
+                    if (count > 1)
+                    {
+                        index.Remove(key);
+                    }
+                }
+            }
         }
 
         public IEnumerable<(int, MethodDefinitionHandle)> StaticConstructorsOf(int index, MethodDefinitionHandle method) =>
@@ -481,15 +538,16 @@ public static partial class DataFlowAnalyzer
                 ? constructors
                 : [];
 
-        private void IndexFieldStores(int index, AnalyzedAssembly assembly, MethodDefinitionHandle handle, MethodDefinition definition)
+        private void IndexFieldStores(int index, MetadataReader reader, PEReader peReader, MethodDefinitionHandle handle, MethodDefinition definition)
         {
             try
             {
-                foreach (var instruction in DecodeInstructions(assembly.PeReader.GetMethodBody(definition.RelativeVirtualAddress).GetILReader()))
+                foreach (var instruction in DecodeInstructions(peReader.GetMethodBody(definition.RelativeVirtualAddress).GetILReader()))
                 {
-                    if ((instruction.OpCode == OpCodes.Stfld || instruction.OpCode == OpCodes.Stsfld) && instruction.Operand is int token && ResolveMember(assembly.Reader, token) is { } field)
+                    if ((instruction.OpCode == OpCodes.Stfld || instruction.OpCode == OpCodes.Stsfld) && instruction.Operand is int token && ResolveMember(reader, token) is { } field)
                     {
-                        Add(_storesByField, FieldKey(field), (index, handle));
+                        var (qualified, legacy) = FieldKeys(field, QualifiedContainingType(reader, token));
+                        AddBoth(_storesByField, _storesByLegacyFieldKey, _fieldLegacyKeyCounts, (qualified, legacy), (index, handle));
                     }
                 }
             }
@@ -509,10 +567,119 @@ public static partial class DataFlowAnalyzer
             list.Add(method);
         }
 
-        private static string MethodKey(AssemblyMemberInfo member) =>
-            string.Create(CultureInfo.InvariantCulture, $"{OpenName(member.ContainingType)}\u001f{OpenName(member.Name)}\u001f{member.ParameterCount}");
+        /// <summary>Indexes a definition under its qualified key and in the legacy secondary index, counting the latter's multiplicity.</summary>
+        private static void AddBoth(Dictionary<string, List<(int, MethodDefinitionHandle)>> index, Dictionary<string, List<(int, MethodDefinitionHandle)>> legacyIndex, Dictionary<string, int> legacyCounts, (string Qualified, string Legacy) keys, (int, MethodDefinitionHandle) method)
+        {
+            Add(index, keys.Qualified, method);
+            Add(legacyIndex, keys.Legacy, method);
+            legacyCounts[keys.Legacy] = legacyCounts.TryGetValue(keys.Legacy, out var count) ? count + 1 : 1;
+        }
 
-        private static string FieldKey(AssemblyMemberInfo member) => $"{OpenName(member.ContainingType)}\u001f{member.Name}";
+        private static (string Qualified, string Legacy) MethodKeys(AssemblyMemberInfo member, string? qualifiedContainingType) => (
+            string.Create(CultureInfo.InvariantCulture, $"{OpenName(qualifiedContainingType ?? member.ContainingType)}\u001f{OpenName(member.Name)}\u001f{member.ParameterCount}"),
+            string.Create(CultureInfo.InvariantCulture, $"{OpenName(member.ContainingType)}\u001f{OpenName(member.Name)}\u001f{member.ParameterCount}"));
+
+        private static (string Qualified, string Legacy) FieldKeys(AssemblyMemberInfo member, string? qualifiedContainingType) => (
+            $"{OpenName(qualifiedContainingType ?? member.ContainingType)}\u001f{member.Name}",
+            $"{OpenName(member.ContainingType)}\u001f{member.Name}");
+
+        /// <summary>
+        ///     The declaring type of a referenced member as a full nesting chain under the
+        ///     outermost type's namespace, both sides of the walk (a definition's declaring type
+        ///     or a reference's parent): the call graph qualifies its ids the same way, for the
+        ///     same collision (issue #128). Both chain walks are bounded and cycle-guarded, so
+        ///     malformed metadata cannot loop the walk; a chain that cannot be rendered returns
+        ///     null and the caller falls back to the legacy key.
+        /// </summary>
+        internal static string? QualifiedContainingType(MetadataReader reader, int token)
+        {
+            var handle = MetadataTokens.EntityHandle(token);
+            if (handle.Kind == HandleKind.MethodSpecification)
+            {
+                var method = reader.GetMethodSpecification((MethodSpecificationHandle)handle).Method;
+                return method.Kind is HandleKind.MemberReference or HandleKind.MethodDefinition ? QualifiedContainingType(reader, MetadataTokens.GetToken(method)) : null;
+            }
+
+            var parent = handle.Kind switch
+            {
+                HandleKind.MethodDefinition => reader.GetMethodDefinition((MethodDefinitionHandle)handle).GetDeclaringType(),
+                HandleKind.MemberReference => reader.GetMemberReference((MemberReferenceHandle)handle).Parent,
+                HandleKind.FieldDefinition => reader.GetFieldDefinition((FieldDefinitionHandle)handle).GetDeclaringType(),
+                _ => default
+            };
+
+            for (var depth = 0; depth < MaxNestingDepth; depth++)
+            {
+                switch (parent.Kind)
+                {
+                    case HandleKind.TypeDefinition:
+                        return QualifiedDefinitionTypeName(reader, (TypeDefinitionHandle)parent);
+                    case HandleKind.TypeSpecification:
+                        // A generic instance: the chain of the generic type it instantiates.
+                        var blob = reader.GetBlobReader(reader.GetTypeSpecification((TypeSpecificationHandle)parent).Signature);
+                        if (blob.ReadSignatureTypeCode() != SignatureTypeCode.GenericTypeInstance)
+                        {
+                            return null;
+                        }
+
+                        blob.ReadSignatureTypeCode();
+                        parent = blob.ReadTypeHandle();
+                        continue;
+                    case HandleKind.TypeReference:
+                        return QualifiedReferenceTypeName(reader, (TypeReferenceHandle)parent);
+                    default:
+                        return null;
+                }
+            }
+
+            return null;
+        }
+
+        private static string QualifiedDefinitionTypeName(MetadataReader reader, TypeDefinitionHandle typeHandle)
+        {
+            var type = reader.GetTypeDefinition(typeHandle);
+            var parts = new List<string> { reader.GetString(type.Name) };
+            var seen = new HashSet<TypeDefinitionHandle> { typeHandle };
+            var outermost = type;
+            for (var declaring = type.GetDeclaringType(); !declaring.IsNil && parts.Count < MaxNestingDepth && seen.Add(declaring); declaring = outermost.GetDeclaringType())
+            {
+                outermost = reader.GetTypeDefinition(declaring);
+                parts.Add(reader.GetString(outermost.Name));
+            }
+
+            parts.Reverse();
+            var ns = reader.GetString(outermost.Namespace);
+            var name = string.Join('.', parts);
+            return string.IsNullOrWhiteSpace(ns) ? name : $"{ns}.{name}";
+        }
+
+        private static string? QualifiedReferenceTypeName(MetadataReader reader, TypeReferenceHandle start)
+        {
+            var parts = new List<string>();
+            var seen = new HashSet<TypeReferenceHandle>();
+            var current = start;
+            while (parts.Count < MaxNestingDepth)
+            {
+                if (!seen.Add(current))
+                {
+                    return null;
+                }
+
+                var reference = reader.GetTypeReference(current);
+                parts.Add(reader.GetString(reference.Name));
+                if (reference.ResolutionScope.Kind != HandleKind.TypeReference)
+                {
+                    var ns = reader.GetString(reference.Namespace);
+                    parts.Reverse();
+                    var name = string.Join('.', parts);
+                    return string.IsNullOrWhiteSpace(ns) ? name : $"{ns}.{name}";
+                }
+
+                current = (TypeReferenceHandle)reference.ResolutionScope;
+            }
+
+            return null;
+        }
 
         /// <summary>A type or member name without generic argument lists or arity suffixes: <c>List`1</c> and <c>List&lt;int&gt;</c> are both <c>List</c>.</summary>
         private static string OpenName(string name)
@@ -4067,7 +4234,7 @@ public static partial class DataFlowAnalyzer
     private sealed record AssemblyInstruction(int Offset, int NextOffset, OpCode OpCode, object? Operand);
     private sealed record AssemblySuccessor(int Index, bool IsExceptionHandler, ExceptionRegionKind RegionKind);
     private sealed record AssemblySignatureInfo(int ParameterCount, bool HasThis, bool ReturnsVoid, string ReturnType, IReadOnlyList<string> ParameterTypes);
-    private sealed record AssemblyMemberInfo(string Symbol, string Name, string ContainingType, int ParameterCount, bool HasThis, bool ReturnsVoid, string ReturnType);
+    internal sealed record AssemblyMemberInfo(string Symbol, string Name, string ContainingType, int ParameterCount, bool HasThis, bool ReturnsVoid, string ReturnType);
     private sealed record AssemblyMethodSymbolParts(string Namespace, string ClassName, string MethodName);
     private sealed record AssemblySourceLocation(string FilePath, int LineNumber, int ColumnNumber);
     private sealed record AssemblySequencePoint(int Offset, string FilePath, int LineNumber, int ColumnNumber);

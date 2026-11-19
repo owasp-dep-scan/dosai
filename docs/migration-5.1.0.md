@@ -530,7 +530,11 @@ as application code until someone copied a `*.deps.json` into the root.
   the member it names (generic arguments and arity removed, so a call to `M<int>` reaches `M<T>`),
   a member reaches its type's static constructor, and a field read reaches every method that
   stores the field. Overrides are not followed, because the interpreter takes a call's summary
-  from the member the call names. The application's slices are the same as with `all`, node for
+  from the member the call names. The walk's member and field keys carry the declaring type's full
+  nesting chain (issue #128), so a nested type of one assembly - a compiler-generated `<>c` or
+  a user-written `Cache` - never joins another assembly's, and a key that cannot be qualified
+  falls back to a legacy key unique over the whole set. The application's slices are the same
+  as with `all`, node for
   node (a corpus test compares them on a MailKit app), flows that only start inside package code
   are not reported, and a diagnostic counts the method bodies left out. On that MailKit app it
   took `dataflows` from 70 s and 127 MB to 3.5 s and 0.3 MB.

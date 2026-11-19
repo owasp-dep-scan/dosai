@@ -614,6 +614,56 @@ public class CorpusTests
         return Assert.Single(packages);
     }
 
+    // Issue #128: the reachable-mode walk keys members by the declaring type's full nesting
+    // chain, so a namespace-less nested type of one package never joins another's. The
+    // fixtures hold the app builds (App/bin/Release/net10.0) with LibA/LibB (main, control)
+    // and LibP/LibQ (probe) packed as local 1.0.0 packages.
+    private static DataFlowResult Issue128Reachable(string tree)
+    {
+        var path = CorpusPathOrSkip($"issue128-libpacks/{tree}/App/bin/Release/net10.0");
+        using var scope = DependencyFlowScope.Apply(DependencyFlowMode.Reachable);
+        return DataFlowAnalyzer.Analyze(path);
+    }
+
+    [SkippableFact]
+    public void Corpus_Issue128_Main_ThePackedLibraryStaysPruned()
+    {
+        var result = Issue128Reachable("main");
+
+        // Before the qualified keys the note read "5 of 13": LibB's <>c joined LibA's, so
+        // LibB.B.NeverCalled was analyzed and its command sink recorded.
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Contains("9 of 13 method bodies in dependency assemblies were not analyzed", StringComparison.Ordinal));
+        Assert.DoesNotContain(result.MethodSummaries, summary => summary.Method.Contains("LibB", StringComparison.Ordinal));
+        Assert.DoesNotContain(result.Nodes, node => (node.Symbol ?? string.Empty).Contains("LibB", StringComparison.Ordinal));
+        Assert.DoesNotContain(result.MethodSummaries, summary => summary.SinkCategories.Contains("command"));
+        Assert.Contains(result.MethodSummaries, summary => summary.Method.Contains("LibA.A.Run", StringComparison.Ordinal));
+    }
+
+    [SkippableFact]
+    public void Corpus_Issue128_Control_NoCollisionStillPrunesTheUncalledPackage()
+    {
+        var result = Issue128Reachable("control");
+
+        // Qualification must not over-prune where no collision exists: LibA's bodies stay kept.
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Contains("6 of 10 method bodies in dependency assemblies were not analyzed", StringComparison.Ordinal));
+        Assert.DoesNotContain(result.MethodSummaries, summary => summary.Method.Contains("LibB", StringComparison.Ordinal));
+        Assert.Contains(result.MethodSummaries, summary => summary.Method.Contains("LibA.A.Run", StringComparison.Ordinal));
+    }
+
+    [SkippableFact]
+    public void Corpus_Issue128_Probe_UserWrittenNestedTypesSeparate()
+    {
+        var result = Issue128Reachable("probe");
+
+        // LibP's and LibQ's user-written nested Cache classes shared one legacy key; the probe's
+        // never-called LibQ.Q.Cache.Local(string) is a Process.Start sink that stayed analyzed.
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Contains("4 of 6 method bodies in dependency assemblies were not analyzed", StringComparison.Ordinal));
+        Assert.DoesNotContain(result.MethodSummaries, summary => summary.Method.Contains("LibQ", StringComparison.Ordinal));
+        Assert.DoesNotContain(result.Nodes, node => (node.Symbol ?? string.Empty).Contains("LibQ", StringComparison.Ordinal));
+        Assert.DoesNotContain(result.MethodSummaries, summary => summary.SinkCategories.Contains("command"));
+        Assert.Contains(result.MethodSummaries, summary => summary.Method.Contains("LibP.P.Run", StringComparison.Ordinal));
+    }
+
     // Issue #110's repro: with the app and the library in one tree the library's call binds
     // as it does when the library is scanned alone.
     [SkippableFact]
