@@ -1375,8 +1375,33 @@ for entry in report["PackageReachability"]:
         print(entry["Purl"], "EdgeIds", entry["EdgeIds"], "missing from CallGraph.Edges", missing)
 CHECK
 
+# The report's probe tree: three SerializeObject calls and one DeserializeObject in one
+# method, so more than one call-site group collapses and the entry's EdgeIds list several
+# dropped ids beside the keepers.
+mkdir -p "${ISSUE129}/threecalls"
+cat > "${ISSUE129}/threecalls/Repro.csproj" <<'CSPROJ'
+<Project Sdk="Microsoft.NET.Sdk">
+  <OutputType>Exe</OutputType>
+  <TargetFramework>net10.0</TargetFramework>
+  <ImplicitUsings>enable</ImplicitUsings>
+  <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+  </ItemGroup>
+</Project>
+CSPROJ
+cat > "${ISSUE129}/threecalls/Program.cs" <<'PROGRAM'
+using Newtonsoft.Json;
+
+var a = JsonConvert.SerializeObject(new { x = 1 });
+var b = JsonConvert.SerializeObject(new { y = 2 });
+var c = JsonConvert.SerializeObject(new { z = 3 });
+_ = JsonConvert.DeserializeObject<Dictionary<string, int>>("{}");
+Console.WriteLine(a.Length + b.Length + c.Length);
+PROGRAM
+
 # Source-only analysis is enough for the issue; restore resolves the package closure.
 dotnet restore "${ISSUE129}/Repro.csproj" -v quiet
+dotnet restore "${ISSUE129}/threecalls/Repro.csproj" -v quiet
 
 echo "==> Issue #129 fixture ready at ${ISSUE129}"
 

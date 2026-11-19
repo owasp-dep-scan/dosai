@@ -376,6 +376,35 @@ public static class TransparencyBuilder
             reachability.Remember(nodeId, edgeId, sliceId, category, evidenceKinds, confidence, sourceLocation);
             if (kind == "Dependency") reachability.AddConfidenceReason("Package URL is supported by dependency/import metadata.");
         }
+
+    }
+
+    /// <summary>
+    ///     Removes edge ids that no longer exist in <paramref name="callGraph" /> (issue
+    ///     #129). The section is built before same-site collapsing, which replaces a group
+    ///     of duplicate call sites with one keeper edge, and every group's keeper was itself
+    ///     recorded like the rest, so dropping the absent ids removes no live reference under
+    ///     any purl the keeper resolved to. An entry that loses its last id stays in the list
+    ///     with an empty <c>EdgeIds</c>: its nodes, locations and dependency evidence can
+    ///     still be the reason the purl is reachable at all. <c>RemoveAll</c> preserves the
+    ///     surviving ids' insertion order.
+    /// </summary>
+    public static void DropDanglingEdgeIds(List<PackageReachability> reachability, CallGraph callGraph)
+    {
+        // One set of the final edge ids, so the membership check never scans the edge list
+        // per id (the accumulator rule; the list reaches millions on the largest trees).
+        // Allocated only when some entry carries ids.
+        HashSet<string>? ids = null;
+        foreach (var entry in reachability)
+        {
+            if (entry.EdgeIds.Count == 0)
+            {
+                continue;
+            }
+
+            ids ??= [.. callGraph.Edges.Select(edge => edge.Id)];
+            entry.EdgeIds.RemoveAll(id => !ids.Contains(id));
+        }
     }
 
     public static List<PackageReachability> BuildPackageReachability(DataFlowResult result)

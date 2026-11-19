@@ -656,8 +656,16 @@ public static class Dosai
         var reachabilityDiagnostics = new List<string>();
         using (DebugLog.Phase("methods.reachability"))
         {
+            var edgesBeforeCollapse = callGraph.Edges.Count;
             ReachabilityAnalyzer.CollapseDuplicateCallSites(callGraph);
             DebugLog.Count("call graph (collapsed) edges", callGraph.Edges.Count);
+            // Same-site collapsing replaced edges the reachability section still names (issue
+            // #129); reconcile the ids when anything collapsed, so an uncollapsed graph
+            // allocates nothing.
+            if (callGraph.Edges.Count < edgesBeforeCollapse)
+            {
+                TransparencyBuilder.DropDanglingEdgeIds(packageReachability, callGraph);
+            }
             (reachability, recursionClusters, budgetExhausted) = ReachabilityAnalyzer.Compute(callGraph, entryPoints, reachabilityDiagnostics);
             deadCode = ReachabilityAnalyzer.BuildDeadCode(callGraph, reachability, sourceMode, budgetExhausted, reachabilityDiagnostics);
         }

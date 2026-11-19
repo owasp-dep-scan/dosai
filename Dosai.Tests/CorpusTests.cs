@@ -788,6 +788,48 @@ public class CorpusTests
         Assert.Equal([(7, 11, "source")], built);
     }
 
+    // Issue #129: after same-site collapsing, every PackageReachability EdgeId names an edge
+    // of the final CallGraph; the surviving ids' order and the SourceLocations are unchanged.
+    private static void AssertNoDanglingEdgeIds(MethodsSlice slice)
+    {
+        var edgeIds = slice.CallGraph!.Edges.Select(edge => edge.Id).ToHashSet(StringComparer.Ordinal);
+        Assert.All(slice.PackageReachability!, entry => Assert.All(entry.EdgeIds, id => Assert.Contains(id, edgeIds)));
+    }
+
+    [SkippableFact]
+    public void Corpus_Issue129_Threecalls_EdgeIdsNameFinalEdges()
+    {
+        var path = CorpusPathOrSkip("issue129-edgeids/threecalls");
+        var slice = JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(path), JsonOptions)!;
+        var entry = Assert.Single(slice.PackageReachability!, package => package.Purl == "pkg:nuget/Newtonsoft.Json@13.0.3");
+        Assert.Equal(["e1", "e2"], entry.EdgeIds);
+        Assert.Equal(
+            [("Program.cs", 1, 1, "Dependency"), ("Program.cs", 3, 9, "CallGraphEdge"), ("Program.cs", 4, 9, "CallGraphEdge"), ("Program.cs", 5, 9, "CallGraphEdge"), ("Program.cs", 6, 5, "CallGraphEdge")],
+            entry.SourceLocations.Select(location => (location.Path!, location.LineNumber, location.ColumnNumber, location.Kind)).ToList());
+        Assert.Equal(3, Assert.Single(slice.CallGraph!.Edges, edge => edge.Id == "e2").CallSiteCount);
+        AssertNoDanglingEdgeIds(slice);
+    }
+
+    [SkippableFact]
+    public void Corpus_Issue129_Root_EdgeIdsNameFinalEdges()
+    {
+        var path = CorpusPathOrSkip("issue129-edgeids");
+        var slice = JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(path), JsonOptions)!;
+        var entry = Assert.Single(slice.PackageReachability!, package => package.Purl == "pkg:nuget/Newtonsoft.Json@13.0.3");
+        Assert.Equal(["e1", "e2"], entry.EdgeIds);
+        var locations = entry.SourceLocations
+            .Select(location => (NormalizeSeparator(location.Path!), location.LineNumber, location.ColumnNumber, location.Kind))
+            .Order()
+            .ToList();
+        Assert.Equal(
+            new[] { ("Program.cs", 1, 1, "Dependency"), ("Program.cs", 3, 9, "CallGraphEdge"), ("Program.cs", 4, 9, "CallGraphEdge"), ("threecalls/Program.cs", 1, 1, "Dependency"), ("threecalls/Program.cs", 5, 9, "CallGraphEdge"), ("threecalls/Program.cs", 6, 5, "CallGraphEdge") }.Order().ToList(),
+            locations);
+        Assert.Equal("e5", Assert.Single(slice.PackageReachability!, package => package.Purl == "pkg:nuget/System.Console").EdgeIds.Single());
+        AssertNoDanglingEdgeIds(slice);
+
+        static string NormalizeSeparator(string path) => path.Replace('\\', '/');
+    }
+
     // Issue #110's repro: with the app and the library in one tree the library's call binds
     // as it does when the library is scanned alone.
     [SkippableFact]
