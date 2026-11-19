@@ -4573,6 +4573,16 @@ public static partial class DataFlowAnalyzer
 
             _nodesById.TryGetValue(firstSource, out var sourceNode);
             var sliceNodes = nodeIds.Select(nodeId => _nodesById.TryGetValue(nodeId, out var node) ? node : null).Where(node => node is not null).ToList();
+            // The source pass already reported this exact flow on a built tree (issue #131):
+            // flows only this pass finds, package-internal ones included, keep their
+            // assembly-il evidence. This pass is the only one that consults the set, so
+            // same-line slices within one pass never merge through it.
+            if (result.SliceFingerprints is { } fingerprints
+                && !fingerprints.Add(DataFlowAnalyzer.SliceFingerprint(sourceNode!, sinkNode, sinkPattern?.Category ?? sinkNode.Category, sinkArgumentIndex)))
+            {
+                return;
+            }
+
             var patternPurls = new[] { sinkPattern?.Purl, sourceNode?.Purl, sinkNode.Purl }.Where(purl => !string.IsNullOrWhiteSpace(purl));
 
             // Categories whose safety depends on a guard the IL interpreter cannot see (the XXE

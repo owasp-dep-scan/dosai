@@ -711,7 +711,10 @@ public class CorpusTests
         }
 
         var reachableSlices = ApplicationSlices(reachable);
-        Assert.True(reachableSlices.Length >= 2, $"expected anchored slices, got {reachableSlices.Length}");
+        // One anchored slice here: the cross-pass fingerprint (issue #131) also collapses the
+        // duplicate the IL pass used to emit for the same flow, so the count is the distinct
+        // flows, not the passes' copies of them.
+        Assert.True(reachableSlices.Length >= 1, $"expected anchored slices, got {reachableSlices.Length}");
         Assert.All(reachableSlices, slice => Assert.Contains(slice, ApplicationSlices(all)));
     }
 
@@ -739,6 +742,50 @@ public class CorpusTests
             return (sink.Symbol ?? string.Empty).StartsWith("Serilog.Formatting.ITextFormatter.Format(", StringComparison.Ordinal)
                 || (sink.Symbol ?? string.Empty).Contains("MessageTemplateTextFormatter.Format", StringComparison.Ordinal);
         });
+    }
+
+    // Issue #131: the source data-flow pass finds the flows of an unbuilt tree that live in
+    // initializers, expression bodies and a primary constructor's base arguments, and a built
+    // tree reports each flow exactly once: the source pass claims its flows and the assembly
+    // pass drops the duplicates through the cross-pass fingerprint.
+    private static List<(int SourceLine, int SinkLine, string Evidence)> Issue131Flows(string tree)
+    {
+        var path = CorpusPathOrSkip(tree);
+        var result = JsonSerializer.Deserialize<DataFlowResult>(DataFlowAnalyzer.GetDataFlows(path), JsonOptions)!;
+        var nodes = result.Nodes.ToDictionary(node => node.Id, node => node, StringComparer.Ordinal);
+        return result.Slices
+            .Select(slice => (nodes[slice.SourceId].LineNumber, nodes[slice.SinkId].LineNumber, slice.Summary?.StartsWith("Assembly IL", StringComparison.Ordinal) == true ? "assembly-il" : "source"))
+            .Order()
+            .ToList();
+    }
+
+    [SkippableFact]
+    public void Corpus_Issue131_InitFlows_Unbuilt()
+    {
+        var flows = Issue131Flows("issue131-initflows");
+        Assert.Equal(
+            [(7, 8, "source"), (9, 9, "source"), (11, 11, "source"), (12, 12, "source"), (13, 13, "source"), (21, 21, "source")],
+            flows);
+    }
+
+    [SkippableFact]
+    public void Corpus_Issue131_InitFlows_Built_EachFlowOnce()
+    {
+        var flows = Issue131Flows("issue131-initflows-built");
+        Assert.Equal(
+            [(7, 8, "source"), (9, 9, "source"), (11, 11, "source"), (12, 12, "source"), (13, 13, "source"), (21, 21, "source")],
+            flows);
+    }
+
+    [SkippableFact]
+    public void Corpus_Issue131_InitFlows_Probe_TheCrossMemberFlowAppearsOnceInEachCopy()
+    {
+        var unbuilt = Issue131Flows("issue131-initflows-probe");
+        var built = Issue131Flows("issue131-initflows-probe-built");
+        Assert.Equal([(7, 11, "source")], unbuilt);
+        // The static field's taint reaches the block-bodied reader from the initializer's own
+        // line, with identical lines between the built and unbuilt copies.
+        Assert.Equal([(7, 11, "source")], built);
     }
 
     // Issue #110's repro: with the app and the library in one tree the library's call binds

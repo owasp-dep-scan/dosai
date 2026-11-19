@@ -803,3 +803,17 @@ exactly as the compiler's IL does, which promotes packages used only from initia
 `Ns.T..ctor()` node that the inventory minted beside a declared static constructor is gone.
 Attribute arguments and Visual Basic initializer calls stay unrecorded (VB with a diagnostic
 counting the dropped sites).
+
+## Source-pass flows from initializers and expression bodies (issue #131, behavioral)
+
+The `dataflows` source pass analyzes field and property initializers, expression-bodied
+properties and indexers, and a primary constructor's base arguments on unbuilt trees, where
+before only flows inside method bodies (and lambdas of field initializers) were found. A
+static field initializer's taint reaches the methods that read the field, and the source node
+of such a slice sits at the initializer, under the synthesized constructor's method id
+(`Ns.T..cctor()`), matching the IL pass's placement. On a built tree each flow is reported
+once: the source pass claims its flows and the assembly pass drops its duplicates, so the
+`EvidenceKind` mix changes on built trees (flows previously reported as `assembly-il` are
+reported as `source`). Node ids (`dfn{...}`) shift because the source pass now walks more
+roots before the IL pass numbers its nodes; ids are order-dependent and deterministic, but a
+consumer pinning raw node ids sees churn.

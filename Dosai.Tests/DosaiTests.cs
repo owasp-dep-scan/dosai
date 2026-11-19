@@ -5904,6 +5904,186 @@ End Namespace
     #endregion
     #endregion GetMethods
 
+    #region Issue 131 - source-pass flows from initializers and expression bodies
+
+    private static void WriteIssue131Tree(string directory, string source)
+    {
+        Directory.CreateDirectory(directory);
+        File.WriteAllText(Path.Combine(directory, "Repro.csproj"), """
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+</Project>
+""");
+        File.WriteAllText(Path.Combine(directory, "Flows.cs"), source);
+    }
+
+    [Fact]
+    public void DataFlows_InitializerAndExpressionBodiedFlowsFoundOnUnbuiltTrees()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        WriteIssue131Tree(tempDirectory.Path, """
+using System.Diagnostics;
+
+namespace Repro;
+
+public class Flows
+{
+    private static readonly string FromField = Console.ReadLine()!;
+    public static Process UseField() => Process.Start(FromField);
+    public Process AutoProperty { get; } = Process.Start(Console.ReadLine()!);
+    public static string Input => Console.ReadLine()!;
+    public static Process UseInput() => Process.Start(Input);
+    public Process this[int i] => Process.Start(Console.ReadLine()!);
+    public static Process Direct() => Process.Start(Console.ReadLine()!);
+}
+
+public class Base(Process process)
+{
+    public Process Started => process;
+}
+
+public class Derived() : Base(Process.Start(Console.ReadLine()!));
+""");
+
+        var result = ReadDataFlows(tempDirectory.Path);
+        var nodes = result.Nodes.ToDictionary(node => node.Id, node => node, StringComparer.Ordinal);
+        var flows = result.Slices
+            .Select(slice => (nodes[slice.SourceId].LineNumber, nodes[slice.SinkId].LineNumber))
+            .Order()
+            .ToList();
+        Assert.Equal([(7, 8), (9, 9), (11, 11), (12, 12), (13, 13), (21, 21)], flows);
+    }
+
+    [Fact]
+    public void DataFlows_ExpressionBodiedMethodWalkedOnce()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        WriteIssue131Tree(tempDirectory.Path, """
+using System.Diagnostics;
+
+namespace Repro;
+
+public class Mixed
+{
+    private static readonly string Field = Console.ReadLine()!;
+
+    public static Process Arrow() => Process.Start(Field);
+
+    public static Process Block()
+    {
+        var local = Console.ReadLine();
+        return Process.Start(local);
+    }
+
+    public string Prop => Process.Start(Console.ReadLine()!);
+}
+""");
+
+        var result = ReadDataFlows(tempDirectory.Path);
+        // The arrow-bodied method is walked exactly once as its declaration root (the naive
+        // fix that added the arrow clause as a root of its own walked it twice), and the
+        // local initializer inside the block body adds no duplicate.
+        var pairs = result.Slices.Select(slice =>
+        {
+            var source = result.Nodes.Single(node => node.Id == slice.SourceId);
+            var sink = result.Nodes.Single(node => node.Id == slice.SinkId);
+            return (source.LineNumber, sink.LineNumber);
+        }).Order().ToList();
+        Assert.Equal([(7, 9), (13, 14), (17, 17)], pairs);
+    }
+
+    [Fact]
+    public void DataFlows_StaticFieldInitializerTaintReachesReaders()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        WriteIssue131Tree(tempDirectory.Path, """
+using System.Diagnostics;
+
+namespace Ns;
+
+public class P
+{
+    private static readonly string Config = Console.ReadLine()!;
+
+    public static void Reader()
+    {
+        Process.Start(Config);
+    }
+}
+""");
+
+        var result = ReadDataFlows(tempDirectory.Path);
+        var slice = Assert.Single(result.Slices);
+        var source = result.Nodes.Single(node => node.Id == slice.SourceId);
+        // The source node sits at the initializer (line 7), where the IL pass places it, and
+        // carries the synthesized static constructor's method id.
+        Assert.Equal(7, source.LineNumber);
+        Assert.Equal("Ns.P..cctor()", source.Properties["methodId"]);
+    }
+
+    [Fact]
+    public void DataFlows_SliceFingerprint_DedupesAcrossPasses()
+    {
+        DataFlowNode Node(string file, int line, int column) => new() { Id = "dfn", Kind = "Source", Name = "n", FileName = file, LineNumber = line, ColumnNumber = column };
+        var source = Node("Flows.cs", 7, 48);
+        var sink = Node("Flows.cs", 8, 41);
+
+        // Two slices that agree on the files, lines, sink name, category and argument index
+        // are the same flow, whatever their node ids; the columns differ across passes by
+        // construction (expression start against sequence point) and are not part of the key.
+        Assert.Equal(
+            DataFlowAnalyzer.SliceFingerprint(source, sink, "command", 0),
+            DataFlowAnalyzer.SliceFingerprint(Node("Flows.cs", 7, 5), Node("Flows.cs", 8, 9), "command", 0));
+        // A different source file, sink name, category or argument index is a distinct flow
+        // and is kept.
+        Assert.NotEqual(
+            DataFlowAnalyzer.SliceFingerprint(source, sink, "command", 0),
+            DataFlowAnalyzer.SliceFingerprint(Node("Other.cs", 7, 48), sink, "command", 0));
+        Assert.NotEqual(
+            DataFlowAnalyzer.SliceFingerprint(source, sink, "command", 0),
+            DataFlowAnalyzer.SliceFingerprint(source, new DataFlowNode { Id = "dfn", Kind = "Sink", Name = "WriteAllText", FileName = "Flows.cs", LineNumber = 8, ColumnNumber = 41 }, "command", 0));
+        Assert.NotEqual(
+            DataFlowAnalyzer.SliceFingerprint(source, sink, "command", 0),
+            DataFlowAnalyzer.SliceFingerprint(source, sink, "log", 0));
+        Assert.NotEqual(
+            DataFlowAnalyzer.SliceFingerprint(source, sink, "command", 0),
+            DataFlowAnalyzer.SliceFingerprint(source, sink, "command", 1));
+    }
+
+    [Fact]
+    public void DataFlows_InstanceMemberFactsFromInitializers()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        WriteIssue131Tree(tempDirectory.Path, """
+using System.Diagnostics;
+
+namespace Repro;
+
+public class Holder
+{
+    public string Config = Console.ReadLine()!;
+
+    public void Use()
+    {
+        Process.Start(Config);
+    }
+}
+""");
+
+        var result = ReadDataFlows(tempDirectory.Path);
+        var slice = Assert.Single(result.Slices);
+        var source = result.Nodes.Single(node => node.Id == slice.SourceId);
+        Assert.Equal(7, source.LineNumber);
+        // The instance twin of the static case: the owner is the generated parameterless
+        // constructor, so the member fact mints at the initializer.
+        Assert.Equal("Repro.Holder..ctor()", source.Properties["methodId"]);
+    }
+
+    #endregion
+
     private static void AssertNamespaces(List<Namespace>? actualNamespaces, Namespace[] expectedNamespaces)
     {
         foreach(var expectedNamespace in expectedNamespaces)
