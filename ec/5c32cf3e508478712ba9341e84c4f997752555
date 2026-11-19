@@ -1,0 +1,47 @@
+Dosai.Tests/Issue107AssemblyScopeTests.cs
+  s_c7ab1e6d0f0c48::t_699d59a6c44ad7 116-117
+docs/migration-5.1.0.md
+  s_c7ab1e6d0f0c48::t_699d59a6c44ad7 536-550
+Dosai/DependencyFlowScope.cs
+  s_c7ab1e6d0f0c48::t_ffcab86679ce48 11-15
+docs/commands.md
+  s_c7ab1e6d0f0c48::t_ffcab86679ce48 201
+Dosai/DataFlowAssembly.cs
+  s_c7ab1e6d0f0c48::t_af636293967666 701,706-709,711-717,719-720,726-733,736-748,750-753,895,997-1002
+  s_c7ab1e6d0f0c48::t_6b862e286abd70 2830,4639-4643
+  s_c7ab1e6d0f0c48::t_2c8040e3ec7b13 406,412,598
+  s_c7ab1e6d0f0c48::t_21396c8b8c745e 265-284
+  s_c7ab1e6d0f0c48::t_962691d61435b3 4578-4579
+  s_c7ab1e6d0f0c48::t_34e7a90cd0ff7c 4576-4577,4582,4584-4585
+  s_c7ab1e6d0f0c48::t_7e1ff6fbb2890e 4580-4581,4583
+  s_c7ab1e6d0f0c48::t_cae21be53f891d 494-503,507,572-597,599-700,702-705,710,718,721-725,734-735,749,754-894
+  s_c7ab1e6d0f0c48::t_3ef87873f6988f 313-319,370,375-378,380-405,407-409,414-417,439,504-506
+  s_c7ab1e6d0f0c48::t_8f6c96a44abc38 896
+Dosai/CommandLine.cs
+  s_c7ab1e6d0f0c48::t_ffcab86679ce48 67
+Dosai.Tests/CorpusTests.cs
+  s_c7ab1e6d0f0c48::t_699d59a6c44ad7 390-395,397
+  s_c7ab1e6d0f0c48::t_34ce6fca428d79 671-743
+  s_c7ab1e6d0f0c48::t_1a6be08cd0bc0b 744-745,748-753,755-772,774-783,785-787
+  s_c7ab1e6d0f0c48::t_4b27ebc6bc2538 746-747,754,773,784
+Dosai.Tests/Issue120RtaDispatchTests.cs
+  s_c7ab1e6d0f0c48::t_d21c9be11a8db8 1-201
+docs/ARCHITECTURE.md
+  s_c7ab1e6d0f0c48::t_ffcab86679ce48 113
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ec5c32cf3e508478712ba9341e84c4f997752555",
+  "prompts": {},
+  "sessions": {
+    "s_c7ab1e6d0f0c48": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "sess_ffe8eabc-0c06-4d2b-9b0a-1af2dae85431",
+        "model": "GLM-5.3"
+      },
+      "human_author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}
