@@ -1,0 +1,70 @@
+docs/commands.md
+  s_c7ab1e6d0f0c48::t_ffcab86679ce48 203
+  s_c7ab1e6d0f0c48::t_299d3234787d03 201-202
+docs/ARCHITECTURE.md
+  s_c7ab1e6d0f0c48::t_c3e233aa1cd67f 167-168
+  s_c7ab1e6d0f0c48::t_ffcab86679ce48 113
+Dosai/DataFlow.cs
+  s_c7ab1e6d0f0c48::t_7e1ff6fbb2890e 5653
+  s_c7ab1e6d0f0c48::t_26f7538dedbb06 675,684-685,687
+  s_c7ab1e6d0f0c48::t_d3ec5679dea7b7 450,464,509-516
+  s_c7ab1e6d0f0c48::t_fd066a3419652f 142-148,517,2870-2921
+  s_c7ab1e6d0f0c48::t_962691d61435b3 676-683,686,5650-5652
+  s_c7ab1e6d0f0c48::t_05bbd98d74b6fb 1895-1903,1908-1943,1945-1982,2261-2272
+  s_5bad3094f7bc65::t_f066c079f8e8b9 2273-2276
+  s_c7ab1e6d0f0c48::t_6c0c1b7fca23b0 635-674,688,691,693,695-713,737,739-740,742-755
+  s_c7ab1e6d0f0c48::t_09e21a1a0687c0 3963,3966,4000-4002
+  s_c7ab1e6d0f0c48::t_de8ed373fa7f82 149,1944,3953,3964-3965,3967,4003
+  s_c7ab1e6d0f0c48::t_458819ea2402f0 303-310,521-523
+  s_c7ab1e6d0f0c48::t_af68531dad6e89 2922
+Dosai.Tests/Issue120RtaDispatchTests.cs
+  s_c7ab1e6d0f0c48::t_d21c9be11a8db8 1-201
+Dosai/CommandLine.cs
+  s_c7ab1e6d0f0c48::t_ffcab86679ce48 67
+docs/migration-5.1.0.md
+  s_c7ab1e6d0f0c48::t_699d59a6c44ad7 536-550
+  s_c7ab1e6d0f0c48::t_c3e233aa1cd67f 806-819
+Dosai.Tests/DosaiTests.cs
+  s_c7ab1e6d0f0c48::t_ce34cb33c3d392 5907-5994,5996-6033,6037-6038,6041-6046,6048-6078,6080-6086
+  s_c7ab1e6d0f0c48::t_962691d61435b3 6034-6036,6039-6040,6047
+  s_c7ab1e6d0f0c48::t_de8ed373fa7f82 5995,6079
+Dosai.Tests/Issue107AssemblyScopeTests.cs
+  s_c7ab1e6d0f0c48::t_699d59a6c44ad7 116-117
+Dosai.Tests/CorpusTests.cs
+  s_c7ab1e6d0f0c48::t_34ce6fca428d79 671-743
+  s_c7ab1e6d0f0c48::t_699d59a6c44ad7 390-395,397
+Dosai/DataFlowAssembly.cs
+  s_c7ab1e6d0f0c48::t_21396c8b8c745e 265-284
+  s_c7ab1e6d0f0c48::t_af636293967666 701,706-709,711-717,719-720,726-733,736-748,750-753,895,997-1002
+  s_c7ab1e6d0f0c48::t_2c8040e3ec7b13 406,412,598
+  s_c7ab1e6d0f0c48::t_6b862e286abd70 2830,4629-4633
+  s_c7ab1e6d0f0c48::t_cae21be53f891d 494-503,507,572-597,599-700,702-705,710,718,721-725,734-735,749,754-894
+  s_c7ab1e6d0f0c48::t_8f6c96a44abc38 896
+  s_c7ab1e6d0f0c48::t_3ef87873f6988f 313-319,370,375-378,380-405,407-409,414-417,439,504-506
+Dosai/DependencyFlowScope.cs
+  s_c7ab1e6d0f0c48::t_ffcab86679ce48 11-15
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7b7c6c55d8dde2814a2d45a8f3e0be8ed745737c",
+  "prompts": {},
+  "sessions": {
+    "s_5bad3094f7bc65": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c8058ad5-2c38-4556-995e-6d27935e4326",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    },
+    "s_c7ab1e6d0f0c48": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "sess_ffe8eabc-0c06-4d2b-9b0a-1af2dae85431",
+        "model": "GLM-5.3"
+      },
+      "human_author": null
+    }
+  }
+}
