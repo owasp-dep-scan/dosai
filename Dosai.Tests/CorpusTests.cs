@@ -274,7 +274,7 @@ public class CorpusTests
         // name the assembly under out/).
         Assert.All(slice.MethodCalls!, call => Assert.False(call.Path is not null && (Path.IsPathFullyQualified(call.Path) || call.Path.StartsWith("/_/", StringComparison.Ordinal)), call.Path));
         Assert.All(slice.CallGraph.Edges, edge => Assert.False(edge.Path is not null && Path.IsPathFullyQualified(edge.Path), edge.Path));
-        Assert.Contains(slice.MethodCalls!, call => call.Path == Path.Combine("out", "Repro.dll"));
+        Assert.Contains(slice.MethodCalls!, call => call.Path == "out/Repro.dll");
     }
 
     // Added with the target-framework-aware analysis (schema 5.1.0): the corpus previously

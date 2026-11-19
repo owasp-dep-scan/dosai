@@ -2500,7 +2500,7 @@ public static class Dosai
                         
                         fsharpMethods.Add(new Method
                         {
-                            Path = Path.GetRelativePath(path, sourceFilePath),
+                            Path = Path.GetRelativePath(path, sourceFilePath).Replace('\\', '/'),
                             FileName = fileName,
                             Name = functionName,
                             ClassName = containingContext,
@@ -2524,7 +2524,7 @@ public static class Dosai
                         
                         fsharpMethods.Add(new Method
                         {
-                            Path = Path.GetRelativePath(path, sourceFilePath),
+                            Path = Path.GetRelativePath(path, sourceFilePath).Replace('\\', '/'),
                             FileName = fileName,
                             Name = memberName,
                             ClassName = containingType,
@@ -2547,7 +2547,7 @@ public static class Dosai
                         
                         fsharpMethods.Add(new Method
                         {
-                            Path = Path.GetRelativePath(path, sourceFilePath),
+                            Path = Path.GetRelativePath(path, sourceFilePath).Replace('\\', '/'),
                             FileName = fileName,
                             Name = ".ctor",
                             ClassName = containingType,
@@ -3024,7 +3024,8 @@ public static class Dosai
             var fileName = Path.GetFileName(sourceFilePath);
             // Computed once per file: it was rendered per member and per call site, a pure
             // function of (path, file) that left an identical string behind in every record.
-            var relativePath = Path.GetRelativePath(path, sourceFilePath);
+            // Forward slashes on every OS: consumers match records against source paths.
+            var relativePath = Path.GetRelativePath(path, sourceFilePath).Replace('\\', '/');
             var extn = Path.GetExtension(sourceFilePath);
             SemanticModel? model;
             CompilationUnitSyntax? csRoot = null;

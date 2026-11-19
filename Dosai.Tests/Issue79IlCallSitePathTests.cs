@@ -64,7 +64,8 @@ public sealed class Issue79IlCallSitePathTests
     {
         using var fixture = BuildFixture(document);
         var slice = Depscan.Dosai.GetMethodsSlice(fixture.Path);
-        var expected = Path.Combine("src", "App", "Program.cs");
+        // The placement joins the tail with forward slashes: the output contract on every OS.
+        var expected = "src/App/Program.cs";
 
         var ilCalls = (slice.MethodCalls ?? []).Where(IsIlCall).ToList();
         Assert.NotEmpty(ilCalls);
@@ -93,8 +94,8 @@ public sealed class Issue79IlCallSitePathTests
         Assert.Contains(slice.CallGraph.Edges, edge => edge.CalledMethodName == "Serialize" && edge.EvidenceKind == AnalysisEvidenceKind.AssemblyIlDirect && edge.Path == expected);
 
         // A call no sequence point covers names the assembly, relative to the root as well.
-        Assert.Contains(ilCalls, call => call.Path == Path.Combine("out", "App.dll"));
-        Assert.DoesNotContain(ilCalls, call => call.FileName == "App.dll" && call.Path != Path.Combine("out", "App.dll"));
+        Assert.Contains(ilCalls, call => call.Path == "out/App.dll");
+        Assert.DoesNotContain(ilCalls, call => call.FileName == "App.dll" && call.Path != "out/App.dll");
 
         // The package's own sources have no place in the tree, even where a tail of their path matches.
         var vendorCalls = ilCalls.Where(call => call.CallerNamespace == "Vendor").ToList();
@@ -142,7 +143,7 @@ public sealed class Issue79IlCallSitePathTests
         Directory.CreateDirectory(Path.Combine(root, "src", "App"));
         File.WriteAllText(Path.Combine(root, "src", "App", "Program.cs"), string.Empty);
         File.WriteAllText(Path.Combine(fixture.Path, "outside.cs"), string.Empty);
-        var appProgram = Path.Combine("src", "App", "Program.cs");
+        var appProgram = "src/App/Program.cs";
 
         Assert.Equal(appProgram, SourceDocumentPaths.InTree(root, Path.Combine(root, "src", "App", "Program.cs"), builtFromSource: false));
         Assert.Equal(appProgram, SourceDocumentPaths.InTree(root, "/_/src/App/Program.cs", builtFromSource: true));

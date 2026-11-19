@@ -817,3 +817,13 @@ once: the source pass claims its flows and the assembly pass drops its duplicate
 reported as `source`). Node ids (`dfn{...}`) shift because the source pass now walks more
 roots before the IL pass numbers its nodes; ids are order-dependent and deterministic, but a
 consumer pinning raw node ids sees churn.
+
+## Relative paths use forward slashes on every OS (fix)
+
+Every record's tree-relative path (`MethodCalls[].Path`, the call-graph edges' paths,
+data-flow nodes' `Path`, crypto locations, `ApiEndpoints[].FilePath`, and the IL pass's
+records) uses forward slashes on every OS. On Windows these fields carried backslashes,
+so the same scan produced `Views/Home/Privacy.cshtml` on Linux and
+`Views\Home\Privacy.cshtml` on Windows, and consumers matching records against source
+paths saw different values per host. Diagnostics prose and `FileName` fields are
+unchanged; on Linux and macOS no output changes at all.

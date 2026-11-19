@@ -128,7 +128,7 @@ public static partial class ApiEndpointAnalyzer
                 var location = statement.GetLocation().GetLineSpan().StartLinePosition;
                 var endpoint = new ApiEndpoint
                 {
-                    FilePath = Path.GetRelativePath(basePath, sourceFile),
+                    FilePath = SourceDocumentPaths.RelativePath(basePath, sourceFile),
                     FileName = Path.GetFileName(sourceFile),
                     Namespace = namespaceName,
                     ClassName = className,

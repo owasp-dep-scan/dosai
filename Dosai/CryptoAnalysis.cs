@@ -1558,7 +1558,7 @@ public static class CryptoAnalyzer
         ColumnNumber = column
     };
 
-    private static string SafeRelativePath(string basePath, string file) => Directory.Exists(basePath) ? Path.GetRelativePath(basePath, file) : Path.GetFileName(file);
+    private static string SafeRelativePath(string basePath, string file) => Directory.Exists(basePath) ? SourceDocumentPaths.RelativePath(basePath, file) : Path.GetFileName(file);
 
     private static string TrimCode(string code)
     {

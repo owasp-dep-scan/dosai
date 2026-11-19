@@ -73,14 +73,16 @@ public sealed class Issue98RazorCallSiteTests
 
     private const string VendorDocument = "/_/src/Vendor/Shared/Widget.razor";
 
-    private static readonly string CounterTemplate = Path.Combine("Components", "Pages", "Counter.razor");
+    // Expected record paths carry forward slashes on every OS (the output contract), and a
+    // forward-slashed relative path still builds fixture paths on Windows.
+    private const string CounterTemplate = "Components/Pages/Counter.razor";
 
     public static TheoryData<string, string> TemplateBuilds() => new()
     {
         { "{root}/", CounterTemplate },
         { "/_/", CounterTemplate },
-        { "{root}/", Path.Combine("Pages", "Privacy.cshtml") },
-        { "{root}/", Path.Combine("Components", "Layout", "NavMenu.Razor") }
+        { "{root}/", "Pages/Privacy.cshtml" },
+        { "{root}/", "Components/Layout/NavMenu.Razor" }
     };
 
     [Theory]
@@ -91,7 +93,7 @@ public sealed class Issue98RazorCallSiteTests
         var slice = Depscan.Dosai.GetMethodsSlice(fixture.Path);
 
         var call = Assert.Single(slice.MethodCalls ?? [], call => call.CalledMethod == "Serialize" && call.FileName == Path.GetFileName(template));
-        Assert.Equal((AnalysisEvidenceKind.AssemblyIlDirect, Path.Combine("src", "App", template), TemplateSerializeLine, 13), (call.EvidenceKind, call.Path, call.LineNumber, call.ColumnNumber));
+        Assert.Equal((AnalysisEvidenceKind.AssemblyIlDirect, "src/App/" + template, TemplateSerializeLine, 13), (call.EvidenceKind, call.Path, call.LineNumber, call.ColumnNumber));
         Assert.Contains(slice.CallGraph!.Edges, edge => edge.CalledMethodName == "Serialize" && edge.Path == call.Path && edge.CallLocation.FileName == Path.GetFileName(template) && edge.CallLocation.LineNumber == TemplateSerializeLine);
     }
 
@@ -105,7 +107,7 @@ public sealed class Issue98RazorCallSiteTests
         // Every IL row sits in the template; the unmapped KeepAlive call and the build's other
         // call sites (Program.cs, already read as source) are not repeated from IL.
         Assert.All(calls.Where(IsIlCall), call => Assert.Equal("Counter.razor", call.FileName));
-        Assert.Single(calls, call => call.CalledMethod is { } called && called.Contains("Serialize", StringComparison.Ordinal) && call.Path == Path.Combine("src", "App", "Program.cs") && call.LineNumber == ProgramSerializeLine);
+        Assert.Single(calls, call => call.CalledMethod is { } called && called.Contains("Serialize", StringComparison.Ordinal) && call.Path == "src/App/Program.cs" && call.LineNumber == ProgramSerializeLine);
         Assert.DoesNotContain(calls, call => call.CallerNamespace == "Vendor");
         Assert.DoesNotContain(slice.CallGraph!.Nodes, node => node.Name == "KeepAlive");
         Assert.DoesNotContain(calls, call => call.FileName?.EndsWith(".g.cs", StringComparison.Ordinal) == true);
@@ -233,7 +235,7 @@ public sealed class Issue98RazorCallSiteTests
         var slice = Depscan.Dosai.GetMethodsSlice(fixture.Path);
 
         var call = Assert.Single(slice.MethodCalls ?? [], call => call.CalledMethod == "Serialize" && call.FileName == "Counter.razor");
-        Assert.Equal((Path.Combine("src", "App", CounterTemplate), TemplateSerializeLine), (call.Path, call.LineNumber));
+        Assert.Equal(("src/App/" + CounterTemplate, TemplateSerializeLine), (call.Path, call.LineNumber));
     }
 
     [Fact]
@@ -245,7 +247,7 @@ public sealed class Issue98RazorCallSiteTests
         var slice = Depscan.Dosai.GetMethodsSlice(fixture.Path);
 
         Assert.DoesNotContain(slice.MethodCalls ?? [], IsIlCall);
-        Assert.Contains(slice.MethodCalls ?? [], call => call.CalledMethod is { } called && called.Contains("Serialize", StringComparison.Ordinal) && call.Path == Path.Combine("src", "App", "Program.cs"));
+        Assert.Contains(slice.MethodCalls ?? [], call => call.CalledMethod is { } called && called.Contains("Serialize", StringComparison.Ordinal) && call.Path == "src/App/Program.cs");
     }
 
     [Fact]
@@ -364,7 +366,7 @@ public sealed class Issue98RazorCallSiteTests
         var slice = Depscan.Dosai.GetMethodsSlice(fixture.Path);
 
         var row = Assert.Single(slice.MethodCalls ?? [], call => call.CalledMethod == "Serialize" && call.FileName == "Widget.razor");
-        Assert.Equal(Path.Combine(library, "Shared", "Widget.razor"), row.Path);
+        Assert.Equal($"{library}/Shared/Widget.razor", row.Path);
         Assert.Equal(1, row.LineNumber);
         AssertNoDanglingEdges(slice);
     }

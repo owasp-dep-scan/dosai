@@ -1529,7 +1529,7 @@ public static partial class DataFlowAnalyzer
                         Label = assignedName,
                         SourcePurl = source.Purl,
                         TargetPurl = sinkNode.Purl,
-                        Path = Directory.Exists(basePath) ? Path.GetRelativePath(basePath, file) : Path.GetFileName(file),
+                        Path = Directory.Exists(basePath) ? SourceDocumentPaths.RelativePath(basePath, file) : Path.GetFileName(file),
                         FileName = Path.GetFileName(file),
                         LineNumber = index + 1,
                         ColumnNumber = 1
@@ -1562,7 +1562,7 @@ public static partial class DataFlowAnalyzer
             Id = $"dfln{++nodeCounter}",
             Kind = kind,
             Name = name,
-            Path = Directory.Exists(basePath) ? Path.GetRelativePath(basePath, file) : Path.GetFileName(file),
+            Path = Directory.Exists(basePath) ? SourceDocumentPaths.RelativePath(basePath, file) : Path.GetFileName(file),
             FileName = Path.GetFileName(file),
             Namespace = namespaceName,
             ClassName = className,
@@ -5553,7 +5553,7 @@ public static partial class DataFlowAnalyzer
                 Purl = matchedPatterns.Select(pattern => pattern.Purl).FirstOrDefault(purl => !string.IsNullOrWhiteSpace(purl)) ??
                        purlResolver.Resolve(method?.ContainingAssembly?.ToDisplayString(), method?.ContainingModule?.ToDisplayString(), symbol, method?.ContainingNamespace?.ToDisplayString(), typeName, sourceFilePath),
                 Code = TrimCode(code ?? syntax.ToString()),
-                Path = Path.GetRelativePath(basePath, sourceFilePath),
+                Path = SourceDocumentPaths.RelativePath(basePath, sourceFilePath),
                 FileName = Path.GetFileName(sourceFilePath),
                 Namespace = method?.ContainingNamespace?.ToDisplayString() ?? string.Empty,
                 ClassName = method?.ContainingType?.Name ?? string.Empty,
@@ -5688,8 +5688,8 @@ public static partial class DataFlowAnalyzer
             if (string.IsNullOrWhiteSpace(root)) return Path.GetFileName(sourcePath);
             try
             {
-                var relative = Path.GetRelativePath(Path.GetFullPath(root), Path.GetFullPath(sourcePath));
-                if (string.IsNullOrWhiteSpace(relative) || Path.IsPathFullyQualified(relative) || relative == ".." || relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal) || relative.StartsWith($"..{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal)) return Path.GetFileName(sourcePath);
+                var relative = SourceDocumentPaths.RelativePath(Path.GetFullPath(root), Path.GetFullPath(sourcePath));
+                if (string.IsNullOrWhiteSpace(relative) || Path.IsPathFullyQualified(relative) || relative == ".." || relative.StartsWith("../", StringComparison.Ordinal)) return Path.GetFileName(sourcePath);
                 return relative;
             }
             catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
