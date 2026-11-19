@@ -1,0 +1,33 @@
+Dosai/SafeFileRead.cs
+  h_0926447d100ad2 44-51,93-129,131-281,323-327,338-342
+  s_4934ed444cde27::t_3976859dab797d 130
+docs/THREAT_MODEL.md
+  h_0926447d100ad2 54,161-167
+Dosai.Tests/McpConfinementTests.cs
+  h_0926447d100ad2 1-314
+Dosai/McpServer.cs
+  h_0926447d100ad2 20-24,40-45,48-51,85-93,96-102,157-159,162,164-168,241-256,264-265
+Dosai/DataFlow.cs
+  s_4934ed444cde27::t_dd174570aee353 702-714
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "65c52a25aeb07502ee5c976e2832a4f0e0e25673",
+  "prompts": {},
+  "humans": {
+    "h_0926447d100ad2": {
+      "author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  },
+  "sessions": {
+    "s_4934ed444cde27": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bb33f44c-7f08-4ca1-b501-a8d60716aa4f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}

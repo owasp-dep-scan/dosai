@@ -1,0 +1,20 @@
+Dosai.Tests/McpConfinementTests.cs
+  h_0926447d100ad2 1-314
+Dosai/McpServer.cs
+  h_0926447d100ad2 20-24,40-45,48-51,85-93,96-102,157-159,162,164-168,172-173,243-282,290-291
+Dosai/SafeFileRead.cs
+  h_0926447d100ad2 44-51,93-280,322-326,337-341
+docs/THREAT_MODEL.md
+  h_0926447d100ad2 53,160-166
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a352aa0886417e021a4379ae241040532e270e77",
+  "prompts": {},
+  "humans": {
+    "h_0926447d100ad2": {
+      "author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}

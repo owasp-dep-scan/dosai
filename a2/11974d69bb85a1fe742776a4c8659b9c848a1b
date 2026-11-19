@@ -1,0 +1,24 @@
+Dosai.Tests/SafeProcessTests.cs
+  h_0926447d100ad2 1-372
+Dosai/BuildPreparation.cs
+  h_0926447d100ad2 133-142,147
+Dosai/Dosai.cs
+  h_0926447d100ad2 1770-1775,1783-1788,1792,1797-1799
+Dosai/LanguageFrontendAnalyzer.cs
+  h_0926447d100ad2 692-694,710-715,720-721,942-944,946
+Dosai/SafeProcess.cs
+  h_0926447d100ad2 1-200
+docs/THREAT_MODEL.md
+  h_0926447d100ad2 53
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a211974d69bb85a1fe742776a4c8659b9c848a1b",
+  "prompts": {},
+  "humans": {
+    "h_0926447d100ad2": {
+      "author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
