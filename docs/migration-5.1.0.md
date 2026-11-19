@@ -775,3 +775,17 @@ a weak HMAC-MD5 asset) and replaces the generic strong `HMAC` asset the method n
 give; a runtime-chosen algorithm keeps the generic record. A block-body MAC line keeps the line
 pass's MD5 token beside the walker's MAC asset (two assets, one finding), and hyphenated
 constant spellings (`"SHA-256"`) record nothing.
+
+## Initializer calls attribute to the constructors that run them (issue #130, behavioral)
+
+Calls made directly in field, auto-property and event initializers appear in `MethodCalls` and
+the call graph, attributed to the constructor the compiler runs the initializer in: `Ns.T..cctor()`
+for static members, `Ns.T..ctor()` for instance members, one row per declared constructor (each
+row keeping the initializer's own line and column, with `EvidenceKind` `SourceRoslynDirect`, or
+`SourceUnresolved` on unrestored trees). On a class with several constructors the rows multiply
+exactly as the compiler's IL does, which promotes packages used only from initializers from
+`Dependency` to `ExternalCallGraphNode`. The static-constructor id loses its `:void` suffix
+(`Repro.Settings..cctor():void` becomes `Repro.Settings..cctor()`) and the phantom
+`Ns.T..ctor()` node that the inventory minted beside a declared static constructor is gone.
+Attribute arguments and Visual Basic initializer calls stay unrecorded (VB with a diagnostic
+counting the dropped sites).

@@ -509,6 +509,111 @@ public class CorpusTests
         Assert.DoesNotContain(result.Diagnostics, line => line.Contains("Crypto reachability fallback", StringComparison.Ordinal) || line.Contains("Crypto data-flow fallback", StringComparison.Ordinal));
     }
 
+    // Issue #130: calls made directly in field and auto-property initializers attribute to
+    // the constructors the compiler runs them in, promoting the package to
+    // ExternalCallGraphNode without the lambda's help.
+    private static MethodsSlice Issue130Slice(string variant)
+    {
+        var path = CorpusPathOrSkip($"issue130-initcalls/{variant}");
+        return JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(path), JsonOptions)!;
+    }
+
+    private static List<(int Line, string SourceId, string Called, CallType CallType, AnalysisEvidenceKind Evidence)> Issue130Rows(MethodsSlice slice) => slice.MethodCalls!
+        .Where(call => call.CalledMethod is { } called && (called.Contains("SerializeObject", StringComparison.Ordinal) || called.EndsWith("JsonSerializerSettings", StringComparison.Ordinal)))
+        .OrderBy(call => call.LineNumber).ThenBy(call => call.SourceId, StringComparer.Ordinal)
+        .Select(call => (call.LineNumber, call.SourceId!, call.CalledMethod!, call.CallType, call.EvidenceKind)).ToList();
+
+    [SkippableFact]
+    public void Corpus_Issue130_Base_InitializerCallsAttributeToSynthesizedConstructors()
+    {
+        var slice = Issue130Slice("base");
+        Assert.Equal(
+            [
+                (7, "Repro.Settings..cctor()", "Newtonsoft.Json.JsonConvert.SerializeObject(object?)", CallType.MethodCall, AnalysisEvidenceKind.SourceRoslynDirect),
+                (8, "Repro.Settings..ctor()", "JsonSerializerSettings", CallType.ConstructorCall, AnalysisEvidenceKind.SourceRoslynDirect),
+                (9, "Repro.Settings..ctor()", "Newtonsoft.Json.JsonConvert.SerializeObject(object?)", CallType.MethodCall, AnalysisEvidenceKind.SourceRoslynDirect),
+                (10, "Repro.Settings.<LambdaField>lambda1():string", "Newtonsoft.Json.JsonConvert.SerializeObject(object?)", CallType.MethodCall, AnalysisEvidenceKind.SourceRoslynDirect),
+            ],
+            Issue130Rows(slice));
+        Assert.Equal("ExternalCallGraphNode", SinglePackage(slice, "newtonsoft.json").ReachabilityKind);
+        AssertEveryEdgeEndpointExists(slice);
+    }
+
+    [SkippableFact]
+    public void Corpus_Issue130_NoLambda_ThePackageStaysReachableWithoutTheLambda()
+    {
+        var slice = Issue130Slice("nolambda");
+        Assert.Equal(3, Issue130Rows(slice).Count);
+        Assert.All(Issue130Rows(slice), row => Assert.Equal(AnalysisEvidenceKind.SourceRoslynDirect, row.Evidence));
+        // The headline regression: the initializer rows alone promote the package (Dependency Low before).
+        Assert.Equal("ExternalCallGraphNode", SinglePackage(slice, "newtonsoft.json").ReachabilityKind);
+    }
+
+    [SkippableFact]
+    public void Corpus_Issue130_NoRestore_InitializerCallsRecordAsSourceUnresolved()
+    {
+        var slice = Issue130Slice("norestore");
+        var rows = Issue130Rows(slice);
+        Assert.Equal(4, rows.Count);
+        Assert.All(rows, row => Assert.Equal(AnalysisEvidenceKind.SourceUnresolved, row.Evidence));
+        Assert.Equal(new[] { "Repro.Settings..cctor()", "Repro.Settings..ctor()", "Repro.Settings..ctor()", "Repro.Settings.<LambdaField>lambda1():string" }.Order(StringComparer.Ordinal), rows.Select(row => row.SourceId).Order(StringComparer.Ordinal));
+    }
+
+    [SkippableFact]
+    public void Corpus_Issue130_StructInit_StaticAttributed_InstanceDropped()
+    {
+        var slice = Issue130Slice("structinit");
+        var row = Assert.Single(Issue130Rows(slice));
+        Assert.Equal((7, "Repro.Settings..cctor()"), (row.Line, row.SourceId));
+        // A struct's implicit parameterless constructor never runs initializers, so the line 8
+        // instance initializer has no owner and records nothing.
+        Assert.Equal("ExternalCallGraphNode", SinglePackage(slice, "newtonsoft.json").ReachabilityKind);
+    }
+
+    [SkippableFact]
+    public void Corpus_Issue130_AttributeArguments_StayOutOfScope()
+    {
+        var slice = Issue130Slice("attrarg");
+        Assert.Empty(Issue130Rows(slice));
+        Assert.Equal("Dependency", SinglePackage(slice, "newtonsoft.json").ReachabilityKind);
+    }
+
+    [SkippableFact]
+    public void Corpus_Issue130_DeclaredStaticConstructor_OneCctorNodeAndNoPhantomCtor()
+    {
+        var slice = Issue130Slice("staticctor");
+        var row = Assert.Single(Issue130Rows(slice));
+        Assert.Equal((11, "Repro.Settings..cctor()"), (row.Line, row.SourceId));
+        Assert.Equal(["Repro.Settings..cctor()"], slice.CallGraph!.Nodes.Where(node => node.Id.StartsWith("Repro.Settings..", StringComparison.Ordinal)).Select(node => node.Id).ToList());
+        AssertEveryEdgeEndpointExists(slice);
+    }
+
+    [SkippableFact]
+    public void Corpus_Issue130_Built_TheIlPassAddsNothingToTheInitializerRows()
+    {
+        var slice = Issue130Slice("built");
+        // The IL pass leaves a non-Razor bin/ to source analysis, so the built tree reports the
+        // same rows once, no doubling.
+        Assert.Equal(4, Issue130Rows(slice).Count);
+        Assert.All(Issue130Rows(slice), row => Assert.Equal(AnalysisEvidenceKind.SourceRoslynDirect, row.Evidence));
+    }
+
+    [SkippableFact]
+    public void Corpus_Issue130_QualifiedNoLambda_BindsThroughTheQualifiedNames()
+    {
+        var slice = Issue130Slice("qualified-nolambda");
+        var rows = Issue130Rows(slice);
+        Assert.Equal(3, rows.Count);
+        Assert.All(rows, row => Assert.Equal(AnalysisEvidenceKind.SourceRoslynDirect, row.Evidence));
+        Assert.Equal("ExternalCallGraphNode", SinglePackage(slice, "newtonsoft.json").ReachabilityKind);
+    }
+
+    private static PackageReachability SinglePackage(MethodsSlice slice, string name)
+    {
+        var packages = slice.PackageReachability!.Where(entry => entry.Purl?.Contains(name, StringComparison.OrdinalIgnoreCase) == true).ToList();
+        return Assert.Single(packages);
+    }
+
     // Issue #110's repro: with the app and the library in one tree the library's call binds
     // as it does when the library is scanned alone.
     [SkippableFact]

@@ -129,7 +129,10 @@ public static class Dosai
             _ when IsNestedFunction(method) => NestedFunctionName(method),
             _ => method.MetadataName
         };
-        var returnType = method.MethodKind == MethodKind.Constructor ? "" : NormalizeSymbolName(method.ReturnType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat));
+        // Constructors and static constructors carry no return type, matching the IL passes'
+        // ids (`Ns.T..ctor()`, `Ns.T..cctor()`); a `:void` suffix on the static one used to
+        // give it two nodes (issue #130).
+        var returnType = method.MethodKind is MethodKind.Constructor or MethodKind.StaticConstructor ? "" : NormalizeSymbolName(method.ReturnType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat));
 
         var parameters = method.Parameters.Select(p => NormalizeSymbolName(p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat))).ToList();
         var paramString = string.Join(",", parameters);
@@ -148,6 +151,39 @@ public static class Dosai
     ///     memoizes per symbol so one member costs one render and one string instance per run.
     /// </summary>
     internal static string FormatMethodSignature(IMethodSymbol methodSymbol) => GenerateMethodSignature(methodSymbol);
+
+    /// <summary>
+    ///     The constructors the compiler runs a member initializer in, as real method symbols
+    ///     (issue #130): a static member resolves to the type's declared or implicitly declared
+    ///     static constructor, an instance member to every declared instance constructor in
+    ///     declaration order - or, when a reference type declares none, the implicitly declared
+    ///     parameterless one. A struct's implicit parameterless constructor only zeroes fields
+    ///     and never runs initializers, so a struct without a declared constructor has no owner
+    ///     (C# itself requires one before a struct may have field initializers). A record's
+    ///     copy constructor copies fields and does not run initializers, so it is excluded; the
+    ///     primary constructor runs them and stays.
+    /// </summary>
+    internal static IReadOnlyList<IMethodSymbol> InitializerOwnerConstructors(ISymbol member)
+    {
+        var type = member.ContainingType;
+        if (type is null)
+        {
+            return [];
+        }
+
+        if (member.IsStatic)
+        {
+            return type.StaticConstructors.ToArray();
+        }
+
+        var declared = type.InstanceConstructors.Where(constructor => !constructor.IsImplicitlyDeclared).ToArray();
+        if (declared.Length > 0)
+        {
+            return declared;
+        }
+
+        return type.IsValueType ? [] : type.InstanceConstructors.Where(constructor => constructor.IsImplicitlyDeclared).ToArray();
+    }
 
     /// <summary>An anonymous function (lambda, anonymous method) or a local function: named after the member that declares it.</summary>
     internal static bool IsNestedFunction(IMethodSymbol method) => method.MethodKind is MethodKind.AnonymousFunction or MethodKind.LocalFunction;
@@ -292,7 +328,7 @@ public static class Dosai
         var typeName = string.Join('.', new[] { namespaceName, className }.Where(part => !string.IsNullOrWhiteSpace(part)));
         var parameterTypes = parameters?.Select(p => NormalizeSymbolName(p.TypeFullName ?? p.Type ?? string.Empty)) ?? [];
         var id = $"{typeName}.{memberName}({string.Join(",", parameterTypes)})";
-        if (!string.IsNullOrWhiteSpace(returnType) && memberName != ".ctor")
+        if (!string.IsNullOrWhiteSpace(returnType) && memberName is not ".ctor" and not ".cctor")
         {
             id += $":{NormalizeSymbolName(returnType)}";
         }
@@ -2692,6 +2728,7 @@ public static class Dosai
         public List<string> Diagnostics { get; } = [];
         public int AbandonedDispatchSites { get; set; }
         public string? FirstAbandonedDispatch { get; set; }
+        public int DroppedInitializerCalls { get; set; }
     }
 
     private static Method CreateMethodFromSymbol(
@@ -3827,7 +3864,7 @@ public static class Dosai
                         : OperationDepthGuard.GetOperation(model, operationNode);
                     if (operation is not null)
                     {
-                        walker.Visit(operation);
+                        walker.VisitRootOperation(operationNode, operation);
                     }
                 }
 
@@ -3837,6 +3874,7 @@ public static class Dosai
                 }
 
                 symbols.AbandonedDispatchSites = walker.AbandonedDispatchSites;
+                symbols.DroppedInitializerCalls = walker.DroppedInitializerCalls;
                 symbols.FirstAbandonedDispatch = walker.FirstAbandonedDispatch;
             }
 
@@ -3851,6 +3889,7 @@ public static class Dosai
             index => fileSymbols[index] = AnalyzeSourceFile(sourcesToInspect[index]));
 
         var abandonedDispatchSites = 0;
+        var droppedInitializerCalls = 0;
         string? firstAbandonedDispatch = null;
         foreach (var fileResult in fileSymbols)
         {
@@ -3869,6 +3908,13 @@ public static class Dosai
             mergedDiagnostics.AddRange(fileResult.Diagnostics);
             abandonedDispatchSites += fileResult.AbandonedDispatchSites;
             firstAbandonedDispatch ??= fileResult.FirstAbandonedDispatch;
+            droppedInitializerCalls += fileResult.DroppedInitializerCalls;
+        }
+
+        if (droppedInitializerCalls > 0)
+        {
+            mergedDiagnostics.Add(string.Create(CultureInfo.InvariantCulture,
+                $"{droppedInitializerCalls} call site(s) in Visual Basic field initializers were not recorded: initializer-call attribution covers C# only (shared and per-constructor initializers are a follow-up)."));
         }
 
         // The collectors and the dispatch indexes have served their purpose; dropping the
@@ -3931,15 +3977,21 @@ public static class Dosai
             // duplicate unreachable node per global-namespace constructor, the exact false
             // positive the dead-code report surfaces.
             var constructorNamespace = constructor.Namespace is "<global namespace>" ? null : constructor.Namespace;
-            var id = CreateMemberId(constructorNamespace, constructorClassName, ".ctor", constructor.Parameters);
-            AddNode(id, ".ctor", constructorClassName, constructorNamespace, constructor.FileName, constructor.Assembly, constructor.Module, "Constructor", constructor.LineNumber, constructor.ColumnNumber, false);
+            // A declared static constructor is `.cctor` (its ConstructorInfo knows IsStatic):
+            // minting it as `.ctor` put a phantom `Ns.T..ctor()` beside the `Ns.T..cctor()` node
+            // its own body's rows mint (issue #130).
+            var constructorName = constructor.IsStatic ? ".cctor" : ".ctor";
+            var id = CreateMemberId(constructorNamespace, constructorClassName, constructorName, constructor.Parameters);
+            AddNode(id, constructorName, constructorClassName, constructorNamespace, constructor.FileName, constructor.Assembly, constructor.Module, "Constructor", constructor.LineNumber, constructor.ColumnNumber, false);
         }
 
         foreach (var call in mergedMethodCalls.Where(c => !string.IsNullOrWhiteSpace(c.SourceId) && !string.IsNullOrWhiteSpace(c.TargetId)))
         {
             if (!methodNodeLookup.ContainsKey(call.SourceId!))
             {
-                AddNode(call.SourceId!, call.CallerMethod ?? call.SourceId!, call.CallerClass, call.CallerNamespace, call.FileName, null, null, "Method", call.LineNumber, call.ColumnNumber, false);
+                // A call attributed to the constructor a member initializer compiles into
+                // (issue #130) names a constructor node, like the inventory's.
+                AddNode(call.SourceId!, call.CallerMethod ?? call.SourceId!, call.CallerClass, call.CallerNamespace, call.FileName, null, null, call.CallerMethod is ".ctor" or ".cctor" ? "Constructor" : "Method", call.LineNumber, call.ColumnNumber, false);
             }
 
             if (!methodNodeLookup.ContainsKey(call.TargetId!))
@@ -4319,6 +4371,88 @@ public static class Dosai
         // OperationDepthGuard limit) and keep every call of a long chain in the graph.
         protected override int MaxAnalysisDepth => 1 << 17;
 
+        // The root whose operation tree is being visited. Initializer attribution (issue #130)
+        // applies only when the root is a member initializer's EqualsValue clause: every
+        // initializer is also inside some enclosing block root, where the enclosing method is
+        // the member the initializer belongs to and the call is dropped as before.
+        private SyntaxNode? currentRoot;
+
+        // Immutable symbols per compilation, so the owner list never depends on the worker.
+        private readonly Dictionary<ISymbol, IReadOnlyList<IMethodSymbol>> initializerOwnersByMember = new(SymbolEqualityComparer.Default);
+
+        /// <summary>Call sites in Visual Basic field initializers the guard dropped (issue #130: VB is out of scope, visibly).</summary>
+        public int DroppedInitializerCalls { get; private set; }
+
+        internal void VisitRootOperation(SyntaxNode root, IOperation operation)
+        {
+            currentRoot = root;
+            Visit(operation);
+            currentRoot = null;
+        }
+
+        /// <summary>
+        ///     Whether an <c>=</c> clause is a member initializer: a field or event-field
+        ///     declarator under a field declaration, or a property declaration. Attribute
+        ///     arguments, locals, parameter defaults and enum members are excluded by the parent
+        ///     chain (named attribute arguments are <c>=</c> clauses under an attribute
+        ///     argument), so they keep today's drop.
+        /// </summary>
+        private static bool IsMemberInitializer(EqualsValueClauseSyntax clause) => clause.Parent switch
+        {
+            Microsoft.CodeAnalysis.CSharp.Syntax.VariableDeclaratorSyntax
+            {
+                Parent: Microsoft.CodeAnalysis.CSharp.Syntax.VariableDeclarationSyntax
+                {
+                    Parent: Microsoft.CodeAnalysis.CSharp.Syntax.FieldDeclarationSyntax or Microsoft.CodeAnalysis.CSharp.Syntax.EventFieldDeclarationSyntax
+                }
+            } => true,
+            Microsoft.CodeAnalysis.CSharp.Syntax.PropertyDeclarationSyntax => true,
+            _ => false
+        };
+
+        /// <summary>
+        ///     The methods a call at <paramref name="position" /> attributes to: the enclosing
+        ///     method, or, inside a member-initializer root, the constructors the compiler runs
+        ///     the initializer in (issue #130), one row per owner so a multi-constructor class
+        ///     mirrors the IL the compiler emits. Visual Basic initializer roots stay dropped
+        ///     but counted, so the gap is a diagnostic instead of silence.
+        /// </summary>
+        private (IReadOnlyList<IMethodSymbol> Callers, bool FromInitializer) ResolveCallers(IOperation operation, int position)
+        {
+            if (EnclosingSymbol(position) is IMethodSymbol caller)
+            {
+                return ([caller], false);
+            }
+
+            if (currentRoot is EqualsValueClauseSyntax clause && IsMemberInitializer(clause))
+            {
+                var member = EnclosingSymbol(clause.SpanStart) ?? EnclosingSymbol(operation.Syntax.SpanStart);
+                if (member is IFieldSymbol or IPropertySymbol or IEventSymbol)
+                {
+                    if (!initializerOwnersByMember.TryGetValue(member, out var owners))
+                    {
+                        owners = InitializerOwnerConstructors(member);
+                        initializerOwnersByMember[member] = owners;
+                    }
+
+                    return (owners, true);
+                }
+            }
+            else if (currentRoot is Microsoft.CodeAnalysis.VisualBasic.Syntax.EqualsValueSyntax
+                     {
+                         Parent: Microsoft.CodeAnalysis.VisualBasic.Syntax.VariableDeclaratorSyntax
+                         {
+                             Parent: Microsoft.CodeAnalysis.VisualBasic.Syntax.FieldDeclarationSyntax
+                         }
+                     }
+                     && EnclosingSymbol(operation.Syntax.SpanStart) is not IMethodSymbol)
+            {
+                DroppedInitializerCalls++;
+            }
+
+            return ([], false);
+        }
+
         public override void Visit(IOperation? operation)
         {
             if (operation is null)
@@ -4384,7 +4518,8 @@ public static class Dosai
             {
                 return;
             }
-            if (EnclosingSymbol(operation.Syntax.SpanStart) is not IMethodSymbol callerSymbol)
+            var (callers, fromInitializer) = ResolveCallers(operation, operation.Syntax.SpanStart);
+            if (callers.Count == 0)
             {
                 return;
             }
@@ -4404,12 +4539,6 @@ public static class Dosai
                 return;
             }
             var location = operation.Syntax.GetLocation().GetLineSpan().StartLinePosition;
-            var key = $"{location.Line}:{location.Character}:{cleanName}";
-            if (!unresolvedCallKeys.Add(key))
-            {
-                return;
-            }
-
             var isCreation = operation.Syntax is ObjectCreationExpressionSyntax;
             var segments = cleanName.Split('.', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             // The type part of the name: everything for a constructor call, everything but
@@ -4434,39 +4563,52 @@ public static class Dosai
                 ObjectCreationExpressionSyntax created => created.ArgumentList?.Arguments.Select(argument => SafeSyntaxText.Text(argument.Expression)).ToList() ?? [],
                 _ => []
             };
-            methodCalls.Add(new MethodCalls
+            foreach (var callerSymbol in callers)
             {
-                Path = relativePath,
-                FileName = fileName,
-                Namespace = namespaceGuess,
-                ClassName = className,
-                CalledMethod = isCreation ? className ?? cleanName : segments[^1],
-                LineNumber = location.Line + 1,
-                ColumnNumber = location.Character + 1,
-                Arguments = argumentTexts,
-                ArgumentExpressions = argumentTexts,
-                CallType = isCreation ? CallType.ConstructorCall : CallType.MethodCall,
-                SourceId = renderCache.Signature(callerSymbol),
-                TargetId = $"Unresolved:{cleanName}",
-                CallerMethod = renderCache.MemberName(callerSymbol),
-                CallerNamespace = renderCache.Display(callerSymbol.ContainingNamespace),
-                CallerClass = GetNamedContainingTypeName(callerSymbol),
-                IsInternal = false,
-                EvidenceKind = AnalysisEvidenceKind.SourceUnresolved,
-                Evidence =
-                [
-                    new AnalysisEvidence
-                    {
-                        Kind = AnalysisEvidenceKind.SourceUnresolved,
-                        Source = "roslyn-source-unresolved",
-                        Confidence = "Low",
-                        Description = "Call site did not bind; the target assembly was not available to the compilation.",
-                        FileName = fileName,
-                        LineNumber = location.Line + 1,
-                        ColumnNumber = location.Character + 1
-                    }
-                ]
-            });
+                var sourceId = renderCache.Signature(callerSymbol);
+                // The owner joins the key: several constructors of one class each keep their
+                // row (the line:column:name key alone suppressed the second and later).
+                if (!unresolvedCallKeys.Add($"{location.Line}:{location.Character}:{cleanName}:{sourceId}"))
+                {
+                    continue;
+                }
+
+                methodCalls.Add(new MethodCalls
+                {
+                    Path = relativePath,
+                    FileName = fileName,
+                    Namespace = namespaceGuess,
+                    ClassName = className,
+                    CalledMethod = isCreation ? className ?? cleanName : segments[^1],
+                    LineNumber = location.Line + 1,
+                    ColumnNumber = location.Character + 1,
+                    Arguments = argumentTexts,
+                    ArgumentExpressions = argumentTexts,
+                    CallType = isCreation ? CallType.ConstructorCall : CallType.MethodCall,
+                    SourceId = sourceId,
+                    TargetId = $"Unresolved:{cleanName}",
+                    CallerMethod = renderCache.MemberName(callerSymbol),
+                    CallerNamespace = renderCache.Display(callerSymbol.ContainingNamespace),
+                    CallerClass = GetNamedContainingTypeName(callerSymbol),
+                    IsInternal = false,
+                    EvidenceKind = AnalysisEvidenceKind.SourceUnresolved,
+                    Evidence =
+                    [
+                        new AnalysisEvidence
+                        {
+                            Kind = AnalysisEvidenceKind.SourceUnresolved,
+                            Source = "roslyn-source-unresolved",
+                            Confidence = "Low",
+                            Description = fromInitializer
+                                ? "Call site did not bind; the target assembly was not available to the compilation. The caller is the constructor the compiler generates from the member initializer."
+                                : "Call site did not bind; the target assembly was not available to the compilation.",
+                            FileName = fileName,
+                            LineNumber = location.Line + 1,
+                            ColumnNumber = location.Character + 1
+                        }
+                    ]
+                });
+            }
         }
 
         private static string CleanUnresolvedName(string name)
@@ -4602,15 +4744,20 @@ public static class Dosai
             var callerPosition = operation.Syntax is PrimaryConstructorBaseTypeSyntax baseType
                 ? baseType.ArgumentList.OpenParenToken.Span.End
                 : operation.Syntax.SpanStart;
-            if (targetMethod is null || EnclosingSymbol(callerPosition) is not IMethodSymbol callerSymbol)
+            if (targetMethod is null)
+            {
+                return;
+            }
+
+            var (callers, fromInitializer) = ResolveCallers(operation, callerPosition);
+            if (callers.Count == 0)
             {
                 return;
             }
 
             var location = operation.Syntax.GetLocation().GetLineSpan().StartLinePosition;
-            var sourceId = renderCache.Signature(callerSymbol);
             var targetId = renderCache.Signature(targetMethod);
-            if (string.IsNullOrWhiteSpace(sourceId) || string.IsNullOrWhiteSpace(targetId))
+            if (string.IsNullOrWhiteSpace(targetId))
             {
                 return;
             }
@@ -4625,40 +4772,53 @@ public static class Dosai
                 ? targetMethod.ContainingType?.Name ?? targetMethod.Name
                 : IsNestedFunction(targetMethod) ? renderCache.MemberName(targetMethod) : renderCache.NormalizedErrorMessage(targetMethod);
 
-            methodCalls.Add(new MethodCalls
+            // A member initializer's calls emit one row per owner constructor, in declaration
+            // order (issue #130), keeping the initializer's own line and column.
+            foreach (var callerSymbol in callers)
             {
-                Path = relativePath,
-                FileName = fileName,
-                Assembly = renderCache.Display(targetMethod.ContainingAssembly),
-                Module = renderCache.Display(targetMethod.ContainingModule),
-                Namespace = renderCache.Display(targetMethod.ContainingNamespace),
-                ClassName = GetNamedContainingTypeName(targetMethod),
-                CalledMethod = calledMethod,
-                LineNumber = location.Line + 1,
-                ColumnNumber = location.Character + 1,
-                Arguments = argumentList,
-                ArgumentExpressions = argumentExpressions,
-                CallType = callType,
-                SourceId = sourceId,
-                TargetId = targetId,
-                CallerMethod = renderCache.MemberName(callerSymbol),
-                CallerNamespace = renderCache.Display(callerSymbol.ContainingNamespace),
-                CallerClass = GetNamedContainingTypeName(callerSymbol),
-                IsInternal = isInternal && !isInMetadata,
-                EvidenceKind = AnalysisEvidenceKind.SourceRoslynDirect,
-                Evidence =
-                [
-                    new AnalysisEvidence
-                    {
-                        Kind = AnalysisEvidenceKind.SourceRoslynDirect,
-                        Source = "roslyn-source",
-                        Description = "Call discovered from Roslyn semantic operation.",
-                        FileName = fileName,
-                        LineNumber = location.Line + 1,
-                        ColumnNumber = location.Character + 1
-                    }
-                ]
-            });
+                var sourceId = renderCache.Signature(callerSymbol);
+                if (string.IsNullOrWhiteSpace(sourceId))
+                {
+                    continue;
+                }
+
+                methodCalls.Add(new MethodCalls
+                {
+                    Path = relativePath,
+                    FileName = fileName,
+                    Assembly = renderCache.Display(targetMethod.ContainingAssembly),
+                    Module = renderCache.Display(targetMethod.ContainingModule),
+                    Namespace = renderCache.Display(targetMethod.ContainingNamespace),
+                    ClassName = GetNamedContainingTypeName(targetMethod),
+                    CalledMethod = calledMethod,
+                    LineNumber = location.Line + 1,
+                    ColumnNumber = location.Character + 1,
+                    Arguments = argumentList,
+                    ArgumentExpressions = argumentExpressions,
+                    CallType = callType,
+                    SourceId = sourceId,
+                    TargetId = targetId,
+                    CallerMethod = renderCache.MemberName(callerSymbol),
+                    CallerNamespace = renderCache.Display(callerSymbol.ContainingNamespace),
+                    CallerClass = GetNamedContainingTypeName(callerSymbol),
+                    IsInternal = isInternal && !isInMetadata,
+                    EvidenceKind = AnalysisEvidenceKind.SourceRoslynDirect,
+                    Evidence =
+                    [
+                        new AnalysisEvidence
+                        {
+                            Kind = AnalysisEvidenceKind.SourceRoslynDirect,
+                            Source = "roslyn-source",
+                            Description = fromInitializer
+                                ? "Call discovered from Roslyn semantic operation. The caller is the constructor the compiler generates from the member initializer."
+                                : "Call discovered from Roslyn semantic operation.",
+                            FileName = fileName,
+                            LineNumber = location.Line + 1,
+                            ColumnNumber = location.Character + 1
+                        }
+                    ]
+                });
+            }
         }
 
         /// <summary>Call sites of this file whose dispatch lookup lost a candidate to a Roslyn failure (issue #64).</summary>
@@ -4888,14 +5048,16 @@ public static class Dosai
 
         private void AddInferredMethodCall(IOperation operation, IMethodSymbol targetMethod, CallType callType, IEnumerable<IArgumentOperation> arguments, List<string> argumentExpressions, AnalysisEvidenceKind evidenceKind, string description, string confidence, IMethodSymbol? callerOverride = null, string? dispatchConfidence = null)
         {
-            if ((callerOverride ?? EnclosingSymbol(operation.Syntax.SpanStart)) is not IMethodSymbol callerSymbol)
+            // An explicit caller override stays single; otherwise a member-initializer root
+            // attributes to the constructor owners (issue #130), one row per owner.
+            var (callers, fromInitializer) = callerOverride is not null ? ([callerOverride], false) : ResolveCallers(operation, operation.Syntax.SpanStart);
+            if (callers.Count == 0)
             {
                 return;
             }
 
-            var sourceId = renderCache.Signature(callerSymbol);
             var targetId = renderCache.Signature(targetMethod);
-            if (string.IsNullOrWhiteSpace(sourceId) || string.IsNullOrWhiteSpace(targetId) || sourceId == targetId)
+            if (string.IsNullOrWhiteSpace(targetId))
             {
                 return;
             }
@@ -4906,43 +5068,52 @@ public static class Dosai
             var isInMetadata = targetLocations.Any(locationInfo => locationInfo.IsInMetadata);
             var isInSource = targetLocations.Any(locationInfo => locationInfo.IsInSource);
 
-            methodCalls.Add(new MethodCalls
+            foreach (var callerSymbol in callers)
             {
-                Path = relativePath,
-                FileName = fileName,
-                Assembly = renderCache.Display(targetMethod.ContainingAssembly),
-                Module = renderCache.Display(targetMethod.ContainingModule),
-                Namespace = renderCache.Display(targetMethod.ContainingNamespace),
-                ClassName = GetNamedContainingTypeName(targetMethod),
-                CalledMethod = targetMethod.MethodKind == MethodKind.Constructor ? targetMethod.ContainingType?.Name ?? targetMethod.Name
-                    : IsNestedFunction(targetMethod) ? renderCache.MemberName(targetMethod) : renderCache.NormalizedErrorMessage(targetMethod),
-                LineNumber = location.Line + 1,
-                ColumnNumber = location.Character + 1,
-                Arguments = argumentList,
-                ArgumentExpressions = argumentExpressions,
-                CallType = callType,
-                SourceId = sourceId,
-                TargetId = targetId,
-                CallerMethod = renderCache.MemberName(callerSymbol),
-                CallerNamespace = callerSymbol.ContainingNamespace?.ToDisplayString() ?? string.Empty,
-                CallerClass = GetNamedContainingTypeName(callerSymbol),
-                IsInternal = (isInSource || SymbolEqualityComparer.Default.Equals(targetMethod.ContainingAssembly, model.Compilation.Assembly)) && !isInMetadata,
-                EvidenceKind = evidenceKind,
-                DispatchConfidence = dispatchConfidence,
-                Evidence =
-                [
-                    new AnalysisEvidence
-                    {
-                        Kind = evidenceKind,
-                        Source = "roslyn-source-inferred",
-                        Description = description,
-                        Confidence = confidence,
-                        FileName = fileName,
-                        LineNumber = location.Line + 1,
-                        ColumnNumber = location.Character + 1
-                    }
-                ]
-            });
+                var sourceId = renderCache.Signature(callerSymbol);
+                if (string.IsNullOrWhiteSpace(sourceId) || sourceId == targetId)
+                {
+                    continue;
+                }
+
+                methodCalls.Add(new MethodCalls
+                {
+                    Path = relativePath,
+                    FileName = fileName,
+                    Assembly = renderCache.Display(targetMethod.ContainingAssembly),
+                    Module = renderCache.Display(targetMethod.ContainingModule),
+                    Namespace = renderCache.Display(targetMethod.ContainingNamespace),
+                    ClassName = GetNamedContainingTypeName(targetMethod),
+                    CalledMethod = targetMethod.MethodKind == MethodKind.Constructor ? targetMethod.ContainingType?.Name ?? targetMethod.Name
+                        : IsNestedFunction(targetMethod) ? renderCache.MemberName(targetMethod) : renderCache.NormalizedErrorMessage(targetMethod),
+                    LineNumber = location.Line + 1,
+                    ColumnNumber = location.Character + 1,
+                    Arguments = argumentList,
+                    ArgumentExpressions = argumentExpressions,
+                    CallType = callType,
+                    SourceId = sourceId,
+                    TargetId = targetId,
+                    CallerMethod = renderCache.MemberName(callerSymbol),
+                    CallerNamespace = callerSymbol.ContainingNamespace?.ToDisplayString() ?? string.Empty,
+                    CallerClass = GetNamedContainingTypeName(callerSymbol),
+                    IsInternal = (isInSource || SymbolEqualityComparer.Default.Equals(targetMethod.ContainingAssembly, model.Compilation.Assembly)) && !isInMetadata,
+                    EvidenceKind = evidenceKind,
+                    DispatchConfidence = dispatchConfidence,
+                    Evidence =
+                    [
+                        new AnalysisEvidence
+                        {
+                            Kind = evidenceKind,
+                            Source = "roslyn-source-inferred",
+                            Description = fromInitializer ? $"{description} The caller is the constructor the compiler generates from the member initializer." : description,
+                            Confidence = confidence,
+                            FileName = fileName,
+                            LineNumber = location.Line + 1,
+                            ColumnNumber = location.Character + 1
+                        }
+                    ]
+                });
+            }
         }
 
         private bool ShouldInferDispatchCandidates(IMethodSymbol targetMethod)

@@ -50,6 +50,15 @@ dotnet run --project ./Dosai/Dosai.csproj -- methods \
 
 Supported call graph formats are `mermaid`, `graphml`, and `gexf`. If `--callgraph-out` is omitted, Dosai derives the output name from `--o` and the selected format.
 
+Calls made directly in field, auto-property and event initializers are recorded under the
+constructor the compiler runs them in (issue #130): the static constructor (`.cctor`) for
+static members, every declared instance constructor for instance members (one row each, at the
+initializer's own line), the generated parameterless one when a reference type declares none,
+and declared constructors only for structs, because a struct's implicit parameterless
+constructor never runs initializers. A declared static constructor's node id is `Ns.T..cctor()`
+with no return-type suffix, matching the IL passes. Attribute arguments stay out of scope, and
+Visual Basic initializer calls are recorded nowhere yet, with a diagnostic saying so.
+
 Framework-analysis options:
 
 | Flag                          | Effect                                                                                                                                |
