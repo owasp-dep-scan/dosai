@@ -72,7 +72,8 @@ public static class Program
 """));
         var nodes = result.Nodes.ToDictionary(node => node.Id);
         Assert.Contains(result.MethodSummaries, summary => summary.Method.Contains("Program.Helper", StringComparison.Ordinal));
-        Assert.Contains(result.Slices, slice => nodes[slice.SinkId].MethodName == "Run");
+        var slice = Assert.Single(result.Slices);
+        Assert.Equal("Run", nodes[slice.SinkId].MethodName);
     }
 
     [Fact]
@@ -160,5 +161,41 @@ public class Plain
 }
 """));
         Assert.DoesNotContain(result.MethodSummaries, summary => summary.Method.Contains(".ctor", StringComparison.Ordinal) || summary.Method.Contains(".cctor", StringComparison.Ordinal));
+    }
+
+    private static void AssertNoDuplicateNodes(DataFlowResult result) =>
+        Assert.Empty(result.Nodes.GroupBy(node => (node.Kind, node.Name, node.Path, node.LineNumber, node.ColumnNumber)).Where(group => group.Count() > 1));
+
+    [Fact]
+    public void LocalFunctionWithItsOwnSource_IsReportedOnce()
+    {
+        var result = AnalyzeSources(("Fixture.cs", Header.Replace("using System.Diagnostics;", "using System.IO;") + """
+public static class Program
+{
+    public static void Main()
+    {
+        Local2();
+        static void Local2() { var x = Console.ReadLine()!; File.ReadAllText(x); }
+    }
+}
+"""));
+        var slice = Assert.Single(result.Slices);
+        Assert.Equal("Local2", result.Nodes.Single(node => node.Id == slice.SinkId).MethodName);
+        AssertNoDuplicateNodes(result);
+    }
+
+    [Fact]
+    public void TopLevelLocalFunction_IsReportedOnce()
+    {
+        var result = AnalyzeSources(("Program.cs", """
+using System;
+using System.IO;
+
+Local2();
+
+static void Local2() { var x = Console.ReadLine()!; File.ReadAllText(x); }
+"""));
+        Assert.Single(result.Slices);
+        AssertNoDuplicateNodes(result);
     }
 }

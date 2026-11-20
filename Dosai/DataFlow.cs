@@ -723,7 +723,7 @@ public static partial class DataFlowAnalyzer
                         continue;
                     }
 
-                    collector.Visit(declaration);
+                    collector.VisitRoot(declaration);
                     break;
             }
         }
@@ -765,7 +765,7 @@ public static partial class DataFlowAnalyzer
                         continue;
                     }
 
-                    walker.Visit(operation);
+                    walker.VisitRoot(operation);
                     break;
             }
         }
@@ -1857,6 +1857,29 @@ public static partial class DataFlowAnalyzer
     /// </summary>
     private sealed class DataFlowSummaryCollector(SemanticModel model, Dictionary<string, DataFlowMethodSummary> summaries, DataFlowPatternSet patterns, Dictionary<string, HashSet<string>>? callerIndex = null, Dictionary<string, (IOperation Root, SemanticModel Model)>? methodRoots = null, DataFlowMemberFacts? memberFacts = null) : DepthBoundedOperationWalker
     {
+        // A local function is a root of its own (SelectDataFlowRoots); the walk of the
+        // declaration that encloses it, or of top-level statements, must not enter it a second
+        // time, or its slices and nodes would be reported twice.
+        private ILocalFunctionOperation? _rootLocalFunction;
+
+        public void VisitRoot(IOperation operation)
+        {
+            if (operation is ILocalFunctionOperation localFunction)
+            {
+                _rootLocalFunction = localFunction;
+            }
+
+            Visit(operation);
+        }
+
+        public override void VisitLocalFunction(ILocalFunctionOperation operation)
+        {
+            if (ReferenceEquals(operation, _rootLocalFunction))
+            {
+                base.VisitLocalFunction(operation);
+            }
+        }
+
         private IMethodSymbol? _currentMethod;
 
         // What each local of the current method was assigned from, flow-insensitively: a summary
@@ -2707,6 +2730,29 @@ public static partial class DataFlowAnalyzer
 
     private sealed class DataFlowOperationWalker(SemanticModel model, DataFlowGraphBuilder graph, DataFlowPatternSet patterns, Dictionary<string, DataFlowMethodSummary> summaries, string basePath, string sourceFilePath, FrameworkTaintSeedIndex? frameworkSeeds = null, DataFlowMemberFacts? memberFacts = null) : DepthBoundedOperationWalker
     {
+        // A local function is a root of its own (SelectDataFlowRoots); the walk of the
+        // declaration that encloses it, or of top-level statements, must not enter it a second
+        // time, or its slices and nodes would be reported twice.
+        private ILocalFunctionOperation? _rootLocalFunction;
+
+        public void VisitRoot(IOperation operation)
+        {
+            if (operation is ILocalFunctionOperation localFunction)
+            {
+                _rootLocalFunction = localFunction;
+            }
+
+            Visit(operation);
+        }
+
+        public override void VisitLocalFunction(ILocalFunctionOperation operation)
+        {
+            if (ReferenceEquals(operation, _rootLocalFunction))
+            {
+                base.VisitLocalFunction(operation);
+            }
+        }
+
         private readonly Dictionary<string, TaintTrace> _taintedSymbols = new(StringComparer.Ordinal);
         private readonly DataFlowPatternIndex _patternIndex = new(patterns);
         private readonly FrameworkTaintSeedIndex? _frameworkSeeds = frameworkSeeds;
