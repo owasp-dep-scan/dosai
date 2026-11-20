@@ -157,7 +157,8 @@ public static class Dosai
     ///     (issue #130): a static member resolves to the type's declared or implicitly declared
     ///     static constructor, an instance member to every declared instance constructor in
     ///     declaration order - or, when a reference type declares none, the implicitly declared
-    ///     parameterless one. A struct's implicit parameterless constructor only zeroes fields
+    ///     parameterless one; constructors that chain with <c>: this(...)</c> are left out, as
+    ///     the constructor they chain to is the one that runs it. A struct's implicit parameterless constructor only zeroes fields
     ///     and never runs initializers, so a struct without a declared constructor has no owner
     ///     (C# itself requires one before a struct may have field initializers). A record's
     ///     copy constructor copies fields and does not run initializers, so it is excluded; the
@@ -176,13 +177,32 @@ public static class Dosai
             return type.StaticConstructors.ToArray();
         }
 
-        var declared = type.InstanceConstructors.Where(constructor => !constructor.IsImplicitlyDeclared).ToArray();
+        // A constructor that chains with `: this(...)` runs no initializers: the constructor it
+        // chains to does (every other constructor of a primary-constructor type chains). A
+        // struct's chain to its implicit parameterless `this()` is the exception, the implicit
+        // constructor being the one that runs the initializers there.
+        var declared = type.InstanceConstructors.Where(constructor => !constructor.IsImplicitlyDeclared && !ChainsToAnotherConstructor(constructor, type.IsValueType)).ToArray();
         if (declared.Length > 0)
         {
             return declared;
         }
 
         return type.IsValueType ? [] : type.InstanceConstructors.Where(constructor => constructor.IsImplicitlyDeclared).ToArray();
+    }
+
+    private static bool ChainsToAnotherConstructor(IMethodSymbol constructor, bool inStruct)
+    {
+        foreach (var reference in constructor.DeclaringSyntaxReferences)
+        {
+            if (reference.GetSyntax() is Microsoft.CodeAnalysis.CSharp.Syntax.ConstructorDeclarationSyntax { Initializer: { } initializer }
+                && initializer.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.ThisConstructorInitializer)
+                && !(inStruct && initializer.ArgumentList.Arguments.Count == 0))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>An anonymous function (lambda, anonymous method) or a local function: named after the member that declares it.</summary>
@@ -3865,7 +3885,7 @@ public static class Dosai
                     // A primary constructor's base-type arguments (`class D(int x) : B(x)`) are its
                     // constructor initializer.
                     ? csRoot.DescendantNodes().Where(node => node is Microsoft.CodeAnalysis.CSharp.Syntax.BlockSyntax or ArrowExpressionClauseSyntax or EqualsValueClauseSyntax or ConstructorInitializerSyntax or PrimaryConstructorBaseTypeSyntax or GlobalStatementSyntax)
-                    : vbRoot?.DescendantNodes().Where(node => node is Microsoft.CodeAnalysis.VisualBasic.Syntax.StatementSyntax or Microsoft.CodeAnalysis.VisualBasic.Syntax.EqualsValueSyntax) ?? [];
+                    : vbRoot?.DescendantNodes().Where(node => node is Microsoft.CodeAnalysis.VisualBasic.Syntax.StatementSyntax or Microsoft.CodeAnalysis.VisualBasic.Syntax.EqualsValueSyntax or Microsoft.CodeAnalysis.VisualBasic.Syntax.AsNewClauseSyntax { Parent: Microsoft.CodeAnalysis.VisualBasic.Syntax.VariableDeclaratorSyntax { Parent: Microsoft.CodeAnalysis.VisualBasic.Syntax.FieldDeclarationSyntax } or Microsoft.CodeAnalysis.VisualBasic.Syntax.PropertyStatementSyntax }) ?? [];
                 foreach (var operationNode in operationNodes)
                 {
                     var operation = operationNode is GlobalStatementSyntax globalStatement
@@ -3923,7 +3943,7 @@ public static class Dosai
         if (droppedInitializerCalls > 0)
         {
             mergedDiagnostics.Add(string.Create(CultureInfo.InvariantCulture,
-                $"{droppedInitializerCalls} call site(s) in Visual Basic field initializers were not recorded: initializer-call attribution covers C# only (shared and per-constructor initializers are a follow-up)."));
+                $"{droppedInitializerCalls} call site(s) in Visual Basic field and property initializers (As New clauses included) were not recorded: initializer-call attribution covers C# only (shared and per-constructor initializers are a follow-up)."));
         }
 
         // The collectors and the dispatch indexes have served their purpose; dropping the
@@ -4389,6 +4409,16 @@ public static class Dosai
         // Immutable symbols per compilation, so the owner list never depends on the worker.
         private readonly Dictionary<ISymbol, IReadOnlyList<IMethodSymbol>> initializerOwnersByMember = new(SymbolEqualityComparer.Default);
 
+        private readonly HashSet<int> droppedInitializerSites = [];
+
+        /// <summary>A Visual Basic field or property initializer root: <c>= value</c> or <c>As New T(...)</c>.</summary>
+        private static bool IsVisualBasicMemberInitializer(SyntaxNode? root) => root switch
+        {
+            Microsoft.CodeAnalysis.VisualBasic.Syntax.EqualsValueSyntax { Parent: Microsoft.CodeAnalysis.VisualBasic.Syntax.VariableDeclaratorSyntax { Parent: Microsoft.CodeAnalysis.VisualBasic.Syntax.FieldDeclarationSyntax } or Microsoft.CodeAnalysis.VisualBasic.Syntax.PropertyStatementSyntax } => true,
+            Microsoft.CodeAnalysis.VisualBasic.Syntax.AsNewClauseSyntax { Parent: Microsoft.CodeAnalysis.VisualBasic.Syntax.VariableDeclaratorSyntax { Parent: Microsoft.CodeAnalysis.VisualBasic.Syntax.FieldDeclarationSyntax } or Microsoft.CodeAnalysis.VisualBasic.Syntax.PropertyStatementSyntax } => true,
+            _ => false
+        };
+
         /// <summary>Call sites in Visual Basic field initializers the guard dropped (issue #130: VB is out of scope, visibly).</summary>
         public int DroppedInitializerCalls { get; private set; }
 
@@ -4447,15 +4477,11 @@ public static class Dosai
                     return (owners, true);
                 }
             }
-            else if (currentRoot is Microsoft.CodeAnalysis.VisualBasic.Syntax.EqualsValueSyntax
-                     {
-                         Parent: Microsoft.CodeAnalysis.VisualBasic.Syntax.VariableDeclaratorSyntax
-                         {
-                             Parent: Microsoft.CodeAnalysis.VisualBasic.Syntax.FieldDeclarationSyntax
-                         }
-                     }
-                     && EnclosingSymbol(operation.Syntax.SpanStart) is not IMethodSymbol)
+            else if (IsVisualBasicMemberInitializer(currentRoot) && EnclosingSymbol(operation.Syntax.SpanStart) is not IMethodSymbol
+                     && droppedInitializerSites.Add(operation.Syntax.SpanStart))
             {
+                // Counted once per site: the inferred-dispatch recorder asks for the callers of
+                // the same call again.
                 DroppedInitializerCalls++;
             }
 

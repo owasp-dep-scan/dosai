@@ -5898,7 +5898,7 @@ End Namespace
 
         var slice = ReadMethods(tempDirectory.Path);
         Assert.DoesNotContain(slice.MethodCalls!, call => call.CallerMethod == ".cctor" || call.CallerMethod == ".ctor");
-        Assert.Contains(slice.Diagnostics!, diagnostic => diagnostic.Contains("Visual Basic field initializers were not recorded", StringComparison.Ordinal));
+        Assert.Contains(slice.Diagnostics!, diagnostic => diagnostic.Contains("Visual Basic field and property initializers (As New clauses included) were not recorded", StringComparison.Ordinal));
     }
 
     #endregion
