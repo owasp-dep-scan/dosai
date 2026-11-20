@@ -684,8 +684,9 @@ public class CorpusTests
         Assert.DoesNotContain(reachable.Nodes, node => (node.Symbol ?? string.Empty).Contains("MessageTemplateTextFormatter", StringComparison.Ordinal)
             || (node.Symbol ?? string.Empty).Contains("JsonFormatter", StringComparison.Ordinal)
             || (node.Symbol ?? string.Empty).Contains("LogEvent.Copy", StringComparison.Ordinal));
-        // The measured prune note: 952 of 1190 before rapid type analysis, 780 with it.
-        Assert.Contains(reachable.Diagnostics, diagnostic => diagnostic.Contains("780 of 1190 method bodies in dependency assemblies were not analyzed", StringComparison.Ordinal));
+        // The measured prune note: 952 of 1190 before rapid type analysis, 763 with it
+        // (780 before the dispatch matching kept every match along the base chain).
+        Assert.Contains(reachable.Diagnostics, diagnostic => diagnostic.Contains("763 of 1190 method bodies in dependency assemblies were not analyzed", StringComparison.Ordinal));
 
         // Every reachable application slice appears in all, and the anchored set is not empty.
         DataFlowResult all;
