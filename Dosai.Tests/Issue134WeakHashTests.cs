@@ -188,13 +188,13 @@ public static class Hmac
         Assert.Equal(("HMAC-MD5", "mac", "weak", "roslyn"), (decoded.Name, decoded.Family, decoded.Strength, decoded.Source));
         Assert.DoesNotContain(LineOf(source, "m:decoded"), Lines(result, "DOSAI-CRYPTO-WEAK-HASH-MD5"));
 
-        // A runtime-chosen algorithm keeps exactly the generic HMAC record, as before.
+        // A runtime-chosen algorithm is a MAC of unknown strength, never the strong generic HMAC.
         var runtime = Assert.Single(AssetsOnLine(result, "Fixture.cs", LineOf(source, "m:runtime")));
-        Assert.Equal(("HMAC", "mac", "strong", "roslyn"), (runtime.Name, runtime.Family, runtime.Strength, runtime.Source));
+        Assert.Equal(("HMAC", "mac", "unknown", "roslyn"), (runtime.Name, runtime.Family, runtime.Strength, runtime.Source));
     }
 
     [Fact]
-    public void HmacDataBlockBody_FallbackResidual_IsPinned()
+    public void HmacDataBlockBody_GivesHmacMd5Only_LikeTheExpressionBody()
     {
         var source = Usings + """
 public static class Hmac
@@ -207,17 +207,55 @@ public static class Hmac
 """;
         var result = Analyze(source);
         var line = LineOf(source, "m:block");
-        // The walker records HMAC-MD5 at the argument and the fallback still reads the MD5
-        // token (it cannot tell a hash call from a MAC call); the generic HMAC is gone, so
-        // two assets and one finding is the whole line. Pinned so a later cleanup of the
-        // fallback fails loudly instead of silently changing output.
-        var rows = AssetsOnLine(result, "Fixture.cs", line);
-        Assert.Equal(2, rows.Count);
-        Assert.Contains(rows, row => row is { Name: "HMAC-MD5", Family: "mac", Strength: "weak", Source: "roslyn" });
-        Assert.Contains(rows, row => row is { Name: "MD5", Family: "hash", Strength: "weak", Source: "csharp" });
-        Assert.DoesNotContain(rows, row => row is { Name: "HMAC", Strength: "strong" });
-        Assert.Contains(line, Lines(result, "DOSAI-CRYPTO-WEAK-HASH-MD5"));
-        Assert.Equal(1, result.Findings.Count(finding => finding.RuleId == "DOSAI-CRYPTO-WEAK-HASH-MD5" && finding.Location.LineNumber == line));
+        // The line fallback no longer reads the MD5 token the walker already classified as the
+        // MAC's algorithm: one HMAC-MD5 asset and no plain-MD5 hashing finding, as in the
+        // expression-bodied form.
+        var row = Assert.Single(AssetsOnLine(result, "Fixture.cs", line));
+        Assert.Equal(("HMAC-MD5", "mac", "weak", "roslyn"), (row.Name, row.Family, row.Strength, row.Source));
+        Assert.DoesNotContain(line, Lines(result, "DOSAI-CRYPTO-WEAK-HASH-MD5"));
+    }
+
+    [Fact]
+    public void ReadonlyFieldAlgorithm_IsResolved_AndAnUnresolvableMacIsNotStrong()
+    {
+        var source = Usings + """
+public static class Fields
+{
+    private static readonly HashAlgorithmName Weak = HashAlgorithmName.MD5;
+    public static HashAlgorithmName Mutable = HashAlgorithmName.SHA256;
+
+    public static byte[] ViaField(byte[] key, byte[] data) => CryptographicOperations.HmacData(Weak, key, data); // m:field
+    public static byte[] ViaMutable(byte[] key, byte[] data) => CryptographicOperations.HmacData(Mutable, key, data); // m:mutable
+}
+""";
+        var result = Analyze(source);
+        var field = Assert.Single(AssetsOnLine(result, "Fixture.cs", LineOf(source, "m:field")));
+        Assert.Equal(("HMAC-MD5", "weak"), (field.Name, field.Strength));
+        var mutable = Assert.Single(AssetsOnLine(result, "Fixture.cs", LineOf(source, "m:mutable")));
+        Assert.Equal(("HMAC", "unknown"), (mutable.Name, mutable.Strength));
+    }
+
+    [Fact]
+    public void IncrementalHashAndSignatureCalls_DecodeTheirAlgorithmInExpressionBodies()
+    {
+        var source = Usings + """
+public static class Others
+{
+    public static IncrementalHash Hash() => IncrementalHash.CreateHash(HashAlgorithmName.MD5); // m:hash
+    public static IncrementalHash Mac(byte[] key) => IncrementalHash.CreateHMAC(HashAlgorithmName.MD5, key); // m:mac
+    public static byte[] Sign(RSA rsa, byte[] data) => rsa.SignData(data, HashAlgorithmName.MD5, RSASignaturePadding.Pkcs1); // m:sign
+    public static bool Verify(ECDsa key, byte[] data, byte[] signature) => key.VerifyData(data, signature, HashAlgorithmName.SHA1); // m:verify
+}
+""";
+        var result = Analyze(source);
+        Assert.Contains(AssetsOnLine(result, "Fixture.cs", LineOf(source, "m:hash")), row => row.Name == "MD5");
+        Assert.Contains(LineOf(source, "m:hash"), Lines(result, "DOSAI-CRYPTO-WEAK-HASH-MD5"));
+        Assert.Contains(AssetsOnLine(result, "Fixture.cs", LineOf(source, "m:mac")), row => row.Name == "HMAC-MD5");
+        Assert.DoesNotContain(LineOf(source, "m:mac"), Lines(result, "DOSAI-CRYPTO-WEAK-HASH-MD5"));
+        var sign = AssetsOnLine(result, "Fixture.cs", LineOf(source, "m:sign"));
+        Assert.Contains(sign, row => row.Name == "MD5");
+        Assert.Contains(LineOf(source, "m:sign"), Lines(result, "DOSAI-CRYPTO-WEAK-HASH-MD5"));
+        Assert.Contains(AssetsOnLine(result, "Fixture.cs", LineOf(source, "m:verify")), row => row.Name == "SHA-1");
     }
 
     [Fact]
