@@ -1,0 +1,21 @@
+Dosai.Tests/Issue131FollowUpTests.cs
+  s_870276876982bd::t_77062c23a64576 75-76,165-200
+Dosai/DataFlow.cs
+  s_870276876982bd::t_9e0e6f692527ce 726,768,1860-1882,2733-2755
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8f4d5d6197d96af037d0bc3c56380ef65a4b54dd",
+  "prompts": {},
+  "sessions": {
+    "s_870276876982bd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c678bfd8-2aba-4f7e-aa22-0bbbaf027e71",
+        "model": "unknown"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
