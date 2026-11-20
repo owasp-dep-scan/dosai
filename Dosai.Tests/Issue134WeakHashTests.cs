@@ -219,10 +219,17 @@ public static class Hmac
     public void ReadonlyFieldAlgorithm_IsResolved_AndAnUnresolvableMacIsNotStrong()
     {
         var source = Usings + """
-public static class Fields
+public class Fields
 {
     private static readonly HashAlgorithmName Weak = HashAlgorithmName.MD5;
     public static HashAlgorithmName Mutable = HashAlgorithmName.SHA256;
+    private static readonly HashAlgorithmName Reassigned = HashAlgorithmName.SHA1;
+    private readonly HashAlgorithmName _instance = HashAlgorithmName.SHA1;
+
+    static Fields() { Reassigned = HashAlgorithmName.SHA512; }
+
+    public byte[] ViaInstance(byte[] key, byte[] data) => CryptographicOperations.HmacData(_instance, key, data); // m:instance
+    public static byte[] ViaReassigned(byte[] key, byte[] data) => CryptographicOperations.HmacData(Reassigned, key, data); // m:reassigned
 
     public static byte[] ViaField(byte[] key, byte[] data) => CryptographicOperations.HmacData(Weak, key, data); // m:field
     public static byte[] ViaMutable(byte[] key, byte[] data) => CryptographicOperations.HmacData(Mutable, key, data); // m:mutable
@@ -233,6 +240,13 @@ public static class Fields
         Assert.Equal(("HMAC-MD5", "weak"), (field.Name, field.Strength));
         var mutable = Assert.Single(AssetsOnLine(result, "Fixture.cs", LineOf(source, "m:mutable")));
         Assert.Equal(("HMAC", "unknown"), (mutable.Name, mutable.Strength));
+        // A constructor may store another value in an instance field, and a static constructor
+        // in a static one: neither initializer is trusted, so no weak finding appears.
+        foreach (var marker in new[] { "m:instance", "m:reassigned" })
+        {
+            var row = Assert.Single(AssetsOnLine(result, "Fixture.cs", LineOf(source, marker)));
+            Assert.Equal(("HMAC", "unknown"), (row.Name, row.Strength));
+        }
     }
 
     [Fact]

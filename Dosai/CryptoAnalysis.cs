@@ -1473,13 +1473,15 @@ public static class CryptoAnalyzer
                 return property.Property.Name;
             case IObjectCreationOperation { Arguments: [{ Value.ConstantValue: { HasValue: true, Value: string name } }] }:
                 return name;
-            case IFieldReferenceOperation { Field.IsReadOnly: true } fieldReference when model is not null && depth < 4:
-                // A readonly field is as constant as its initializer: `static readonly
-                // HashAlgorithmName Weak = HashAlgorithmName.MD5`.
-                foreach (var reference in fieldReference.Field.DeclaringSyntaxReferences)
+            case IFieldReferenceOperation { Field: { IsReadOnly: true, IsStatic: true } field } when model is not null && depth < 4 && !AssignedInStaticConstructor(field):
+                // A static readonly field is as constant as its initializer: `static readonly
+                // HashAlgorithmName Weak = HashAlgorithmName.MD5`. An instance field is left
+                // alone (a constructor may store another value), and so is a static one a
+                // static constructor assigns.
+                foreach (var reference in field.DeclaringSyntaxReferences)
                 {
                     if (reference.GetSyntax() is CSharpSyntax.VariableDeclaratorSyntax { Initializer: { } initializer }
-                        && OperationDepthGuard.GetOperation(model.Compilation.GetSemanticModel(reference.SyntaxTree), initializer.Value) is { } initial)
+                        && OperationDepthGuard.GetOperation(ReferenceEquals(reference.SyntaxTree, model.SyntaxTree) ? model : model.Compilation.GetSemanticModel(reference.SyntaxTree), initializer.Value) is { } initial)
                     {
                         return HashAlgorithmNameOf(initial, model, depth + 1);
                     }
@@ -1489,6 +1491,31 @@ public static class CryptoAnalyzer
             default:
                 return null;
         }
+    }
+
+    private static bool AssignedInStaticConstructor(IFieldSymbol field)
+    {
+        foreach (var constructor in field.ContainingType.StaticConstructors)
+        {
+            foreach (var reference in constructor.DeclaringSyntaxReferences)
+            {
+                foreach (var assignment in reference.GetSyntax().DescendantNodes().OfType<CSharpSyntax.AssignmentExpressionSyntax>())
+                {
+                    var target = assignment.Left switch
+                    {
+                        CSharpSyntax.IdentifierNameSyntax identifier => identifier.Identifier.ValueText,
+                        CSharpSyntax.MemberAccessExpressionSyntax access => access.Name.Identifier.ValueText,
+                        _ => null
+                    };
+                    if (string.Equals(target, field.Name, StringComparison.Ordinal))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
     }
 
     private static bool HasCryptoToken(string symbol, params string[] candidates)
