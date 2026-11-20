@@ -4146,6 +4146,11 @@ public static partial class DataFlowAnalyzer
         private DependencyAssemblies? _dependencies;
         private readonly string? _treeRoot = SourceDocumentPaths.Root(basePath);
         private readonly Dictionary<(string Document, string Assembly), string> _treePaths = [];
+        // Documents whose path did not resolve into the tree (a relocated build, a container
+        // build): their nodes carry the bare file name, so the cross-pass fingerprint compares
+        // them by file name (issue #131).
+        private readonly HashSet<(string Document, string Assembly)> _unresolvedDocuments = [];
+        private readonly HashSet<string> _unresolvedNodeIds = new(StringComparer.Ordinal);
 
         public bool IsDependency(string assemblyPath) => Dependencies.IsDependency(assemblyPath);
 
@@ -4170,7 +4175,13 @@ public static partial class DataFlowAnalyzer
             if (!_treePaths.TryGetValue((filePath, assemblyPath), out var path))
             {
                 var builtFromSource = _treeRoot is not null && TreeFrameworks.IsBuiltFromSource(_treeRoot, assemblyPath);
-                path = SourceDocumentPaths.InTree(_treeRoot, filePath, builtFromSource) ?? SourceDocumentPaths.FileName(filePath);
+                var inTree = SourceDocumentPaths.InTree(_treeRoot, filePath, builtFromSource);
+                path = inTree ?? SourceDocumentPaths.FileName(filePath);
+                if (inTree is null)
+                {
+                    _unresolvedDocuments.Add((filePath, assemblyPath));
+                }
+
                 _treePaths.Add((filePath, assemblyPath), path);
             }
 
@@ -4711,6 +4722,11 @@ public static partial class DataFlowAnalyzer
                     ["metadataToken"] = $"0x{method.MetadataToken:x8}"
                 }
             };
+            if (_unresolvedDocuments.Contains((location.FilePath, assemblyKey)))
+            {
+                _unresolvedNodeIds.Add(node.Id);
+            }
+
             if (Dependencies.IsDependency(assemblyKey))
             {
                 node.Properties[TransparencyBuilder.ScopeProperty] = TransparencyBuilder.DependencyScope;
@@ -4780,8 +4796,11 @@ public static partial class DataFlowAnalyzer
             // flows only this pass finds, package-internal ones included, keep their
             // assembly-il evidence. This pass only reads the set: adding to it would merge two
             // distinct assembly flows that share a file, lines and sink name.
-            if (result.SliceFingerprints is { } fingerprints
-                && fingerprints.Contains(DataFlowAnalyzer.SliceFingerprint(sourceNode!, sinkNode, sinkPattern?.Category ?? sinkNode.Category, sinkArgumentIndex)))
+            // A node whose document did not resolve into the tree carries only a file name, so
+            // such a flow is compared with the source pass's name-keyed fingerprints.
+            var byFileName = _unresolvedNodeIds.Contains(sourceNode!.Id) || _unresolvedNodeIds.Contains(sinkNode.Id);
+            if ((byFileName ? result.SliceNameFingerprints : result.SliceFingerprints) is { } fingerprints
+                && fingerprints.Contains(DataFlowAnalyzer.SliceFingerprint(sourceNode, sinkNode, sinkPattern?.Category ?? sinkNode.Category, sinkArgumentIndex, byFileName)))
             {
                 return;
             }

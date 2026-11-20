@@ -309,6 +309,9 @@ public sealed class DataFlowResult
     ///     argument index), never node ids. Not serialized.
     /// </summary>
     internal HashSet<string>? SliceFingerprints { get; set; }
+
+    /// <summary>The same claims keyed by file name, for assembly flows whose document did not resolve into the tree.</summary>
+    internal HashSet<string>? SliceNameFingerprints { get; set; }
 }
 
 public static partial class DataFlowAnalyzer
@@ -522,6 +525,7 @@ public static partial class DataFlowAnalyzer
         // Created before the graph-walk phase so the source pass claims its flows first and
         // the assembly pass drops the duplicates (issue #131).
         result.SliceFingerprints = new HashSet<string>(StringComparer.Ordinal);
+        result.SliceNameFingerprints = new HashSet<string>(StringComparer.Ordinal);
         var graph = new DataFlowGraphBuilder(result, purlResolver, path);
 
         var frameworkSeeds = new FrameworkTaintSeedIndex(frameworkResult.TaintSeeds);
@@ -694,10 +698,11 @@ public static partial class DataFlowAnalyzer
     ///     node and 16 against 9 on a block-bodied sink), so no column matches across passes.
     ///     Only the source pass adds to the set and the assembly pass only reads it, so
     ///     distinct assembly flows (two copies of one build, a package with no source) never
-    ///     merge into each other (issue #131).
+    ///     merge into each other (issue #131). An assembly flow whose document did not resolve
+    ///     into the tree (a relocated or container build) is compared by file name instead.
     /// </summary>
-    internal static string SliceFingerprint(DataFlowNode source, DataFlowNode sink, string? category, int argumentIndex) =>
-        $"{source.Path}\u001f{sink.Path}\u001f{source.LineNumber}\u001f{sink.LineNumber}\u001f{sink.Name}\u001f{source.Category}\u001f{category}\u001f{argumentIndex.ToString(CultureInfo.InvariantCulture)}";
+    internal static string SliceFingerprint(DataFlowNode source, DataFlowNode sink, string? category, int argumentIndex, bool byFileName = false) =>
+        $"{(byFileName ? source.FileName : source.Path)}\u001f{(byFileName ? sink.FileName : sink.Path)}\u001f{source.LineNumber}\u001f{sink.LineNumber}\u001f{sink.Name}\u001f{source.Category}\u001f{category}\u001f{argumentIndex.ToString(CultureInfo.InvariantCulture)}";
 
     private static void CollectCompilationUnitSummaries(SemanticModel model, CSharpCompilationUnitSyntax root, Dictionary<string, DataFlowMethodSummary> summaries, DataFlowPatternSet patterns, Dictionary<string, HashSet<string>>? callerIndex = null, Dictionary<string, (IOperation Root, SemanticModel Model)>? methodRoots = null, DataFlowMemberFacts? memberFacts = null, List<(Microsoft.CodeAnalysis.CSharp.Syntax.EqualsValueClauseSyntax Root, SemanticModel Model)>? memberInitializerRoots = null)
     {
@@ -5727,6 +5732,7 @@ public static partial class DataFlowAnalyzer
             // guard intra-pass duplicates), so two same-line slices of this pass never merge;
             // the assembly pass then drops what the claims already hold (issue #131).
             result.SliceFingerprints?.Add(SliceFingerprint(sourceNode!, sinkNode, sinkPattern?.Category ?? sinkNode.Category, sinkArgumentIndex));
+            result.SliceNameFingerprints?.Add(SliceFingerprint(sourceNode!, sinkNode, sinkPattern?.Category ?? sinkNode.Category, sinkArgumentIndex, byFileName: true));
             var patternPurls = new[] { sinkPattern?.Purl, sourceNode?.Purl, sinkNode.Purl }.Where(purl => !string.IsNullOrWhiteSpace(purl));
             result.Slices.Add(new DataFlowSlice
             {

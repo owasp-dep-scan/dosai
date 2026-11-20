@@ -198,4 +198,39 @@ static void Local2() { var x = Console.ReadLine()!; File.ReadAllText(x); }
         Assert.Single(result.Slices);
         AssertNoDuplicateNodes(result);
     }
+
+    [Fact]
+    public void RelocatedBuild_WhoseDocumentsDoNotResolveIntoTheTree_IsNotReportedTwice()
+    {
+        const string source = """
+using System;
+using System.Diagnostics;
+
+namespace Fixture;
+
+public static class P
+{
+    public static void Main()
+    {
+        var x = Console.ReadLine()!;
+        Process.Start(x);
+    }
+}
+""";
+        using var fixture = new TempDir();
+        var web = System.IO.Path.Combine(fixture.Path, "moved", "x", "web");
+        Directory.CreateDirectory(web);
+        File.WriteAllText(System.IO.Path.Combine(web, "Program.cs"), source);
+        var sourceOnly = DataFlowAnalyzer.Analyze(fixture.Path).Slices.Count;
+        Assert.Equal(1, sourceOnly);
+
+        // The build ran elsewhere (a container at /src): its PDB names a document that is not
+        // under the scan root, so the IL nodes carry only the file name.
+        var output = System.IO.Path.Combine(web, "bin", "Debug", "net10.0");
+        Directory.CreateDirectory(output);
+        global::Dosai.Tests.EmitFixture.Emit(output, "App", source, "/src/web/Program.cs");
+
+        var result = DataFlowAnalyzer.Analyze(fixture.Path);
+        Assert.Equal(sourceOnly, result.Slices.Count);
+    }
 }
