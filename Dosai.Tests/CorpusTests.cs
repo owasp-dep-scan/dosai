@@ -387,14 +387,10 @@ public class CorpusTests
         Assert.Contains(without.Slices, slice => slice.Scope != "dependency" && without.Nodes.Single(node => node.Id == slice.SinkId).Name == "Parse");
         Assert.Contains(without.PackageReachability, package => package.Purl.StartsWith("pkg:nuget/MimeKit@", StringComparison.Ordinal));
 
-        // Reachable analyzes a fraction of the package bodies; every application slice it gives
-        // also appears in all, nodes through generic package methods included. The promise is a
-        // subset (issue #120's dispatch following keeps the bodies a run can execute but the
-        // walk takes a call's summary from the member the call names, so an application slice
-        // whose value propagation needs a dispatch target's return can still be missing); the
-        // test's own subject keeps the exact equality between the two reachable runs below.
+        // Reachable analyzes a fraction of the package bodies and still gives every application
+        // slice exactly as all does, nodes through generic package methods included.
         var all = Run(DependencyFlowMode.All);
-        Assert.All(ApplicationSlices(without), slice => Assert.Contains(slice, ApplicationSlices(all)));
+        Assert.Equal(ApplicationSlices(all), ApplicationSlices(without));
 
         File.Copy(Directory.EnumerateFiles(Path.Combine(copy.Path, "Api", "bin"), "Api.deps.json", SearchOption.AllDirectories).First(), Path.Combine(copy.Path, "Api.deps.json"));
         var with = Run(DependencyFlowMode.Reachable);
