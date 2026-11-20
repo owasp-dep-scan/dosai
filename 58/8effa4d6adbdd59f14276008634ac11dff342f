@@ -1,0 +1,24 @@
+Dosai/DataFlowAssembly.cs
+  s_870276876982bd::t_de617785e63de0 368,371-374,376,378,381-384,386,388-392,395,397-398,400-426,429,431-434,437,439-440
+  s_870276876982bd::t_e0ac916f509d5f 524-529,572-574,627,632-635,670-682,697-703,904-909,912-914,920,1052,1058,1076-1077,1081-1085,1090,1112
+Dosai.Tests/Issue120RtaGapTests.cs
+  s_870276876982bd::t_74d22ab0d2ea42 349,393-394
+  s_870276876982bd::t_4dab5b4833c6b5 54-71,75,95,98,319-348,350-392,395-438
+  s_870276876982bd::t_9dc18d079903c6 106-107
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "588effa4d6adbdd59f14276008634ac11dff342f",
+  "prompts": {},
+  "sessions": {
+    "s_870276876982bd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c678bfd8-2aba-4f7e-aa22-0bbbaf027e71",
+        "model": "claude-sonnet-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
