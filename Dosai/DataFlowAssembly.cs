@@ -578,10 +578,17 @@ public static partial class DataFlowAnalyzer
                 return members;
             }
 
-            // The qualified chain missed or could not be built (a TypeSpecification whose head
-            // does not decode, a reference whose scope chain stops at depth or at a cycle): a
-            // legacy key unique over the whole definition set is still unambiguous, so the
-            // lookup degrades to today's reach, never below it.
+            // A qualified chain that was built and missed is a real miss: an app's nested
+            // Program.Cache must not meet the one dependency that happens to declare an
+            // Outer.Cache of the same short name through the legacy key. Only a call whose
+            // chain could not be built (a TypeSpecification whose head does not decode, a
+            // reference whose scope chain stops at depth or at a cycle) degrades to the legacy
+            // key unique over the whole definition set, today's reach and never below it.
+            if (qualifiedContainingType is not null)
+            {
+                return [];
+            }
+
             return legacyIndex.TryGetValue(legacy, out var legacyMembers) ? legacyMembers : [];
         }
 

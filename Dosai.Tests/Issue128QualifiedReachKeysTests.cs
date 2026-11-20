@@ -315,4 +315,58 @@ public static class Program
             Assert.True(matched, "the app references Describe");
         }
     }
+
+    /// <summary>
+    ///     The legacy unqualified key is only for a call whose qualified chain could not be built.
+    ///     An app's own nested <c>Program.Cache.Local()</c> builds one and misses, so it must not
+    ///     reach the single dependency that declares an <c>Outer.Cache.Local()</c> of the same
+    ///     short name (the note read "1 of 2 not analyzed" through the legacy fallback).
+    /// </summary>
+    [Fact]
+    public void Reachable_AppNestedTypeOfTheSameShortName_DoesNotReachADependencyThroughTheLegacyKey()
+    {
+        using var fixture = new TempDir();
+        var output = System.IO.Path.Combine(fixture.Path, "App", "bin", "Debug", "net10.0");
+        Directory.CreateDirectory(output);
+        var lib = Emit(output, "LibP", """
+namespace LibP;
+
+public static class Outer
+{
+    public static class Cache
+    {
+        public static void Local() => System.Diagnostics.Process.Start("calc");
+    }
+}
+
+public static class Unrelated
+{
+    public static void Other() => System.Diagnostics.Process.Start("x");
+}
+""");
+        Emit(output, "App", """
+namespace App;
+
+public static class Program
+{
+    private static class Cache
+    {
+        public static void Local() { }
+    }
+
+    public static void Main(string[] args) { Cache.Local(); }
+}
+""", lib);
+        File.WriteAllText(System.IO.Path.Combine(output, "App.deps.json"), DepsJsonMarkingPackages("LibP"));
+
+        DataFlowResult result;
+        using (DependencyFlowScope.Apply(DependencyFlowMode.Reachable))
+        {
+            result = DataFlowAnalyzer.Analyze(fixture.Path);
+        }
+
+        Assert.DoesNotContain(result.MethodSummaries.Select(summary => summary.Method), symbol => symbol.Contains("Outer.Cache", StringComparison.Ordinal));
+        Assert.DoesNotContain(result.Nodes, node => (node.Symbol ?? string.Empty).Contains("Outer.Cache", StringComparison.Ordinal));
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Contains("2 of 2 method bodies in dependency assemblies were not analyzed", StringComparison.Ordinal));
+    }
 }
