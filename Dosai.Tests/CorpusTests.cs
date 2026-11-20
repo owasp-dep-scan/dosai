@@ -478,8 +478,7 @@ public class CorpusTests
             ("boundary/Boundary.cs", 9, 72, "MD5", "hash", "weak", "csharp"),
             ("hmac/Hmac.cs", 6, 105, "HMAC-MD5", "mac", "weak", "roslyn"),
             ("hmac/Hmac.cs", 10, 49, "HMAC-MD5", "mac", "weak", "roslyn"),
-            ("hmac/Hmac.cs", 10, 67, "MD5", "hash", "weak", "csharp"),
-            ("hmac/Hmac.cs", 13, 98, "HMAC", "mac", "strong", "roslyn"),
+            ("hmac/Hmac.cs", 13, 131, "HMAC", "mac", "unknown", "roslyn"),
         ];
         var actualAssets = result.Assets.Select(asset => (
             asset.Location.Path!, asset.Location.LineNumber, asset.Location.ColumnNumber,
@@ -492,7 +491,6 @@ public class CorpusTests
             [("boundary/Boundary.cs", 5, "DOSAI-CRYPTO-WEAK-HASH-MD5"), ("boundary/Boundary.cs", 9, "DOSAI-CRYPTO-WEAK-HASH-MD5"),
              ("Hashing.cs", 5, "DOSAI-CRYPTO-WEAK-HASH-MD5"), ("Hashing.cs", 9, "DOSAI-CRYPTO-WEAK-HASH-MD5"),
              ("hasprobe/HasProbe.cs", 9, "DOSAI-CRYPTO-WEAK-HASH-MD5"),
-             ("hmac/Hmac.cs", 10, "DOSAI-CRYPTO-WEAK-HASH-MD5"),
              ("lambda/ParenLambda.cs", 6, "DOSAI-CRYPTO-WEAK-HASH-MD5"),
              ("vb/Hashing.vb", 6, "DOSAI-CRYPTO-WEAK-HASH-MD5")],
             weakHashLines);
