@@ -1,0 +1,25 @@
+Dosai.Tests/Issue130FollowUpTests.cs
+  s_870276876982bd::t_c81f3b805430ef 108,124-142
+  s_870276876982bd::t_1c62f1f713613b 150
+Dosai/Dosai.cs
+  s_870276876982bd::t_c81f3b805430ef 184,193,199
+  s_870276876982bd::t_1c62f1f713613b 4412,4481
+docs/migration-5.1.0.md
+  s_870276876982bd::t_c81f3b805430ef 814-816
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "46278e62af9b49ec197e3039c64cac546cc3ca1a",
+  "prompts": {},
+  "sessions": {
+    "s_870276876982bd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c678bfd8-2aba-4f7e-aa22-0bbbaf027e71",
+        "model": "claude-sonnet-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
