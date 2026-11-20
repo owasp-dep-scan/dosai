@@ -1,0 +1,19 @@
+Dosai.Tests/CorpusTests.cs
+  s_1c3d45e28802c0::t_dacf241a7bab91 687-689
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "aa40c7394ebaca830ecfce25c5e5b2c276898cf8",
+  "prompts": {},
+  "sessions": {
+    "s_1c3d45e28802c0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0c649509-677a-4d91-8c15-5e9ea2c2a6b9",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
