@@ -255,6 +255,7 @@ public static class Probe
         Write(fixture.Path, "Probe.cs", ProbeSource);
 
         var result = Depscan.Dosai.GetMethodsSlice(fixture.Path);
+        Assert.NotEmpty(BindingAssemblies(result));
         Assert.All(BindingAssemblies(result), binding => Assert.Contains("Version=11.0.0.0", binding.Assembly, StringComparison.Ordinal));
         var note = SingleBaseNote(result);
         Assert.Equal(
@@ -270,6 +271,7 @@ public static class Probe
         Write(fixture.Path, "Probe.cs", ProbeSource);
 
         var result = Depscan.Dosai.GetMethodsSlice(fixture.Path);
+        Assert.NotEmpty(BindingAssemblies(result));
         Assert.All(BindingAssemblies(result), binding => Assert.Contains("Version=11.0.0.0", binding.Assembly, StringComparison.Ordinal));
         var note = SingleBaseNote(result);
         Assert.Equal(
@@ -294,8 +296,9 @@ public static class Probe
 """);
 
         var result = Depscan.Dosai.GetMethodsSlice(fixture.Path);
-        // mscorlib owns both symbols for net48 (the pack's System.Console.dll and the facades
-        // forward there, and Roslyn reports the defining assembly).
+        // mscorlib owns both symbols for net48 (the System.Console.dll in the pack's Facades
+        // directory forwards there, and Roslyn reports the defining assembly).
+        Assert.NotEmpty(BindingAssemblies(result));
         Assert.All(BindingAssemblies(result), binding => Assert.Equal("mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089", binding.Assembly));
         var note = SingleBaseNote(result);
         Assert.Equal(
@@ -332,5 +335,45 @@ public static class Probe
         var second = Depscan.Dosai.GetMethodsSlice(fixture.Path).Diagnostics ?? [];
         Assert.Equal(first, second);
         Assert.Contains(first, diagnostic => diagnostic.Contains("Base framework references", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Classify_DotlessNet10AndNet11_AreModernNetNotFramework1x()
+    {
+        Assert.Equal(FrameworkReferences.ReferencePackTargetFamily.ModernNet, FrameworkReferences.ClassifyTargetForReferencePacks("net10", out var ten));
+        Assert.Equal(10, ten.Major);
+        Assert.Equal(FrameworkReferences.ReferencePackTargetFamily.ModernNet, FrameworkReferences.ClassifyTargetForReferencePacks("net11", out var eleven));
+        Assert.Equal(11, eleven.Major);
+        Assert.Equal(FrameworkReferences.ReferencePackTargetFamily.NetFramework, FrameworkReferences.ClassifyTargetForReferencePacks("net48", out var framework));
+        Assert.Equal((4, 8), (framework.Major, framework.Minor));
+    }
+
+    [Fact]
+    public void NetFrameworkPackLookup_FallsBackToALowerVersionHoldingTheTargetFolder()
+    {
+        using var fixture = new TempDir();
+        var package = System.IO.Path.Combine(fixture.Path, "microsoft.netframework.referenceassemblies.net48");
+        Directory.CreateDirectory(System.IO.Path.Combine(package, "1.0.3", "build", ".NETFramework", "v4.8"));
+        Directory.CreateDirectory(System.IO.Path.Combine(package, "2.0.0", "build", ".NETFramework", "v4.7"));
+        var found = FrameworkReferences.ResolveNetFrameworkReferenceAssemblies(
+            "microsoft.netframework.referenceassemblies.net48", new FrameworkPreprocessorDefines.FrameworkVersion(4, 8, 0), [fixture.Path]);
+        Assert.NotNull(found);
+        Assert.Equal("1.0.3", found!.Value.Version);
+    }
+
+    [SkippableFact]
+    public void Methods_Net462Tree_GetsNetStandardBecauseThePackHasNone()
+    {
+        var cache = FrameworkReferences.ResolveNetFrameworkReferenceAssemblies(
+            "microsoft.netframework.referenceassemblies.net462", new FrameworkPreprocessorDefines.FrameworkVersion(4, 6, 2), [NuGetCache()]);
+        Skip.If(cache is null, "microsoft.netframework.referenceassemblies.net462 is not in the NuGet cache");
+        Skip.If(File.Exists(System.IO.Path.Combine(cache!.Value.Directory, "Facades", "netstandard.dll")), "this pack version ships netstandard.dll");
+        using var fixture = new TempDir();
+        Write(fixture.Path, "legacy.csproj", Csproj("net462"));
+        Write(fixture.Path, "Probe.cs", ProbeSource);
+
+        var references = FrameworkReferences.ForTree(fixture.Path);
+        Assert.Contains(references.References, reference => string.Equals(System.IO.Path.GetFileNameWithoutExtension(reference.Key), "netstandard", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains("netstandard", references.Diagnostic ?? string.Empty, StringComparison.Ordinal);
     }
 }

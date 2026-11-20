@@ -301,16 +301,18 @@ internal static class FrameworkPreprocessorDefines
             return TryParseParts(trimmed.Split('.'), out version);
         }
 
-        // SDK-style digit run. Modern targets are major-only (`net8`, `net11`); the framework,
-        // netstandard, and netcoreapp families pack minor (and patch) into the run
-        // (`net45` → 4.5, `net472` → 4.7.2, `netcoreapp31` → 3.1).
+        // SDK-style digit run. Modern targets are major-only (`net8`, `net10`, `net11`); the
+        // framework, netstandard, and netcoreapp families pack minor (and patch) into the run
+        // (`net45` → 4.5, `net472` → 4.7.2, `netcoreapp31` → 3.1). A two-digit run starting
+        // with 1 is a modern major: no SDK-style project targets .NET Framework 1.0 or 1.1
+        // (`net10`, `net11`), whose monikers are `net10.0` and `net11.0` anyway.
         if (!trimmed.All(char.IsAsciiDigit))
         {
             version = default;
             return false;
         }
 
-        if (trimmed[0] >= '5')
+        if (trimmed[0] >= '5' || (trimmed.Length == 2 && trimmed[0] == '1'))
         {
             if (!int.TryParse(trimmed, NumberStyles.Integer, CultureInfo.InvariantCulture, out var major))
             {

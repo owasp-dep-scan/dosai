@@ -290,6 +290,11 @@ internal static class FrameworkReferences
     private static FrameworkReferenceSet ResolveForNetFrameworkTree(string root, string moniker, FrameworkVersion version, List<(string Name, string Evidence)> detected, FrameworkReferenceSet current)
     {
         var notes = new List<string>();
+        if (current.Diagnostic is { } currentDiagnostic)
+        {
+            notes.Add(currentDiagnostic);
+        }
+
         var tfm = MonikerOf(moniker);
         var packageId = $"microsoft.netframework.referenceassemblies.{tfm}";
         var canonicalPackageId = $"Microsoft.NETFramework.ReferenceAssemblies.{tfm}";
@@ -311,6 +316,11 @@ internal static class FrameworkReferences
             notes.Add($"{framework.Name} via {framework.Evidence} was not layered over the .NET Framework reference assemblies; the net4x reference assemblies already contain its types.");
         }
 
+        if (collector.References.Count > 0 && !collector.OriginByName.ContainsKey("netstandard"))
+        {
+            AddNetStandardFacades(collector, notes, versionText, current);
+        }
+
         AddBuiltFromSourceNote(notes, collector.BuiltFromSource);
 
         if (collector.References.Count == 0 || collector.PackOrigins.Count == 0)
@@ -326,6 +336,67 @@ internal static class FrameworkReferences
         DebugLog.Count($"tree framework reference packs ({root})", collector.PackOrigins.Count);
         DebugLog.Count("tree framework references from packs", collector.References.Count);
         return new FrameworkReferenceSet(collector.References, source, JoinNotes(notes), current.Warnings);
+    }
+
+    /// <summary>
+    ///     The net461 to net471 reference packages carry no <c>Facades/netstandard.dll</c>, so with
+    ///     the pack owning the whole set every member of a netstandard2.0 library an app calls
+    ///     bound to nothing and its call sites vanished. The SDK ships the netstandard facade set
+    ///     for exactly this (<c>Microsoft.NET.Build.Extensions/net461/lib</c>); without an SDK the
+    ///     process-wide <c>netstandard</c> facade fills that name alone. Names the pack already
+    ///     holds are never replaced.
+    /// </summary>
+    private static void AddNetStandardFacades(TreePackCollector collector, List<string> notes, string versionText, FrameworkReferenceSet current)
+    {
+        if (FindSdkNetStandardFacadeDirectory() is { } sdkDirectory)
+        {
+            var before = collector.References.Count;
+            collector.AddDirectory(sdkDirectory, $"netstandard facades (.NET SDK Microsoft.NET.Build.Extensions, {sdkDirectory})", onlyMissing: true);
+            if (collector.OriginByName.ContainsKey("netstandard"))
+            {
+                notes.Add(string.Create(CultureInfo.InvariantCulture,
+                    $"The .NET Framework {versionText} reference assemblies carry no netstandard.dll; {collector.References.Count - before} netstandard facade assembl{(collector.References.Count - before == 1 ? "y was" : "ies were")} added from the .NET SDK (Microsoft.NET.Build.Extensions) so calls into netstandard2.0 libraries bind."));
+                return;
+            }
+        }
+
+        if (current.References.FirstOrDefault(reference => string.Equals(Path.GetFileNameWithoutExtension(reference.Reference.FilePath), "netstandard", StringComparison.OrdinalIgnoreCase)) is { Reference: { } fallback } entry)
+        {
+            collector.AddFallbackReference("netstandard", entry.Key, fallback, "netstandard facade (process-wide runtime set)");
+            notes.Add(string.Create(CultureInfo.InvariantCulture,
+                $"The .NET Framework {versionText} reference assemblies carry no netstandard.dll and no .NET SDK netstandard facades were found; the process-wide netstandard facade fills that name alone, so calls into netstandard2.0 libraries may bind only in part."));
+            return;
+        }
+
+        notes.Add(string.Create(CultureInfo.InvariantCulture,
+            $"The .NET Framework {versionText} reference assemblies carry no netstandard.dll and no replacement was found (.NET SDK Microsoft.NET.Build.Extensions, process-wide runtime set); calls into netstandard2.0 libraries are not bound."));
+    }
+
+    private static string? FindSdkNetStandardFacadeDirectory()
+    {
+        string? best = null;
+        Version bestVersion = new(0, 0);
+        foreach (var packs in PackDirectories())
+        {
+            var sdkRoot = Path.Combine(Path.GetFullPath(Path.Combine(packs, "..")), "sdk");
+            if (!Directory.Exists(sdkRoot))
+            {
+                continue;
+            }
+
+            foreach (var sdk in Directory.EnumerateDirectories(sdkRoot).Order(StringComparer.Ordinal))
+            {
+                var library = Path.Combine(sdk, "Microsoft", "Microsoft.NET.Build.Extensions", "net461", "lib");
+                var (parsed, _) = ParseVersion(Path.GetFileName(sdk));
+                if (File.Exists(Path.Combine(library, "netstandard.dll")) && (best is null || parsed > bestVersion))
+                {
+                    best = library;
+                    bestVersion = parsed;
+                }
+            }
+        }
+
+        return best;
     }
 
     private static void AddBuiltFromSourceNote(List<string> notes, List<string> builtFromSource)
@@ -433,7 +504,9 @@ internal static class FrameworkReferences
     /// <summary>Testable core: the package roots are supplied by the caller.</summary>
     internal static (string Directory, string Version)? ResolveNetFrameworkReferenceAssemblies(string packageId, FrameworkVersion version, IEnumerable<string> nugetPackageRoots)
     {
-        (string Directory, Version Version, bool IsRelease)? best = null;
+        // Highest version first, but a version whose package lacks this target's folder (a
+        // restore of another layout) does not hide a lower one that has it.
+        var candidates = new List<(string Directory, Version Version, bool IsRelease)>();
         foreach (var root in nugetPackageRoots)
         {
             var packageRoot = Path.Combine(root, packageId);
@@ -444,27 +517,27 @@ internal static class FrameworkReferences
 
             foreach (var directory in Directory.EnumerateDirectories(packageRoot).Order(StringComparer.Ordinal))
             {
-                var label = Path.GetFileName(directory);
-                var (parsed, isRelease) = ParseVersion(label);
-                if (parsed <= new Version(0, 0))
+                var (parsed, isRelease) = ParseVersion(Path.GetFileName(directory));
+                if (parsed > new Version(0, 0))
                 {
-                    continue;
-                }
-
-                if (best is null || parsed > best.Value.Version || (parsed == best.Value.Version && isRelease && !best.Value.IsRelease))
-                {
-                    best = (directory, parsed, isRelease);
+                    candidates.Add((directory, parsed, isRelease));
                 }
             }
         }
 
-        if (best is not { } found)
+        foreach (var candidate in candidates
+                     .OrderByDescending(candidate => candidate.Version)
+                     .ThenByDescending(candidate => candidate.IsRelease)
+                     .ThenBy(candidate => candidate.Directory, StringComparer.Ordinal))
         {
-            return null;
+            var referenceDirectory = Path.Combine(candidate.Directory, "build", ".NETFramework", $"v{VersionText(version)}");
+            if (Directory.Exists(referenceDirectory))
+            {
+                return (referenceDirectory, Path.GetFileName(candidate.Directory));
+            }
         }
 
-        var referenceDirectory = Path.Combine(found.Directory, "build", ".NETFramework", $"v{VersionText(version)}");
-        return Directory.Exists(referenceDirectory) ? (referenceDirectory, Path.GetFileName(found.Directory)) : null;
+        return null;
     }
 
     /// <summary>
@@ -479,13 +552,27 @@ internal static class FrameworkReferences
         internal readonly List<string> PackOrigins = [];
         internal readonly List<string> BuiltFromSource = [];
 
-        internal void AddDirectory(string directory, string origin, bool isBasePack = false, string? facadesDirectory = null)
+        internal void AddFallbackReference(string name, string key, PortableExecutableReference reference, string origin)
+        {
+            if (OriginByName.TryAdd(name, (key, origin)))
+            {
+                References.Add((key, reference));
+                PackOrigins.Add(origin);
+            }
+        }
+
+        internal void AddDirectory(string directory, string origin, bool isBasePack = false, string? facadesDirectory = null, bool onlyMissing = false)
         {
             var added = 0;
             var dropped = 0;
             foreach (var assemblyPath in EnumerateAssemblies(directory).Concat(facadesDirectory is null ? [] : EnumerateAssemblies(facadesDirectory)))
             {
                 var name = Path.GetFileNameWithoutExtension(assemblyPath);
+                if (onlyMissing && OriginByName.ContainsKey(name))
+                {
+                    continue;
+                }
+
                 // The tree compiles this assembly from source: a pack copy would duplicate its
                 // types in metadata. The base pack is exempt, because the process-wide set fills
                 // the same names anyway and has always stood beside source copies of them.
