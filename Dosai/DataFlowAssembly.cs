@@ -365,67 +365,79 @@ public static partial class DataFlowAnalyzer
 
             try
             {
+                var constrainedPending = false;
                 foreach (var instruction in DecodeInstructions(assembly.PeReader.GetMethodBody(method.RelativeVirtualAddress).GetILReader()))
                 {
-                    if (instruction.Operand is not int token)
+                    // A prefix that applies to the next instruction only.
+                    var constrained = constrainedPending;
+                    constrainedPending = instruction.OpCode == OpCodes.Constrained;
+                    try
                     {
-                        continue;
-                    }
-
-                    var kind = DependencyReachIndex.KindOf(instruction.OpCode);
-                    AssemblyMemberInfo? member = null;
-                    string? qualifiedType = null;
-                    if (kind is not null)
-                    {
-                        if (!targets.TryGetValue((assemblyIndex, token), out member))
+                        if (instruction.Operand is not int token)
                         {
-                            member = ResolveReachTarget(assembly.Reader, token);
-                            targets[(assemblyIndex, token)] = member;
-                            // Memoized beside the member: the qualified chain is walked once per
-                            // referenced token, not once per call site (issue #128).
-                            qualifiedTypes[(assemblyIndex, token)] = member is null ? null : DependencyReachIndex.QualifiedContainingType(assembly.Reader, token);
+                            continue;
                         }
 
-                        qualifiedType = qualifiedTypes[(assemblyIndex, token)];
-                    }
-
-                    if (member is not null && kind is { } reachKind)
-                    {
-                        Reach(reach.Targets(member, reachKind, qualifiedType));
-                        if (reachKind == DependencyReachIndex.ReachKind.Call)
+                        var kind = DependencyReachIndex.KindOf(instruction.OpCode);
+                        AssemblyMemberInfo? member = null;
+                        string? qualifiedType = null;
+                        if (kind is not null)
                         {
-                            // The signature types of a called member are instantiation evidence
-                            // too: a call through a parameter of the interface's type reaches
-                            // what implements it, when reached code instantiates that (issue #120).
-                            foreach (var parameterType in member.RenderedParameterTypes)
+                            if (!targets.TryGetValue((assemblyIndex, token), out member))
                             {
-                                Reach(reach.AdmitRendered(DependencyReachIndex.OpenTypeName(parameterType)));
+                                member = ResolveReachTarget(assembly.Reader, token);
+                                targets[(assemblyIndex, token)] = member;
+                                // Memoized beside the member: the qualified chain is walked once per
+                                // referenced token, not once per call site (issue #128).
+                                qualifiedTypes[(assemblyIndex, token)] = member is null ? null : DependencyReachIndex.QualifiedContainingType(assembly.Reader, token);
+                            }
+
+                            qualifiedType = qualifiedTypes[(assemblyIndex, token)];
+                        }
+
+                        if (member is not null && kind is { } reachKind)
+                        {
+                            Reach(reach.Targets(member, reachKind, qualifiedType));
+                            if (reachKind == DependencyReachIndex.ReachKind.Call)
+                            {
+                                // The signature types of a called member are instantiation evidence
+                                // too: a call through a parameter of the interface's type reaches
+                                // what implements it, when reached code instantiates that (issue #120).
+                                foreach (var parameterType in member.RenderedParameterTypes)
+                                {
+                                    Reach(reach.AdmitRendered(DependencyReachIndex.OpenTypeName(parameterType)));
+                                }
+                            }
+
+                            if (instruction.OpCode == OpCodes.Callvirt || instruction.OpCode == OpCodes.Ldvirtftn)
+                            {
+                                Reach(reach.RecordDispatchKey(qualifiedType, member.ContainingType, member.Name, member.ParameterCount, true));
+                            }
+                            else if (instruction.OpCode == OpCodes.Call || instruction.OpCode == OpCodes.Ldftn)
+                            {
+                                // A call to an interface member (a static abstract one, through a
+                                // constrained type parameter) dispatches to the implementing type.
+                                Reach(reach.RecordDispatchKey(qualifiedType, member.ContainingType, member.Name, member.ParameterCount, constrained));
+                            }
+
+                            foreach (var typeName in reach.MethodSpecTypeNames(assembly.Reader, token))
+                            {
+                                Reach(reach.Admit(typeName));
                             }
                         }
 
-                        if (instruction.OpCode == OpCodes.Callvirt || instruction.OpCode == OpCodes.Ldvirtftn)
+                        if (instruction.OpCode == OpCodes.Newobj || instruction.OpCode == OpCodes.Box || instruction.OpCode == OpCodes.Ldtoken || instruction.OpCode == OpCodes.Constrained || instruction.OpCode == OpCodes.Initobj)
                         {
-                            Reach(reach.RecordDispatchKey(qualifiedType, member.ContainingType, member.Name, member.ParameterCount, true));
-                        }
-                        else if (instruction.OpCode == OpCodes.Call || instruction.OpCode == OpCodes.Ldftn)
-                        {
-                            // A call to an interface member (a static abstract one, through a
-                            // constrained type parameter) dispatches to the implementing type.
-                            Reach(reach.RecordDispatchKey(qualifiedType, member.ContainingType, member.Name, member.ParameterCount, false));
-                        }
-
-                        foreach (var typeName in reach.MethodSpecTypeNames(assembly.Reader, token))
-                        {
-                            Reach(reach.Admit(typeName));
+                            foreach (var typeName in reach.InstantiatedTypeNames(assembly.Reader, token))
+                            {
+                                Reach(reach.Admit(typeName));
+                            }
                         }
                     }
-
-                    if (instruction.OpCode == OpCodes.Newobj || instruction.OpCode == OpCodes.Box || instruction.OpCode == OpCodes.Ldtoken || instruction.OpCode == OpCodes.Constrained || instruction.OpCode == OpCodes.Initobj)
+                    catch (Exception ex) when (ex is BadImageFormatException or InvalidOperationException or ArgumentOutOfRangeException or KeyNotFoundException)
                     {
-                        foreach (var typeName in reach.InstantiatedTypeNames(assembly.Reader, token))
-                        {
-                            Reach(reach.Admit(typeName));
-                        }
+                        // One malformed operand (a type specification that does not decode)
+                        // names nothing; the rest of the body is still read.
                     }
                 }
             }
@@ -509,6 +521,12 @@ public static partial class DataFlowAnalyzer
         // types; rendered names without arity reach them through _keysByOpenName.
         private readonly Dictionary<string, TypeInfo> _typesByName = new(StringComparer.Ordinal);
         private readonly Dictionary<string, List<string>> _keysByOpenName = new(StringComparer.Ordinal);
+        // Type keys by the last segment of their open name, for rendered nested types (`Inner`).
+        private readonly Dictionary<string, List<string>> _keysByLeafName = new(StringComparer.Ordinal);
+        // Definitions keyed by the arity-bearing qualified declaring type, for the chain walk:
+        // `Circle` and an unrelated `Circle<T>` never share an entry. `_methods` keeps the open
+        // name, for call targets that arrive without arity.
+        private readonly Dictionary<string, List<(int, MethodDefinitionHandle)>> _methodsByArityKey = new(StringComparer.Ordinal);
         private readonly Dictionary<string, string[]> _closureByType = new(StringComparer.Ordinal);
         private readonly HashSet<string> _instantiated = new(StringComparer.Ordinal);
         private readonly Dictionary<string, List<string>> _instantiatedByAncestor = new(StringComparer.Ordinal);
@@ -551,7 +569,9 @@ public static partial class DataFlowAnalyzer
                     continue;
                 }
 
-                AddBoth(_methods, _methodsByLegacyKey, _methodLegacyKeyCounts, MethodKeys(member, QualifiedContainingType(reader, MetadataTokens.GetToken(handle))), (index, handle));
+                var qualifiedType = QualifiedContainingType(reader, MetadataTokens.GetToken(handle));
+                AddBoth(_methods, _methodsByLegacyKey, _methodLegacyKeyCounts, MethodKeys(member, qualifiedType), (index, handle));
+                Add(_methodsByArityKey, MethodKeyText(qualifiedType ?? member.ContainingType, member.Name, member.ParameterCount), (index, handle));
 
                 if (member.Name == ".cctor")
                 {
@@ -604,11 +624,15 @@ public static partial class DataFlowAnalyzer
             {
                 var type = reader.GetTypeDefinition(handle);
                 var name = QualifiedDefinitionTypeName(reader, handle);
-                if (OpenName(name).Length == 0 || _typesByName.ContainsKey(name))
+                if (OpenName(name).Length == 0)
                 {
                     continue;
                 }
 
+                // A second copy of a type (the same full name in another assembly of the tree)
+                // keeps the first copy's flags and base, and contributes its interfaces and
+                // MethodImpl rows to the one entry.
+                var known = _typesByName.TryGetValue(name, out var existing);
                 string? baseType = null;
                 var interfaces = new List<string>();
                 try
@@ -643,6 +667,19 @@ public static partial class DataFlowAnalyzer
                     // Untrusted metadata: the type keeps what was read.
                 }
 
+                if (known)
+                {
+                    foreach (var interfaceName in interfaces)
+                    {
+                        if (!existing!.Interfaces.Contains(interfaceName, StringComparer.Ordinal))
+                        {
+                            existing.Interfaces.Add(interfaceName);
+                        }
+                    }
+
+                    continue;
+                }
+
                 var attributes = type.Attributes;
                 _typesByName[name] = new TypeInfo(
                     (attributes & TypeAttributes.Sealed) != 0,
@@ -657,6 +694,13 @@ public static partial class DataFlowAnalyzer
                 }
 
                 keys.Add(name);
+                var leaf = open[(open.LastIndexOf('.') + 1)..];
+                if (!_keysByLeafName.TryGetValue(leaf, out var leafKeys))
+                {
+                    _keysByLeafName[leaf] = leafKeys = [];
+                }
+
+                leafKeys.Add(name);
             }
         }
 
@@ -857,16 +901,23 @@ public static partial class DataFlowAnalyzer
             }
         }
 
-        /// <summary>Admits a rendered type name (no arity): every known type of that open name.</summary>
+        /// <summary>
+        ///     Admits a rendered type name (no arity): array, by-ref and pointer suffixes are
+        ///     stripped, and every known type of that open name is admitted. A nested type is
+        ///     rendered as its last segment alone, so a name that matches no type exactly is
+        ///     looked up by that segment.
+        /// </summary>
         public IEnumerable<(int, MethodDefinitionHandle)> AdmitRendered(string openTypeName)
         {
-            if (!_keysByOpenName.TryGetValue(openTypeName, out var keys))
+            var name = openTypeName.TrimEnd('&', '*', ']', '[', ',');
+            if (!_keysByOpenName.TryGetValue(name, out var keys)
+                && !_keysByLeafName.TryGetValue(name[(name.LastIndexOf('.') + 1)..], out keys))
             {
                 return [];
             }
 
             var fired = new List<(int, MethodDefinitionHandle)>();
-            foreach (var key in keys)
+            foreach (var key in keys.ToArray())
             {
                 fired.AddRange(Admit(key));
             }
@@ -998,13 +1049,13 @@ public static partial class DataFlowAnalyzer
             var results = new List<(int, MethodDefinitionHandle)>();
             for (var current = instantiatedType; current is not null && current.Length > 0 && seen.Add(current);)
             {
-                if (_methods.TryGetValue(MethodKeyText(current, member, parameters), out var methods))
+                if (_methodsByArityKey.TryGetValue(MethodKeyText(current, member, parameters), out var methods))
                 {
                     hit = true;
                     results.AddRange(methods);
                 }
 
-                if (_methods.TryGetValue(MethodKeyText(current, dotted, parameters), out var explicitMethods))
+                if (_methodsByArityKey.TryGetValue(MethodKeyText(current, dotted, parameters), out var explicitMethods))
                 {
                     hit = true;
                     results.AddRange(explicitMethods);
@@ -1022,20 +1073,21 @@ public static partial class DataFlowAnalyzer
                     }
                 }
 
-                // The first declaration matching the key wins, as method resolution would.
-                if (hit)
-                {
-                    return results;
-                }
-
+                // The walk continues past a hit: a derived class that adds an overload must not
+                // hide the base override, and over-approximating is the documented contract.
                 current = _typesByName.TryGetValue(current, out var info) ? info.BaseType : null;
+            }
+
+            if (hit)
+            {
+                return results;
             }
 
             foreach (var type in ClosureOf(instantiatedType))
             {
                 if (_typesByName.TryGetValue(type, out var info) && info.Interface && !string.Equals(type, declaringType, StringComparison.Ordinal))
                 {
-                    if (_methods.TryGetValue(MethodKeyText(type, dotted, parameters), out var overrides))
+                    if (_methodsByArityKey.TryGetValue(MethodKeyText(type, dotted, parameters), out var overrides))
                     {
                         results.AddRange(overrides);
                     }
@@ -1057,7 +1109,7 @@ public static partial class DataFlowAnalyzer
         }
 
         private static string MethodKeyText(string containingType, string member, int parameters) =>
-            string.Create(CultureInfo.InvariantCulture, $"{OpenName(containingType)}\u001f{OpenName(member)}\u001f{parameters}");
+            string.Create(CultureInfo.InvariantCulture, $"{containingType}\u001f{OpenName(member)}\u001f{parameters}");
 
         /// <summary>
         ///     The type and every base and interface the table holds, transitively, breadth

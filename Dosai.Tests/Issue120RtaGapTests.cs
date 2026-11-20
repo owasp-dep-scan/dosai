@@ -51,11 +51,28 @@ public class Issue120RtaGapTests
         return dllPath;
     }
 
-    private static string BuildTree(string root, string librarySource, string appSource)
+    private static string EmitVisualBasic(string outputDirectory, string assemblyName, string source)
+    {
+        var metadata = FrameworkReferences.Current.References.Select(entry => (Microsoft.CodeAnalysis.MetadataReference)entry.Reference).ToList();
+        var compilation = Microsoft.CodeAnalysis.VisualBasic.VisualBasicCompilation.Create(assemblyName,
+            [Microsoft.CodeAnalysis.VisualBasic.VisualBasicSyntaxTree.ParseText(source, path: $"{assemblyName}.vb")],
+            metadata,
+            new Microsoft.CodeAnalysis.VisualBasic.VisualBasicCompilationOptions(Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary));
+        var dllPath = System.IO.Path.Combine(outputDirectory, $"{assemblyName}.dll");
+        using (var stream = File.Create(dllPath))
+        {
+            var result = compilation.Emit(stream);
+            Assert.True(result.Success, string.Join("\n", result.Diagnostics));
+        }
+
+        return dllPath;
+    }
+
+    private static string BuildTree(string root, string librarySource, string appSource, bool visualBasic = false)
     {
         var output = System.IO.Path.Combine(root, "App", "bin", "Debug", "net10.0");
         Directory.CreateDirectory(output);
-        var library = Emit(output, "RtaLib", librarySource);
+        var library = visualBasic ? EmitVisualBasic(output, "RtaLib", librarySource) : Emit(output, "RtaLib", librarySource);
         Emit(output, "App", appSource, library);
         File.WriteAllText(System.IO.Path.Combine(output, "App.deps.json"), """
 {
@@ -75,10 +92,10 @@ public class Issue120RtaGapTests
         return output;
     }
 
-    private static List<string> ReachedMethods(string librarySource, string appSource)
+    private static List<string> ReachedMethods(string librarySource, string appSource, bool visualBasic = false)
     {
         using var fixture = new TempDir();
-        BuildTree(fixture.Path, librarySource, appSource);
+        BuildTree(fixture.Path, librarySource, appSource, visualBasic);
         // A hang is a failure, not a stuck test run.
         var task = Task.Run(() =>
         {
@@ -86,7 +103,8 @@ public class Issue120RtaGapTests
             return DataFlowAnalyzer.Analyze(fixture.Path);
         });
         Assert.True(task.Wait(TimeSpan.FromSeconds(120)), "the reachable walk did not finish");
-        return task.Result.MethodSummaries.Select(summary => summary.Method).ToList();
+        var summaries = task.Result.MethodSummaries.Select(summary => summary.Method).ToList();
+        return summaries;
     }
 
     private static bool Reached(List<string> methods, string text) => methods.Any(method => method.Contains(text, StringComparison.Ordinal));
@@ -297,5 +315,125 @@ public static class Program { public static void Main(string[] a) { Rta.Helper.C
 """);
         Assert.True(Reached(methods, "Rta.Real.Do"));
         Assert.False(Reached(methods, "Rta.Fake.Do"));
+    }
+
+    [Fact]
+    public void Reachable_AnOverloadInADerivedClass_DoesNotHideTheBaseOverride()
+    {
+        var methods = ReachedMethods("""
+using System;
+namespace Rta;
+public abstract class Shape { public abstract void Draw(string v); }
+public class CircleBase : Shape { public override void Draw(string v) => Console.WriteLine(v); }
+public class Circle : CircleBase { public void Draw(int n) => Console.WriteLine(n); }
+public static class Helper { public static void Call(Shape s, string v) => s.Draw(v); }
+""", """
+namespace App;
+public static class Program { public static void Main(string[] a) => Rta.Helper.Call(new Rta.Circle(), a[0]); }
+""");
+        Assert.True(Reached(methods, "Rta.CircleBase.Draw"));
+    }
+
+    [Fact]
+    public void Reachable_AGenericTypeAndAnUnrelatedNonGenericOneOfTheSameName_KeepTheirOwnBodies()
+    {
+        var methods = ReachedMethods("""
+using System;
+namespace Rta;
+public interface IRun { void Run(string v); }
+public class Circle { public void Run(string v) => Console.WriteLine(v); }
+public class Circle<T> : IRun { public void Run(string v) => Console.WriteLine(v); }
+public static class Helper { public static void Call(IRun r, string v) => r.Run(v); }
+""", """
+namespace App;
+public static class Program { public static void Main(string[] a) { Rta.Helper.Call(new Rta.Circle<int>(), a[0]); } }
+""");
+        Assert.True(Reached(methods, "Rta.Circle`1.Run"));
+        Assert.False(Reached(methods, "Rta.Circle.Run"));
+    }
+
+    [Fact]
+    public void Reachable_StaticAbstractMemberOfAFrameworkInterface_ReachesTheImplementation()
+    {
+        var methods = ReachedMethods("""
+using System;
+namespace Rta;
+public readonly struct Money : IParsable<Money>
+{
+    public static Money Parse(string s, IFormatProvider? provider) { Console.WriteLine(s); return default; }
+    public static bool TryParse(string? s, IFormatProvider? provider, out Money result) { Console.WriteLine(s); result = default; return true; }
+}
+public static class G { public static T P<T>(string s) where T : IParsable<T> => T.Parse(s, null); }
+""", """
+namespace App;
+public static class Program { public static void Main(string[] a) => Rta.G.P<Rta.Money>(a[0]); }
+""");
+        Assert.True(Reached(methods, "Rta.Money.Parse"));
+    }
+
+    [Fact]
+    public void Reachable_NestedAndArrayParameterTypes_AreInstantiationEvidence()
+    {
+        var methods = ReachedMethods("""
+using System;
+namespace Rta;
+public interface IRun { void Run(string v); }
+public class Outer { public class Impl : IRun { public void Run(string v) => Console.WriteLine(v); } }
+public class Flat { public class Item : IRun { public void Run(string v) => Console.WriteLine(v); } }
+public class Idle : IRun { public void Run(string v) => Console.WriteLine(v); }
+public static class Consumer
+{
+    public static void Take(Outer.Impl impl, string v) { IRun r = impl; r.Run(v); }
+    public static void TakeAll(Flat.Item[] items, string v) { IRun r = items[0]; r.Run(v); }
+}
+""", """
+namespace App;
+public static class Program { public static void Main(string[] a) { Rta.Consumer.Take(null!, a[0]); Rta.Consumer.TakeAll(null!, a[0]); } }
+""");
+        Assert.True(Reached(methods, "Impl.Run"));
+        Assert.True(Reached(methods, "Item.Run"));
+        Assert.False(Reached(methods, "Rta.Idle"));
+    }
+
+    [Fact]
+    public void Reachable_MethodImplRow_NamesTheImplementationOfADifferentlyNamedMethod()
+    {
+        // Visual Basic names the method freely (Emit) and records the interface member in a
+        // MethodImpl row, so neither the name nor the dotted form matches.
+        var methods = ReachedMethods("""
+Option Strict On
+Imports System
+
+Namespace Rta
+    Public Interface ISink
+        Sub Write(value As String)
+    End Interface
+
+    Public Class VbSink
+        Implements ISink
+        Public Sub Emit(value As String) Implements ISink.Write
+            Console.WriteLine(value)
+        End Sub
+    End Class
+
+    Public Class VbIdle
+        Implements ISink
+        Public Sub Emit2(value As String) Implements ISink.Write
+            Console.WriteLine(value)
+        End Sub
+    End Class
+
+    Public Module Helper
+        Public Sub Invoke(sink As ISink, value As String)
+            sink.Write(value)
+        End Sub
+    End Module
+End Namespace
+""", """
+namespace App;
+public static class Program { public static void Main(string[] a) => Rta.Helper.Invoke(new Rta.VbSink(), a[0]); }
+""", visualBasic: true);
+        Assert.True(Reached(methods, "Rta.VbSink.Emit"));
+        Assert.False(Reached(methods, "Rta.VbIdle"));
     }
 }
