@@ -1,0 +1,23 @@
+docs/migration-5.1.0.md
+  s_870276876982bd::t_9890bd8f145ae6 538-542,792-799,812-816,826-828,842-843
+docs/ARCHITECTURE.md
+  s_870276876982bd::t_9890bd8f145ae6 167
+docs/compiler-engineering.md
+  s_870276876982bd::t_9890bd8f145ae6 86,89-92
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9abc990986230003c59505478cc2958406d2042a",
+  "prompts": {},
+  "sessions": {
+    "s_870276876982bd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c678bfd8-2aba-4f7e-aa22-0bbbaf027e71",
+        "model": "claude-sonnet-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
