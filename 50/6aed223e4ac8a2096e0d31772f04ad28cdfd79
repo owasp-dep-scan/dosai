@@ -1,0 +1,19 @@
+Dosai.Tests/Corpus/setup.sh
+  s_870276876982bd::t_2c01d22b9bf820 1384-1388
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "506aed223e4ac8a2096e0d31772f04ad28cdfd79",
+  "prompts": {},
+  "sessions": {
+    "s_870276876982bd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c678bfd8-2aba-4f7e-aa22-0bbbaf027e71",
+        "model": "claude-sonnet-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
