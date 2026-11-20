@@ -474,7 +474,7 @@ internal static class FrameworkReferences
             return ReferencePackTargetFamily.None;
         }
 
-        return FrameworkPreprocessorDefines.TryParseVersion(normalized["net".Length..], out version)
+        return FrameworkPreprocessorDefines.TryParseVersion(normalized["net".Length..], out version, bareNet: true)
             ? version.Major >= 5 ? ReferencePackTargetFamily.ModernNet : ReferencePackTargetFamily.NetFramework
             : ReferencePackTargetFamily.None;
     }

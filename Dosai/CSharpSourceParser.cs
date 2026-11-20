@@ -124,7 +124,7 @@ internal static class FrameworkPreprocessorDefines
 
         if (normalized.StartsWith("net", StringComparison.Ordinal))
         {
-            if (!TryParseVersion(normalized["net".Length..], out var version)) return false;
+            if (!TryParseVersion(normalized["net".Length..], out var version, bareNet: true)) return false;
             rank = (version.Major >= 5 ? 4 : 1, version);
             return true;
         }
@@ -155,7 +155,7 @@ internal static class FrameworkPreprocessorDefines
         }
         else if (normalized.StartsWith("net", StringComparison.Ordinal))
         {
-            if (!TryParseVersion(normalized["net".Length..], out var version))
+            if (!TryParseVersion(normalized["net".Length..], out var version, bareNet: true))
             {
                 return symbols;
             }
@@ -286,7 +286,7 @@ internal static class FrameworkPreprocessorDefines
 
     // Internal so FrameworkReferences shares the one parse the preprocessor-define sets depend
     // on: net48 is 4.8, not major 48 (issue #127).
-    internal static bool TryParseVersion(string text, out FrameworkVersion version)
+    internal static bool TryParseVersion(string text, out FrameworkVersion version, bool bareNet = false)
     {
         var trimmed = text.Trim();
         if (trimmed.Length == 0)
@@ -303,16 +303,16 @@ internal static class FrameworkPreprocessorDefines
 
         // SDK-style digit run. Modern targets are major-only (`net8`, `net10`, `net11`); the
         // framework, netstandard, and netcoreapp families pack minor (and patch) into the run
-        // (`net45` → 4.5, `net472` → 4.7.2, `netcoreapp31` → 3.1). A two-digit run starting
-        // with 1 is a modern major: no SDK-style project targets .NET Framework 1.0 or 1.1
-        // (`net10`, `net11`), whose monikers are `net10.0` and `net11.0` anyway.
+        // (`net45` → 4.5, `net472` → 4.7.2, `netcoreapp31` → 3.1). In a bare `net` moniker
+        // (`bareNet`) a two-digit run starting with 1 is a modern major: no SDK-style project
+        // targets .NET Framework 1.0 or 1.1 (`net10`, `net11`). `netstandard11` stays 1.1.
         if (!trimmed.All(char.IsAsciiDigit))
         {
             version = default;
             return false;
         }
 
-        if (trimmed[0] >= '5' || (trimmed.Length == 2 && trimmed[0] == '1'))
+        if (trimmed[0] >= '5' || (bareNet && trimmed.Length == 2 && trimmed[0] == '1'))
         {
             if (!int.TryParse(trimmed, NumberStyles.Integer, CultureInfo.InvariantCulture, out var major))
             {

@@ -349,6 +349,17 @@ public static class Probe
     }
 
     [Fact]
+    public void TwoDigitRun_IsAModernMajorOnlyInABareNetMoniker()
+    {
+        Assert.True(FrameworkPreprocessorDefines.TryParseVersion("11", out var compact));
+        Assert.Equal((1, 1), (compact.Major, compact.Minor));
+        var symbols = FrameworkPreprocessorDefines.ForTargetFramework("netstandard11");
+        Assert.Contains("NETSTANDARD1_1", symbols);
+        Assert.DoesNotContain("NETSTANDARD11_0", symbols);
+        Assert.Contains("NET11_0", FrameworkPreprocessorDefines.ForTargetFramework("net11"));
+    }
+
+    [Fact]
     public void NetFrameworkPackLookup_FallsBackToALowerVersionHoldingTheTargetFolder()
     {
         using var fixture = new TempDir();
