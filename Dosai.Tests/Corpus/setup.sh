@@ -1381,9 +1381,11 @@ CHECK
 mkdir -p "${ISSUE129}/threecalls"
 cat > "${ISSUE129}/threecalls/Repro.csproj" <<'CSPROJ'
 <Project Sdk="Microsoft.NET.Sdk">
-  <OutputType>Exe</OutputType>
-  <TargetFramework>net10.0</TargetFramework>
-  <ImplicitUsings>enable</ImplicitUsings>
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
   </ItemGroup>
