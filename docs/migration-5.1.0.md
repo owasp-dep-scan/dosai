@@ -811,7 +811,9 @@ exactly as the compiler's IL does, which promotes packages used only from initia
 `Ns.T..ctor()` node that the inventory minted beside a declared static constructor is gone.
 A constructor that chains with `: this(...)` is not an owner (the constructor it chains to runs
 the initializer; every other constructor of a primary-constructor type chains), except that a
-struct constructor chaining to the implicit parameterless `this()` keeps its rows. Attribute
+struct constructor chaining with `: this()` keeps its rows only while the struct declares no
+parameterless constructor of its own (the implicit one runs the initializers); with a declared
+`S()`, that constructor owns them. Attribute
 arguments and Visual Basic initializer calls stay unrecorded; the diagnostic counts each dropped
 site once, `As New` clauses and property initializers included.
 

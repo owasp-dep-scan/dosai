@@ -105,7 +105,7 @@ public record Rec(int X)
     }
 
     [Fact]
-    public void StructConstructors_ChainingToTheImplicitParameterlessOne_KeepTheInitializer()
+    public void StructWithADeclaredParameterlessConstructor_RunsTheInitializerThereOnly()
     {
         var callers = MakeCallers("""
 namespace Ns;
@@ -121,7 +121,25 @@ public struct Pair
     static int Make() => 1;
 }
 """);
-        Assert.Equal(["Ns.Pair..ctor()", "Ns.Pair..ctor(int)"], callers.Where(id => id.Contains("..ctor", StringComparison.Ordinal)).ToList());
+        Assert.Equal(["Ns.Pair..ctor()"], callers.Where(id => id.Contains("..ctor", StringComparison.Ordinal)).ToList());
+    }
+
+    [Fact]
+    public void StructChainingToTheImplicitParameterlessConstructor_KeepsTheInitializer()
+    {
+        var callers = MakeCallers("""
+namespace Ns;
+
+public struct Quad
+{
+    int _a = Make();
+
+    public Quad(int x) : this() { }
+
+    static int Make() => 1;
+}
+""");
+        Assert.Equal(["Ns.Quad..ctor(int)"], callers.Where(id => id.Contains("..ctor", StringComparison.Ordinal)).ToList());
     }
 
     [Theory]
@@ -129,6 +147,7 @@ public struct Pair
     [InlineData("Private Builder As New System.Text.StringBuilder()", 1)]
     [InlineData("Public Property Name As String = Integer.Parse(\"8\")", 1)]
     [InlineData("Public Property Created As New System.Text.StringBuilder()", 1)]
+    [InlineData("Private Shared ReadOnly Chained As String = Environment.GetEnvironmentVariable(\"A\").Trim()", 2)]
     public void VbInitializers_AreCountedOncePerSite_AsNewAndPropertyInitializersIncluded(string member, int expected)
     {
         using var fixture = new TempDir();

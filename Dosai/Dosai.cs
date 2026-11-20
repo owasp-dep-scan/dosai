@@ -181,7 +181,7 @@ public static class Dosai
         // chains to does (every other constructor of a primary-constructor type chains). A
         // struct's chain to its implicit parameterless `this()` is the exception, the implicit
         // constructor being the one that runs the initializers there.
-        var declared = type.InstanceConstructors.Where(constructor => !constructor.IsImplicitlyDeclared && !ChainsToAnotherConstructor(constructor, type.IsValueType)).ToArray();
+        var declared = type.InstanceConstructors.Where(constructor => !constructor.IsImplicitlyDeclared && !ChainsToAnotherConstructor(constructor, type.IsValueType && !type.InstanceConstructors.Any(other => !other.IsImplicitlyDeclared && other.Parameters.Length == 0))).ToArray();
         if (declared.Length > 0)
         {
             return declared;
@@ -190,13 +190,13 @@ public static class Dosai
         return type.IsValueType ? [] : type.InstanceConstructors.Where(constructor => constructor.IsImplicitlyDeclared).ToArray();
     }
 
-    private static bool ChainsToAnotherConstructor(IMethodSymbol constructor, bool inStruct)
+    private static bool ChainsToAnotherConstructor(IMethodSymbol constructor, bool thisChainIsImplicit)
     {
         foreach (var reference in constructor.DeclaringSyntaxReferences)
         {
             if (reference.GetSyntax() is Microsoft.CodeAnalysis.CSharp.Syntax.ConstructorDeclarationSyntax { Initializer: { } initializer }
                 && initializer.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.ThisConstructorInitializer)
-                && !(inStruct && initializer.ArgumentList.Arguments.Count == 0))
+                && !(thisChainIsImplicit && initializer.ArgumentList.Arguments.Count == 0))
             {
                 return true;
             }
@@ -4409,7 +4409,7 @@ public static class Dosai
         // Immutable symbols per compilation, so the owner list never depends on the worker.
         private readonly Dictionary<ISymbol, IReadOnlyList<IMethodSymbol>> initializerOwnersByMember = new(SymbolEqualityComparer.Default);
 
-        private readonly HashSet<int> droppedInitializerSites = [];
+        private readonly HashSet<(int Start, int Length)> droppedInitializerSites = [];
 
         /// <summary>A Visual Basic field or property initializer root: <c>= value</c> or <c>As New T(...)</c>.</summary>
         private static bool IsVisualBasicMemberInitializer(SyntaxNode? root) => root switch
@@ -4478,7 +4478,7 @@ public static class Dosai
                 }
             }
             else if (IsVisualBasicMemberInitializer(currentRoot) && EnclosingSymbol(operation.Syntax.SpanStart) is not IMethodSymbol
-                     && droppedInitializerSites.Add(operation.Syntax.SpanStart))
+                     && droppedInitializerSites.Add((operation.Syntax.SpanStart, operation.Syntax.Span.Length)))
             {
                 // Counted once per site: the inferred-dispatch recorder asks for the callers of
                 // the same call again.
