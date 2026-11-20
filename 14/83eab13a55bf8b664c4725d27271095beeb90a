@@ -1,0 +1,39 @@
+Dosai.Tests/IssueRegressionTests.cs
+  s_c7ab1e6d0f0c48::t_1b90331c42e8cb 1153
+  s_c7ab1e6d0f0c48::t_cf7fc6a694664e 1218-1222
+  s_c7ab1e6d0f0c48::t_9b5bde03a6d0ac 1164-1166,1213-1214
+  s_c7ab1e6d0f0c48::t_004b5ca1a54653 1239
+  s_c7ab1e6d0f0c48::t_05ddbeb757a4a7 1142-1152,1154-1163,1167-1212,1215-1217,1223-1237
+  s_c7ab1e6d0f0c48::t_241a5a9dc48b68 1238
+Dosai.Tests/Corpus/setup.sh
+  s_c7ab1e6d0f0c48::t_59e06fb778f026 1378-1401,1404
+Dosai/Dosai.cs
+  s_c7ab1e6d0f0c48::t_f37806204c6a57 659,662-668
+Dosai/Transparency.cs
+  s_c7ab1e6d0f0c48::t_a09d583c34652f 379
+  s_c7ab1e6d0f0c48::t_c6ac1aea8be556 380-398,400,402-406
+  s_c7ab1e6d0f0c48::t_f37806204c6a57 399,401
+  s_c7ab1e6d0f0c48::t_c89c518264c988 407
+Dosai.Tests/Corpus/README.md
+  s_c7ab1e6d0f0c48::t_59e06fb778f026 37,77
+Dosai.Tests/CorpusTests.cs
+  s_c7ab1e6d0f0c48::t_6a69fd4adf8798 791-832
+docs/commands.md
+  s_c7ab1e6d0f0c48::t_3667789375bf79 150
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1483eab13a55bf8b664c4725d27271095beeb90a",
+  "prompts": {},
+  "sessions": {
+    "s_c7ab1e6d0f0c48": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "sess_ffe8eabc-0c06-4d2b-9b0a-1af2dae85431",
+        "model": "GLM-5.3"
+      },
+      "human_author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}

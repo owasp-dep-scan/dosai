@@ -1,0 +1,35 @@
+docs/commands.md
+  s_c7ab1e6d0f0c48::t_78b65161ed887d 150,201
+  s_c7ab1e6d0f0c48::t_2c6efccbc5a291 202
+Dosai/DataFlowAssembly.cs
+  s_c7ab1e6d0f0c48::t_44b501e93c56df 4576-4585
+Dosai.Tests/CorpusTests.cs
+  s_c7ab1e6d0f0c48::t_44b501e93c56df 747-790
+  s_c7ab1e6d0f0c48::t_5654f13b2883e0 714-717
+Dosai.Tests/Issue83AssemblyCopyTests.cs
+  s_c7ab1e6d0f0c48::t_5654f13b2883e0 170-174
+Dosai.Tests/DosaiTests.cs
+  s_c7ab1e6d0f0c48::t_3c6e97dba1d9ff 5907-6086
+Dosai/DataFlow.cs
+  s_c7ab1e6d0f0c48::t_8253d9c46ea1dc 142-149,303-310,450,464,509-517,521-523,635-688,691,693,695-713,737,739-740,742-755,1895-1903,1908-1982,2261-2276,2870-2922,3953,3963-3967,4000-4003,5650-5653
+docs/ARCHITECTURE.md
+  s_c7ab1e6d0f0c48::t_e7d057a7f1b733 167-168
+docs/migration-5.1.0.md
+  s_c7ab1e6d0f0c48::t_794424bc1ffa42 806-819
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1eb645a6cedaf80739a9c4d9b24b15e752ab1a91",
+  "prompts": {},
+  "sessions": {
+    "s_c7ab1e6d0f0c48": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "sess_ffe8eabc-0c06-4d2b-9b0a-1af2dae85431",
+        "model": "GLM-5.3"
+      },
+      "human_author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}

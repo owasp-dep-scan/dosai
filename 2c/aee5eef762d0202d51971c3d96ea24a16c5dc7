@@ -1,0 +1,25 @@
+Dosai/AssemblyCopies.cs
+  s_870276876982bd::t_2a1a291a9802c7 260
+Dosai/GlobalUsings.cs
+  s_870276876982bd::t_272d687758455c 219
+Dosai/MsBuildImports.cs
+  s_870276876982bd::t_120ee01457f7b2 706
+Dosai/PackageUrlResolver.cs
+  s_870276876982bd::t_5d0dd8c68b1d7f 401,450
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2caee5eef762d0202d51971c3d96ea24a16c5dc7",
+  "prompts": {},
+  "sessions": {
+    "s_870276876982bd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c678bfd8-2aba-4f7e-aa22-0bbbaf027e71",
+        "model": "claude-sonnet-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}

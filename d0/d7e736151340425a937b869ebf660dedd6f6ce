@@ -1,0 +1,21 @@
+Dosai.Tests/CorpusTests.cs
+  s_c7ab1e6d0f0c48::t_99192f21f0f1b8 562-563
+Dosai.Tests/Corpus/setup.sh
+  s_c7ab1e6d0f0c48::t_b949e1a9624581 442-446
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d0d7e736151340425a937b869ebf660dedd6f6ce",
+  "prompts": {},
+  "sessions": {
+    "s_c7ab1e6d0f0c48": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "sess_ffe8eabc-0c06-4d2b-9b0a-1af2dae85431",
+        "model": "GLM-5.3"
+      },
+      "human_author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}

@@ -1,0 +1,35 @@
+Dosai.Tests/CorpusTests.cs
+  s_870276876982bd::t_9d96fbb8f7b9fe 714
+Dosai.Tests/Issue83AssemblyCopyTests.cs
+  s_870276876982bd::t_9d96fbb8f7b9fe 172-174
+Dosai.Tests/DosaiTests.cs
+  s_870276876982bd::t_d7daf0c50f1bbb 6047-6051
+  s_870276876982bd::t_ffdd2e29e2cd72 6030,6052
+Dosai.Tests/Issue131FollowUpTests.cs
+  s_870276876982bd::t_ef5608c7e01a43 1-35,39-73,163-164
+  s_870276876982bd::t_be7a1e919b8f4f 85-86,112-114
+  s_870276876982bd::t_de28ac77f0b4c9 84,94,102
+  s_870276876982bd::t_6506cc05b7ca66 122-125
+  s_870276876982bd::t_522885f920dcf0 36-38,76-83,87-93,95-101,103-111,115-121,126-162
+  s_870276876982bd::t_7c1b3f602f62f2 74-75
+Dosai/DataFlowAssembly.cs
+  s_870276876982bd::t_e1b7061894b83c 4774-4775,4777
+Dosai/DataFlow.cs
+  s_870276876982bd::t_e1b7061894b83c 145-146,150,638-641,652-659,687-691,695-697,700,1913-1915,1950,1958-1961,1964,1970,1976-1977,2301-2307,3983,3997,4033
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "177fc7e447c7af6ec47aaff89c0c08b784dd1662",
+  "prompts": {},
+  "sessions": {
+    "s_870276876982bd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c678bfd8-2aba-4f7e-aa22-0bbbaf027e71",
+        "model": "claude-sonnet-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}

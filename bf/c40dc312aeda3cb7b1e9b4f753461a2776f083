@@ -1,0 +1,51 @@
+Dosai/Dosai.cs
+  s_c7ab1e6d0f0c48::t_ad740f720cba32 647
+  s_c7ab1e6d0f0c48::t_f46315f2851e95 765-780
+Dosai/FrameworkReferences.cs
+  s_c7ab1e6d0f0c48::t_2f8fb0fc97e081 293-295,301,306,308
+  s_c7ab1e6d0f0c48::t_34bd56ffa6850c 158-163,165,168-171,173,175,177-178,180,182-186,188-190,193-199,203-204,206,209-211,223-224,230,232,240,248,258-259,263-265,272-274,276-292,296-300,302-305,307,309-368,381-392,394-401,403,406-437,439-518,521-522
+  s_c7ab1e6d0f0c48::t_20227651b3351b 4
+  s_c7ab1e6d0f0c48::t_ca0df0005b5b9f 52-58
+Dosai.Tests/Issue74BindingTests.cs
+  s_c7ab1e6d0f0c48::t_16b150285190a3 619-621,623-624,626-629
+  s_c7ab1e6d0f0c48::t_09b2edf05092a5 625
+docs/compiler-engineering.md
+  s_c7ab1e6d0f0c48::t_f74d53a46afbbd 69-74,83-95
+  s_a34cd04a824088::t_79519c0a4119a1 96
+Dosai/CSharpSourceParser.cs
+  s_c7ab1e6d0f0c48::t_42e57e6b7571c9 287-289
+  s_c7ab1e6d0f0c48::t_b0c456b9be271a 374
+docs/migration-5.1.0.md
+  s_c7ab1e6d0f0c48::t_93a3fcdf8db044 741-762
+Dosai.Tests/Issue127FrameworkBindingTests.cs
+  s_c7ab1e6d0f0c48::t_fd3ebdaeb48cc5 1-86,88-92,94-113,115-207,212-214,216-243,245-258,260-273,275-299,301-336
+  s_c7ab1e6d0f0c48::t_20259af8d01b45 114
+  s_c7ab1e6d0f0c48::t_cafc8d035a3b2a 87,93
+  s_c7ab1e6d0f0c48::t_47e857dca4bfb7 244,259,274,300
+  s_c7ab1e6d0f0c48::t_9e270b37e9a6f8 208-211
+  s_c7ab1e6d0f0c48::t_6475b23a473f49 215
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "bfc40dc312aeda3cb7b1e9b4f753461a2776f083",
+  "prompts": {},
+  "sessions": {
+    "s_a34cd04a824088": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "sess_24d48338-f8d7-4187-8394-535bdb84f354",
+        "model": "GLM-5.3"
+      },
+      "human_author": "Team AppThreat <cloud@appthreat.com>"
+    },
+    "s_c7ab1e6d0f0c48": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "sess_ffe8eabc-0c06-4d2b-9b0a-1af2dae85431",
+        "model": "GLM-5.3"
+      },
+      "human_author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}

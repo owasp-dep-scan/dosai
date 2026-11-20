@@ -1,0 +1,24 @@
+Dosai/DataFlow.cs
+  s_870276876982bd::t_37eef17e4ddd6d 312-314,528,701-702,704-705,5735
+Dosai.Tests/Issue131FollowUpTests.cs
+  s_870276876982bd::t_fe0c2e17bac0b5 231
+  s_870276876982bd::t_80a69099fa62ee 201-230,232-235
+Dosai/DataFlowAssembly.cs
+  s_870276876982bd::t_37eef17e4ddd6d 4149-4153,4178-4184,4725-4729,4799-4803
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3fab31ae348718e2d7de1086498a2da8e0e4a716",
+  "prompts": {},
+  "sessions": {
+    "s_870276876982bd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c678bfd8-2aba-4f7e-aa22-0bbbaf027e71",
+        "model": "claude-sonnet-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}

@@ -1,0 +1,24 @@
+Dosai/FrameworkReferences.cs
+  s_870276876982bd::t_7c1f2761cf6f4c 477
+Dosai.Tests/Issue127FrameworkBindingTests.cs
+  s_870276876982bd::t_7c1f2761cf6f4c 352-361
+  s_870276876982bd::t_8a516048fb7eec 351
+Dosai/CSharpSourceParser.cs
+  s_870276876982bd::t_7c1f2761cf6f4c 127,158,289,306-308,315
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6e0796cb1da2d0d753c6ac53a55a797f004363d1",
+  "prompts": {},
+  "sessions": {
+    "s_870276876982bd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c678bfd8-2aba-4f7e-aa22-0bbbaf027e71",
+        "model": "claude-sonnet-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}

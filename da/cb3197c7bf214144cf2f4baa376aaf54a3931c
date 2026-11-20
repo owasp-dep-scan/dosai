@@ -1,0 +1,25 @@
+Dosai.Tests/CorpusTests.cs
+  s_c7ab1e6d0f0c48::t_68b1603f865050 617-666
+Dosai.Tests/Issue128QualifiedReachKeysTests.cs
+  s_c7ab1e6d0f0c48::t_5e66d821174b75 1-318
+Dosai/DataFlowAssembly.cs
+  s_c7ab1e6d0f0c48::t_934550491f6188 300,304-307,339,363-365,370,412-421,423,431-433,436-441,444-445,458,477,489,495,497-499,501,504-533,541,545,547,549-550,570-580,582-682,4237
+docs/migration-5.1.0.md
+  s_c7ab1e6d0f0c48::t_80c572c035a531 533-537
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "dacb3197c7bf214144cf2f4baa376aaf54a3931c",
+  "prompts": {},
+  "sessions": {
+    "s_c7ab1e6d0f0c48": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "sess_ffe8eabc-0c06-4d2b-9b0a-1af2dae85431",
+        "model": "GLM-5.3"
+      },
+      "human_author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}
