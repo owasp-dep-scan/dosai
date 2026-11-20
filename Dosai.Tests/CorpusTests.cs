@@ -711,10 +711,7 @@ public class CorpusTests
         }
 
         var reachableSlices = ApplicationSlices(reachable);
-        // One anchored slice here: the cross-pass fingerprint (issue #131) also collapses the
-        // duplicate the IL pass used to emit for the same flow, so the count is the distinct
-        // flows, not the passes' copies of them.
-        Assert.True(reachableSlices.Length >= 1, $"expected anchored slices, got {reachableSlices.Length}");
+        Assert.True(reachableSlices.Length >= 2, $"expected anchored slices, got {reachableSlices.Length}");
         Assert.All(reachableSlices, slice => Assert.Contains(slice, ApplicationSlices(all)));
     }
 

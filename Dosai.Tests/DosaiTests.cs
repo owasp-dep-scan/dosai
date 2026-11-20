@@ -6027,7 +6027,7 @@ public class P
     [Fact]
     public void DataFlows_SliceFingerprint_DedupesAcrossPasses()
     {
-        DataFlowNode Node(string file, int line, int column) => new() { Id = "dfn", Kind = "Source", Name = "n", FileName = file, LineNumber = line, ColumnNumber = column };
+        DataFlowNode Node(string file, int line, int column, string directory = "") => new() { Id = "dfn", Kind = "Source", Name = "n", FileName = file, Path = directory + file, LineNumber = line, ColumnNumber = column };
         var source = Node("Flows.cs", 7, 48);
         var sink = Node("Flows.cs", 8, 41);
 
@@ -6044,7 +6044,12 @@ public class P
             DataFlowAnalyzer.SliceFingerprint(Node("Other.cs", 7, 48), sink, "command", 0));
         Assert.NotEqual(
             DataFlowAnalyzer.SliceFingerprint(source, sink, "command", 0),
-            DataFlowAnalyzer.SliceFingerprint(source, new DataFlowNode { Id = "dfn", Kind = "Sink", Name = "WriteAllText", FileName = "Flows.cs", LineNumber = 8, ColumnNumber = 41 }, "command", 0));
+            DataFlowAnalyzer.SliceFingerprint(source, new DataFlowNode { Id = "dfn", Kind = "Sink", Name = "WriteAllText", FileName = "Flows.cs", Path = "Flows.cs", LineNumber = 8, ColumnNumber = 41 }, "command", 0));
+        // The same file name in another directory is another file: the tree-relative path is
+        // what the key holds, never the bare name.
+        Assert.NotEqual(
+            DataFlowAnalyzer.SliceFingerprint(source, sink, "command", 0),
+            DataFlowAnalyzer.SliceFingerprint(Node("Flows.cs", 7, 48, "vendor/"), Node("Flows.cs", 8, 41, "vendor/"), "command", 0));
         Assert.NotEqual(
             DataFlowAnalyzer.SliceFingerprint(source, sink, "command", 0),
             DataFlowAnalyzer.SliceFingerprint(source, sink, "log", 0));
