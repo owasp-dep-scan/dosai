@@ -55,9 +55,16 @@ internal static class SourceDocumentPaths
     ///     write <c>Views\Home\Privacy.cshtml</c> on Windows and
     ///     <c>Views/Home/Privacy.cshtml</c> on Linux for the same file, so consumers matching
     ///     records against source paths (and every cross-platform assertion) saw different
-    ///     values. The separator is the only change; segments keep their case and form.
+    ///     values. The separator is the only change, and it is made on Windows only (a Unix
+    ///     file name may hold a literal backslash); segments keep their case and form.
     /// </summary>
-    public static string RelativePath(string root, string path) => Path.GetRelativePath(root, path).Replace('\\', '/');
+    public static string RelativePath(string root, string path)
+    {
+        var relative = Path.GetRelativePath(root, path);
+        // Only Windows has a second separator to normalize: a Unix file name may hold a
+        // literal backslash, which is part of the name and stays.
+        return OperatingSystem.IsWindows() ? relative.Replace('\\', '/') : relative;
+    }
 
     /// <summary>
     ///     <paramref name="documentPath" /> relative to <paramref name="root" />, or null when it has no

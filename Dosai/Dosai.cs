@@ -2318,7 +2318,7 @@ public static class Dosai
             best ??= first;
             if (!ReferenceEquals(best, first))
             {
-                var describe = (string file) => Path.GetRelativePath(File.Exists(path) ? (Path.GetDirectoryName(path) ?? string.Empty) : path, file).Replace('\\', '/');
+                var describe = (string file) => SourceDocumentPaths.RelativePath(File.Exists(path) ? (Path.GetDirectoryName(path) ?? string.Empty) : path, file);
                 diagnostics.Add(best.Complete
                     ? $"{Path.GetFileName(first.FilePath)} did not load completely from {describe(first.FilePath)}; its types were read from the complete copy in {describe(best.FilePath)}."
                     : $"{Path.GetFileName(first.FilePath)} did not load completely from {describe(first.FilePath)}; the copy in {describe(best.FilePath)} read more of its members and was used.");
@@ -2520,7 +2520,7 @@ public static class Dosai
                         
                         fsharpMethods.Add(new Method
                         {
-                            Path = Path.GetRelativePath(path, sourceFilePath).Replace('\\', '/'),
+                            Path = SourceDocumentPaths.RelativePath(path, sourceFilePath),
                             FileName = fileName,
                             Name = functionName,
                             ClassName = containingContext,
@@ -2544,7 +2544,7 @@ public static class Dosai
                         
                         fsharpMethods.Add(new Method
                         {
-                            Path = Path.GetRelativePath(path, sourceFilePath).Replace('\\', '/'),
+                            Path = SourceDocumentPaths.RelativePath(path, sourceFilePath),
                             FileName = fileName,
                             Name = memberName,
                             ClassName = containingType,
@@ -2567,7 +2567,7 @@ public static class Dosai
                         
                         fsharpMethods.Add(new Method
                         {
-                            Path = Path.GetRelativePath(path, sourceFilePath).Replace('\\', '/'),
+                            Path = SourceDocumentPaths.RelativePath(path, sourceFilePath),
                             FileName = fileName,
                             Name = ".ctor",
                             ClassName = containingType,
@@ -2592,7 +2592,7 @@ public static class Dosai
                     
                     fsharpDependencies.Add(new Dependency
                     {
-                        Path = Path.GetRelativePath(path, sourceFilePath),
+                        Path = SourceDocumentPaths.RelativePath(path, sourceFilePath),
                         FileName = fileName,
                         Name = namespaceName,
                         Namespace = namespaceName,
@@ -2616,7 +2616,7 @@ public static class Dosai
                     
                     fsharpMethodCalls.Add(new MethodCalls
                     {
-                        Path = Path.GetRelativePath(path, sourceFilePath),
+                        Path = SourceDocumentPaths.RelativePath(path, sourceFilePath),
                         FileName = fileName,
                         CalledMethod = methodName,
                         ClassName = "Unknown",
@@ -3045,7 +3045,7 @@ public static class Dosai
             // Computed once per file: it was rendered per member and per call site, a pure
             // function of (path, file) that left an identical string behind in every record.
             // Forward slashes on every OS: consumers match records against source paths.
-            var relativePath = Path.GetRelativePath(path, sourceFilePath).Replace('\\', '/');
+            var relativePath = SourceDocumentPaths.RelativePath(path, sourceFilePath);
             var extn = Path.GetExtension(sourceFilePath);
             SemanticModel? model;
             CompilationUnitSyntax? csRoot = null;

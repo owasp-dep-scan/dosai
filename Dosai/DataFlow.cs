@@ -5408,7 +5408,7 @@ public static partial class DataFlowAnalyzer
                 return Path.GetFileName(sourceFilePath);
             }
 
-            return Path.GetRelativePath(basePath, sourceFilePath).Replace('\\', '/');
+            return SourceDocumentPaths.RelativePath(basePath, sourceFilePath);
         }
 
         /// <summary>
