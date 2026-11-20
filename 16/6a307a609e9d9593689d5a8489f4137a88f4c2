@@ -1,0 +1,22 @@
+Dosai/CryptoAnalysis.cs
+  s_870276876982bd::t_219b2a35bf7123 1476-1481,1484,1496-1518
+  s_870276876982bd::t_f80f6a7823f311 1519-1520
+Dosai.Tests/Issue134WeakHashTests.cs
+  s_870276876982bd::t_219b2a35bf7123 222,226-232,243-249
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "166a307a609e9d9593689d5a8489f4137a88f4c2",
+  "prompts": {},
+  "sessions": {
+    "s_870276876982bd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c678bfd8-2aba-4f7e-aa22-0bbbaf027e71",
+        "model": "claude-sonnet-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
