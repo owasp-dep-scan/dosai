@@ -257,7 +257,7 @@ internal sealed class AssemblyCopies
         }
 
         var baseDirectory = Directory.Exists(root) ? root : Path.GetDirectoryName(root) ?? root;
-        string Relative(string path) => Path.GetRelativePath(baseDirectory, Path.GetDirectoryName(path) ?? path).Replace('\\', '/');
+        string Relative(string path) => SourceDocumentPaths.RelativePath(baseDirectory, Path.GetDirectoryName(path) ?? path);
         static string List(IReadOnlyList<string> paths, Func<string, string> relative)
         {
             var named = string.Join(", ", paths.Take(MaxCopiesPerGroupInDiagnostic).Select(relative));

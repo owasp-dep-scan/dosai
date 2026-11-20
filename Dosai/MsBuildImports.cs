@@ -703,7 +703,7 @@ internal static partial class MsBuildImports
     }
 
     /// <summary>A path relative to the scan root with forward slashes, so a diagnostic reads the same on every OS.</summary>
-    private static string Relative(string root, string path) => Path.GetRelativePath(root, path).Replace('\\', '/');
+    private static string Relative(string root, string path) => SourceDocumentPaths.RelativePath(root, path);
 
     /// <summary>
     ///     A UNC path shape (<c>\\server\share</c> or <c>//server/share</c>, the
