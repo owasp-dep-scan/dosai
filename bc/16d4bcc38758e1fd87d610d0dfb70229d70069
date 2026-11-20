@@ -1,0 +1,18 @@
+Dosai.Tests/IssueRegressionTests.cs
+  h_6a4cc5cdf68def 632-850
+Dosai/GraphAssembly.cs
+  h_6a4cc5cdf68def 53-54,141-148,158,171-301
+Dosai/Reachability.cs
+  h_6a4cc5cdf68def 389-396,399-400,402-556,560
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "bc16d4bcc38758e1fd87d610d0dfb70229d70069",
+  "prompts": {},
+  "humans": {
+    "h_6a4cc5cdf68def": {
+      "author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}

@@ -1,0 +1,32 @@
+AGENTS.md
+  h_6a4cc5cdf68def 168-170,252-258
+Dosai.Tests/Issue65ScalingTests.cs
+  h_6a4cc5cdf68def 1-161
+Dosai/CryptoAnalysis.cs
+  h_6a4cc5cdf68def 1223-1224,1228
+Dosai/DataFlow.cs
+  h_6a4cc5cdf68def 1327-1329,1338
+Dosai/Dosai.cs
+  h_6a4cc5cdf68def 2402-2406,2409-2414,2423-2428,2435-2439
+Dosai/FrameworkReferences.cs
+  h_6a4cc5cdf68def 172-175,182-191,252-257
+Dosai/Frameworks/FrameworkContext.cs
+  h_6a4cc5cdf68def 97-98,103-126,144-145,148-170
+Dosai/McpServer.cs
+  h_6a4cc5cdf68def 127
+Dosai/TreeFrameworks.cs
+  h_6a4cc5cdf68def 106-180,362-364
+docs/migration-5.1.0.md
+  h_6a4cc5cdf68def 288-302
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1f226c40dfee89c585c2f3b78c8ff6c94721d5eb",
+  "prompts": {},
+  "humans": {
+    "h_6a4cc5cdf68def": {
+      "author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}

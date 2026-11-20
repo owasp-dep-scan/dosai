@@ -1,0 +1,26 @@
+AGENTS.md
+  h_6a4cc5cdf68def 65-69,85-88
+Dosai.Tests/DosaiTests.cs
+  h_6a4cc5cdf68def 1338-1456
+Dosai/CryptoAnalysis.cs
+  h_6a4cc5cdf68def 216-220,223-225
+Dosai/DataFlow.cs
+  h_6a4cc5cdf68def 264-271,273-275
+Dosai/DedicatedStack.cs
+  h_6a4cc5cdf68def 1-52
+Dosai/Dosai.cs
+  h_6a4cc5cdf68def 353-360,362-364,1285,1296
+Dosai/Transparency.cs
+  h_6a4cc5cdf68def 272,299-302,309,312-313,319,340-341,348,351,476-485,487-522
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c3e9618f3fd5ad80be9d9cc134fe915bb521776a",
+  "prompts": {},
+  "humans": {
+    "h_6a4cc5cdf68def": {
+      "author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}

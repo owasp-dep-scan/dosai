@@ -1,0 +1,30 @@
+AGENTS.md
+  h_6a4cc5cdf68def 233-242
+Dosai.Tests/Issue74BindingTests.cs
+  h_6a4cc5cdf68def 291-297,299,301-347,349-350,354-495
+Dosai/FrameworkReferences.cs
+  h_6a4cc5cdf68def 59-67,208-209,211,219,221-223,231,260,262-264,304-312,315-325,327-334,338,341,343-345,347,350-354,356,361-372,374,376,379,382-384,386,392,394-396,398,403-410,414-451
+Dosai/GlobalUsings.cs
+  h_6a4cc5cdf68def 87-95,140-150,217-220,289-295,297,299-302,305,312,320-332,343,345-346,348-349,351-355,362-367,391-407,465,533,593-595
+Dosai/McpServer.cs
+  h_6a4cc5cdf68def 121-126
+Dosai/TargetFrameworkDetection.cs
+  h_6a4cc5cdf68def 67-82
+Dosai/TreeFrameworks.cs
+  h_6a4cc5cdf68def 37,42-44,78,83-84,242
+docs/compiler-engineering.md
+  h_6a4cc5cdf68def 61-67
+docs/migration-5.1.0.md
+  h_6a4cc5cdf68def 267-275
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "659b86dcebb736aed86dd9f5cac4134003bdacc4",
+  "prompts": {},
+  "humans": {
+    "h_6a4cc5cdf68def": {
+      "author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}

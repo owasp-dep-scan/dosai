@@ -1,0 +1,37 @@
+Dosai.Tests/DosaiTests.cs
+  s_c7ab1e6d0f0c48::t_ba9eff1792a9d9 5869-5870
+  s_c7ab1e6d0f0c48::t_dd4618d478efc7 5627-5715,5718-5754,5757-5778,5780-5802,5804-5836,5838-5864,5867,5871-5904
+  s_c7ab1e6d0f0c48::t_26359beeaa28d2 5803,5837,5865-5866,5868
+  s_c7ab1e6d0f0c48::t_d9a2e6ffdd9057 5716-5717,5755-5756,5779
+docs/commands.md
+  s_c7ab1e6d0f0c48::t_0b4d5cc85bc637 53-61
+docs/ARCHITECTURE.md
+  s_c7ab1e6d0f0c48::t_35bd77ee0bfce9 111-112
+Dosai/Dosai.cs
+  s_c7ab1e6d0f0c48::t_b8b732b49da15a 4374-4401,4410-4428,4430-4431,4438-4444,4446-4455
+  s_c7ab1e6d0f0c48::t_75763603336bc0 4429,4432-4437
+  s_c7ab1e6d0f0c48::t_5618f52b48f802 4747-4753,4760,4775-4821
+  s_c7ab1e6d0f0c48::t_6396a5053ebfd6 5051-5054,5060,5071-5116
+  s_c7ab1e6d0f0c48::t_7999d0a8f22977 132-135,331
+  s_c7ab1e6d0f0c48::t_cdd756629b0b5f 3980-3985,3992-3994
+  s_c7ab1e6d0f0c48::t_c77645ea4bc387 155-187
+  s_c7ab1e6d0f0c48::t_55d13d0d3a6f93 2731,3867,3877,3892,3911-3917
+  s_c7ab1e6d0f0c48::t_53e2dee200ee4e 4521-4522,4566-4611
+  s_c7ab1e6d0f0c48::t_b19387b25cb844 4402-4409,4445
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0ae7b1757d19244fd0fbaa7ba24b0f33cf2c79d7",
+  "prompts": {},
+  "sessions": {
+    "s_c7ab1e6d0f0c48": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "sess_ffe8eabc-0c06-4d2b-9b0a-1af2dae85431",
+        "model": "GLM-5.3"
+      },
+      "human_author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}

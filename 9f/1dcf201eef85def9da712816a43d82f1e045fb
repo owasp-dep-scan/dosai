@@ -1,0 +1,22 @@
+AGENTS.md
+  h_6a4cc5cdf68def 153-156
+Dosai.Tests/Issue84AsyncParameterSourceTests.cs
+  h_6a4cc5cdf68def 1-128
+Dosai/AssemblyCallGraphAnalyzer.cs
+  h_6a4cc5cdf68def 1080,1099-1107,1109-1117
+Dosai/DataFlowAssembly.cs
+  h_6a4cc5cdf68def 1770,1785-1791,1795-1806
+docs/compiler-engineering.md
+  h_6a4cc5cdf68def 318
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9f1dcf201eef85def9da712816a43d82f1e045fb",
+  "prompts": {},
+  "humans": {
+    "h_6a4cc5cdf68def": {
+      "author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}

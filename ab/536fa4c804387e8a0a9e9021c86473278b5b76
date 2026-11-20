@@ -1,0 +1,46 @@
+AGENTS.md
+  h_6a4cc5cdf68def 41-45
+Dosai.TestData/CSharp15Features.cs
+  h_6a4cc5cdf68def 4-6,15,50-79
+Dosai.TestData/Dosai.TestData.CSharp.csproj
+  h_6a4cc5cdf68def 7-8,14
+Dosai.TestData/FSharp11Language.fs
+  h_6a4cc5cdf68def 1-64
+Dosai.TestData/FileBasedApp.cs
+  h_6a4cc5cdf68def 1-36
+Dosai.TestData/ModernRFeatures.R
+  h_6a4cc5cdf68def 2-6,17-21
+Dosai.Tests/Dosai.Tests.csproj
+  h_6a4cc5cdf68def 37-38
+Dosai.Tests/DosaiTests.cs
+  h_6a4cc5cdf68def 1350,1368-1525,2479-2524,3711-3750,3835-3849,4753,4755
+Dosai/CSharpSourceParser.cs
+  h_6a4cc5cdf68def 1,20-27,30-31
+Dosai/CryptoAnalysis.cs
+  h_6a4cc5cdf68def 433,821-825,831-833
+Dosai/DataFlow.cs
+  h_6a4cc5cdf68def 897-902,1793-1829,3902-3904,3906,3912-3917,3953-3965
+Dosai/Dosai.cs
+  h_6a4cc5cdf68def 2262-2303
+Dosai/Frameworks/Providers/MinimalApiProvider.cs
+  h_6a4cc5cdf68def 190-196,212-243,294-333
+Dosai/LanguageFrontendAnalyzer.cs
+  h_6a4cc5cdf68def 23-25,92,101-132,352-456
+docs/compiler-engineering.md
+  h_6a4cc5cdf68def 63-79
+docs/migration-5.0.md
+  h_6a4cc5cdf68def 71-93,107-113,137-166
+docs/pattern-packs.md
+  h_6a4cc5cdf68def 60-62
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ab536fa4c804387e8a0a9e9021c86473278b5b76",
+  "prompts": {},
+  "humans": {
+    "h_6a4cc5cdf68def": {
+      "author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}

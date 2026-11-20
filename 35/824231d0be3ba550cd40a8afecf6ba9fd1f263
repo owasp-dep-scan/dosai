@@ -1,0 +1,30 @@
+Dosai.Tests/DosaiTests.cs
+  h_6a4cc5cdf68def 4559,4572,4599-4600,4602,4615-4671
+Dosai/BuildPreparation.cs
+  h_6a4cc5cdf68def 24-27,61-64,66-71
+Dosai/CSharpSourceParser.cs
+  h_6a4cc5cdf68def 92-100,111-112,114,120,162-163
+Dosai/Dosai.cs
+  h_6a4cc5cdf68def 2448,2860,2931-2936
+Dosai/Frameworks/FrameworkContext.cs
+  h_6a4cc5cdf68def 315,321,328,332-335,338-341
+Dosai/NuGetRestoreCache.cs
+  h_6a4cc5cdf68def 168-175,220-234
+docs/THREAT_MODEL.md
+  h_6a4cc5cdf68def 83-104
+docs/migration-5.0.md
+  h_6a4cc5cdf68def 190-200,204-210
+docs/supply-chain-purl.md
+  h_6a4cc5cdf68def 40
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "35824231d0be3ba550cd40a8afecf6ba9fd1f263",
+  "prompts": {},
+  "humans": {
+    "h_6a4cc5cdf68def": {
+      "author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}

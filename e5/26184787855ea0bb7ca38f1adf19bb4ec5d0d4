@@ -1,0 +1,58 @@
+Dosai.Tests/CryptoDataFlowDetailTests.cs
+  h_6a4cc5cdf68def 1-331
+Dosai.Tests/Dosai.Tests.csproj
+  h_6a4cc5cdf68def 26-35
+Dosai.Tests/Goldens/README.md
+  h_6a4cc5cdf68def 1-32
+Dosai.Tests/Goldens/graph-exports/callgraph.gexf
+  h_6a4cc5cdf68def 1-64
+Dosai.Tests/Goldens/graph-exports/callgraph.graphml
+  h_6a4cc5cdf68def 1-56
+Dosai.Tests/Goldens/graph-exports/callgraph.mermaid
+  h_6a4cc5cdf68def 1-4
+Dosai.Tests/Goldens/graph-exports/crypto-cyclonedx.json
+  h_6a4cc5cdf68def 1-50
+Dosai.Tests/Goldens/graph-exports/dataflows.gexf
+  h_6a4cc5cdf68def 1-97
+Dosai.Tests/Goldens/graph-exports/dataflows.graphml
+  h_6a4cc5cdf68def 1-89
+Dosai.Tests/Goldens/graph-exports/dataflows.mermaid
+  h_6a4cc5cdf68def 1-7
+Dosai.Tests/Goldens/graph-labels-fixture/NastyLabels.cs
+  h_6a4cc5cdf68def 1-19
+Dosai.Tests/GraphExportGoldenTests.cs
+  h_6a4cc5cdf68def 1-216
+Dosai.Tests/GraphExportReference.cs
+  h_6a4cc5cdf68def 1-457
+Dosai.Tests/LocaleInvarianceTests.cs
+  h_6a4cc5cdf68def 283,286,289-293
+Dosai/CallGraphExporter.cs
+  h_6a4cc5cdf68def 22-23
+Dosai/CommandLine.cs
+  h_6a4cc5cdf68def 91,93-94,410-422,432
+Dosai/CryptoAnalysis.cs
+  h_6a4cc5cdf68def 176,178,182-198,313,340-343,349-352,354,359,361,363,370-391,398-408,410,433-461
+Dosai/DataFlowExporter.cs
+  h_6a4cc5cdf68def 21-22,100
+Dosai/McpServer.cs
+  h_6a4cc5cdf68def 144,222
+docs/commands.md
+  h_6a4cc5cdf68def 303,306-307
+docs/compiler-engineering.md
+  h_6a4cc5cdf68def 304-306
+docs/crypto-cbom.md
+  h_6a4cc5cdf68def 50,53-54
+docs/migration-5.1.0.md
+  h_6a4cc5cdf68def 224-231,235-244
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e526184787855ea0bb7ca38f1adf19bb4ec5d0d4",
+  "prompts": {},
+  "humans": {
+    "h_6a4cc5cdf68def": {
+      "author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}

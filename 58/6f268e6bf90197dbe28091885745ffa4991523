@@ -1,0 +1,22 @@
+Dosai.Tests/DosaiTests.cs
+  h_6a4cc5cdf68def 1278-1347,2491,2501-2550
+Dosai/CryptoAnalysis.cs
+  h_6a4cc5cdf68def 1445-1468,1475-1480,1484-1496,1506-1513,1527-1534,1549-1564,1575-1586,1598,1602-1604,1606-1611,1626-1628,1633-1682
+Dosai/Dosai.cs
+  h_6a4cc5cdf68def 787-796,808,817,833-845,847,851-859,1443,1445-1448,1450-1453,1461-1471
+docs/crypto-cbom.md
+  h_6a4cc5cdf68def 53-54
+docs/migration-5.0.md
+  h_6a4cc5cdf68def 240-246
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "586f268e6bf90197dbe28091885745ffa4991523",
+  "prompts": {},
+  "humans": {
+    "h_6a4cc5cdf68def": {
+      "author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}
