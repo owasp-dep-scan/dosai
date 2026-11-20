@@ -1,0 +1,27 @@
+Dosai.Tests/Issue130FollowUpTests.cs
+  s_870276876982bd::t_f48c3655f4b318 127-132,142,149,156
+  s_870276876982bd::t_a50ae7599d35eb 1-126,133-141,143-148,150-155,157-158
+Dosai.Tests/DosaiTests.cs
+  s_870276876982bd::t_f0c76fca29223f 5901
+Dosai/Dosai.cs
+  s_870276876982bd::t_dd97e0a55866b4 160-161,180-184,193-205
+  s_870276876982bd::t_a50ae7599d35eb 3946
+  s_870276876982bd::t_de8c015da5b1f5 3888,4412-4421,4480-4481,4483-4484
+  s_870276876982bd::t_319898bc33ef49 206-207
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c1515119c86481759756df7125e9be8d141bd82c",
+  "prompts": {},
+  "sessions": {
+    "s_870276876982bd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c678bfd8-2aba-4f7e-aa22-0bbbaf027e71",
+        "model": "claude-sonnet-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
