@@ -535,8 +535,11 @@ as application code until someone copied a `*.deps.json` into the root.
   a user-written `Cache` - never joins another assembly's, and a key that cannot be qualified
   falls back to a legacy key unique over the whole set. `callvirt` and `ldvirtftn` reach the
   implementations held by types reached code instantiates (issue #120): instantiation evidence
-  is `newobj`, `box`, `ldtoken` and the generic arguments and signature types of called
-  members, counted in reached bodies only, with no class-hierarchy fallback, fired against a
+  is `newobj`, `box`, `ldtoken`, `constrained.`, `initobj`, the generic arguments of method
+  instantiations and the generic arguments and signature types of called members, with a
+  generic base type or interface decoded through its type specification; types are keyed with
+  their arity, so `Box` and `Box<T>` are two types. Calls to interface members (static abstract
+  ones too), MethodImpl rows and explicit overrides in derived interfaces are followed. Evidence is counted in reached bodies only, with no class-hierarchy fallback, fired against a
   memoized inheritance table built from every analyzed assembly and matching explicit
   interface implementations by their dotted metadata name. The flows through the package code
   a run can execute are kept while flows that only analyzing every package body finds are
@@ -786,9 +789,14 @@ already reported: a block-body MD5 asset and finding anchor at the argument inst
 token (column 67 becomes 49 on the fixture's line), and the operation names the called API with
 `source: roslyn`. On the MAC half, a decoded argument names the MAC (`HmacData` with MD5 becomes
 a weak HMAC-MD5 asset) and replaces the generic strong `HMAC` asset the method name used to
-give; a runtime-chosen algorithm keeps the generic record. A block-body MAC line keeps the line
-pass's MD5 token beside the walker's MAC asset (two assets, one finding), and hyphenated
-constant spellings (`"SHA-256"`) record nothing.
+give. The line pass skips the algorithm tokens the walker classified from an argument, so a
+block-body and an expression-body `HmacData(HashAlgorithmName.MD5, ...)` both give one HMAC-MD5
+asset and no plain-MD5 hashing finding. A runtime-chosen MAC algorithm is recorded as an `HMAC`
+asset of `unknown` strength rather than the generic strong one; a `static readonly
+HashAlgorithmName` field is resolved through its initializer. `IncrementalHash.CreateHash` and
+`CreateHMAC` and the `SignData`, `VerifyData` and `SignHash` families of `RSA`, `ECDsa` and
+`DSA` are decoded the same way (a signature call keeps its RSA or ECDsa asset and adds the
+digest it signs with), and hyphenated constant spellings (`"SHA-256"`) record nothing.
 
 ## Initializer calls attribute to the constructors that run them (issue #130, behavioral)
 
@@ -801,8 +809,11 @@ exactly as the compiler's IL does, which promotes packages used only from initia
 `Dependency` to `ExternalCallGraphNode`. The static-constructor id loses its `:void` suffix
 (`Repro.Settings..cctor():void` becomes `Repro.Settings..cctor()`) and the phantom
 `Ns.T..ctor()` node that the inventory minted beside a declared static constructor is gone.
-Attribute arguments and Visual Basic initializer calls stay unrecorded (VB with a diagnostic
-counting the dropped sites).
+A constructor that chains with `: this(...)` is not an owner (the constructor it chains to runs
+the initializer; every other constructor of a primary-constructor type chains), except that a
+struct constructor chaining to the implicit parameterless `this()` keeps its rows. Attribute
+arguments and Visual Basic initializer calls stay unrecorded; the diagnostic counts each dropped
+site once, `As New` clauses and property initializers included.
 
 ## Source-pass flows from initializers and expression bodies (issue #131, behavioral)
 
@@ -812,7 +823,9 @@ before only flows inside method bodies (and lambdas of field initializers) were 
 static field initializer's taint reaches the methods that read the field, and the source node
 of such a slice sits at the initializer, under the synthesized constructor's method id
 (`Ns.T..cctor()`), matching the IL pass's placement. On a built tree each flow is reported
-once: the source pass claims its flows and the assembly pass drops its duplicates, so the
+once: the source pass claims its flows (the key holds the tree-relative paths, lines, sink name,
+source and sink category and argument index) and the assembly pass drops the ones the source
+pass already holds, never merging two assembly flows with each other, so the
 `EvidenceKind` mix changes on built trees (flows previously reported as `assembly-il` are
 reported as `source`). Node ids (`dfn{...}`) shift because the source pass now walks more
 roots before the IL pass numbers its nodes; ids are order-dependent and deterministic, but a
@@ -826,4 +839,5 @@ records) uses forward slashes on every OS. On Windows these fields carried backs
 so the same scan produced `Views/Home/Privacy.cshtml` on Linux and
 `Views\Home\Privacy.cshtml` on Windows, and consumers matching records against source
 paths saw different values per host. Diagnostics prose and `FileName` fields are
-unchanged; on Linux and macOS no output changes at all.
+unchanged; on Linux and macOS no output changes at all, and a Unix file name that holds a
+literal backslash keeps it (only Windows rewrites the separator).

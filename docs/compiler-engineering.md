@@ -83,10 +83,13 @@ scan root so it is deterministic across the run.
 A net4x tree reads the .NET Framework reference assemblies from the NuGet cache (issue #127):
 restore auto-fetches `microsoft.netframework.referenceassemblies.<tfm>`, and the exact package
 (highest version, layout `build/.NETFramework/v<Major.Minor[.Patch]>/` plus its `Facades/`, no
-cross-TFM substitution) owns the whole set the way a base reference pack owns the corlib, only
+cross-TFM substitution; a lower package version serves when the highest lacks the target's folder) owns the whole set the way a base reference pack owns the corlib, only
 stronger: mscorlib is the corlib, the process-wide runtime set fills nothing beside it, and the
 modern shared frameworks the tree declares (WindowsDesktop via `UseWindowsForms`) are not layered
-either, because the net4x pack already carries their types and the skip is reported. Without the
+either, because the net4x pack already carries their types and the skip is reported. The net461 to net471 packs ship no
+`Facades/netstandard.dll`, so the SDK's `Microsoft.NET.Build.Extensions` netstandard facades
+(or, without an SDK, the process-wide `netstandard` facade for that name alone) are added with a
+diagnostic, and a call into a netstandard2.0 library binds. Without the
 package the tree degrades to the process-wide set under a diagnostic naming the package and the
 runtime base actually used. netstandard, netcoreapp and undetectable targets keep the
 process-wide set too, now with a diagnostic naming that base instead of silence, and a net4x
