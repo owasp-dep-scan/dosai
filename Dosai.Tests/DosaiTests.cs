@@ -5624,7 +5624,470 @@ class SqlFlow
         var methodsSlice = JsonSerializer.Deserialize<MethodsSlice>(result,  deserializeOptions);
         Assert.Equal(0, methodsSlice?.Methods?.Count);
     }
+    #region Issue 130 - initializer calls attribute to the constructors that run them
+
+    private static string WriteIssue130Tree(string directory, string source, string fileName = "Settings.cs")
+    {
+        File.WriteAllText(Path.Combine(directory, "Repro.csproj"), """
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+</Project>
+""");
+        var sourcePath = Path.Combine(directory, fileName);
+        File.WriteAllText(sourcePath, source);
+        return sourcePath;
+    }
+
+    private static void AssertEveryEdgeEndpointExists(MethodsSlice slice)
+    {
+        var ids = slice.CallGraph!.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
+        Assert.All(slice.CallGraph.Edges, edge =>
+        {
+            Assert.Contains(edge.SourceId, ids);
+            Assert.Contains(edge.TargetId, ids);
+        });
+    }
+
+    [Fact]
+    public void GetMethods_FieldInitializerCalls_AreAttributedToSynthesizedConstructors()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        WriteIssue130Tree(tempDirectory.Path, """
+using System;
+
+namespace Ns;
+
+public class Type
+{
+    private static readonly int StaticField = int.Parse("7");
+    private readonly int instanceField = int.Parse("8");
+    public int AutoProperty { get; } = int.Parse("9");
+}
+""");
+
+        var slice = ReadMethods(tempDirectory.Path);
+        var rows = slice.MethodCalls!.Where(call => call.CalledMethod?.Contains("Parse", StringComparison.Ordinal) == true).OrderBy(call => call.LineNumber).ToList();
+        Assert.Equal(3, rows.Count);
+        Assert.Equal((7, "Ns.Type..cctor()", ".cctor"), (rows[0].LineNumber, rows[0].SourceId, rows[0].CallerMethod));
+        Assert.Equal((8, "Ns.Type..ctor()", ".ctor"), (rows[1].LineNumber, rows[1].SourceId, rows[1].CallerMethod));
+        Assert.Equal((9, "Ns.Type..ctor()", ".ctor"), (rows[2].LineNumber, rows[2].SourceId, rows[2].CallerMethod));
+        Assert.All(rows, row => Assert.Equal(AnalysisEvidenceKind.SourceRoslynDirect, row.EvidenceKind));
+        // The initializer rows carry their own line and column, and the evidence says the
+        // caller is the generated constructor.
+        Assert.Contains(rows[0].Evidence, evidence => (evidence.Description ?? string.Empty).Contains("constructor the compiler generates from the member initializer", StringComparison.Ordinal));
+
+        var nodeIds = slice.CallGraph!.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
+        Assert.Contains("Ns.Type..cctor()", nodeIds);
+        Assert.Contains("Ns.Type..ctor()", nodeIds);
+        Assert.All(slice.CallGraph.Edges, edge => { Assert.Contains(edge.SourceId, nodeIds); Assert.Contains(edge.TargetId, nodeIds); });
+    }
+
+    [Fact]
+    public void GetMethods_InstanceInitializerCalls_EmitOneRowPerDeclaredConstructor()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        WriteIssue130Tree(tempDirectory.Path, """
+using System;
+
+namespace Ns;
+
+public class Type
+{
+    public readonly int Field = int.Parse("1");
+
+    public Type()
+    {
+    }
+
+    public Type(int other)
+    {
+    }
+}
+""");
+
+        var slice = ReadMethods(tempDirectory.Path);
+        var rows = slice.MethodCalls!.Where(call => call.CalledMethod?.Contains("Parse", StringComparison.Ordinal) == true).ToList();
+        // One row per declared constructor, at the same line and column, with distinct SourceIds.
+        Assert.Equal(2, rows.Count);
+        Assert.Equal((rows[0].LineNumber, rows[0].ColumnNumber), (rows[1].LineNumber, rows[1].ColumnNumber));
+        Assert.Equal(new[] { "Ns.Type..ctor()", "Ns.Type..ctor(int)" }.Order(StringComparer.Ordinal), rows.Select(row => row.SourceId).Order(StringComparer.Ordinal));
+        Assert.Equal(2, slice.CallGraph!.Edges.Count(edge => edge.SourceId is "Ns.Type..ctor()" or "Ns.Type..ctor(int)" && edge.TargetId.Contains("Parse", StringComparison.Ordinal)));
+        AssertEveryEdgeEndpointExists(slice);
+    }
+
+    [Fact]
+    public void GetMethods_StructInitializerCalls_StaticAttributed_InstanceOnlyWithDeclaredCtor()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        WriteIssue130Tree(tempDirectory.Path, """
+using System;
+
+namespace Ns;
+
+public struct NoCtor
+{
+    private static readonly int StaticField = int.Parse("7");
+    public int AutoProperty { get; } = int.Parse("8");
+}
+
+public struct WithCtor
+{
+    public int Field = int.Parse("11");
+
+    public WithCtor(int other)
+    {
+        Field = other;
+    }
+}
+""");
+
+        var slice = ReadMethods(tempDirectory.Path);
+        var rows = slice.MethodCalls!.Where(call => call.CalledMethod?.Contains("Parse", StringComparison.Ordinal) == true).ToList();
+        // A struct's implicit parameterless constructor never runs initializers, so the
+        // instance initializer without a declared constructor has no owner; with one, the
+        // initializer attributes to it.
+        var row = Assert.Single(rows, call => call.SourceId == "Ns.NoCtor..cctor()");
+        Assert.Equal(7, row.LineNumber);
+        Assert.DoesNotContain(rows, call => call.SourceId == "Ns.NoCtor..ctor()");
+        var declared = Assert.Single(rows, call => call.SourceId == "Ns.WithCtor..ctor(int)");
+        Assert.Equal(13, declared.LineNumber);
+    }
+
+    [Fact]
+    public void GetMethods_PrimaryConstructorFieldInitializers_AttributeToPrimaryCtor_AndTheCopyConstructorIsExcluded()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        WriteIssue130Tree(tempDirectory.Path, """
+using System;
+
+namespace Ns;
+
+public record Rec(int Value)
+{
+    public int Doubled = int.Parse("7");
+}
+""");
+
+        var slice = ReadMethods(tempDirectory.Path);
+        // The primary constructor runs instance field initializers (including ones reading the
+        // primary parameter); the copy constructor copies fields and does not, so exactly one
+        // row exists and it names the primary constructor.
+        var row = Assert.Single(slice.MethodCalls!, call => call.CalledMethod?.Contains("Parse", StringComparison.Ordinal) == true);
+        Assert.Equal("Ns.Rec..ctor(int)", row.SourceId);
+        Assert.DoesNotContain(slice.CallGraph!.Nodes, node => node.Id == "Ns.Rec..ctor(Ns.Rec)");
+    }
+
+    [Fact]
+    public void GetMethods_DeclaredStaticConstructorId_DropsVoidSuffix()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        WriteIssue130Tree(tempDirectory.Path, """
+using System;
+
+namespace Ns;
+
+public class Type
+{
+    static Type()
+    {
+        _ = int.Parse("8");
+    }
+}
+""");
+
+        var slice = ReadMethods(tempDirectory.Path);
+        var row = Assert.Single(slice.MethodCalls!, call => call.CalledMethod?.Contains("Parse", StringComparison.Ordinal) == true);
+        Assert.Equal(("Ns.Type..cctor()", 9), (row.SourceId, row.LineNumber));
+        // One node for the type's constructors, the cctor, and no phantom .ctor beside it
+        // (both halves of the id parity: the :void suffix is gone and the inventory mints .cctor).
+        Assert.Equal(["Ns.Type..cctor()"], slice.CallGraph!.Nodes.Where(node => node.Id.StartsWith("Ns.Type..", StringComparison.Ordinal)).Select(node => node.Id).ToList());
+        AssertEveryEdgeEndpointExists(slice);
+    }
+
+    [Fact]
+    public void GetMethods_FieldAttributeArguments_AreStillNotRecorded()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        WriteIssue130Tree(tempDirectory.Path, """
+using System;
+
+namespace Ns;
+
+public class MarkAttribute : Attribute
+{
+    public MarkAttribute(string value) => Value = value;
+
+    public string Value { get; }
+}
+
+[Mark("positional")]
+public class Type
+{
+    [Mark("applied")]
+    public readonly int Field = int.Parse("9");
+}
+""");
+
+        var slice = ReadMethods(tempDirectory.Path);
+        // The attribute arguments stay out of scope; only the initializer's own call records.
+        var row = Assert.Single(slice.MethodCalls!, call => call.CalledMethod?.Contains("Parse", StringComparison.Ordinal) == true);
+        Assert.Equal((16, "Ns.Type..ctor()"), (row.LineNumber, row.SourceId));
+        Assert.DoesNotContain(slice.MethodCalls!, call => call.CallerClass == "MarkAttribute" || (call.CalledMethod ?? string.Empty).Contains("Mark", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void GetMethods_UnrestoredTree_InitializerCallsRecordAsSourceUnresolved()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        WriteIssue130Tree(tempDirectory.Path, """
+namespace Repro;
+
+public class Settings
+{
+    private static readonly string StaticField = Newtonsoft.Json.JsonConvert.SerializeObject(1);
+    public string AutoProperty { get; } = Newtonsoft.Json.JsonConvert.SerializeObject(2);
+
+    public Settings()
+    {
+    }
+
+    public Settings(int other)
+    {
+    }
+}
+""");
+
+        var slice = ReadMethods(tempDirectory.Path);
+        // One unresolved row per owner constructor on the unrestored tree, each keeping its own
+        // dedupe key (the line:column:name key alone used to suppress the second and later):
+        // the static initializer has one owner (.cctor), the auto-property two.
+        var rows = slice.MethodCalls!.Where(call => call.TargetId == "Unresolved:Newtonsoft.Json.JsonConvert.SerializeObject").ToList();
+        Assert.Equal(3, rows.Count);
+        Assert.Equal(1, rows.Count(row => row.LineNumber == 5));
+        Assert.Equal(2, rows.Count(row => row.LineNumber == 6));
+        Assert.All(rows, row => Assert.Equal(AnalysisEvidenceKind.SourceUnresolved, row.EvidenceKind));
+    }
+
+    [Fact]
+    public void GetMethods_VbInitializerCalls_StillDroppedButDiagnosed()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Repro.vbproj"), """
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+</Project>
+""");
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Settings.vb"), """
+Imports System
+
+Namespace Repro
+
+    Public Class Settings
+
+        Private Shared ReadOnly StaticField As String = Integer.Parse("7")
+
+    End Class
+
+End Namespace
+""");
+
+        var slice = ReadMethods(tempDirectory.Path);
+        Assert.DoesNotContain(slice.MethodCalls!, call => call.CallerMethod == ".cctor" || call.CallerMethod == ".ctor");
+        Assert.Contains(slice.Diagnostics!, diagnostic => diagnostic.Contains("Visual Basic field and property initializers (As New clauses included) were not recorded", StringComparison.Ordinal));
+    }
+
+    #endregion
     #endregion GetMethods
+
+    #region Issue 131 - source-pass flows from initializers and expression bodies
+
+    private static void WriteIssue131Tree(string directory, string source)
+    {
+        Directory.CreateDirectory(directory);
+        File.WriteAllText(Path.Combine(directory, "Repro.csproj"), """
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+</Project>
+""");
+        File.WriteAllText(Path.Combine(directory, "Flows.cs"), source);
+    }
+
+    [Fact]
+    public void DataFlows_InitializerAndExpressionBodiedFlowsFoundOnUnbuiltTrees()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        WriteIssue131Tree(tempDirectory.Path, """
+using System.Diagnostics;
+
+namespace Repro;
+
+public class Flows
+{
+    private static readonly string FromField = Console.ReadLine()!;
+    public static Process UseField() => Process.Start(FromField);
+    public Process AutoProperty { get; } = Process.Start(Console.ReadLine()!);
+    public static string Input => Console.ReadLine()!;
+    public static Process UseInput() => Process.Start(Input);
+    public Process this[int i] => Process.Start(Console.ReadLine()!);
+    public static Process Direct() => Process.Start(Console.ReadLine()!);
+}
+
+public class Base(Process process)
+{
+    public Process Started => process;
+}
+
+public class Derived() : Base(Process.Start(Console.ReadLine()!));
+""");
+
+        var result = ReadDataFlows(tempDirectory.Path);
+        var nodes = result.Nodes.ToDictionary(node => node.Id, node => node, StringComparer.Ordinal);
+        var flows = result.Slices
+            .Select(slice => (nodes[slice.SourceId].LineNumber, nodes[slice.SinkId].LineNumber))
+            .Order()
+            .ToList();
+        Assert.Equal([(7, 8), (9, 9), (11, 11), (12, 12), (13, 13), (21, 21)], flows);
+    }
+
+    [Fact]
+    public void DataFlows_ExpressionBodiedMethodWalkedOnce()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        WriteIssue131Tree(tempDirectory.Path, """
+using System.Diagnostics;
+
+namespace Repro;
+
+public class Mixed
+{
+    private static readonly string Field = Console.ReadLine()!;
+
+    public static Process Arrow() => Process.Start(Field);
+
+    public static Process Block()
+    {
+        var local = Console.ReadLine();
+        return Process.Start(local);
+    }
+
+    public string Prop => Process.Start(Console.ReadLine()!);
+}
+""");
+
+        var result = ReadDataFlows(tempDirectory.Path);
+        // The arrow-bodied method is walked exactly once as its declaration root (the naive
+        // fix that added the arrow clause as a root of its own walked it twice), and the
+        // local initializer inside the block body adds no duplicate.
+        var pairs = result.Slices.Select(slice =>
+        {
+            var source = result.Nodes.Single(node => node.Id == slice.SourceId);
+            var sink = result.Nodes.Single(node => node.Id == slice.SinkId);
+            return (source.LineNumber, sink.LineNumber);
+        }).Order().ToList();
+        Assert.Equal([(7, 9), (13, 14), (17, 17)], pairs);
+    }
+
+    [Fact]
+    public void DataFlows_StaticFieldInitializerTaintReachesReaders()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        WriteIssue131Tree(tempDirectory.Path, """
+using System.Diagnostics;
+
+namespace Ns;
+
+public class P
+{
+    private static readonly string Config = Console.ReadLine()!;
+
+    public static void Reader()
+    {
+        Process.Start(Config);
+    }
+}
+""");
+
+        var result = ReadDataFlows(tempDirectory.Path);
+        var slice = Assert.Single(result.Slices);
+        var source = result.Nodes.Single(node => node.Id == slice.SourceId);
+        // The source node sits at the initializer (line 7), where the IL pass places it, and
+        // carries the synthesized static constructor's method id.
+        Assert.Equal(7, source.LineNumber);
+        Assert.Equal("Ns.P..cctor()", source.Properties["methodId"]);
+    }
+
+    [Fact]
+    public void DataFlows_SliceFingerprint_DedupesAcrossPasses()
+    {
+        DataFlowNode Node(string file, int line, int column, string directory = "") => new() { Id = "dfn", Kind = "Source", Name = "n", FileName = file, Path = directory + file, LineNumber = line, ColumnNumber = column };
+        var source = Node("Flows.cs", 7, 48);
+        var sink = Node("Flows.cs", 8, 41);
+
+        // Two slices that agree on the files, lines, sink name, category and argument index
+        // are the same flow, whatever their node ids; the columns differ across passes by
+        // construction (expression start against sequence point) and are not part of the key.
+        Assert.Equal(
+            DataFlowAnalyzer.SliceFingerprint(source, sink, "command", 0),
+            DataFlowAnalyzer.SliceFingerprint(Node("Flows.cs", 7, 5), Node("Flows.cs", 8, 9), "command", 0));
+        // A different source file, sink name, category or argument index is a distinct flow
+        // and is kept.
+        Assert.NotEqual(
+            DataFlowAnalyzer.SliceFingerprint(source, sink, "command", 0),
+            DataFlowAnalyzer.SliceFingerprint(Node("Other.cs", 7, 48), sink, "command", 0));
+        Assert.NotEqual(
+            DataFlowAnalyzer.SliceFingerprint(source, sink, "command", 0),
+            DataFlowAnalyzer.SliceFingerprint(source, new DataFlowNode { Id = "dfn", Kind = "Sink", Name = "WriteAllText", FileName = "Flows.cs", Path = "Flows.cs", LineNumber = 8, ColumnNumber = 41 }, "command", 0));
+        // The same file name in another directory is another file: the tree-relative path is
+        // what the key holds, never the bare name.
+        Assert.NotEqual(
+            DataFlowAnalyzer.SliceFingerprint(source, sink, "command", 0),
+            DataFlowAnalyzer.SliceFingerprint(Node("Flows.cs", 7, 48, "vendor/"), Node("Flows.cs", 8, 41, "vendor/"), "command", 0));
+        Assert.NotEqual(
+            DataFlowAnalyzer.SliceFingerprint(source, sink, "command", 0),
+            DataFlowAnalyzer.SliceFingerprint(source, sink, "log", 0));
+        Assert.NotEqual(
+            DataFlowAnalyzer.SliceFingerprint(source, sink, "command", 0),
+            DataFlowAnalyzer.SliceFingerprint(source, sink, "command", 1));
+    }
+
+    [Fact]
+    public void DataFlows_InstanceMemberFactsFromInitializers()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        WriteIssue131Tree(tempDirectory.Path, """
+using System.Diagnostics;
+
+namespace Repro;
+
+public class Holder
+{
+    public string Config = Console.ReadLine()!;
+
+    public void Use()
+    {
+        Process.Start(Config);
+    }
+}
+""");
+
+        var result = ReadDataFlows(tempDirectory.Path);
+        var slice = Assert.Single(result.Slices);
+        var source = result.Nodes.Single(node => node.Id == slice.SourceId);
+        Assert.Equal(7, source.LineNumber);
+        // The instance twin of the static case: the owner is the generated parameterless
+        // constructor, so the member fact mints at the initializer.
+        Assert.Equal("Repro.Holder..ctor()", source.Properties["methodId"]);
+    }
+
+    #endregion
 
     private static void AssertNamespaces(List<Namespace>? actualNamespaces, Namespace[] expectedNamespaces)
     {

@@ -50,6 +50,23 @@ internal static class SourceDocumentPaths
     }
 
     /// <summary>
+    ///     A tree-relative path in the form every record writes: forward slashes on every OS.
+    ///     <see cref="Path.GetRelativePath" /> yields the host's separator, which made one scan
+    ///     write <c>Views\Home\Privacy.cshtml</c> on Windows and
+    ///     <c>Views/Home/Privacy.cshtml</c> on Linux for the same file, so consumers matching
+    ///     records against source paths (and every cross-platform assertion) saw different
+    ///     values. The separator is the only change, and it is made on Windows only (a Unix
+    ///     file name may hold a literal backslash); segments keep their case and form.
+    /// </summary>
+    public static string RelativePath(string root, string path)
+    {
+        var relative = Path.GetRelativePath(root, path);
+        // Only Windows has a second separator to normalize: a Unix file name may hold a
+        // literal backslash, which is part of the name and stays.
+        return OperatingSystem.IsWindows() ? relative.Replace('\\', '/') : relative;
+    }
+
+    /// <summary>
     ///     <paramref name="documentPath" /> relative to <paramref name="root" />, or null when it has no
     ///     place in the tree. <paramref name="builtFromSource" /> says whether the assembly whose PDB
     ///     names the document is one the tree builds from source.
@@ -85,7 +102,7 @@ internal static class SourceDocumentPaths
 
     private static string? UnderRoot(string root, string fullPath)
     {
-        var relative = Path.GetRelativePath(root, fullPath);
+        var relative = RelativePath(root, fullPath);
         return string.IsNullOrWhiteSpace(relative) || relative == "." || Path.IsPathFullyQualified(relative) || relative == ".." ||
                relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal) ||
                relative.StartsWith($"..{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal)
@@ -109,7 +126,7 @@ internal static class SourceDocumentPaths
 
         for (var start = firstUsable; start < segments.Length; start++)
         {
-            var relative = string.Join(Path.DirectorySeparatorChar, segments, start, segments.Length - start);
+            var relative = string.Join('/', segments, start, segments.Length - start);
             if (File.Exists(Path.Join(root, relative)))
             {
                 return relative;

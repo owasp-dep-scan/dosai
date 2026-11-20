@@ -274,7 +274,7 @@ public class CorpusTests
         // name the assembly under out/).
         Assert.All(slice.MethodCalls!, call => Assert.False(call.Path is not null && (Path.IsPathFullyQualified(call.Path) || call.Path.StartsWith("/_/", StringComparison.Ordinal)), call.Path));
         Assert.All(slice.CallGraph.Edges, edge => Assert.False(edge.Path is not null && Path.IsPathFullyQualified(edge.Path), edge.Path));
-        Assert.Contains(slice.MethodCalls!, call => call.Path == Path.Combine("out", "Repro.dll"));
+        Assert.Contains(slice.MethodCalls!, call => call.Path == "out/Repro.dll");
     }
 
     // Added with the target-framework-aware analysis (schema 5.1.0): the corpus previously
@@ -456,6 +456,372 @@ public class CorpusTests
         Assert.Contains(slice.Diagnostics!, line => line.StartsWith("Global usings differ between projects", StringComparison.Ordinal));
     }
 
+    // Issue #134's whole-directory matrix: the algorithm argument of the one-shot hash APIs is
+    // read in every body shape, a decoded MAC argument names the MAC in place of the generic
+    // HMAC asset, and the signature probe and the local-algorithm call stay silent.
+    [SkippableFact]
+    public void Corpus_Issue134WeakHash_TheArgumentIsReadInEveryBodyShape()
+    {
+        var path = CorpusPathOrSkip("issue134-weakhash");
+        var result = CryptoAnalyzer.Analyze(path);
+
+        // (path, line, column, name, family, strength, source) of every asset, and every
+        // weak-hash finding line, exactly as measured after the fix.
+        (string Path, int Line, int Column, string Name, string Family, string Strength, string Source)[] expectedAssets =
+        [
+            ("Hashing.cs", 5, 81, "MD5", "hash", "weak", "roslyn"),
+            ("Hashing.cs", 9, 49, "MD5", "hash", "weak", "roslyn"),
+            ("vb/Hashing.vb", 6, 53, "MD5", "hash", "weak", "roslyn"),
+            ("lambda/ParenLambda.cs", 6, 104, "MD5", "hash", "weak", "roslyn"),
+            ("hasprobe/HasProbe.cs", 9, 49, "MD5", "hash", "weak", "roslyn"),
+            ("boundary/Boundary.cs", 5, 119, "MD5", "hash", "weak", "roslyn"),
+            ("boundary/Boundary.cs", 9, 72, "MD5", "hash", "weak", "csharp"),
+            ("hmac/Hmac.cs", 6, 105, "HMAC-MD5", "mac", "weak", "roslyn"),
+            ("hmac/Hmac.cs", 10, 49, "HMAC-MD5", "mac", "weak", "roslyn"),
+            ("hmac/Hmac.cs", 13, 131, "HMAC", "mac", "unknown", "roslyn"),
+        ];
+        var actualAssets = result.Assets.Select(asset => (
+            asset.Location.Path!, asset.Location.LineNumber, asset.Location.ColumnNumber,
+            asset.Name, asset.Family!, asset.Strength!, asset.Properties.TryGetValue("source", out var source) ? source : null)).ToList();
+        Assert.Equal(expectedAssets.OrderBy(row => row.Item1, StringComparer.Ordinal).ThenBy(row => row.Item2).ThenBy(row => row.Item3), actualAssets.OrderBy(row => row.Item1, StringComparer.Ordinal).ThenBy(row => row.Item2).ThenBy(row => row.Item3));
+
+        var weakHashLines = result.Findings.Where(finding => finding.RuleId is "DOSAI-CRYPTO-WEAK-HASH-MD5" or "DOSAI-CRYPTO-WEAK-HASH-SHA1")
+            .Select(finding => (finding.Location.Path, finding.Location.LineNumber, finding.RuleId)).OrderBy(row => row.Path).ThenBy(row => row.LineNumber).ToList();
+        Assert.Equal(
+            [("boundary/Boundary.cs", 5, "DOSAI-CRYPTO-WEAK-HASH-MD5"), ("boundary/Boundary.cs", 9, "DOSAI-CRYPTO-WEAK-HASH-MD5"),
+             ("Hashing.cs", 5, "DOSAI-CRYPTO-WEAK-HASH-MD5"), ("Hashing.cs", 9, "DOSAI-CRYPTO-WEAK-HASH-MD5"),
+             ("hasprobe/HasProbe.cs", 9, "DOSAI-CRYPTO-WEAK-HASH-MD5"),
+             ("lambda/ParenLambda.cs", 6, "DOSAI-CRYPTO-WEAK-HASH-MD5"),
+             ("vb/Hashing.vb", 6, "DOSAI-CRYPTO-WEAK-HASH-MD5")],
+            weakHashLines);
+
+        // The negative pins: the signature probe reports nothing, the local-algorithm call
+        // reports at its declaration line only, and no generic HMAC sits beside a decoded MAC.
+        Assert.DoesNotContain(result.Assets, asset => asset.Location.Path == "hasprobe/HasProbe.cs" && asset.Location.LineNumber == 5);
+        Assert.DoesNotContain(result.Findings, finding => finding.Location.Path == "hasprobe/HasProbe.cs" && finding.Location.LineNumber == 5);
+        Assert.DoesNotContain(result.Assets, asset => asset.Location.Path == "boundary/Boundary.cs" && asset.Location.LineNumber == 10);
+        Assert.DoesNotContain(result.Assets, asset => asset.Location.Path == "hmac/Hmac.cs" && asset.Name == "HMAC" && asset.Location.LineNumber is 6 or 10);
+
+        // Not an empty list (issue #127 adds a base-naming note even to project-less trees);
+        // nothing originates from the crypto pass itself.
+        Assert.DoesNotContain(result.Diagnostics, line => line.Contains("Crypto reachability fallback", StringComparison.Ordinal) || line.Contains("Crypto data-flow fallback", StringComparison.Ordinal));
+    }
+
+    // Issue #130: calls made directly in field and auto-property initializers attribute to
+    // the constructors the compiler runs them in, promoting the package to
+    // ExternalCallGraphNode without the lambda's help.
+    private static MethodsSlice Issue130Slice(string variant)
+    {
+        var path = CorpusPathOrSkip($"issue130-initcalls/{variant}");
+        return JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(path), JsonOptions)!;
+    }
+
+    private static List<(int Line, string SourceId, string Called, CallType CallType, AnalysisEvidenceKind Evidence)> Issue130Rows(MethodsSlice slice) => slice.MethodCalls!
+        .Where(call => call.CalledMethod is { } called && (called.Contains("SerializeObject", StringComparison.Ordinal) || called.EndsWith("JsonSerializerSettings", StringComparison.Ordinal)))
+        .OrderBy(call => call.LineNumber).ThenBy(call => call.SourceId, StringComparer.Ordinal)
+        .Select(call => (call.LineNumber, call.SourceId!, call.CalledMethod!, call.CallType, call.EvidenceKind)).ToList();
+
+    [SkippableFact]
+    public void Corpus_Issue130_Base_InitializerCallsAttributeToSynthesizedConstructors()
+    {
+        var slice = Issue130Slice("base");
+        Assert.Equal(
+            [
+                (7, "Repro.Settings..cctor()", "Newtonsoft.Json.JsonConvert.SerializeObject(object?)", CallType.MethodCall, AnalysisEvidenceKind.SourceRoslynDirect),
+                (8, "Repro.Settings..ctor()", "JsonSerializerSettings", CallType.ConstructorCall, AnalysisEvidenceKind.SourceRoslynDirect),
+                (9, "Repro.Settings..ctor()", "Newtonsoft.Json.JsonConvert.SerializeObject(object?)", CallType.MethodCall, AnalysisEvidenceKind.SourceRoslynDirect),
+                (10, "Repro.Settings.<LambdaField>lambda1():string", "Newtonsoft.Json.JsonConvert.SerializeObject(object?)", CallType.MethodCall, AnalysisEvidenceKind.SourceRoslynDirect),
+            ],
+            Issue130Rows(slice));
+        Assert.Equal("ExternalCallGraphNode", SinglePackage(slice, "newtonsoft.json").ReachabilityKind);
+        AssertEveryEdgeEndpointExists(slice);
+    }
+
+    [SkippableFact]
+    public void Corpus_Issue130_NoLambda_ThePackageStaysReachableWithoutTheLambda()
+    {
+        var slice = Issue130Slice("nolambda");
+        Assert.Equal(3, Issue130Rows(slice).Count);
+        Assert.All(Issue130Rows(slice), row => Assert.Equal(AnalysisEvidenceKind.SourceRoslynDirect, row.Evidence));
+        // The headline regression: the initializer rows alone promote the package (Dependency Low before).
+        Assert.Equal("ExternalCallGraphNode", SinglePackage(slice, "newtonsoft.json").ReachabilityKind);
+    }
+
+    [SkippableFact]
+    public void Corpus_Issue130_NoRestore_InitializerCallsRecordAsSourceUnresolved()
+    {
+        var slice = Issue130Slice("norestore");
+        var rows = Issue130Rows(slice);
+        Assert.Equal(4, rows.Count);
+        Assert.All(rows, row => Assert.Equal(AnalysisEvidenceKind.SourceUnresolved, row.Evidence));
+        Assert.Equal(new[] { "Repro.Settings..cctor()", "Repro.Settings..ctor()", "Repro.Settings..ctor()", "Repro.Settings.<LambdaField>lambda1():string" }.Order(StringComparer.Ordinal), rows.Select(row => row.SourceId).Order(StringComparer.Ordinal));
+    }
+
+    [SkippableFact]
+    public void Corpus_Issue130_StructInit_StaticAttributed_InstanceDropped()
+    {
+        var slice = Issue130Slice("structinit");
+        var row = Assert.Single(Issue130Rows(slice));
+        Assert.Equal((7, "Repro.Settings..cctor()"), (row.Line, row.SourceId));
+        // A struct's implicit parameterless constructor never runs initializers, so the line 8
+        // instance initializer has no owner and records nothing.
+        Assert.Equal("ExternalCallGraphNode", SinglePackage(slice, "newtonsoft.json").ReachabilityKind);
+    }
+
+    [SkippableFact]
+    public void Corpus_Issue130_AttributeArguments_StayOutOfScope()
+    {
+        var slice = Issue130Slice("attrarg");
+        Assert.Empty(Issue130Rows(slice));
+        Assert.Equal("Dependency", SinglePackage(slice, "newtonsoft.json").ReachabilityKind);
+    }
+
+    [SkippableFact]
+    public void Corpus_Issue130_DeclaredStaticConstructor_OneCctorNodeAndNoPhantomCtor()
+    {
+        var slice = Issue130Slice("staticctor");
+        var row = Assert.Single(Issue130Rows(slice));
+        Assert.Equal((11, "Repro.Settings..cctor()"), (row.Line, row.SourceId));
+        Assert.Equal(["Repro.Settings..cctor()"], slice.CallGraph!.Nodes.Where(node => node.Id.StartsWith("Repro.Settings..", StringComparison.Ordinal)).Select(node => node.Id).ToList());
+        AssertEveryEdgeEndpointExists(slice);
+    }
+
+    [SkippableFact]
+    public void Corpus_Issue130_Built_TheIlPassAddsNothingToTheInitializerRows()
+    {
+        var slice = Issue130Slice("built");
+        // The IL pass leaves a non-Razor bin/ to source analysis, so the built tree reports the
+        // same rows once, no doubling.
+        Assert.Equal(4, Issue130Rows(slice).Count);
+        Assert.All(Issue130Rows(slice), row => Assert.Equal(AnalysisEvidenceKind.SourceRoslynDirect, row.Evidence));
+    }
+
+    [SkippableFact]
+    public void Corpus_Issue130_QualifiedNoLambda_BindsThroughTheQualifiedNames()
+    {
+        var slice = Issue130Slice("qualified-nolambda");
+        var rows = Issue130Rows(slice);
+        Assert.Equal(3, rows.Count);
+        Assert.All(rows, row => Assert.Equal(AnalysisEvidenceKind.SourceRoslynDirect, row.Evidence));
+        Assert.Equal("ExternalCallGraphNode", SinglePackage(slice, "newtonsoft.json").ReachabilityKind);
+    }
+
+    private static PackageReachability SinglePackage(MethodsSlice slice, string name)
+    {
+        var packages = slice.PackageReachability!.Where(entry => entry.Purl?.Contains(name, StringComparison.OrdinalIgnoreCase) == true).ToList();
+        return Assert.Single(packages);
+    }
+
+    // Issue #128: the reachable-mode walk keys members by the declaring type's full nesting
+    // chain, so a namespace-less nested type of one package never joins another's. The
+    // fixtures hold the app builds (App/bin/Release/net10.0) with LibA/LibB (main, control)
+    // and LibP/LibQ (probe) packed as local 1.0.0 packages.
+    private static DataFlowResult Issue128Reachable(string tree)
+    {
+        var path = CorpusPathOrSkip($"issue128-libpacks/{tree}/App/bin/Release/net10.0");
+        using var scope = DependencyFlowScope.Apply(DependencyFlowMode.Reachable);
+        return DataFlowAnalyzer.Analyze(path);
+    }
+
+    [SkippableFact]
+    public void Corpus_Issue128_Main_ThePackedLibraryStaysPruned()
+    {
+        var result = Issue128Reachable("main");
+
+        // Before the qualified keys the note read "5 of 13": LibB's <>c joined LibA's, so
+        // LibB.B.NeverCalled was analyzed and its command sink recorded.
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Contains("9 of 13 method bodies in dependency assemblies were not analyzed", StringComparison.Ordinal));
+        Assert.DoesNotContain(result.MethodSummaries, summary => summary.Method.Contains("LibB", StringComparison.Ordinal));
+        Assert.DoesNotContain(result.Nodes, node => (node.Symbol ?? string.Empty).Contains("LibB", StringComparison.Ordinal));
+        Assert.DoesNotContain(result.MethodSummaries, summary => summary.SinkCategories.Contains("command"));
+        Assert.Contains(result.MethodSummaries, summary => summary.Method.Contains("LibA.A.Run", StringComparison.Ordinal));
+    }
+
+    [SkippableFact]
+    public void Corpus_Issue128_Control_NoCollisionStillPrunesTheUncalledPackage()
+    {
+        var result = Issue128Reachable("control");
+
+        // Qualification must not over-prune where no collision exists: LibA's bodies stay kept.
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Contains("6 of 10 method bodies in dependency assemblies were not analyzed", StringComparison.Ordinal));
+        Assert.DoesNotContain(result.MethodSummaries, summary => summary.Method.Contains("LibB", StringComparison.Ordinal));
+        Assert.Contains(result.MethodSummaries, summary => summary.Method.Contains("LibA.A.Run", StringComparison.Ordinal));
+    }
+
+    [SkippableFact]
+    public void Corpus_Issue128_Probe_UserWrittenNestedTypesSeparate()
+    {
+        var result = Issue128Reachable("probe");
+
+        // LibP's and LibQ's user-written nested Cache classes shared one legacy key; the probe's
+        // never-called LibQ.Q.Cache.Local(string) is a Process.Start sink that stayed analyzed.
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Contains("4 of 6 method bodies in dependency assemblies were not analyzed", StringComparison.Ordinal));
+        Assert.DoesNotContain(result.MethodSummaries, summary => summary.Method.Contains("LibQ", StringComparison.Ordinal));
+        Assert.DoesNotContain(result.Nodes, node => (node.Symbol ?? string.Empty).Contains("LibQ", StringComparison.Ordinal));
+        Assert.DoesNotContain(result.MethodSummaries, summary => summary.SinkCategories.Contains("command"));
+        Assert.Contains(result.MethodSummaries, summary => summary.Method.Contains("LibP.P.Run", StringComparison.Ordinal));
+    }
+
+    // Issue #120: the reachable walk follows interface and virtual dispatch to the types
+    // reached code instantiates, so the flows through the package code a run can execute come
+    // back while the dead formatters stay out.
+    [SkippableFact]
+    public void Corpus_Issue120_Serilog_ReachableFollowsInterfaceDispatch()
+    {
+        var path = CorpusPathOrSkip("issue120-serilog/App");
+        DataFlowResult reachable;
+        using (DependencyFlowScope.Apply(DependencyFlowMode.Reachable))
+        {
+            reachable = DataFlowAnalyzer.Analyze(path);
+        }
+
+        // The console sink's package and renderer bodies come back (both were gone before:
+        // the walk stopped at the interface call and the diagnostic read 952 of 1190).
+        Assert.Contains(reachable.PackageReachability, package => package.Purl == "pkg:nuget/Serilog.Sinks.Console@6.1.1");
+        Assert.Equal(2, reachable.Nodes.Count(node => (node.Symbol ?? string.Empty).Contains("ExceptionTokenRenderer.Render", StringComparison.Ordinal)));
+        Assert.Contains(reachable.Nodes, node => (node.Symbol ?? string.Empty).Contains("Serilog.", StringComparison.Ordinal));
+        // The dead formatters nothing constructs stay out, with no class-hierarchy fallback.
+        Assert.DoesNotContain(reachable.Nodes, node => (node.Symbol ?? string.Empty).Contains("MessageTemplateTextFormatter", StringComparison.Ordinal)
+            || (node.Symbol ?? string.Empty).Contains("JsonFormatter", StringComparison.Ordinal)
+            || (node.Symbol ?? string.Empty).Contains("LogEvent.Copy", StringComparison.Ordinal));
+        // The measured prune note: 952 of 1190 before rapid type analysis, 763 with it
+        // (780 before the dispatch matching kept every match along the base chain).
+        Assert.Contains(reachable.Diagnostics, diagnostic => diagnostic.Contains("763 of 1190 method bodies in dependency assemblies were not analyzed", StringComparison.Ordinal));
+
+        // Every reachable application slice appears in all, and the anchored set is not empty.
+        DataFlowResult all;
+        using (DependencyFlowScope.Apply(DependencyFlowMode.All))
+        {
+            all = DataFlowAnalyzer.Analyze(path);
+        }
+
+        string[] ApplicationSlices(DataFlowResult result)
+        {
+            var nodes = result.Nodes.ToDictionary(node => node.Id, node => $"{node.FileName}:{node.LineNumber}:{node.ColumnNumber}:{node.Name}", StringComparer.Ordinal);
+            return result.Slices
+                .Where(slice => slice.Scope != "dependency")
+                .Select(slice => $"{nodes[slice.SourceId]}->{nodes[slice.SinkId]}:{slice.SinkArgumentIndex}|{string.Join(",", slice.NodeIds.Select(id => nodes[id]))}")
+                .Order(StringComparer.Ordinal)
+                .ToArray();
+        }
+
+        var reachableSlices = ApplicationSlices(reachable);
+        Assert.True(reachableSlices.Length >= 2, $"expected anchored slices, got {reachableSlices.Length}");
+        Assert.All(reachableSlices, slice => Assert.Contains(slice, ApplicationSlices(all)));
+    }
+
+    // Issue #120's boundary probe: the app instantiates MessageTemplateTextFormatter itself and
+    // calls Format through ITextFormatter, a flow reachable lost entirely before.
+    [SkippableFact]
+    public void Corpus_Issue120_Serilog_Probe_InstantiatedFormatterFlowsAnchor()
+    {
+        var path = CorpusPathOrSkip("issue120-serilog/probe");
+        DataFlowResult result;
+        using (DependencyFlowScope.Apply(DependencyFlowMode.Reachable))
+        {
+            result = DataFlowAnalyzer.Analyze(path);
+        }
+
+        var nodes = result.Nodes.ToDictionary(node => node.Id, node => node, StringComparer.Ordinal);
+        Assert.Contains(result.Slices, slice =>
+        {
+            if (slice.Scope == "dependency" || nodes[slice.SourceId].FileName?.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) != true)
+            {
+                return false;
+            }
+
+            var sink = nodes[slice.SinkId];
+            return (sink.Symbol ?? string.Empty).StartsWith("Serilog.Formatting.ITextFormatter.Format(", StringComparison.Ordinal)
+                || (sink.Symbol ?? string.Empty).Contains("MessageTemplateTextFormatter.Format", StringComparison.Ordinal);
+        });
+    }
+
+    // Issue #131: the source data-flow pass finds the flows of an unbuilt tree that live in
+    // initializers, expression bodies and a primary constructor's base arguments, and a built
+    // tree reports each flow exactly once: the source pass claims its flows and the assembly
+    // pass drops the duplicates through the cross-pass fingerprint.
+    private static List<(int SourceLine, int SinkLine, string Evidence)> Issue131Flows(string tree)
+    {
+        var path = CorpusPathOrSkip(tree);
+        var result = JsonSerializer.Deserialize<DataFlowResult>(DataFlowAnalyzer.GetDataFlows(path), JsonOptions)!;
+        var nodes = result.Nodes.ToDictionary(node => node.Id, node => node, StringComparer.Ordinal);
+        return result.Slices
+            .Select(slice => (nodes[slice.SourceId].LineNumber, nodes[slice.SinkId].LineNumber, slice.Summary?.StartsWith("Assembly IL", StringComparison.Ordinal) == true ? "assembly-il" : "source"))
+            .Order()
+            .ToList();
+    }
+
+    [SkippableFact]
+    public void Corpus_Issue131_InitFlows_Unbuilt()
+    {
+        var flows = Issue131Flows("issue131-initflows");
+        Assert.Equal(
+            [(7, 8, "source"), (9, 9, "source"), (11, 11, "source"), (12, 12, "source"), (13, 13, "source"), (21, 21, "source")],
+            flows);
+    }
+
+    [SkippableFact]
+    public void Corpus_Issue131_InitFlows_Built_EachFlowOnce()
+    {
+        var flows = Issue131Flows("issue131-initflows-built");
+        Assert.Equal(
+            [(7, 8, "source"), (9, 9, "source"), (11, 11, "source"), (12, 12, "source"), (13, 13, "source"), (21, 21, "source")],
+            flows);
+    }
+
+    [SkippableFact]
+    public void Corpus_Issue131_InitFlows_Probe_TheCrossMemberFlowAppearsOnceInEachCopy()
+    {
+        var unbuilt = Issue131Flows("issue131-initflows-probe");
+        var built = Issue131Flows("issue131-initflows-probe-built");
+        Assert.Equal([(7, 11, "source")], unbuilt);
+        // The static field's taint reaches the block-bodied reader from the initializer's own
+        // line, with identical lines between the built and unbuilt copies.
+        Assert.Equal([(7, 11, "source")], built);
+    }
+
+    // Issue #129: after same-site collapsing, every PackageReachability EdgeId names an edge
+    // of the final CallGraph; the surviving ids' order and the SourceLocations are unchanged.
+    private static void AssertNoDanglingEdgeIds(MethodsSlice slice)
+    {
+        var edgeIds = slice.CallGraph!.Edges.Select(edge => edge.Id).ToHashSet(StringComparer.Ordinal);
+        Assert.All(slice.PackageReachability!, entry => Assert.All(entry.EdgeIds, id => Assert.Contains(id, edgeIds)));
+    }
+
+    [SkippableFact]
+    public void Corpus_Issue129_Threecalls_EdgeIdsNameFinalEdges()
+    {
+        var path = CorpusPathOrSkip("issue129-edgeids/threecalls");
+        var slice = JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(path), JsonOptions)!;
+        var entry = Assert.Single(slice.PackageReachability!, package => package.Purl == "pkg:nuget/Newtonsoft.Json@13.0.3");
+        Assert.Equal(["e1", "e2"], entry.EdgeIds);
+        Assert.Equal(
+            [("Program.cs", 1, 1, "Dependency"), ("Program.cs", 3, 9, "CallGraphEdge"), ("Program.cs", 4, 9, "CallGraphEdge"), ("Program.cs", 5, 9, "CallGraphEdge"), ("Program.cs", 6, 5, "CallGraphEdge")],
+            entry.SourceLocations.Select(location => (location.Path!, location.LineNumber, location.ColumnNumber, location.Kind)).ToList());
+        Assert.Equal(3, Assert.Single(slice.CallGraph!.Edges, edge => edge.Id == "e2").CallSiteCount);
+        AssertNoDanglingEdgeIds(slice);
+    }
+
+    [SkippableFact]
+    public void Corpus_Issue129_Root_EdgeIdsNameFinalEdges()
+    {
+        var path = CorpusPathOrSkip("issue129-edgeids");
+        var slice = JsonSerializer.Deserialize<MethodsSlice>(Depscan.Dosai.GetMethods(path), JsonOptions)!;
+        var entry = Assert.Single(slice.PackageReachability!, package => package.Purl == "pkg:nuget/Newtonsoft.Json@13.0.3");
+        Assert.Equal(["e1", "e2"], entry.EdgeIds);
+        var locations = entry.SourceLocations
+            .Select(location => (NormalizeSeparator(location.Path!), location.LineNumber, location.ColumnNumber, location.Kind))
+            .Order()
+            .ToList();
+        Assert.Equal(
+            new[] { ("Program.cs", 1, 1, "Dependency"), ("Program.cs", 3, 9, "CallGraphEdge"), ("Program.cs", 4, 9, "CallGraphEdge"), ("threecalls/Program.cs", 1, 1, "Dependency"), ("threecalls/Program.cs", 5, 9, "CallGraphEdge"), ("threecalls/Program.cs", 6, 5, "CallGraphEdge") }.Order().ToList(),
+            locations);
+        Assert.Equal("e5", Assert.Single(slice.PackageReachability!, package => package.Purl == "pkg:nuget/System.Console").EdgeIds.Single());
+        AssertNoDanglingEdgeIds(slice);
+
+        static string NormalizeSeparator(string path) => path.Replace('\\', '/');
+    }
+
     // Issue #110's repro: with the app and the library in one tree the library's call binds
     // as it does when the library is scanned alone.
     [SkippableFact]
@@ -559,7 +925,8 @@ public class CorpusTests
         Assert.Equal([(3, "ToString", "BuildRenderTree"), (8, "SerializeObject", "Describe")], Rows("Widgets/Badge.razor"));
 
         // One node for each method a template declares, whichever copy of the library was read.
-        Assert.Single(slice.CallGraph!.Nodes, node => node.Id == "Host.Components.Pages.Behind.Label():string");
+        // Label lives only in the template, so its node keeps the IL rendering of the signature.
+        Assert.Single(slice.CallGraph!.Nodes, node => node.Id == "Host.Components.Pages.Behind.Label():System.String");
         Assert.Single(slice.CallGraph.Nodes, node => node.Id.StartsWith("Widgets.Badge.Describe()", StringComparison.Ordinal));
         AssertEveryEdgeEndpointExists(slice);
     }

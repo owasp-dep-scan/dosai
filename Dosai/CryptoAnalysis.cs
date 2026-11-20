@@ -46,6 +46,13 @@ public sealed class CryptoAnalysisResult
     public List<CryptoFinding> Findings { get; set; } = [];
     public CryptoStatistics Statistics { get; set; } = new();
     public List<string> Diagnostics { get; set; } = [];
+
+    /// <summary>
+    ///     Algorithm tokens (file, line, upper-case name) the semantic walker already classified
+    ///     from a <c>HashAlgorithmName</c> argument: the line fallback skips exactly those, so
+    ///     one call gives one answer whatever the body shape. Not serialized.
+    /// </summary>
+    internal HashSet<(string File, int Line, string Name)> ArgumentClassifiedTokens { get; } = [];
 }
 
 public sealed class CryptoAsset
@@ -703,6 +710,11 @@ public static class CryptoAnalyzer
             var symbolCandidates = IsLikelyDeclarationLine(line, language) ? Enumerable.Empty<string>() : ExtractSymbolCandidates(line, language);
             foreach (var symbol in symbolCandidates)
             {
+                if (result.ArgumentClassifiedTokens.Contains((file, index + 1, symbol.ToUpperInvariant())))
+                {
+                    continue;
+                }
+
                 RecordCryptoUse(symbol, line, basePath, file, index + 1, Math.Max(1, line.IndexOf(symbol, StringComparison.Ordinal) + 1), currentNamespace, currentClass, currentMethod, reachability, result, source: language);
             }
 
@@ -921,9 +933,11 @@ public static class CryptoAnalyzer
         return false;
     }
 
-    private static void RecordCryptoUse(string symbol, string code, string basePath, string file, int line, int column, string? namespaceName, string? className, string? methodName, CryptoReachability reachability, CryptoAnalysisResult result, string source)
+    private static void RecordCryptoUse(string symbol, string code, string basePath, string file, int line, int column, string? namespaceName, string? className, string? methodName, CryptoReachability reachability, CryptoAnalysisResult result, string source, CryptoClassification? classification = null)
     {
-        var classification = ClassifyCryptoSymbol(symbol, code, source);
+        // A caller that classified from an argument (the one-shot hash APIs' HashAlgorithmName)
+        // passes its classification in and still names the API called as the symbol evidence.
+        classification ??= ClassifyCryptoSymbol(symbol, code, source);
         if (classification is null)
         {
             return;
@@ -1436,6 +1450,74 @@ public static class CryptoAnalyzer
 
     private static bool ContainsAny(string value, params string[] candidates) => candidates.Any(candidate => value.Contains(candidate, StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>
+    ///     The algorithm a <c>HashAlgorithmName</c> value names, when it is a compile-time
+    ///     constant: a static property (<c>HashAlgorithmName.MD5</c>, also through
+    ///     <c>using static</c>) or a <c>new HashAlgorithmName("MD5")</c> with a constant string.
+    ///     Null when the value is computed at run time (a local, <c>Parse</c>, a parameter).
+    ///     Read by the PBKDF2 PRF check and by the one-shot hash APIs' argument rule (issue
+    ///     #134).
+    /// </summary>
+    internal static string? HashAlgorithmNameOf(IOperation value, SemanticModel? model = null) => HashAlgorithmNameOf(value, model, 0);
+
+    private static string? HashAlgorithmNameOf(IOperation value, SemanticModel? model, int depth)
+    {
+        while (value is IConversionOperation conversion)
+        {
+            value = conversion.Operand;
+        }
+
+        switch (value)
+        {
+            case IPropertyReferenceOperation { Property.ContainingType.Name: "HashAlgorithmName" } property:
+                return property.Property.Name;
+            case IObjectCreationOperation { Arguments: [{ Value.ConstantValue: { HasValue: true, Value: string name } }] }:
+                return name;
+            case IFieldReferenceOperation { Field: { IsReadOnly: true, IsStatic: true } field } when model is not null && depth < 4 && !AssignedInStaticConstructor(field):
+                // A static readonly field is as constant as its initializer: `static readonly
+                // HashAlgorithmName Weak = HashAlgorithmName.MD5`. An instance field is left
+                // alone (a constructor may store another value), and so is a static one a
+                // static constructor assigns.
+                foreach (var reference in field.DeclaringSyntaxReferences)
+                {
+                    if (reference.GetSyntax() is CSharpSyntax.VariableDeclaratorSyntax { Initializer: { } initializer }
+                        && OperationDepthGuard.GetOperation(ReferenceEquals(reference.SyntaxTree, model.SyntaxTree) ? model : model.Compilation.GetSemanticModel(reference.SyntaxTree), initializer.Value) is { } initial)
+                    {
+                        return HashAlgorithmNameOf(initial, model, depth + 1);
+                    }
+                }
+
+                return null;
+            default:
+                return null;
+        }
+    }
+
+    private static bool AssignedInStaticConstructor(IFieldSymbol field)
+    {
+        foreach (var constructor in field.ContainingType.StaticConstructors)
+        {
+            foreach (var reference in constructor.DeclaringSyntaxReferences)
+            {
+                foreach (var assignment in reference.GetSyntax().DescendantNodes().OfType<CSharpSyntax.AssignmentExpressionSyntax>())
+                {
+                    var target = assignment.Left switch
+                    {
+                        CSharpSyntax.IdentifierNameSyntax identifier => identifier.Identifier.ValueText,
+                        CSharpSyntax.MemberAccessExpressionSyntax access => access.Name.Identifier.ValueText,
+                        _ => null
+                    };
+                    if (string.Equals(target, field.Name, StringComparison.Ordinal))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
     private static bool HasCryptoToken(string symbol, params string[] candidates)
     {
         var frameworkQualified = symbol.Contains("System.Security.Cryptography", StringComparison.OrdinalIgnoreCase) ||
@@ -1533,7 +1615,7 @@ public static class CryptoAnalyzer
         ColumnNumber = column
     };
 
-    private static string SafeRelativePath(string basePath, string file) => Directory.Exists(basePath) ? Path.GetRelativePath(basePath, file) : Path.GetFileName(file);
+    private static string SafeRelativePath(string basePath, string file) => Directory.Exists(basePath) ? SourceDocumentPaths.RelativePath(basePath, file) : Path.GetFileName(file);
 
     private static string TrimCode(string code)
     {
@@ -1638,9 +1720,132 @@ public static class CryptoAnalyzer
     {
         public override void VisitInvocation(IInvocationOperation operation)
         {
-            Record(operation, operation.TargetMethod, SafeSyntaxText.Text(operation.Syntax));
+            // The argument is read before the symbol: a decoded one-shot hash or MAC call
+            // records its algorithm asset in place of the record the method name would give
+            // (a generic strong HMAC beside a weak HMAC-MD5 would disagree about strength).
+            if (!RecordHashAlgorithmArgument(operation))
+            {
+                Record(operation, operation.TargetMethod, SafeSyntaxText.Text(operation.Syntax));
+            }
+
             DetectSemanticMisuse(operation, operation.TargetMethod, operation.Arguments);
             base.VisitInvocation(operation);
+        }
+
+        /// <summary>
+        ///     Records the one-shot hash APIs' algorithm from their <c>HashAlgorithmName</c>
+        ///     argument (issue #134). The walker reaches every body shape (expression bodies,
+        ///     field-initializer lambdas, VB statements), where the line fallback is silent, and
+        ///     the decoded argument classifies through the same rules as the named algorithm
+        ///     types: MD5 keeps its weak-hash finding, and a MAC argument names the MAC
+        ///     (<c>HmacData(HashAlgorithmName.MD5, ...)</c> records HMAC-MD5). The record is
+        ///     anchored at the argument, the evidence being the algorithm choice. Returns
+        ///     whether it recorded; a decode that failed (a runtime-chosen algorithm) or spelled
+        ///     a candidate the classifier never defined leaves the caller on today's symbol
+        ///     record, which never silences a call.
+        /// </summary>
+        private bool RecordHashAlgorithmArgument(IInvocationOperation operation)
+        {
+            var type = operation.TargetMethod.ContainingType;
+            if (type is null || !(type.ContainingNamespace?.ToDisplayString() ?? string.Empty).StartsWith(CryptographyNamespace, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            // Which APIs take a HashAlgorithmName that decides the algorithm, and whether the
+            // call is a MAC. The one-shot and incremental APIs replace the symbol record (the
+            // algorithm is what they are about); a signature call keeps its RSA/ECDsa record
+            // and adds the digest it signs with.
+            var name = operation.TargetMethod.Name;
+            bool isMac;
+            bool replacesSymbolRecord;
+            switch (type.Name)
+            {
+                case "CryptographicOperations" when name is "HmacData" or "HmacDataAsync" or "TryHmacData":
+                    (isMac, replacesSymbolRecord) = (true, true);
+                    break;
+                case "CryptographicOperations" when name is "HashData" or "HashDataAsync" or "TryHashData":
+                    (isMac, replacesSymbolRecord) = (false, true);
+                    break;
+                case "IncrementalHash" when name == "CreateHMAC":
+                    (isMac, replacesSymbolRecord) = (true, true);
+                    break;
+                case "IncrementalHash" when name == "CreateHash":
+                    (isMac, replacesSymbolRecord) = (false, true);
+                    break;
+                case "RSA" or "ECDsa" or "DSA" when name is "SignData" or "VerifyData" or "TrySignData" or "SignDataAsync" or "VerifyDataAsync" or "SignHash" or "VerifyHash" or "TrySignHash":
+                    (isMac, replacesSymbolRecord) = (false, false);
+                    break;
+                default:
+                    return false;
+            }
+
+            foreach (var argument in operation.Arguments)
+            {
+                if (argument.Parameter?.Type.Name != "HashAlgorithmName")
+                {
+                    continue;
+                }
+
+                var algorithm = HashAlgorithmNameOf(argument.Value, model);
+                CryptoClassification? classification;
+                if (algorithm is not null)
+                {
+                    // No hyphen or underscore normalization: the weak rules' targets decode in
+                    // every form because their canonical strings equal their token spellings,
+                    // and inventing spellings the classifier never defined is how token rules
+                    // drift.
+                    classification = ClassifyCryptoSymbol(isMac ? "HMAC" + algorithm : algorithm, SafeSyntaxText.Text(operation.Syntax), "roslyn");
+                }
+                else if (isMac && replacesSymbolRecord)
+                {
+                    // A MAC whose algorithm is not a constant is neither strong nor weak as
+                    // far as Dosai can tell: it must not claim the strength of the generic HMAC.
+                    classification = ClassifyCryptoSymbol(DescribeSymbol(operation.TargetMethod), SafeSyntaxText.Text(operation.Syntax), "roslyn") is { } generic
+                        ? generic with { Strength = "unknown" }
+                        : null;
+                }
+                else
+                {
+                    return false;
+                }
+
+                if (classification is null)
+                {
+                    return false;
+                }
+
+                var method = model.GetEnclosingSymbol(operation.Syntax.SpanStart) as IMethodSymbol;
+                var span = argument.Syntax.GetLocation().GetLineSpan();
+                var position = span.StartLinePosition;
+                RecordCryptoUse(
+                    DescribeSymbol(operation.TargetMethod),
+                    SafeSyntaxText.Text(operation.Syntax),
+                    basePath,
+                    sourceFilePath,
+                    position.Line + 1,
+                    position.Character + 1,
+                    method?.ContainingNamespace?.ToDisplayString(),
+                    method?.ContainingType?.Name,
+                    method?.Name,
+                    reachability,
+                    result,
+                    "roslyn",
+                    classification);
+                if (algorithm is not null)
+                {
+                    // The line fallback must not read the same token again as a plain hash.
+                    var token = algorithm.ToUpperInvariant();
+                    for (var line = position.Line + 1; line <= span.EndLinePosition.Line + 1; line++)
+                    {
+                        result.ArgumentClassifiedTokens.Add((sourceFilePath, line, token));
+                    }
+                }
+
+                return replacesSymbolRecord;
+            }
+
+            return false;
         }
 
         public override void VisitObjectCreation(IObjectCreationOperation operation)
@@ -1694,7 +1899,7 @@ public static class CryptoAnalyzer
                     Report(operation, "DOSAI-CRYPTO-LOW-PBKDF2-ITERATIONS", "Medium", "High", $"PBKDF2 iteration count {iterations.Value.ToString(CultureInfo.InvariantCulture)}{origin} is below the recommended baseline.", "Use at least 100,000 iterations, and prefer current platform guidance.");
                 }
 
-                var prf = Argument("hashAlgorithm") is { } prfArgument ? HashAlgorithmNameOf(prfArgument.Value) : "SHA1";
+                var prf = Argument("hashAlgorithm") is { } prfArgument ? HashAlgorithmNameOf(prfArgument.Value, model) : "SHA1";
                 if (prf is "SHA1" or "MD5")
                 {
                     var origin = Argument("hashAlgorithm") is null ? " (the constructor's default)" : string.Empty;
@@ -1791,13 +1996,6 @@ public static class CryptoAnalyzer
 
             return false;
         }
-
-        private static string? HashAlgorithmNameOf(IOperation value) => Strip(value) switch
-        {
-            IPropertyReferenceOperation { Property.ContainingType.Name: "HashAlgorithmName" } property => property.Property.Name,
-            IObjectCreationOperation { Arguments: [{ Value.ConstantValue: { HasValue: true, Value: string name } }] } => name,
-            _ => null
-        };
 
         /// <summary>
         ///     "zero" for a freshly allocated array (`new byte[16]`), "constant" for one built only

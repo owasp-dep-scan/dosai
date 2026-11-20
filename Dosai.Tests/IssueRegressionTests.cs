@@ -1139,5 +1139,103 @@ public static class Shouting
         }
     }
 
+    #region Issue 129 - dangling EdgeIds after same-site collapsing
+
+    private static MethodCallEdge Issue129Edge(string id, string sourceId, string targetId, string? targetPurl, int line, int column, AnalysisEvidenceKind kind = AnalysisEvidenceKind.SourceRoslynDirect) => new()
+    {
+        Id = id,
+        SourceId = sourceId,
+        TargetId = targetId,
+        TargetPurl = targetPurl,
+        CallType = CallType.MethodCall,
+        EvidenceKind = kind,
+        Path = "Program.cs",
+        CallLocation = new CallLocation { FileName = "Program.cs", LineNumber = line, ColumnNumber = column },
+        Evidence = [new AnalysisEvidence { Kind = kind, Source = "roslyn-source", Description = "Call discovered from Roslyn semantic operation.", FileName = "Program.cs", LineNumber = line, ColumnNumber = column }],
+    };
+
+    [Fact]
+    public void DropDanglingEdgeIds_CollapsedGroupsLeaveOnlyTheKeepersId()
+    {
+        var callGraph = new CallGraph
+        {
+            Nodes =
+            [
+                new MethodNode { Id = "Program.Main()", Name = "Main", ClassName = "Program", Namespace = "", FileName = "Program.cs" },
+                new MethodNode { Id = "Json.SerializeObject()", Name = "SerializeObject", ClassName = "JsonConvert", Namespace = "Newtonsoft.Json", FileName = "Program.cs", Purl = "pkg:nuget/Newtonsoft.Json@13.0.3", IsExternal = true },
+                new MethodNode { Id = "Console.WriteLine()", Name = "WriteLine", ClassName = "Console", Namespace = "System", FileName = "Program.cs" },
+            ],
+            // Three call sites of the same pair, listed with the minimal site NOT first, plus an
+            // edge of a different pair that must survive untouched.
+            Edges =
+            [
+                Issue129Edge("e2", "Program.Main()", "Json.SerializeObject()", "pkg:nuget/Newtonsoft.Json@13.0.3", 4, 9),
+                Issue129Edge("e1", "Program.Main()", "Json.SerializeObject()", "pkg:nuget/Newtonsoft.Json@13.0.3", 3, 9),
+                Issue129Edge("e3", "Program.Main()", "Json.SerializeObject()", "pkg:nuget/Newtonsoft.Json@13.0.3", 5, 9),
+                Issue129Edge("e4", "Program.Main()", "Console.WriteLine()", null, 7, 9),
+            ],
+        };
+
+        var reachability = TransparencyBuilder.BuildPackageReachability(callGraph, dependencies:
+        [
+            new Dependency { Purl = "pkg:nuget/Newtonsoft.Json@13.0.3", Path = "Program.cs", LineNumber = 1, ColumnNumber = 1 },
+        ]);
+        ReachabilityAnalyzer.CollapseDuplicateCallSites(callGraph);
+        TransparencyBuilder.DropDanglingEdgeIds(reachability, callGraph);
+
+        // The section was built before the collapse, so the entry listed all three ids; after
+        // the drop it names exactly the keeper (nothing about first ids is assumed), every
+        // listed id exists in the final edges, and the locations and evidence the collapse
+        // merged are still listed - the fix never rebuilds the section.
+        var entry = Assert.Single(reachability, package => package.Purl == "pkg:nuget/Newtonsoft.Json@13.0.3");
+        var keeper = Assert.Single(callGraph.Edges, edge => edge.TargetId == "Json.SerializeObject()");
+        Assert.Equal(["e1"], entry.EdgeIds);
+        Assert.Equal(3, keeper.CallSiteCount);
+        Assert.All(keeper.Evidence, evidence => Assert.Contains((evidence.LineNumber, evidence.ColumnNumber), new[] { (3, 9), (4, 9), (5, 9) }));
+        Assert.Contains(entry.SourceLocations, location => location is { Path: "Program.cs", LineNumber: 1, ColumnNumber: 1, Kind: "Dependency" });
+        Assert.Contains(entry.SourceLocations, location => location is { Path: "Program.cs", LineNumber: 3, ColumnNumber: 9, Kind: "CallGraphEdge" });
+        Assert.Contains(entry.SourceLocations, location => location is { Path: "Program.cs", LineNumber: 4, ColumnNumber: 9, Kind: "CallGraphEdge" });
+        Assert.Contains(entry.SourceLocations, location => location is { Path: "Program.cs", LineNumber: 5, ColumnNumber: 9, Kind: "CallGraphEdge" });
+        var finalIds = callGraph.Edges.Select(edge => edge.Id).ToHashSet(StringComparer.Ordinal);
+        Assert.All(reachability, package => Assert.All(package.EdgeIds, id => Assert.Contains(id, finalIds)));
+    }
+
+    [Fact]
+    public void DropDanglingEdgeIds_AnEntryThatLosesItsLastIdStaysWithItsLocations()
+    {
+        // The group's members carried the purl; the keeper does not. The entry keeps its place
+        // with empty EdgeIds, because its dependency location can still be the reason the purl
+        // is reachable at all.
+        var callGraph = new CallGraph
+        {
+            Nodes =
+            [
+                new MethodNode { Id = "Program.Main()", Name = "Main", ClassName = "Program", Namespace = "", FileName = "Program.cs" },
+                new MethodNode { Id = "Json.SerializeObject()", Name = "SerializeObject", ClassName = "JsonConvert", Namespace = "Newtonsoft.Json", FileName = "Program.cs", IsExternal = true },
+            ],
+            Edges =
+            [
+                // The keeper of the group is the minimal site (3:9), which carries no purl;
+                // the members that do are the dropped ones.
+                Issue129Edge("e2", "Program.Main()", "Json.SerializeObject()", "pkg:nuget/Split@1.0.0", 5, 9),
+                Issue129Edge("e1", "Program.Main()", "Json.SerializeObject()", "pkg:nuget/Split@1.0.0", 4, 9),
+                Issue129Edge("e3", "Program.Main()", "Json.SerializeObject()", null, 3, 9),
+            ],
+        };
+
+        var reachability = TransparencyBuilder.BuildPackageReachability(callGraph, dependencies:
+        [
+            new Dependency { Purl = "pkg:nuget/Split@1.0.0", Path = "Program.cs", LineNumber = 1, ColumnNumber = 1 },
+        ]);
+        ReachabilityAnalyzer.CollapseDuplicateCallSites(callGraph);
+        TransparencyBuilder.DropDanglingEdgeIds(reachability, callGraph);
+
+        var entry = Assert.Single(reachability, package => package.Purl == "pkg:nuget/Split@1.0.0");
+        Assert.Empty(entry.EdgeIds);
+        Assert.Contains(entry.SourceLocations, location => location is { Path: "Program.cs", LineNumber: 1, Kind: "Dependency" });
+    }
+
+    #endregion
+
     #endregion
 }

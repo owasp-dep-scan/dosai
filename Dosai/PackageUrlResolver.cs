@@ -398,7 +398,7 @@ public sealed partial class PackageUrlResolver
         }
 
         return TablesForLocation(fullPath) is { } tables && tables.TryGetAssembly(name, out var purl) && purl is not null
-            ? (purl, Path.GetRelativePath(_root, Path.GetDirectoryName(fullPath) ?? fullPath).Replace('\\', '/'))
+            ? (purl, SourceDocumentPaths.RelativePath(_root, Path.GetDirectoryName(fullPath) ?? fullPath))
             : null;
     }
 
@@ -447,7 +447,7 @@ public sealed partial class PackageUrlResolver
 
         if (!_projectTables.TryGetValue(directory, out var tables))
         {
-            var relative = Path.GetRelativePath(_root, directory).Replace('\\', '/');
+            var relative = SourceDocumentPaths.RelativePath(_root, directory);
             tables = new PackageTables(relative);
             _projectTables[directory] = tables;
         }

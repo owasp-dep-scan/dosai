@@ -923,7 +923,7 @@ write.table(pd, file = "", sep = "\t", row.names = FALSE, col.names = TRUE, quot
     private static bool IsFSharpDeclarationKeyword(string word) =>
         word is "abstract" or "inherit" or "override" or "member" or "interface" or "val" or "yield" or "use" or "when" or "let" or "do" or "done" or "while" or "for" or "if" or "then" or "else" or "match";
 
-    private static string SafeRelative(string basePath, string file) => Directory.Exists(basePath) ? Path.GetRelativePath(basePath, file) : Path.GetFileName(file);
+    private static string SafeRelative(string basePath, string file) => Directory.Exists(basePath) ? SourceDocumentPaths.RelativePath(basePath, file) : Path.GetFileName(file);
 
     private static Assembly? TryLoadFSharpCompilerService()
     {

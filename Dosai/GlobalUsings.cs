@@ -216,7 +216,7 @@ internal static partial class GlobalUsings
             {
                 var differing = owners
                     .Where(owner => !owner.Directives.Order(StringComparer.Ordinal).SequenceEqual(owners[0].Directives.Order(StringComparer.Ordinal)))
-                    .Select(owner => Path.GetRelativePath(root, owner.Key).Replace('\\', '/'))
+                    .Select(owner => SourceDocumentPaths.RelativePath(root, owner.Key))
                     .ToList();
                 diagnostics.Add($"Global usings differ between projects ({string.Join(", ", differing)}); the usings every project shares stay global, each file gets the rest of its own project's set as file-local using directives, and a file outside every project gets the union of every project's set. The directives are written after the file's last using, else on a blank or comment line before its code, else (code on the first line and no using) before that code, which shifts the columns of that one line.");
                 var union = new List<string>();

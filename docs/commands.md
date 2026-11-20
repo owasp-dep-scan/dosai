@@ -50,6 +50,15 @@ dotnet run --project ./Dosai/Dosai.csproj -- methods \
 
 Supported call graph formats are `mermaid`, `graphml`, and `gexf`. If `--callgraph-out` is omitted, Dosai derives the output name from `--o` and the selected format.
 
+Calls made directly in field, auto-property and event initializers are recorded under the
+constructor the compiler runs them in (issue #130): the static constructor (`.cctor`) for
+static members, every declared instance constructor for instance members (one row each, at the
+initializer's own line), the generated parameterless one when a reference type declares none,
+and declared constructors only for structs, because a struct's implicit parameterless
+constructor never runs initializers. A declared static constructor's node id is `Ns.T..cctor()`
+with no return-type suffix, matching the IL passes. Attribute arguments stay out of scope, and
+Visual Basic initializer calls are recorded nowhere yet, with a diagnostic saying so.
+
 Framework-analysis options:
 
 | Flag                          | Effect                                                                                                                                |
@@ -138,7 +147,7 @@ F#, R, and VC++ frontends are intentionally tolerant of incomplete project metad
 
 ### Output
 
-The primary output is `MethodsSlice`. Important collections include `Methods`, `MethodCalls`, `Properties`, `Fields`, `Events`, `Constructors`, `CallGraph`, `ApiEndpoints`, `EntryPoints`, `Reachability`, `RecursionClusters`, `DeadCode`, `SecurityFindings`, `PackageReachability`, `AssemblyInformation`, and `SourceAssemblyMapping`. `PackageReachability[].SourceLocations` records source-file-backed call graph nodes or edges that support each reachable PURL. If a project has dependency/import PURLs but no package-attributed call graph edge, Dosai also emits low-confidence dependency-backed reachability facts from `Dependencies[]`; this keeps VB `Imports`, F# `open`, and R `library`/`require` evidence available to SBOM occurrence matching. Assembly DLL fallback locations are filtered out so downstream tools can prefer actionable source files.
+The primary output is `MethodsSlice`. Important collections include `Methods`, `MethodCalls`, `Properties`, `Fields`, `Events`, `Constructors`, `CallGraph`, `ApiEndpoints`, `EntryPoints`, `Reachability`, `RecursionClusters`, `DeadCode`, `SecurityFindings`, `PackageReachability`, `AssemblyInformation`, and `SourceAssemblyMapping`. `PackageReachability[].SourceLocations` records source-file-backed call graph nodes or edges that support each reachable PURL, and `PackageReachability[].EdgeIds` name edges of the final `CallGraph`, where same-site collapsing has merged duplicate call sites into one counted edge (`CallSiteCount`), each merged group appearing as its surviving edge's id. If a project has dependency/import PURLs but no package-attributed call graph edge, Dosai also emits low-confidence dependency-backed reachability facts from `Dependencies[]`; this keeps VB `Imports`, F# `open`, and R `library`/`require` evidence available to SBOM occurrence matching. Assembly DLL fallback locations are filtered out so downstream tools can prefer actionable source files.
 
 `DeadCode[]` (schema 4.1.0) lists source-declared methods and constructors that no entry point reaches and no reflection/DI evidence keeps alive. It is the inverse of the reachability index, capped at 500 entries. Only reviewable targets are listed: entries must resolve to a `.cs`/`.vb`/`.fs` source location (so binaries pulled into a source scan are skipped), and compiler-synthesized members (lambdas, local functions, closures, iterator and async state machines, identified by their `<`-prefixed names: `<Run>b__0_0` in IL, `<Run>lambda1` and `<Run>Helper` in source) are excluded. Members of generic types are included; their node ids embed the type arguments (`Box<T>..ctor(T)`). The report is suppressed entirely when the reachability budget was exhausted, because an unvisited node is then unknown rather than unreachable. `Reachability[].KeepAlive`/`KeepAliveReasons` explain why an unreachable node was still retained (for example an `AddSingleton<T>()` registration or `Activator.CreateInstance` target). Top-level-statement programs (the default `dotnet new console` template) report their synthesized `<Main>$` like any declared `Main`, so a modern CLI keeps its entry point, reachability facts, and exploit chains.
 
@@ -189,7 +198,9 @@ dotnet run --project ./Dosai/Dosai.csproj -- dataflows \
   --graph-out /tmp/dosai-dataflows.gexf
 ```
 
-Common options are `--patterns`, `--pattern-packs`, `--dependency-flows` (`all` or `reachable`: analyze only the package methods application code reaches, which is much faster when packages are large and leaves the application's slices unchanged; `all` is the default for a built source tree and `reachable` for an assembly-only input such as a publish directory), `--graph-format`, `--graph-out`, `--print`, `--print-sources-sinks`, and `--suppress`. Supported graph formats are `mermaid`, `graphml`, and `gexf`. By default, `dataflows` writes the JSON and optional graph artifacts without printing flow details to stdout. Use `--print` for a human-readable path view, and use `--print-sources-sinks` only for source/sink pattern diagnostics.
+Field and property initializers, expression-bodied properties and indexers, and a primary constructor's base arguments are analyzed on unbuilt trees, so a flow that only lives in a member initializer (`private static readonly string c = Console.ReadLine()!;` read later by `Process.Start`) is reported without a build; a static field initializer's taint reaches the methods that read the field, with the source node placed at the initializer under the synthesized constructor's method id. On a built tree each flow is reported once: the source pass claims its flows and the assembly pass drops its duplicates.
+
+Common options are `--patterns`, `--pattern-packs`, `--dependency-flows` (`all` or `reachable`: analyze only the package methods application code reaches, following interface and virtual dispatch to the types reached code instantiates; much faster when packages are large, with flows through package bodies no reachable path executes left out; `all` is the default for a built source tree and `reachable` for an assembly-only input such as a publish directory), `--graph-format`, `--graph-out`, `--print`, `--print-sources-sinks`, and `--suppress`. Supported graph formats are `mermaid`, `graphml`, and `gexf`. By default, `dataflows` writes the JSON and optional graph artifacts without printing flow details to stdout. Use `--print` for a human-readable path view, and use `--print-sources-sinks` only for source/sink pattern diagnostics.
 
 Use `--patterns` to merge project-specific source, sink, passthrough, and sanitizer patterns with Dosai's built-in patterns:
 

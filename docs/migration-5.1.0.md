@@ -530,10 +530,27 @@ as application code until someone copied a `*.deps.json` into the root.
   the member it names (generic arguments and arity removed, so a call to `M<int>` reaches `M<T>`),
   a member reaches its type's static constructor, and a field read reaches every method that
   stores the field. Overrides are not followed, because the interpreter takes a call's summary
-  from the member the call names. The application's slices are the same as with `all`, node for
-  node (a corpus test compares them on a MailKit app), flows that only start inside package code
-  are not reported, and a diagnostic counts the method bodies left out. On that MailKit app it
-  took `dataflows` from 70 s and 127 MB to 3.5 s and 0.3 MB.
+  from the member the call names. The walk's member and field keys carry the declaring type's full
+  nesting chain (issue #128), so a nested type of one assembly - a compiler-generated `<>c` or
+  a user-written `Cache` - never joins another assembly's, and a key that cannot be qualified
+  falls back to a legacy key unique over the whole set. `callvirt` and `ldvirtftn` reach the
+  implementations held by types reached code instantiates (issue #120): instantiation evidence
+  is `newobj`, `box`, `ldtoken`, `constrained.`, `initobj`, the generic arguments of method
+  instantiations and the generic arguments and signature types of called members, with a
+  generic base type or interface decoded through its type specification; types are keyed with
+  their arity, so `Box` and `Box<T>` are two types. Calls to interface members (static abstract
+  ones too), MethodImpl rows and explicit overrides in derived interfaces are followed. Evidence is counted in reached bodies only, with no class-hierarchy fallback, fired against a
+  memoized inheritance table built from every analyzed assembly and matching explicit
+  interface implementations by their dotted metadata name. The flows through the package code
+  a run can execute are kept while flows that only analyzing every package body finds are
+  left out: on the Serilog fixture of issue #120 the dead formatters stay out
+  (`MessageTemplateTextFormatter`, `JsonFormatter`, `LogEvent.Copy`) while the console sink's
+  `OutputTemplateRenderer` and `ExceptionTokenRenderer` bodies come back with
+  `Serilog.Sinks.Console`'s package reachability, and the interpreter still takes a call's
+  summary from the member the call names, so a flow needing value propagation through an
+  interface call's return can differ from `all`. A diagnostic counts the method bodies left
+  out; on that MailKit app `reachable` took `dataflows` from 70 s and 127 MB to 3.5 s and
+  0.3 MB.
 - **Default by input.** Without the option or the variable, a built source tree uses `all`, as
   before, and an assembly-only input (a publish directory, a container file system, a `bin/`
   folder scanned on its own) uses `reachable`. Such an input used to be scoped to the project
@@ -738,3 +755,91 @@ does: public single-parameter constructors and the static `Create` methods of an
 `IUnionMembers` interface. A union whose cases are named only by that interface used to
 classify as if it had no cases, and a private single-parameter constructor used to count as a
 case; both now follow the compiler. Union declarations classify as before.
+
+## Framework-reference diagnostics and target-following binding (issue #127, behavioral)
+
+Every command's `Diagnostics` gain one base-naming line naming where the base framework
+references came from, in five shapes: an exact-major pack ("Base framework references for target
+'net10.0' come from the Microsoft.NETCore.App 10.0.15 reference pack (exact major)"), Dosai's own
+runtime on a same-major target, the .NET Framework reference assemblies of a net4x tree, a
+net4x tree whose reference-assemblies package the NuGet cache lacks (the one framework
+diagnostic whose fix is a restore, because restore auto-fetches the package), and the
+netstandard/netcoreapp/undetectable shapes that keep the process-wide set. A tree holding a
+net4x project beside a root-wide modern target gets one extra line naming those projects and
+pointing at `Metadata.ProjectGuardTargetFrameworks`.
+
+The binding itself changes where it was silently wrong: a tree whose target is a modern .NET
+major below Dosai's own runtime now binds through the matching reference pack (or the nearest
+major, with a note) whether or not it declares a second shared framework, and a net4x tree binds
+the .NET Framework reference assemblies from the NuGet cache when restore fetched them. Assembly
+strings a consumer may have pinned change accordingly: `System.Private.CoreLib, Version=11.0.0.0`
+for a net10.0 tree becomes `System.Runtime, Version=10.0.0.0`, and a net48 tree binds
+`mscorlib, Version=4.0.0.0` (the pack's facades forward there and Roslyn reports the defining
+assembly). The unresolved-call diagnostic selects a restore-advice branch for the missing net4x
+package; every other branch keeps its wording.
+
+## The weak-hash rules read the algorithm argument of the one-shot hash APIs (issue #134, behavioral)
+
+`CryptographicOperations.HashData`/`HashDataAsync`/`TryHashData` (and their `Hmac*` twins) now
+have their `HashAlgorithmName` argument read by the semantic walker, so an MD5 or SHA-1 choice
+reports in the body shapes the line pass skips: expression bodies, field-initializer lambdas
+and VB `Dim` statements. Both constant forms decode, the static property (also through
+`using static`) and `new HashAlgorithmName("MD5")`. The evidence contract moves on lines that
+already reported: a block-body MD5 asset and finding anchor at the argument instead of the
+token (column 67 becomes 49 on the fixture's line), and the operation names the called API with
+`source: roslyn`. On the MAC half, a decoded argument names the MAC (`HmacData` with MD5 becomes
+a weak HMAC-MD5 asset) and replaces the generic strong `HMAC` asset the method name used to
+give. The line pass skips the algorithm tokens the walker classified from an argument, so a
+block-body and an expression-body `HmacData(HashAlgorithmName.MD5, ...)` both give one HMAC-MD5
+asset and no plain-MD5 hashing finding. A runtime-chosen MAC algorithm is recorded as an `HMAC`
+asset of `unknown` strength rather than the generic strong one; a `static readonly
+HashAlgorithmName` field is resolved through its initializer. `IncrementalHash.CreateHash` and
+`CreateHMAC` and the `SignData`, `VerifyData` and `SignHash` families of `RSA`, `ECDsa` and
+`DSA` are decoded the same way (a signature call keeps its RSA or ECDsa asset and adds the
+digest it signs with), and hyphenated constant spellings (`"SHA-256"`) record nothing.
+
+## Initializer calls attribute to the constructors that run them (issue #130, behavioral)
+
+Calls made directly in field, auto-property and event initializers appear in `MethodCalls` and
+the call graph, attributed to the constructor the compiler runs the initializer in: `Ns.T..cctor()`
+for static members, `Ns.T..ctor()` for instance members, one row per declared constructor (each
+row keeping the initializer's own line and column, with `EvidenceKind` `SourceRoslynDirect`, or
+`SourceUnresolved` on unrestored trees). On a class with several constructors the rows multiply
+exactly as the compiler's IL does, which promotes packages used only from initializers from
+`Dependency` to `ExternalCallGraphNode`. The static-constructor id loses its `:void` suffix
+(`Repro.Settings..cctor():void` becomes `Repro.Settings..cctor()`) and the phantom
+`Ns.T..ctor()` node that the inventory minted beside a declared static constructor is gone.
+A constructor that chains with `: this(...)` is not an owner (the constructor it chains to runs
+the initializer; every other constructor of a primary-constructor type chains), except that a
+struct constructor chaining with `: this()` keeps its rows only while the struct declares no
+parameterless constructor of its own (the implicit one runs the initializers); with a declared
+`S()`, that constructor owns them. Attribute
+arguments and Visual Basic initializer calls stay unrecorded; the diagnostic counts each dropped
+site once, `As New` clauses and property initializers included.
+
+## Source-pass flows from initializers and expression bodies (issue #131, behavioral)
+
+The `dataflows` source pass analyzes field and property initializers, expression-bodied
+properties and indexers, and a primary constructor's base arguments on unbuilt trees, where
+before only flows inside method bodies (and lambdas of field initializers) were found. A
+static field initializer's taint reaches the methods that read the field, and the source node
+of such a slice sits at the initializer, under the synthesized constructor's method id
+(`Ns.T..cctor()`), matching the IL pass's placement. On a built tree each flow is reported
+once: the source pass claims its flows (the key holds the tree-relative paths, lines, sink name,
+source and sink category and argument index) and the assembly pass drops the ones the source
+pass already holds, never merging two assembly flows with each other, so the
+`EvidenceKind` mix changes on built trees (flows previously reported as `assembly-il` are
+reported as `source`). Node ids (`dfn{...}`) shift because the source pass now walks more
+roots before the IL pass numbers its nodes; ids are order-dependent and deterministic, but a
+consumer pinning raw node ids sees churn.
+
+## Relative paths use forward slashes on every OS (fix)
+
+Every record's tree-relative path (`MethodCalls[].Path`, the call-graph edges' paths,
+data-flow nodes' `Path`, crypto locations, `ApiEndpoints[].FilePath`, and the IL pass's
+records) uses forward slashes on every OS. On Windows these fields carried backslashes,
+so the same scan produced `Views/Home/Privacy.cshtml` on Linux and
+`Views\Home\Privacy.cshtml` on Windows, and consumers matching records against source
+paths saw different values per host. Diagnostics prose and `FileName` fields are
+unchanged; on Linux and macOS no output changes at all, and a Unix file name that holds a
+literal backslash keeps it (only Windows rewrites the separator).

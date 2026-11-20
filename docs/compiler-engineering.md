@@ -66,9 +66,12 @@ resolves to `packs/<Name>.Ref/<version>/ref/<tfm>` or the NuGet cache copy (gath
 so a target-matched pack that only restore downloaded wins over an installed pack of another
 major), or, when no pack of any major exists, the installed shared framework. The version is the
 exact target major, else the nearest major above, else the nearest below, then the highest patch
-with releases over prereleases; a non-exact major always names the version used. A net9.0 web
-tree on a machine with only 8.x and 10.x packs therefore binds against the 10.x base and
-ASP.NET Core packs, a consistent pair, rather than the newest shared runtime. Exactly one reference per assembly simple
+with releases over prereleases; a non-exact major always names the version used. The base pack is
+resolved for every tree with a detectable modern target, not only trees that declare a second
+shared framework (issue #127): the root-wide representative target decides the
+Microsoft.NETCore.App major, so a plain net9.0 tree on a machine with only 8.x and 10.x packs
+binds against the 10.x base, a consistent pair, rather than the newest shared runtime, and every
+command's report carries a diagnostic naming the base used. Exactly one reference per assembly simple
 name survives: the pack that matches the analyzed target claims shared names (this is what keeps
 .NET 11's nine `Microsoft.Extensions.*` assemblies from colliding with an ASP.NET Core 8/9/10
 pack), and every dropped duplicate is reported. A base reference pack owns the corlib: the
@@ -76,6 +79,23 @@ process-wide fallback then skips its `System.Private.*` companions, because a se
 `System.Private.CoreLib` of another major makes Roslyn report CS0518 for every predefined type.
 Missing packs degrade to diagnostics, never failures, and the reference resolution is cached per
 scan root so it is deterministic across the run.
+
+A net4x tree reads the .NET Framework reference assemblies from the NuGet cache (issue #127):
+restore auto-fetches `microsoft.netframework.referenceassemblies.<tfm>`, and the exact package
+(highest version, layout `build/.NETFramework/v<Major.Minor[.Patch]>/` plus its `Facades/`, no
+cross-TFM substitution; a lower package version serves when the highest lacks the target's folder) owns the whole set the way a base reference pack owns the corlib, only
+stronger: mscorlib is the corlib, the process-wide runtime set fills nothing beside it, and the
+modern shared frameworks the tree declares (WindowsDesktop via `UseWindowsForms`) are not layered
+either, because the net4x pack already carries their types and the skip is reported. The net461 to net471 packs ship no
+`Facades/netstandard.dll`, so the SDK's `Microsoft.NET.Build.Extensions` netstandard facades
+(or, without an SDK, the process-wide `netstandard` facade for that name alone) are added with a
+diagnostic, and a call into a netstandard2.0 library binds. Without the
+package the tree degrades to the process-wide set under a diagnostic naming the package and the
+runtime base actually used. netstandard, netcoreapp and undetectable targets keep the
+process-wide set too, now with a diagnostic naming that base instead of silence, and a net4x
+project on a tree whose root-wide base is something else is named in a diagnostic and in
+`Metadata.ProjectGuardTargetFrameworks` (one base per scan root; per-project bases would need
+per-project compilations).
 
 The tree's own assemblies (build output under the scan root) and the restore output's package
 assemblies join those framework references through `CompilationReferenceSet`, still one reference

@@ -139,6 +139,15 @@ public sealed class DataFlowMethodSummary
 internal sealed class DataFlowMemberFacts
 {
     public Dictionary<string, List<string>> SourceCategories { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>
+    ///     Where a member's source was assigned, when the assignment is a member initializer
+    ///     (issue #131), with the initializer's own file (its path is made tree-relative where
+    ///     the node is written, so two files of one name stay apart): the source node of a slice through that member is minted at the
+    ///     initializer, exactly where the IL pass places it. Constructor-stored members keep no
+    ///     origin and mint at the read site as before.
+    /// </summary>
+    public Dictionary<string, (string FilePath, int LineNumber, Microsoft.CodeAnalysis.SyntaxNode Anchor, IMethodSymbol? Owner)> Origins { get; } = new(StringComparer.Ordinal);
 }
 
 public sealed class DataFlowNode
@@ -292,6 +301,17 @@ public sealed class DataFlowResult
     public List<DataFlowMethodSummary> MethodSummaries { get; set; } = [];
     public DataFlowStatistics Statistics { get; set; } = new();
     public List<string> Diagnostics { get; set; } = [];
+
+    /// <summary>
+    ///     Cross-pass slice fingerprints (issue #131): on a built tree both passes find the same
+    ///     flow, and the source pass fills first, so the IL pass drops its duplicates and each
+    ///     flow is reported once. Keyed on slice content (files, lines, columns, category,
+    ///     argument index), never node ids. Not serialized.
+    /// </summary>
+    internal HashSet<string>? SliceFingerprints { get; set; }
+
+    /// <summary>The same claims keyed by file name, for assembly flows whose document did not resolve into the tree.</summary>
+    internal HashSet<string>? SliceNameFingerprints { get; set; }
 }
 
 public static partial class DataFlowAnalyzer
@@ -431,6 +451,7 @@ public static partial class DataFlowAnalyzer
         var memberFacts = new DataFlowMemberFacts();
         var summaryCallerIndex = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
         var summaryMethodRoots = new Dictionary<string, (IOperation Root, SemanticModel Model)>(StringComparer.Ordinal);
+        var memberInitializerRoots = new List<(Microsoft.CodeAnalysis.CSharp.Syntax.EqualsValueClauseSyntax Root, SemanticModel Model)>();
 
         // Iterate summary collection to a fixpoint (capped at 3 rounds, mirroring the IL-mode
         // fixpoint in DataFlowAssembly). Round one is a full pass that also records the caller
@@ -444,7 +465,7 @@ public static partial class DataFlowAnalyzer
             {
                 var model = csharpCompilation.GetSemanticModel(tree);
                 var root = tree.GetCompilationUnitRoot();
-                CollectCompilationUnitSummaries(model, root, summaries, patterns, summaryCallerIndex, summaryMethodRoots, memberFacts);
+                CollectCompilationUnitSummaries(model, root, summaries, patterns, summaryCallerIndex, summaryMethodRoots, memberFacts, memberInitializerRoots);
             }
 
             foreach (var tree in vbTrees)
@@ -489,9 +510,22 @@ public static partial class DataFlowAnalyzer
                     .ToHashSet(StringComparer.Ordinal);
                 cellCountsByKey = cellCountsAfter;
             }
+
+            // Member initializers are nobody's callee, so the fixpoint worklist never re-walks
+            // them; they are walked once more against the converged summaries, so member facts
+            // derived through a callee summary are not left stale (facts only ever grow, so the
+            // second pass strictly adds - issue #131).
+            foreach (var (initializerRoot, initializerModel) in memberInitializerRoots)
+            {
+                new DataFlowSummaryCollector(initializerModel, summaries, patterns, summaryCallerIndex, summaryMethodRoots, memberFacts).VisitMemberInitializer(initializerRoot);
+            }
         }
         DebugLog.Count("method summaries", summaries.Count);
 
+        // Created before the graph-walk phase so the source pass claims its flows first and
+        // the assembly pass drops the duplicates (issue #131).
+        result.SliceFingerprints = new HashSet<string>(StringComparer.Ordinal);
+        result.SliceNameFingerprints = new HashSet<string>(StringComparer.Ordinal);
         var graph = new DataFlowGraphBuilder(result, purlResolver, path);
 
         var frameworkSeeds = new FrameworkTaintSeedIndex(frameworkResult.TaintSeeds);
@@ -603,17 +637,99 @@ public static partial class DataFlowAnalyzer
         }
     }
 
-    private static void CollectCompilationUnitSummaries(SemanticModel model, CSharpCompilationUnitSyntax root, Dictionary<string, DataFlowMethodSummary> summaries, DataFlowPatternSet patterns, Dictionary<string, HashSet<string>>? callerIndex = null, Dictionary<string, (IOperation Root, SemanticModel Model)>? methodRoots = null, DataFlowMemberFacts? memberFacts = null)
+    /// <summary>
+    ///     The outermost operation roots of one compilation unit, in document order (issue
+    ///     #131): method and accessor declarations - whose own spans shadow the arrow clauses
+    ///     and local initializers inside them, so an expression-bodied method is walked exactly
+    ///     once - every local function, even inside one of those (it needs a summary of its
+    ///     own), plus the roots no declaration encloses: member initializers,
+    ///     the `=>` bodies of properties and indexers, and a primary constructor's base
+    ///     arguments. A node is kept when it matches and does not sit inside the span of the
+    ///     last kept node; document order visits ancestors before descendants, so that one
+    ///     comparison is sufficient.
+    /// </summary>
+    internal static IEnumerable<SyntaxNode> SelectDataFlowRoots(CSharpCompilationUnitSyntax root)
     {
-        var operationNodes = root.DescendantNodes()
-            .Where(node => node is Microsoft.CodeAnalysis.CSharp.Syntax.BaseMethodDeclarationSyntax or Microsoft.CodeAnalysis.CSharp.Syntax.AccessorDeclarationSyntax or Microsoft.CodeAnalysis.CSharp.Syntax.LocalFunctionStatementSyntax);
-        var collector = new DataFlowSummaryCollector(model, summaries, patterns, callerIndex, methodRoots, memberFacts);
-        foreach (var node in operationNodes)
+        SyntaxNode? last = null;
+        foreach (var node in root.DescendantNodes())
         {
-            var operation = OperationDepthGuard.GetOperation(model, node);
-            if (operation is not null)
+            // A local function is its own root even inside a method: it has a summary of its
+            // own that call sites bind to, and the enclosing walk does not give it one.
+            if (node is Microsoft.CodeAnalysis.CSharp.Syntax.LocalFunctionStatementSyntax)
             {
-                collector.Visit(operation);
+                yield return node;
+                continue;
+            }
+
+            if (!IsDataFlowRoot(node) || (last is not null && node.Span.Start >= last.Span.Start && node.Span.End <= last.Span.End))
+            {
+                continue;
+            }
+
+            last = node;
+            yield return node;
+        }
+
+        static bool IsDataFlowRoot(SyntaxNode node) => node switch
+        {
+            Microsoft.CodeAnalysis.CSharp.Syntax.BaseMethodDeclarationSyntax => true,
+            Microsoft.CodeAnalysis.CSharp.Syntax.AccessorDeclarationSyntax => true,
+            Microsoft.CodeAnalysis.CSharp.Syntax.LocalFunctionStatementSyntax => true,
+            // Attribute arguments, locals, parameter defaults and enum members are excluded by
+            // the parent chain: named attribute arguments are `=` clauses under an attribute
+            // argument.
+            Microsoft.CodeAnalysis.CSharp.Syntax.EqualsValueClauseSyntax { Parent: Microsoft.CodeAnalysis.CSharp.Syntax.VariableDeclaratorSyntax { Parent: Microsoft.CodeAnalysis.CSharp.Syntax.VariableDeclarationSyntax { Parent: Microsoft.CodeAnalysis.CSharp.Syntax.FieldDeclarationSyntax or Microsoft.CodeAnalysis.CSharp.Syntax.EventFieldDeclarationSyntax } } } => true,
+            Microsoft.CodeAnalysis.CSharp.Syntax.EqualsValueClauseSyntax { Parent: Microsoft.CodeAnalysis.CSharp.Syntax.PropertyDeclarationSyntax } => true,
+            Microsoft.CodeAnalysis.CSharp.Syntax.ArrowExpressionClauseSyntax { Parent: Microsoft.CodeAnalysis.CSharp.Syntax.PropertyDeclarationSyntax or Microsoft.CodeAnalysis.CSharp.Syntax.IndexerDeclarationSyntax } => true,
+            Microsoft.CodeAnalysis.CSharp.Syntax.PrimaryConstructorBaseTypeSyntax => true,
+            _ => false
+        };
+    }
+
+    /// <summary>
+    ///     The cross-pass identity of a slice: the same source line flowing into the same sink
+    ///     line under the same categories and argument index, in the same tree-relative files
+    ///     (never the bare file name: two files of one name in two directories are two files),
+    ///     with the sink's name separating two different calls on one line. Method ids are not
+    ///     part of it: the passes render the id of an async or lambda-hosted flow differently
+    ///     (the source method against its state machine's <c>MoveNext</c>). Columns are deliberately absent:
+    ///     the two passes anchor differently (the source pass at the matched expression, the
+    ///     assembly pass at the statement's sequence point, measured 48 against 5 on a source
+    ///     node and 16 against 9 on a block-bodied sink), so no column matches across passes.
+    ///     Only the source pass adds to the set and the assembly pass only reads it, so
+    ///     distinct assembly flows (two copies of one build, a package with no source) never
+    ///     merge into each other (issue #131). An assembly flow whose document did not resolve
+    ///     into the tree (a relocated or container build) is compared by file name instead.
+    /// </summary>
+    internal static string SliceFingerprint(DataFlowNode source, DataFlowNode sink, string? category, int argumentIndex, bool byFileName = false) =>
+        $"{(byFileName ? source.FileName : source.Path)}\u001f{(byFileName ? sink.FileName : sink.Path)}\u001f{source.LineNumber}\u001f{sink.LineNumber}\u001f{sink.Name}\u001f{source.Category}\u001f{category}\u001f{argumentIndex.ToString(CultureInfo.InvariantCulture)}";
+
+    private static void CollectCompilationUnitSummaries(SemanticModel model, CSharpCompilationUnitSyntax root, Dictionary<string, DataFlowMethodSummary> summaries, DataFlowPatternSet patterns, Dictionary<string, HashSet<string>>? callerIndex = null, Dictionary<string, (IOperation Root, SemanticModel Model)>? methodRoots = null, DataFlowMemberFacts? memberFacts = null, List<(Microsoft.CodeAnalysis.CSharp.Syntax.EqualsValueClauseSyntax Root, SemanticModel Model)>? memberInitializerRoots = null)
+    {
+        var collector = new DataFlowSummaryCollector(model, summaries, patterns, callerIndex, methodRoots, memberFacts);
+        foreach (var node in SelectDataFlowRoots(root))
+        {
+            switch (node)
+            {
+                case Microsoft.CodeAnalysis.CSharp.Syntax.EqualsValueClauseSyntax initializer:
+                    collector.VisitMemberInitializer(initializer);
+                    if (memberInitializerRoots is not null)
+                    {
+                        memberInitializerRoots.Add((initializer, model));
+                    }
+
+                    break;
+                case Microsoft.CodeAnalysis.CSharp.Syntax.ArrowExpressionClauseSyntax or Microsoft.CodeAnalysis.CSharp.Syntax.PrimaryConstructorBaseTypeSyntax:
+                    collector.VisitPinnedRoot(node);
+                    break;
+                default:
+                    if (OperationDepthGuard.GetOperation(model, node) is not { } declaration)
+                    {
+                        continue;
+                    }
+
+                    collector.VisitRoot(declaration);
+                    break;
             }
         }
 
@@ -637,14 +753,25 @@ public static partial class DataFlowAnalyzer
 
     private static void AnalyzeCompilationUnit(SemanticModel model, CSharpCompilationUnitSyntax root, DataFlowGraphBuilder graph, DataFlowPatternSet patterns, Dictionary<string, DataFlowMethodSummary> summaries, string basePath, string sourceFilePath, FrameworkTaintSeedIndex? frameworkSeeds = null, DataFlowMemberFacts? memberFacts = null)
     {
-        var operationNodes = root.DescendantNodes()
-            .Where(node => node is Microsoft.CodeAnalysis.CSharp.Syntax.BaseMethodDeclarationSyntax or Microsoft.CodeAnalysis.CSharp.Syntax.AccessorDeclarationSyntax or Microsoft.CodeAnalysis.CSharp.Syntax.LocalFunctionStatementSyntax);
-        foreach (var node in operationNodes)
+        foreach (var node in SelectDataFlowRoots(root))
         {
-            var operation = OperationDepthGuard.GetOperation(model, node);
-            if (operation is not null)
+            var walker = new DataFlowOperationWalker(model, graph, patterns, summaries, basePath, sourceFilePath, frameworkSeeds, memberFacts);
+            switch (node)
             {
-                new DataFlowOperationWalker(model, graph, patterns, summaries, basePath, sourceFilePath, frameworkSeeds, memberFacts).Visit(operation);
+                case Microsoft.CodeAnalysis.CSharp.Syntax.EqualsValueClauseSyntax initializer:
+                    walker.VisitMemberInitializer(initializer);
+                    break;
+                case Microsoft.CodeAnalysis.CSharp.Syntax.ArrowExpressionClauseSyntax or Microsoft.CodeAnalysis.CSharp.Syntax.PrimaryConstructorBaseTypeSyntax:
+                    walker.VisitPinnedRoot(node);
+                    break;
+                default:
+                    if (OperationDepthGuard.GetOperation(model, node) is not { } operation)
+                    {
+                        continue;
+                    }
+
+                    walker.VisitRoot(operation);
+                    break;
             }
         }
 
@@ -1421,7 +1548,7 @@ public static partial class DataFlowAnalyzer
                         Label = assignedName,
                         SourcePurl = source.Purl,
                         TargetPurl = sinkNode.Purl,
-                        Path = Directory.Exists(basePath) ? Path.GetRelativePath(basePath, file) : Path.GetFileName(file),
+                        Path = Directory.Exists(basePath) ? SourceDocumentPaths.RelativePath(basePath, file) : Path.GetFileName(file),
                         FileName = Path.GetFileName(file),
                         LineNumber = index + 1,
                         ColumnNumber = 1
@@ -1454,7 +1581,7 @@ public static partial class DataFlowAnalyzer
             Id = $"dfln{++nodeCounter}",
             Kind = kind,
             Name = name,
-            Path = Directory.Exists(basePath) ? Path.GetRelativePath(basePath, file) : Path.GetFileName(file),
+            Path = Directory.Exists(basePath) ? SourceDocumentPaths.RelativePath(basePath, file) : Path.GetFileName(file),
             FileName = Path.GetFileName(file),
             Namespace = namespaceName,
             ClassName = className,
@@ -1735,6 +1862,29 @@ public static partial class DataFlowAnalyzer
     /// </summary>
     private sealed class DataFlowSummaryCollector(SemanticModel model, Dictionary<string, DataFlowMethodSummary> summaries, DataFlowPatternSet patterns, Dictionary<string, HashSet<string>>? callerIndex = null, Dictionary<string, (IOperation Root, SemanticModel Model)>? methodRoots = null, DataFlowMemberFacts? memberFacts = null) : DepthBoundedOperationWalker
     {
+        // A local function is a root of its own (SelectDataFlowRoots); the walk of the
+        // declaration that encloses it, or of top-level statements, must not enter it a second
+        // time, or its slices and nodes would be reported twice.
+        private ILocalFunctionOperation? _rootLocalFunction;
+
+        public void VisitRoot(IOperation operation)
+        {
+            if (operation is ILocalFunctionOperation localFunction)
+            {
+                _rootLocalFunction = localFunction;
+            }
+
+            Visit(operation);
+        }
+
+        public override void VisitLocalFunction(ILocalFunctionOperation operation)
+        {
+            if (ReferenceEquals(operation, _rootLocalFunction))
+            {
+                base.VisitLocalFunction(operation);
+            }
+        }
+
         private IMethodSymbol? _currentMethod;
 
         // What each local of the current method was assigned from, flow-insensitively: a summary
@@ -1784,8 +1934,101 @@ public static partial class DataFlowAnalyzer
             {
                 _currentMethod = model.GetEnclosingSymbol(operation.Syntax.SpanStart) as IMethodSymbol;
             }
+
+            // The fixpoint re-walks a caller only through its registered root; a root that is
+            // not a method-body operation (an arrow body walked through VisitPinnedRoot)
+            // resolves its method here, so those summaries can grow in later rounds too.
+            // A block lambda inside a member initializer runs under the owner constructor's
+            // method id but is not that constructor's body: the constructor registers itself.
+            if (_currentMethod is not null && methodRoots is not null && _initializerDepth == 0)
+            {
+                methodRoots.TryAdd(DescribeSymbol(_currentMethod), (operation, model));
+            }
+
             base.VisitBlock(operation);
             _currentMethod = previousMethod;
+        }
+
+        /// <summary>
+        ///     Walks a member initializer pinned to the first constructor that runs it (issue
+        ///     #131) and records the assignment as member facts with the initializer's origin,
+        ///     so a read in another method mints its source where the initializer sits - the
+        ///     same line the IL pass places the flow on.
+        /// </summary>
+        public void VisitMemberInitializer(Microsoft.CodeAnalysis.CSharp.Syntax.EqualsValueClauseSyntax initializer)
+        {
+            if (OperationDepthGuard.GetOperation(model, initializer) is not { } operation)
+            {
+                return;
+            }
+
+            var member = model.GetEnclosingSymbol(initializer.SpanStart);
+            if (member is not (IFieldSymbol or IPropertySymbol or IEventSymbol))
+            {
+                return;
+            }
+
+            var previousMethod = _currentMethod;
+            var previousLocals = _locals;
+            _locals = new Dictionary<ISymbol, Derivation>(SymbolEqualityComparer.Default);
+            var owners = Depscan.Dosai.InitializerOwnerConstructors(member);
+            // No owner (a struct without a declared constructor): the walk still derives the
+            // assignment, but no method summary can hold it, so nothing is recorded.
+            _currentMethod = owners.Count > 0 ? owners[0] : null;
+            _initializerDepth++;
+            try
+            {
+                Visit(operation);
+                if (_currentMethod is not null)
+                {
+                    var memberKey = member.IsStatic ? GlobalMemberPrefix + MemberName(member) : MemberName(member);
+                    RecordMemberWrite(memberKey, operation);
+                    // The origin is where a source was assigned: an initializer that derives no
+                    // source of its own (a constant) is not one, whatever other writers of the
+                    // member assign elsewhere.
+                    if (memberFacts is not null && Derive(operation).Sources.Count > 0 && memberFacts.SourceCategories.TryGetValue(memberKey, out var categories) && categories.Count > 0)
+                    {
+                        var origin = initializer.Value.GetLocation().GetLineSpan().StartLinePosition;
+                        memberFacts.Origins.TryAdd(memberKey, (initializer.SyntaxTree.FilePath, origin.Line + 1, initializer.Value, _currentMethod));
+                    }
+                }
+            }
+            finally
+            {
+                _initializerDepth--;
+                _currentMethod = previousMethod;
+                _locals = previousLocals;
+            }
+        }
+
+        private int _initializerDepth;
+
+        /// <summary>Walks a root whose enclosing symbol is the method it belongs to: a property or indexer arrow body (its getter), a primary constructor's base arguments.</summary>
+        public void VisitPinnedRoot(SyntaxNode root)
+        {
+            if (OperationDepthGuard.GetOperation(model, root) is not { } operation)
+            {
+                return;
+            }
+
+            var previousMethod = _currentMethod;
+            var previousLocals = _locals;
+            _locals = new Dictionary<ISymbol, Derivation>(SymbolEqualityComparer.Default);
+            _currentMethod = model.GetEnclosingSymbol(root.SpanStart) as IMethodSymbol;
+            if (_currentMethod is not null && methodRoots is not null)
+            {
+                methodRoots.TryAdd(DescribeSymbol(_currentMethod), (operation, model));
+            }
+
+            try
+            {
+                Visit(operation);
+            }
+            finally
+            {
+                _currentMethod = previousMethod;
+                _locals = previousLocals;
+            }
         }
 
         /// <summary>
@@ -2066,7 +2309,30 @@ public static partial class DataFlowAnalyzer
                 return;
             }
 
+            RecordMemberWrite(memberKey, value);
+        }
+
+        /// <summary>
+        ///     Records a member assignment into the current method's summary and the shared
+        ///     member facts: which parameters are stored into the member and which source
+        ///     categories it is assigned from. The initializer path (issue #131) records the
+        ///     same write with the initializer's value.
+        /// </summary>
+        private void RecordMemberWrite(string memberKey, IOperation value)
+        {
+            if (_currentMethod is null)
+            {
+                return;
+            }
+
             var written = Derive(value);
+            if (written.Parameters.Count == 0 && written.Sources.Count == 0)
+            {
+                // Nothing to record: an initializer of constants must not leave an empty
+                // .ctor/.cctor summary behind.
+                return;
+            }
+
             var summary = GetSummary(_currentMethod);
             foreach (var parameterIndex in written.Parameters)
             {
@@ -2469,6 +2735,29 @@ public static partial class DataFlowAnalyzer
 
     private sealed class DataFlowOperationWalker(SemanticModel model, DataFlowGraphBuilder graph, DataFlowPatternSet patterns, Dictionary<string, DataFlowMethodSummary> summaries, string basePath, string sourceFilePath, FrameworkTaintSeedIndex? frameworkSeeds = null, DataFlowMemberFacts? memberFacts = null) : DepthBoundedOperationWalker
     {
+        // A local function is a root of its own (SelectDataFlowRoots); the walk of the
+        // declaration that encloses it, or of top-level statements, must not enter it a second
+        // time, or its slices and nodes would be reported twice.
+        private ILocalFunctionOperation? _rootLocalFunction;
+
+        public void VisitRoot(IOperation operation)
+        {
+            if (operation is ILocalFunctionOperation localFunction)
+            {
+                _rootLocalFunction = localFunction;
+            }
+
+            Visit(operation);
+        }
+
+        public override void VisitLocalFunction(ILocalFunctionOperation operation)
+        {
+            if (ReferenceEquals(operation, _rootLocalFunction))
+            {
+                base.VisitLocalFunction(operation);
+            }
+        }
+
         private readonly Dictionary<string, TaintTrace> _taintedSymbols = new(StringComparer.Ordinal);
         private readonly DataFlowPatternIndex _patternIndex = new(patterns);
         private readonly FrameworkTaintSeedIndex? _frameworkSeeds = frameworkSeeds;
@@ -2652,6 +2941,59 @@ public static partial class DataFlowAnalyzer
             {
                 SeedMethodParameters(topLevelMain, statementList[0]);
                 VisitStatements(statementList.Select(statement => OperationDepthGuard.GetOperation(model, statement)).OfType<IOperation>());
+            }
+            finally
+            {
+                _currentMethod = previousMethod;
+            }
+        }
+
+        /// <summary>
+        ///     Walks a member initializer pinned to the first constructor the compiler runs it in
+        ///     (issue #130's owner resolution, issue #131), so its nodes carry that
+        ///     constructor's method id like the IL pass's. The initializer is walked once, not
+        ///     once per owner, which is what keeps node and slice counts stable.
+        /// </summary>
+        public void VisitMemberInitializer(Microsoft.CodeAnalysis.CSharp.Syntax.EqualsValueClauseSyntax initializer)
+        {
+            if (OperationDepthGuard.GetOperation(model, initializer) is not { } operation)
+            {
+                return;
+            }
+
+            var previousMethod = _currentMethod;
+            var member = model.GetEnclosingSymbol(initializer.SpanStart);
+            // A struct initializer without a declared constructor has no owner (its implicit
+            // parameterless constructor only zeroes fields): walked unpinned, so its
+            // intra-initializer flows are still found.
+            if (member is IFieldSymbol or IPropertySymbol or IEventSymbol && Depscan.Dosai.InitializerOwnerConstructors(member) is { Count: > 0 } owners)
+            {
+                _currentMethod = owners[0];
+            }
+
+            try
+            {
+                Visit(operation);
+            }
+            finally
+            {
+                _currentMethod = previousMethod;
+            }
+        }
+
+        /// <summary>Walks a root whose enclosing symbol is already the method it belongs to: a property or indexer arrow body (its getter), a primary constructor's base arguments.</summary>
+        public void VisitPinnedRoot(SyntaxNode root)
+        {
+            if (OperationDepthGuard.GetOperation(model, root) is not { } operation)
+            {
+                return;
+            }
+
+            var previousMethod = _currentMethod;
+            _currentMethod = model.GetEnclosingSymbol(root.SpanStart) as IMethodSymbol;
+            try
+            {
+                Visit(operation);
             }
             finally
             {
@@ -3689,7 +4031,7 @@ public static partial class DataFlowAnalyzer
             return combined.Append(node.Id);
         }
 
-        private TaintTrace MintSource(IOperation at, string origin, IReadOnlyList<string> categories, string description)
+        private TaintTrace MintSource(IOperation at, string origin, IReadOnlyList<string> categories, string description, SyntaxNode? locationAnchor = null, IMethodSymbol? methodOverride = null, string? originFilePath = null)
         {
             var pattern = new DataFlowPattern
             {
@@ -3699,7 +4041,11 @@ public static partial class DataFlowAnalyzer
                 Category = categories[0],
                 Description = description
             };
-            var sourceNode = graph.AddNode("Source", GetOperationName(at), at, model, basePath, sourceFilePath, _currentMethod,
+            // An origin-carrying member fact mints at the initializer that assigned it, exactly
+            // where the IL pass places the flow, under the owner constructor's method id
+            // (issue #131); everything else mints at the read in the reading method.
+            var syntax = locationAnchor ?? at.Syntax;
+            var sourceNode = graph.AddNode("Source", GetOperationName(at), syntax, model, basePath, originFilePath ?? sourceFilePath, methodOverride ?? _currentMethod,
                 isSource: true,
                 isSink: false,
                 matchedPatterns: [pattern],
@@ -3732,7 +4078,10 @@ public static partial class DataFlowAnalyzer
             var factKey = member.IsStatic ? GlobalMemberPrefix + MemberName(member) : MemberName(member);
             if (memberFacts is not null && memberFacts.SourceCategories.TryGetValue(factKey, out var categories))
             {
-                traces.Add(MintSource(operation, factKey, categories, "Member assigned from a source in another method"));
+                // A member-initializer origin moves the source node to the initializer (line and
+                // file of the assignment), matching the IL pass's placement (issue #131).
+                memberFacts.Origins.TryGetValue(factKey, out var origin);
+                traces.Add(MintSource(operation, factKey, categories, "Member assigned from a source in another method", origin.Anchor, origin.Owner, origin.FilePath));
             }
 
             if (member is IPropertySymbol { GetMethod: { } getter })
@@ -5110,7 +5459,7 @@ public static partial class DataFlowAnalyzer
                 return Path.GetFileName(sourceFilePath);
             }
 
-            return Path.GetRelativePath(basePath, sourceFilePath).Replace('\\', '/');
+            return SourceDocumentPaths.RelativePath(basePath, sourceFilePath);
         }
 
         /// <summary>
@@ -5285,7 +5634,7 @@ public static partial class DataFlowAnalyzer
                 Purl = matchedPatterns.Select(pattern => pattern.Purl).FirstOrDefault(purl => !string.IsNullOrWhiteSpace(purl)) ??
                        purlResolver.Resolve(method?.ContainingAssembly?.ToDisplayString(), method?.ContainingModule?.ToDisplayString(), symbol, method?.ContainingNamespace?.ToDisplayString(), typeName, sourceFilePath),
                 Code = TrimCode(code ?? syntax.ToString()),
-                Path = Path.GetRelativePath(basePath, sourceFilePath),
+                Path = SourceDocumentPaths.RelativePath(basePath, sourceFilePath),
                 FileName = Path.GetFileName(sourceFilePath),
                 Namespace = method?.ContainingNamespace?.ToDisplayString() ?? string.Empty,
                 ClassName = method?.ContainingType?.Name ?? string.Empty,
@@ -5379,6 +5728,11 @@ public static partial class DataFlowAnalyzer
 
             _nodesById.TryGetValue(firstSource, out var sourceNode);
             var sliceNodes = nodeIds.Select(nodeId => _nodesById.TryGetValue(nodeId, out var node) ? node : null).Where(node => node is not null).ToList();
+            // The source pass claims its flows without consulting the set (its own _sliceKeys
+            // guard intra-pass duplicates), so two same-line slices of this pass never merge;
+            // the assembly pass then drops what the claims already hold (issue #131).
+            result.SliceFingerprints?.Add(SliceFingerprint(sourceNode!, sinkNode, sinkPattern?.Category ?? sinkNode.Category, sinkArgumentIndex));
+            result.SliceNameFingerprints?.Add(SliceFingerprint(sourceNode!, sinkNode, sinkPattern?.Category ?? sinkNode.Category, sinkArgumentIndex, byFileName: true));
             var patternPurls = new[] { sinkPattern?.Purl, sourceNode?.Purl, sinkNode.Purl }.Where(purl => !string.IsNullOrWhiteSpace(purl));
             result.Slices.Add(new DataFlowSlice
             {
@@ -5416,8 +5770,8 @@ public static partial class DataFlowAnalyzer
             if (string.IsNullOrWhiteSpace(root)) return Path.GetFileName(sourcePath);
             try
             {
-                var relative = Path.GetRelativePath(Path.GetFullPath(root), Path.GetFullPath(sourcePath));
-                if (string.IsNullOrWhiteSpace(relative) || Path.IsPathFullyQualified(relative) || relative == ".." || relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal) || relative.StartsWith($"..{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal)) return Path.GetFileName(sourcePath);
+                var relative = SourceDocumentPaths.RelativePath(Path.GetFullPath(root), Path.GetFullPath(sourcePath));
+                if (string.IsNullOrWhiteSpace(relative) || Path.IsPathFullyQualified(relative) || relative == ".." || relative.StartsWith("../", StringComparison.Ordinal)) return Path.GetFileName(sourcePath);
                 return relative;
             }
             catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)

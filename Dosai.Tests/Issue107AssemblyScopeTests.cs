@@ -113,6 +113,8 @@ public sealed class Issue107AssemblyScopeTests
         Assert.Equal(2, all.Slices.Count(slice => slice.Scope == "dependency"));
         Assert.Single(reachable.Slices, slice => slice.Scope == "dependency");
         Assert.DoesNotContain(reachable.Nodes, node => node.MethodName == "Orphan");
+        // The fixture's calls are all static, so the reachable walk's dispatch following (issue
+        // #120) changes nothing here and the application slices stay exactly all's.
         Assert.Equal(
             all.Slices.Where(slice => slice.Scope != "dependency").Select(slice => all.Nodes.Single(node => node.Id == slice.SinkId).Name),
             reachable.Slices.Where(slice => slice.Scope != "dependency").Select(slice => reachable.Nodes.Single(node => node.Id == slice.SinkId).Name));

@@ -167,6 +167,10 @@ public sealed class Issue83AssemblyCopyTests
 
         var result = DataFlowAnalyzer.Analyze(fixture.Path);
 
+        // Both copies are analyzed (the tampered one is not collapsed: the diagnostic below
+        // names only the byte-identical copy), and the flow both produce at the same location
+        // is reported once per copy: the cross-pass fingerprint (issue #131) is only read by
+        // the IL pass, so two IL flows that share a file, lines and sink name stay two.
         Assert.Equal(2, IlSlices(result).Count);
         Assert.Contains("1 assembly file(s) are byte-identical copies of another file in the tree and were not analyzed again, so each flow through them is reported once: Lib.dll analyzed in Lib/bin/Debug/net8.0 (copies in App/bin/Debug/net8.0).", result.Diagnostics);
     }

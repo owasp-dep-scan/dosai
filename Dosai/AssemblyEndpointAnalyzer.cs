@@ -134,7 +134,7 @@ internal static class AssemblyEndpointAnalyzer
     {
         var reader = peReader.GetMetadataReader();
         var fileName = Path.GetFileName(assemblyPath);
-        var relativePath = SourceDocumentPaths.Root(basePath) is { } root ? Path.GetRelativePath(root, assemblyPath).Replace('\\', '/') : fileName;
+        var relativePath = SourceDocumentPaths.Root(basePath) is { } root ? SourceDocumentPaths.RelativePath(root, assemblyPath) : fileName;
         var assemblyName = reader.IsAssembly ? reader.GetString(reader.GetAssemblyDefinition().Name) : Path.GetFileNameWithoutExtension(assemblyPath);
         if (assemblyName.StartsWith("System.", StringComparison.Ordinal) || assemblyName.StartsWith("Microsoft.", StringComparison.Ordinal) || assemblyName is "System" or "mscorlib" or "netstandard")
         {

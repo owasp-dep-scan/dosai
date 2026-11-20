@@ -220,7 +220,7 @@ internal static class ReferenceSources
     {
         // Trees come in file-system enumeration order, which differs between OSes: every list
         // below is ordered by relative path so the text is the same everywhere.
-        string Relative(SyntaxTree tree) => Path.GetRelativePath(basePath, tree.FilePath).Replace('\\', '/');
+        string Relative(SyntaxTree tree) => SourceDocumentPaths.RelativePath(basePath, tree.FilePath);
 
         if (partition.Skipped.Count > 0)
         {
