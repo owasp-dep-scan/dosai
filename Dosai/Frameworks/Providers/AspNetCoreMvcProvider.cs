@@ -236,32 +236,88 @@ public sealed class AspNetCoreMvcProvider : IFrameworkProvider
         yield return service;
     }
 
+    /// <summary>
+    ///     An action's routes, grouped the way ASP.NET Core's DefaultApplicationModelProvider
+    ///     (CreateSelectors) groups its routing attributes.
+    /// </summary>
     private static List<ActionRoute> ActionVerbs(List<AttributeSyntax> attributes, SemanticModel model)
     {
+        var routingAttributes = attributes
+            .Select(attribute => RoutingAttributeOf(attribute, model))
+            .OfType<RoutingAttribute>()
+            .ToList();
+        var templatelessVerbs = routingAttributes
+            .Where(routing => routing.IsTemplateless)
+            .SelectMany(routing => routing.HttpMethods)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        var firstTemplateless = routingAttributes.FindIndex(routing => routing.IsTemplateless);
+        var templatelessVerbsRouteAlone = routingAttributes.All(routing => routing.IsTemplateless || routing.Kind == RoutingAttributeKind.HttpMethod);
         var verbs = new List<ActionRoute>();
-        foreach (var attribute in attributes)
+        for (var index = 0; index < routingAttributes.Count; index++)
         {
-            var name = ProviderHelpers.NormalizeAttributeName(attribute);
-            if (VerbAttributes.TryGetValue(name, out var verb))
+            var routing = routingAttributes[index];
+            if (!routing.IsTemplateless)
             {
-                verbs.Add(new ActionRoute(verb, TemplateOf(attribute, model)));
+                var routeVerbs = routing.Kind == RoutingAttributeKind.HttpMethod ? routing.HttpMethods : templatelessVerbs;
+                verbs.AddRange(routeVerbs.DefaultIfEmpty("ANY").Select(verb => new ActionRoute(verb, routing.Template)));
             }
-            else if (name.Equals("AcceptVerbs", StringComparison.OrdinalIgnoreCase))
+            else if (index == firstTemplateless && templatelessVerbsRouteAlone)
             {
-                var accepted = ProviderHelpers.AttributeStringArguments(attribute);
-                foreach (var declaredVerb in accepted.Where(v => !string.IsNullOrWhiteSpace(v)))
-                {
-                    verbs.Add(new ActionRoute(declaredVerb.ToUpperInvariant(), TemplateOf(attribute, model, accepted.Count)));
-                }
-            }
-            else if (name.Equals("Route", StringComparison.OrdinalIgnoreCase))
-            {
-                verbs.Add(new ActionRoute("ANY", TemplateOf(attribute, model)));
+                verbs.AddRange(templatelessVerbs.Select(verb => new ActionRoute(verb, routing.Template)));
             }
         }
 
         return verbs;
     }
+
+    private static RoutingAttribute? RoutingAttributeOf(AttributeSyntax attribute, SemanticModel model)
+    {
+        var name = ProviderHelpers.NormalizeAttributeName(attribute);
+        if (VerbAttributes.TryGetValue(name, out var verb))
+        {
+            return HttpMethodAttribute(attribute, model, [verb], TemplateOf(attribute, model));
+        }
+
+        if (name.Equals("AcceptVerbs", StringComparison.OrdinalIgnoreCase))
+        {
+            var acceptedVerbs = ConstructorStringArguments(attribute, model)
+                .Where(v => !string.IsNullOrWhiteSpace(v))
+                .Select(v => v.ToUpperInvariant())
+                .ToList();
+            return HttpMethodAttribute(attribute, model, acceptedVerbs, NamedTemplateOf(attribute, model, "Route"));
+        }
+
+        return name.Equals("Route", StringComparison.OrdinalIgnoreCase)
+            ? new RoutingAttribute(RoutingAttributeKind.Route, [], TemplateOf(attribute, model), false)
+            : null;
+    }
+
+    private static IEnumerable<string> ConstructorStringArguments(AttributeSyntax attribute, SemanticModel model) =>
+        (attribute.ArgumentList?.Arguments ?? [])
+            .Where(argument => argument.NameEquals is null)
+            .SelectMany(argument => argument.Expression switch
+            {
+                ImplicitArrayCreationExpressionSyntax array => array.Initializer.Expressions,
+                ArrayCreationExpressionSyntax { Initializer: { } initializer } => initializer.Expressions,
+                CollectionExpressionSyntax collection => collection.Elements.OfType<ExpressionElementSyntax>().Select(element => element.Expression),
+                var expression => [expression]
+            })
+            .Select(expression => model.GetConstantValue(expression).Value)
+            .OfType<string>();
+
+    private static RoutingAttribute HttpMethodAttribute(AttributeSyntax attribute, SemanticModel model, List<string> httpMethods, ActionTemplate template) =>
+        new(
+            RoutingAttributeKind.HttpMethod,
+            httpMethods,
+            template,
+            template.Text is null && !HasNonNullNamedArgument(attribute, model, "Name", "Order"));
+
+    private static bool HasNonNullNamedArgument(AttributeSyntax attribute, SemanticModel model, params string[] names) =>
+        (attribute.ArgumentList?.Arguments ?? [])
+            .Any(argument => argument.NameEquals is { } nameEquals
+                && names.Contains(nameEquals.Name.Identifier.Text, StringComparer.Ordinal)
+                && model.GetConstantValue(argument.Expression) is not { HasValue: true, Value: null });
 
     /// <summary>
     ///     Template argument of a routing attribute. Unresolvable expressions (non-const fields,
@@ -285,9 +341,30 @@ public sealed class AspNetCoreMvcProvider : IFrameworkProvider
         return text is null ? new ActionTemplate(argument.Expression.ToString(), false) : new ActionTemplate(text, true);
     }
 
+    private static ActionTemplate NamedTemplateOf(AttributeSyntax attribute, SemanticModel model, string argumentName)
+    {
+        var argument = attribute.ArgumentList?.Arguments
+            .FirstOrDefault(candidate => candidate.NameEquals?.Name.Identifier.Text == argumentName);
+        if (argument is null || model.GetConstantValue(argument.Expression) is { HasValue: true, Value: null })
+        {
+            return new ActionTemplate(null, true);
+        }
+
+        var text = ProviderHelpers.ArgumentText(argument.Expression, model);
+        return text is null ? new ActionTemplate(argument.Expression.ToString(), false) : new ActionTemplate(text, true);
+    }
+
     private sealed record ActionTemplate(string? Text, bool Resolvable);
 
     private sealed record ActionRoute(string HttpMethod, ActionTemplate Template);
+
+    private enum RoutingAttributeKind
+    {
+        Route,
+        HttpMethod
+    }
+
+    private sealed record RoutingAttribute(RoutingAttributeKind Kind, IReadOnlyList<string> HttpMethods, ActionTemplate Template, bool IsTemplateless);
 
     private static void AddActionEndpoint(
         FrameworkContext ctx,

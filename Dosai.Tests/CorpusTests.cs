@@ -54,7 +54,7 @@ public class CorpusTests
         // tested `!= false` and reported them too (11 findings), leaving UserController.Logout as
         // the one state-changing MVC action that does not opt in.
         var antiforgeryFindings = slice.SecurityFindings!.Where(finding => finding.Kind == "StateChangingEndpointWithoutAntiforgery").ToList();
-        Assert.Contains(antiforgeryFindings, finding => finding.Route == "/User");
+        Assert.Contains(antiforgeryFindings, finding => finding.Route == "/User/Logout");
         Assert.DoesNotContain(antiforgeryFindings, finding => finding.Route?.StartsWith("/Manage/", StringComparison.Ordinal) == true);
 
         // A restored tree resolves package purls into the slice.
