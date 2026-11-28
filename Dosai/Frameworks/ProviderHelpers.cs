@@ -35,12 +35,11 @@ internal static partial class ProviderHelpers
         var argument = attribute.ArgumentList?.Arguments
             .Where(a => a.NameEquals is null)
             .ElementAtOrDefault(argumentIndex);
-        if (argument is null)
-        {
-            return null;
-        }
+        return argument is null ? null : ArgumentText(argument.Expression, model);
+    }
 
-        var expression = argument.Expression;
+    internal static string? ArgumentText(ExpressionSyntax expression, SemanticModel? model)
+    {
         if (expression is LiteralExpressionSyntax literal)
         {
             return literal.Token.ValueText;

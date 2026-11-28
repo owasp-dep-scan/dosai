@@ -25,15 +25,23 @@ public class AspNetCoreMvcProviderTests : IDisposable
         return slice;
     }
 
+    private static List<string> EndpointsOf(MethodsSlice slice, string methodName) =>
+        (slice.ApiEndpoints ?? [])
+            .Where(endpoint => endpoint.MethodName == methodName)
+            .Select(endpoint => $"{endpoint.HttpMethod} {endpoint.Path}")
+            .Order(StringComparer.Ordinal)
+            .ToList();
+
     public void Dispose() => _tempDirectory.Dispose();
 
     private const string MvcStubs = """
 namespace Microsoft.AspNetCore.Mvc
 {
     public class RouteAttribute : System.Attribute { public RouteAttribute(string template) { } }
-    public class HttpGetAttribute : System.Attribute { public HttpGetAttribute(string template) { } }
+    [System.AttributeUsage(System.AttributeTargets.Method, AllowMultiple = true)]
+    public class HttpGetAttribute : System.Attribute { public HttpGetAttribute() { } public HttpGetAttribute(string template) { } public string Name { get; set; } public int Order { get; set; } }
     public class HttpPostAttribute : System.Attribute { public HttpPostAttribute() { } public HttpPostAttribute(string template) { } }
-    public class AcceptVerbsAttribute : System.Attribute { public AcceptVerbsAttribute(params string[] verbs) { } }
+    public class AcceptVerbsAttribute : System.Attribute { public AcceptVerbsAttribute(params string[] verbs) { } public string Route { get; set; } }
     public class FromBodyAttribute : System.Attribute { }
     public class FromQueryAttribute : System.Attribute { }
     public class ControllerBase { }
@@ -237,6 +245,151 @@ public class BulkController
 
         Assert.Contains(slice.ApiEndpoints ?? [], e => e is { HttpMethod: "GET", Path: "/api/bulk" });
         Assert.Contains(slice.ApiEndpoints ?? [], e => e is { HttpMethod: "POST", Path: "/api/bulk" });
+    }
+
+    [Fact]
+    public void TemplatelessVerbBesideRoute_IsOneEndpointWithThatVerb()
+    {
+        var slice = Run(("Grouped.cs", MvcStubs + """
+
+[Route("api/orders")]
+public class OrdersController
+{
+    [HttpPost]
+    [Route("bulk")]
+    public object Bulk() => null;
+
+    [Route("logout")]
+    [HttpPost]
+    public object Logout() => null;
+
+    [HttpGet]
+    [HttpPost]
+    [Route("multi")]
+    public object Multi() => null;
+
+    [HttpGet]
+    [Route("one")]
+    [Route("two")]
+    public object TwoRoutes() => null;
+
+    [AcceptVerbs("PUT")]
+    [Route("accepted")]
+    public object Accepted() => null;
+
+    [HttpGet(Name = null)]
+    [Route("nullname")]
+    public object NullName() => null;
+
+    [HttpGet]
+    [HttpGet]
+    [Route("twice")]
+    public object Twice() => null;
+}
+
+public class StandaloneController
+{
+    [HttpPost]
+    [Route("standalone")]
+    public object Standalone() => null;
+}
+"""));
+
+        Assert.Equal(["POST /api/orders/bulk"], EndpointsOf(slice, "Bulk"));
+        Assert.Equal(["POST /api/orders/logout"], EndpointsOf(slice, "Logout"));
+        Assert.Equal(["GET /api/orders/multi", "POST /api/orders/multi"], EndpointsOf(slice, "Multi"));
+        Assert.Equal(["GET /api/orders/one", "GET /api/orders/two"], EndpointsOf(slice, "TwoRoutes"));
+        Assert.Equal(["PUT /api/orders/accepted"], EndpointsOf(slice, "Accepted"));
+        Assert.Equal(["GET /api/orders/nullname"], EndpointsOf(slice, "NullName"));
+        Assert.Equal(["GET /api/orders/twice"], EndpointsOf(slice, "Twice"));
+        Assert.Equal(["POST /standalone"], EndpointsOf(slice, "Standalone"));
+    }
+
+    [Fact]
+    public void VerbWithItsOwnRouteOrName_StaysApartFromRouteAttribute()
+    {
+        var slice = Run(("Apart.cs", MvcStubs + """
+
+[Route("api/mixed")]
+public class MixedController
+{
+    [HttpGet("a")]
+    [Route("b")]
+    public object Templated() => null;
+
+    [HttpGet(Name = "named")]
+    [Route("named")]
+    public object Named() => null;
+
+    [HttpGet(Order = 1)]
+    [Route("ordered")]
+    public object Ordered() => null;
+
+    [HttpGet]
+    [HttpPost("x")]
+    public object TemplatelessBesideTemplated() => null;
+}
+"""));
+
+        Assert.Equal(["ANY /api/mixed/b", "GET /api/mixed/a"], EndpointsOf(slice, "Templated"));
+        Assert.Equal(["ANY /api/mixed/named", "GET /api/mixed"], EndpointsOf(slice, "Named"));
+        Assert.Equal(["ANY /api/mixed/ordered", "GET /api/mixed"], EndpointsOf(slice, "Ordered"));
+        Assert.Equal(["GET /api/mixed", "POST /api/mixed/x"], EndpointsOf(slice, "TemplatelessBesideTemplated"));
+    }
+
+    [Fact]
+    public void AcceptVerbsRoute_IsTheTemplateAndNotAVerb()
+    {
+        var slice = Run(("AcceptRoute.cs", MvcStubs + """
+
+[Route("api/orders")]
+public class OrdersController
+{
+    [AcceptVerbs("GET", "HEAD", Route = "verbs")]
+    public object Verbs() => null;
+
+    [AcceptVerbs("GET", Route = null)]
+    public object NullRoute() => null;
+}
+"""));
+
+        Assert.Equal(["GET /api/orders/verbs", "HEAD /api/orders/verbs"], EndpointsOf(slice, "Verbs"));
+        Assert.Equal(["GET /api/orders"], EndpointsOf(slice, "NullRoute"));
+    }
+
+    [Fact]
+    public void AcceptVerbsGivenAnArray_MapsEveryVerbInIt()
+    {
+        var slice = Run(("AcceptArray.cs", MvcStubs + """
+
+[Route("api/orders")]
+public class OrdersController
+{
+    [AcceptVerbs(new[] { "GET", "POST" })]
+    public object Implicit() => null;
+
+    [AcceptVerbs(new string[] { "PUT" }, Route = "explicit")]
+    public object Explicit() => null;
+
+    [AcceptVerbs(["DELETE", "PATCH"])]
+    [Route("collection")]
+    public object Collection() => null;
+
+    [AcceptVerbs(Verbs.Get, Verbs.Post, Route = "constants")]
+    public object Constants() => null;
+}
+
+public static class Verbs
+{
+    public const string Get = "GET";
+    public const string Post = "POST";
+}
+"""));
+
+        Assert.Equal(["GET /api/orders", "POST /api/orders"], EndpointsOf(slice, "Implicit"));
+        Assert.Equal(["PUT /api/orders/explicit"], EndpointsOf(slice, "Explicit"));
+        Assert.Equal(["DELETE /api/orders/collection", "PATCH /api/orders/collection"], EndpointsOf(slice, "Collection"));
+        Assert.Equal(["GET /api/orders/constants", "POST /api/orders/constants"], EndpointsOf(slice, "Constants"));
     }
 
     [Fact]
